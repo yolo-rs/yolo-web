@@ -22,6 +22,7 @@ import {
   ChallengeSolverEngine,
   CHROMIUM_2026_DEFAULT_PROFILE,
 } from "@yolo-web/challenge-solver";
+import { ChromiumTrackingEngine } from "@yolo-web/chromium-tracker";
 import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
@@ -114,7 +115,8 @@ export function createWebCli(): Command {
     .option("-o, --offset <number>", "Pagination offset", "0")
     .action(async (query: string, opts: { count: string; offset: string }) => {
       const bridge = new BraveSearchMcpBridge();
-      const res = await bridge.searchWeb(query, {
+      const res = await bridge.webSearch({
+        query,
         count: Number(opts.count),
         offset: Number(opts.offset),
       });
@@ -131,8 +133,9 @@ export function createWebCli(): Command {
     .option("-t, --max-tokens <tokens>", "Token budget", "4096")
     .action(async (query: string, opts: { maxTokens: string }) => {
       const bridge = new BraveSearchMcpBridge();
-      const res = await bridge.getLlmContext(query, {
-        max_tokens: Number(opts.maxTokens),
+      const res = await bridge.webSearch({
+        query,
+        count: 5,
       });
       console.log(JSON.stringify(res, null, 2));
     });
@@ -292,7 +295,69 @@ export function createWebCli(): Command {
       }
     });
 
-  // 8. web info (Monorepo & Dual-Runtime Inspection)
+  // 8. web chromium <action> (Chromium, CEF, Brave, Helium & Depot Tools Tracking)
+  program
+    .command("chromium")
+    .description(
+      "Real-time tracking, patching and monitoring for Chromium, CEF, Brave, Helium & Google depot_tools",
+    )
+    .argument("[action]", "Action to perform: status, patches, channels, cef, depot-tools", "status")
+    .option("--json", "Output raw JSON payload")
+    .action(async (action: string, opts: { json?: boolean }) => {
+      const tracker = new ChromiumTrackingEngine();
+      if (action === "patches") {
+        const patches = tracker.getManagedPatches();
+        console.log(JSON.stringify(patches, null, 2));
+      } else if (action === "channels") {
+        const channels = await tracker.fetchChromiumChannels();
+        console.log(JSON.stringify(channels, null, 2));
+      } else if (action === "cef") {
+        const cef = await tracker.fetchLatestCef();
+        console.log(JSON.stringify(cef, null, 2));
+      } else if (action === "depot-tools") {
+        const dt = await tracker.fetchDepotToolsStatus();
+        console.log(JSON.stringify(dt, null, 2));
+      } else {
+        const report = await tracker.generateStatusReport();
+        if (opts.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(`=== YOLO-Web 2026 Chromium Upstream Matrix ===`);
+          console.log(`Timestamp: ${report.timestamp}`);
+          console.log(`\n[Official Chrome Channels]`);
+          for (const [k, v] of Object.entries(report.channels)) {
+            console.log(`  - ${k.padEnd(8)}: v${v.version} (M${v.milestone}, rev ${v.revision})`);
+          }
+          if (report.canaryDetails?.hashes) {
+            console.log(`\n[Canary Hashes]`);
+            console.log(`  - V8      : ${report.canaryDetails.hashes.v8}`);
+            console.log(`  - Chromium: ${report.canaryDetails.hashes.chromium}`);
+            console.log(`  - ANGLE   : ${report.canaryDetails.hashes.angle}`);
+          }
+          if (report.cef) {
+            console.log(`\n[CEF (Chromium Embedded Framework)]`);
+            console.log(`  - Version : ${report.cef.cefVersion}`);
+            console.log(`  - Target  : Chromium ${report.cef.chromiumVersion}`);
+          }
+          if (report.depotTools) {
+            console.log(`\n[Google depot_tools]`);
+            console.log(`  - Latest  : ${report.depotTools.latestCommit.slice(0, 10)} by ${report.depotTools.author}`);
+            console.log(`  - Commit  : "${report.depotTools.message}"`);
+          }
+          if (report.downstreams) {
+            console.log(`\n[Downstream Chromium Forks]`);
+            console.log(`  - Brave   : ${report.downstreams.brave.tag} (${report.downstreams.brave.title})`);
+            console.log(`  - Helium  : ${report.downstreams.helium.tag} (${report.downstreams.helium.title})`);
+          }
+          console.log(`\n[YOLO-Web Managed Patches]`);
+          for (const p of report.patches) {
+            console.log(`  - [${p.applied ? 'APPLIED' : 'PENDING'}] ${p.name} (${p.patchStrategy}) -> ${p.upstreamFile}`);
+          }
+        }
+      }
+    });
+
+  // 9. web info (Monorepo & Dual-Runtime Inspection)
   program
     .command("info")
     .description(

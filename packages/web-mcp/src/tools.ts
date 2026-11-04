@@ -22,6 +22,7 @@ import {
   ChallengeSolverEngine,
   CHROMIUM_2026_DEFAULT_PROFILE,
 } from "@yolo-web/challenge-solver";
+import { ChromiumTrackingEngine } from "@yolo-web/chromium-tracker";
 
 export interface UnifiedTool {
   name: string;
@@ -751,6 +752,26 @@ export function createUnifiedWebTools(): UnifiedTool[] {
         properties: {},
       },
     },
+    {
+      name: "chromium_upstream_status",
+      description:
+        "[Chromium & Google Upstream] Real-time tracking of Chrome channels (Stable 157, Canary 159), CEF, Brave, Helium and Google depot_tools",
+      category: "v8-chromium-engine",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
+      name: "chromium_managed_patches",
+      description:
+        "[Chromium & Google Upstream] Audit YOLO-Web managed patches, overrides (chromium_src), and C++ subclasses across Chromium subsystems",
+      category: "v8-chromium-engine",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
   ];
   tools.push(...v8Tools);
 
@@ -983,6 +1004,32 @@ export async function handleUnifiedWebToolCall(
             {
               type: "text",
               text: script,
+            },
+          ],
+        };
+      }
+
+      case "chromium_upstream_status": {
+        const tracker = new ChromiumTrackingEngine();
+        const report = await tracker.generateStatusReport();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(report, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "chromium_managed_patches": {
+        const tracker = new ChromiumTrackingEngine();
+        const patches = tracker.getManagedPatches();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(patches, null, 2),
             },
           ],
         };

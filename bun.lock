@@ -85,6 +85,14 @@
         "@yolo-web/servo-bridge": "workspace:*",
       },
     },
+    "packages/chromium-tracker": {
+      "name": "@yolo-web/chromium-tracker",
+      "version": "0.1.0",
+      "dependencies": {
+        "@yolo-web/knowledge-indexer": "workspace:*",
+        "@yolo-web/shared": "workspace:*",
+      },
+    },
     "packages/knowledge-indexer": {
       "name": "@yolo-web/knowledge-indexer",
       "version": "0.1.0",
@@ -124,6 +132,7 @@
         "@yolo-web/bun-v8-bridge": "workspace:*",
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/challenge-solver": "workspace:*",
+        "@yolo-web/chromium-tracker": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
         "@yolo-web/shared": "workspace:*",
@@ -144,6 +153,7 @@
         "@yolo-web/bun-v8-bridge": "workspace:*",
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/challenge-solver": "workspace:*",
+        "@yolo-web/chromium-tracker": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
         "@yolo-web/shared": "workspace:*",
@@ -174,6 +184,8 @@
     "@yolo-web/cdp-client": ["@yolo-web/cdp-client@workspace:packages/cdp-client"],
 
     "@yolo-web/challenge-solver": ["@yolo-web/challenge-solver@workspace:packages/challenge-solver"],
+
+    "@yolo-web/chromium-tracker": ["@yolo-web/chromium-tracker@workspace:packages/chromium-tracker"],
 
     "@yolo-web/human-browser": ["@yolo-web/human-browser@workspace:apps/human-browser"],
 

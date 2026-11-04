@@ -38,6 +38,7 @@
     "@yolo-web/bun-v8-bridge": "workspace:*",
     "@yolo-web/cdp-client": "workspace:*",
     "@yolo-web/challenge-solver": "workspace:*",
+    "@yolo-web/chromium-tracker": "workspace:*",
     "@yolo-web/mcp-client": "workspace:*",
     "@yolo-web/servo-bridge": "workspace:*",
     "@yolo-web/shared": "workspace:*",

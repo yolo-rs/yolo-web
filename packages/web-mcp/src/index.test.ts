@@ -78,6 +78,15 @@ describe("@yolo-web/web-mcp - Unified MCP Server", () => {
     expect(parsed.hostRuntime.runtime).toBe("bun");
   });
 
+  it("executes chromium_upstream_status tool and audits upstream channels", async () => {
+    const res = await handleUnifiedWebToolCall("chromium_upstream_status", {});
+    expect(res.isError).toBeUndefined();
+    const data = JSON.parse(res.content[0].text);
+    expect(data.channels).toBeDefined();
+    expect(data.channels.Stable).toBeDefined();
+    expect(data.patches.length).toBeGreaterThanOrEqual(5);
+  }, 15000);
+
   it("exposes prompts and resources", () => {
     expect(UNIFIED_WEB_PROMPTS.length).toBeGreaterThanOrEqual(2);
     expect(UNIFIED_WEB_RESOURCES.length).toBeGreaterThanOrEqual(3);
