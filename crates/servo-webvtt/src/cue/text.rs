@@ -346,8 +346,10 @@ pub fn webvtt_cue_text_parsing_rules(
                     // > Otherwise, ignore the token.
                     _ => false,
                 };
-                if matches && let Some(parent) = current.parent.upgrade() {
-                    current = parent;
+                if matches {
+                    if let Some(parent) = current.parent.upgrade() {
+                        current = parent;
+                    }
                 }
             },
             // > If token is a timestamp tag
@@ -364,17 +366,17 @@ pub fn webvtt_cue_text_parsing_rules(
                 // then create a WebVTT Timestamp Object whose value is the collected time,
                 // then append it to current.
                 // Otherwise, ignore the token.
-                if let Some(timestamp) = collect_webvtt_timestamp(position.by_ref()) &&
-                    position.peek().is_none()
-                {
-                    let mut children = current.children.borrow_mut();
-                    let new = WebVTTNodeObject {
-                        kind: WebVTTNodeObjectKind::Timestamp(WebVTTTimestamp(timestamp)),
-                        parent: Rc::downgrade(&current),
-                        index: children.len(),
-                        ..Default::default()
-                    };
-                    children.push(Rc::new(new));
+                if let Some(timestamp) = collect_webvtt_timestamp(position.by_ref()) {
+                    if position.peek().is_none() {
+                        let mut children = current.children.borrow_mut();
+                        let new = WebVTTNodeObject {
+                            kind: WebVTTNodeObjectKind::Timestamp(WebVTTTimestamp(timestamp)),
+                            parent: Rc::downgrade(&current),
+                            index: children.len(),
+                            ..Default::default()
+                        };
+                        children.push(Rc::new(new));
+                    }
                 }
             },
         }

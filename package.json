@@ -14,6 +14,8 @@
     "packages/*"
   ],
   "scripts": {
+    "web": "bun run --cwd packages/web-cli start",
+    "web:mcp": "bun run --cwd packages/web-mcp start",
     "dev": "bun run --cwd apps/human-browser dev",
     "start": "bun run --cwd apps/human-browser start",
     "agent": "bun run --cwd apps/ai-agent-runner start",
@@ -23,9 +25,11 @@
     "fmt": "bun fmt",
     "fmt:check": "bun fmt --check",
     "lint": "bun lint",
+    "aot:web": "bun build --compile --bytecode --minify packages/web-cli/src/index.ts --outfile dist/web",
+    "aot:web-mcp": "bun build --compile --bytecode --minify packages/web-mcp/src/index.ts --outfile dist/web-mcp",
     "aot:human-browser": "bun build --compile --bytecode --minify apps/human-browser/src/server.ts --outfile dist/yolo-human-browser",
     "aot:agent-runner": "bun build --compile --bytecode --minify apps/ai-agent-runner/src/index.ts --outfile dist/yolo-agent-runner",
-    "aot:all": "bun run aot:human-browser && bun run aot:agent-runner",
+    "aot:all": "bun run aot:web && bun run aot:web-mcp && bun run aot:human-browser && bun run aot:agent-runner",
     "rust:info": "cargo run -p yolo-browser-cli -- info",
     "rust:build": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render",
     "rust:build:lto": "cargo build --profile release-dist -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",

@@ -1,0 +1,44 @@
+{
+  "name": "@yolo-web/web-mcp",
+  "version": "0.3.0",
+  "description": "Unified 'web' MCP server fusing Obscura MCP, Brave Search MCP, Servo Web & DOM, and Chromium/V8 inspection",
+  "keywords": [
+    "mcp",
+    "web",
+    "obscura",
+    "brave",
+    "servo",
+    "v8",
+    "chromium",
+    "bun"
+  ],
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "web-mcp": "./src/index.ts"
+  },
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "start": "bun run ./src/index.ts",
+    "test": "bun test",
+    "check": "bun check",
+    "fmt": "bun fmt",
+    "lint": "bun lint"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@yolo-web/brave-search-mcp": "workspace:*",
+    "@yolo-web/brave-shields": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/bun-v8-bridge": "workspace:*",
+    "@yolo-web/cdp-client": "workspace:*",
+    "@yolo-web/mcp-client": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/shared": "workspace:*",
+    "commander": "14.0.3",
+    "zod": "4.6.7"
+  }
+}

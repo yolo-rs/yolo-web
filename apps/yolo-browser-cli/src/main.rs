@@ -123,13 +123,14 @@ async fn main() -> Result<()> {
             let matches = dom
                 .query_selector_all(&selector)
                 .map_err(|e| anyhow::anyhow!(e))?;
-            session.cache_selector_match(&selector, &matches);
+            let node_indices: Vec<usize> = matches.iter().map(|n| n.index()).collect();
+            session.cache_selector_match(&selector, &node_indices);
             println!(
                 "{}",
                 serde_json::json!({
                     "selector": selector,
                     "count": matches.len(),
-                    "nodeIds": matches,
+                    "nodeIds": node_indices,
                     "viewport": session.viewport.physical_size().to_array(),
                 })
             );
@@ -174,7 +175,7 @@ async fn main() -> Result<()> {
                 "Starting YOLO Browser CDP server on ws://127.0.0.1:{}/devtools/browser (viewport: {}x{})",
                 port, width as u32, height as u32
             );
-            obscura_cdp::serve(port, None).await?;
+            yolo_browser::cdp::server::start_with_options(port, None, cli.stealth).await?;
         }
     }
 

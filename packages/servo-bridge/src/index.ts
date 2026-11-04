@@ -594,6 +594,18 @@ export interface ServoCrateEntry {
 /**
  * Complete registry of all 31 consolidated Servo crates in `crates/servo-*`.
  */
+export const calculateSpecificity =
+  ServoSelectorEngine.calculateSpecificity.bind(ServoSelectorEngine);
+export const validateCssSelector = (selector: string) => {
+  const res = ServoSelectorEngine.validateSelector(selector);
+  if (!res.valid) throw new Error(res.reason ?? "Invalid CSS selector");
+  return res;
+};
+export const translateXPathToCss =
+  ServoSelectorEngine.xpathToCss.bind(ServoSelectorEngine);
+export const parseWebVtt =
+  ServoSelectorEngine.parseWebVttCues.bind(ServoSelectorEngine);
+
 export const SERVO_CONSOLIDATED_CRATES: readonly ServoCrateEntry[] = [
   {
     id: "servo-engine",

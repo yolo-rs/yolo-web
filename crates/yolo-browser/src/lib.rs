@@ -177,9 +177,10 @@ impl YoloBrowserSession {
         );
         metadata.insert("runtime".to_string(), "rust + bun".to_string());
 
-        let mut filter_set = FilterSet::new(false);
-        filter_set.add_filters(rules, ParseOptions::default());
-        let adblock_engine = BraveAdblockEngine::from_filter_set(filter_set, true);
+        let mut filter_set = FilterSet::new(true);
+        let list_text = rules.join("\n");
+        filter_set.add_filter_list(list_text, ParseOptions::default());
+        let adblock_engine = BraveAdblockEngine::new_with_filter_set(filter_set);
 
         Self {
             mode,
@@ -205,8 +206,8 @@ impl YoloBrowserSession {
         if !self.brave_shields_enabled {
             return false;
         }
-        match AdblockRequest::new(url, source_url, request_type) {
-            Ok(req) => self.adblock_engine.check_network_request(&req).matched,
+        match AdblockRequest::new(url, source_url, request_type, "GET") {
+            Ok(req) => self.adblock_engine.check_network_request(&req).should_block(),
             Err(_) => false,
         }
     }
@@ -248,7 +249,13 @@ impl YoloBrowserSession {
         let parsed = url::Url::parse(raw_url).map_err(|e| e.to_string())?;
         if !self.allow_private_network {
             if let Some(host) = parsed.host_str() {
-                if obscura_ssrf::is_private_or_loopback_host_literal(host) {
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    if obscura_ssrf::is_forbidden_ip(ip) {
+                        return Err(format!(
+                            "Access to private/internal host {host} is blocked by SSRF gate"
+                        ));
+                    }
+                } else if host == "localhost" || host.ends_with(".localhost") {
                     return Err(format!(
                         "Access to private/internal host {host} is blocked by SSRF gate"
                     ));
@@ -378,9 +385,10 @@ mod tests {
         );
         let matches = tree.query_selector_all(".cta").expect("valid selector");
         assert_eq!(matches.len(), 1);
+        let indices: Vec<usize> = matches.iter().map(|n| n.index()).collect();
 
-        session.cache_selector_match(".cta", &matches);
-        assert_eq!(session.lookup_cached_selector(".cta"), Some(matches.as_slice()));
+        session.cache_selector_match(".cta", &indices);
+        assert_eq!(session.lookup_cached_selector(".cta"), Some(indices.as_slice()));
     }
 
     #[test]

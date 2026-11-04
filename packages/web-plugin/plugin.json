@@ -1,0 +1,8 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "Unified Web Brain plugin for Antigravity: fuses Obscura, Brave, Servo, Bun, Deno, Chromium & V8 into a single 'web' skill, CLI, MCP server, and engineering ruleset.",
+  "author": "yolo-rs (https://github.com/yolo-rs/yolo-web)",
+  "skills": ["skills/web"],
+  "rules": ["rules/AGENTS.md"]
+}

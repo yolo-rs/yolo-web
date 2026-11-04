@@ -1,0 +1,45 @@
+{
+  "name": "@yolo-web/web-cli",
+  "version": "0.3.0",
+  "description": "Unified 'web' CLI uniting Obscura, Brave Search/Shields, Servo, Bun, Deno, Chromium & V8 into a single command",
+  "keywords": [
+    "browser",
+    "cli",
+    "web",
+    "obscura",
+    "brave",
+    "servo",
+    "bun",
+    "deno",
+    "v8",
+    "chromium"
+  ],
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "web": "./src/index.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run ./src/index.ts",
+    "test": "bun test",
+    "check": "bun check",
+    "fmt": "bun fmt",
+    "lint": "bun lint"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@yolo-web/brave-search-mcp": "workspace:*",
+    "@yolo-web/brave-shields": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/bun-v8-bridge": "workspace:*",
+    "@yolo-web/cdp-client": "workspace:*",
+    "@yolo-web/mcp-client": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/shared": "workspace:*",
+    "commander": "^15.0.0"
+  }
+}

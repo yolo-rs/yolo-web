@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "web": {
+      "command": "bun",
+      "args": ["run", "packages/web-mcp/src/index.ts", "--transport", "stdio"],
+      "description": "Unified 'web' MCP server combining 32 Obscura browser automation tools, 9 Brave search & AI context tools, 3 Servo CSS/DOM geometry tools, and 3 Chromium/V8 inspection tools."
+    }
+  }
+}
