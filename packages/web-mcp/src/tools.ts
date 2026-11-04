@@ -795,7 +795,8 @@ export async function handleUnifiedWebToolCall(
       case "brave_web_search": {
         const query = String(args.query ?? "");
         const bridge = new BraveSearchMcpBridge();
-        const res = await bridge.searchWeb(query, {
+        const res = await bridge.webSearch({
+          query,
           count: typeof args.count === "number" ? args.count : 10,
           offset: typeof args.offset === "number" ? args.offset : 0,
         });
@@ -807,9 +808,9 @@ export async function handleUnifiedWebToolCall(
       case "brave_llm_context": {
         const query = String(args.query ?? "");
         const bridge = new BraveSearchMcpBridge();
-        const res = await bridge.getLlmContext(query, {
-          max_tokens:
-            typeof args.max_tokens === "number" ? args.max_tokens : 4096,
+        const res = await bridge.webSearch({
+          query,
+          count: 5,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
@@ -914,7 +915,7 @@ export async function handleUnifiedWebToolCall(
       case "v8_runtime_info":
       case "web_engine_status": {
         const hostInfo = BunHostRuntimeInfo.inspect();
-        const v8Config = new V8PageIsolateConfig({ maxOldSpaceMb: 1024 });
+        const v8Config = new V8PageIsolateConfig({ maxOldSpaceSizeMb: 1024 });
         return {
           content: [
             {

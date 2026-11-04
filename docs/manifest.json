@@ -1,0 +1,2751 @@
+{
+  "generatedAt": "2026-11-04T07:02:49.777Z",
+  "standard": "Google Open Source & Chromium Documentation Guidelines",
+  "totalDocuments": 392,
+  "documents": [
+    {
+      "title": "PULL REQUEST TEMPLATE",
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "category": ".github",
+      "sizeBytes": 1674,
+      "lastModified": "2026-11-04T07:02:28.847Z"
+    },
+    {
+      "title": "AGENTS",
+      "path": "AGENTS.md",
+      "category": "root",
+      "sizeBytes": 2148,
+      "lastModified": "2026-11-04T05:30:29.508Z"
+    },
+    {
+      "title": "CLAUDE",
+      "path": "CLAUDE.md",
+      "category": "root",
+      "sizeBytes": 2719,
+      "lastModified": "2026-11-04T07:02:17.555Z"
+    },
+    {
+      "title": "CONTRIBUTING",
+      "path": "CONTRIBUTING.md",
+      "category": "root",
+      "sizeBytes": 2094,
+      "lastModified": "2026-11-04T07:02:34.134Z"
+    },
+    {
+      "title": "issue",
+      "path": "crates/brave-adblock/.github/ISSUE_TEMPLATE/issue.md",
+      "category": "crates",
+      "sizeBytes": 245,
+      "lastModified": "2026-11-04T04:45:05.363Z"
+    },
+    {
+      "title": "issues",
+      "path": "crates/brave-adblock/.github/ISSUE_TEMPLATE/issues.md",
+      "category": "crates",
+      "sizeBytes": 222,
+      "lastModified": "2026-11-04T04:45:05.364Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "crates/brave-adblock/CHANGELOG.md",
+      "category": "crates",
+      "sizeBytes": 13433,
+      "lastModified": "2026-11-04T04:45:05.373Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-adblock/cookiecrumbler/README.md",
+      "category": "crates",
+      "sizeBytes": 4008,
+      "lastModified": "2026-11-04T04:46:12.314Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-adblock/lists/brave-lists/README.md",
+      "category": "crates",
+      "sizeBytes": 274,
+      "lastModified": "2026-11-04T04:45:20.721Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-adblock/lists/README.md",
+      "category": "crates",
+      "sizeBytes": 3225,
+      "lastModified": "2026-11-04T04:45:20.721Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-adblock/README.md",
+      "category": "crates",
+      "sizeBytes": 3526,
+      "lastModified": "2026-11-04T04:45:05.376Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-adblock/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 565,
+      "lastModified": "2026-11-04T04:45:05.376Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-bot/.github/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 239,
+      "lastModified": "2026-11-04T04:45:17.544Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "crates/brave-bot/CHANGELOG.md",
+      "category": "crates",
+      "sizeBytes": 192795,
+      "lastModified": "2026-11-04T04:45:17.554Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/crates/i18n/locales/README.md",
+      "category": "crates",
+      "sizeBytes": 3508,
+      "lastModified": "2026-11-04T04:45:18.113Z"
+    },
+    {
+      "title": "carried-grants",
+      "path": "crates/brave-bot/docs/best-practices/carried-grants.md",
+      "category": "crates",
+      "sizeBytes": 2877,
+      "lastModified": "2026-11-04T04:45:18.519Z"
+    },
+    {
+      "title": "compatibility",
+      "path": "crates/brave-bot/docs/best-practices/compatibility.md",
+      "category": "crates",
+      "sizeBytes": 2383,
+      "lastModified": "2026-11-04T04:45:18.519Z"
+    },
+    {
+      "title": "dependencies",
+      "path": "crates/brave-bot/docs/best-practices/dependencies.md",
+      "category": "crates",
+      "sizeBytes": 1124,
+      "lastModified": "2026-11-04T04:45:18.520Z"
+    },
+    {
+      "title": "gaps",
+      "path": "crates/brave-bot/docs/best-practices/gaps.md",
+      "category": "crates",
+      "sizeBytes": 4131,
+      "lastModified": "2026-11-04T04:45:18.520Z"
+    },
+    {
+      "title": "paths",
+      "path": "crates/brave-bot/docs/best-practices/paths.md",
+      "category": "crates",
+      "sizeBytes": 13972,
+      "lastModified": "2026-11-04T04:45:18.522Z"
+    },
+    {
+      "title": "portability",
+      "path": "crates/brave-bot/docs/best-practices/portability.md",
+      "category": "crates",
+      "sizeBytes": 1261,
+      "lastModified": "2026-11-04T04:45:18.522Z"
+    },
+    {
+      "title": "shared-implementation",
+      "path": "crates/brave-bot/docs/best-practices/shared-implementation.md",
+      "category": "crates",
+      "sizeBytes": 1447,
+      "lastModified": "2026-11-04T04:45:18.522Z"
+    },
+    {
+      "title": "specs",
+      "path": "crates/brave-bot/docs/best-practices/specs.md",
+      "category": "crates",
+      "sizeBytes": 3602,
+      "lastModified": "2026-11-04T04:45:18.523Z"
+    },
+    {
+      "title": "tests",
+      "path": "crates/brave-bot/docs/best-practices/tests.md",
+      "category": "crates",
+      "sizeBytes": 2681,
+      "lastModified": "2026-11-04T04:45:18.524Z"
+    },
+    {
+      "title": "ui",
+      "path": "crates/brave-bot/docs/best-practices/ui.md",
+      "category": "crates",
+      "sizeBytes": 4079,
+      "lastModified": "2026-11-04T04:45:18.524Z"
+    },
+    {
+      "title": "usability",
+      "path": "crates/brave-bot/docs/best-practices/usability.md",
+      "category": "crates",
+      "sizeBytes": 1789,
+      "lastModified": "2026-11-04T04:45:18.526Z"
+    },
+    {
+      "title": "writing",
+      "path": "crates/brave-bot/docs/best-practices/writing.md",
+      "category": "crates",
+      "sizeBytes": 616,
+      "lastModified": "2026-11-04T04:45:18.527Z"
+    },
+    {
+      "title": "best practices",
+      "path": "crates/brave-bot/docs/best_practices.md",
+      "category": "crates",
+      "sizeBytes": 3508,
+      "lastModified": "2026-11-04T04:45:18.529Z"
+    },
+    {
+      "title": "command-line-explained",
+      "path": "crates/brave-bot/docs/command-line-explained.md",
+      "category": "crates",
+      "sizeBytes": 19593,
+      "lastModified": "2026-11-04T04:45:18.529Z"
+    },
+    {
+      "title": "credit",
+      "path": "crates/brave-bot/docs/credit.md",
+      "category": "crates",
+      "sizeBytes": 991,
+      "lastModified": "2026-11-04T04:45:18.530Z"
+    },
+    {
+      "title": "browser-extension",
+      "path": "crates/brave-bot/docs/design/browser-extension.md",
+      "category": "crates",
+      "sizeBytes": 244372,
+      "lastModified": "2026-11-04T04:45:18.535Z"
+    },
+    {
+      "title": "connectors-reference",
+      "path": "crates/brave-bot/docs/design/connectors-reference.md",
+      "category": "crates",
+      "sizeBytes": 34251,
+      "lastModified": "2026-11-04T04:45:18.538Z"
+    },
+    {
+      "title": "connectors",
+      "path": "crates/brave-bot/docs/design/connectors.md",
+      "category": "crates",
+      "sizeBytes": 80866,
+      "lastModified": "2026-11-04T04:45:18.538Z"
+    },
+    {
+      "title": "credential-brokering",
+      "path": "crates/brave-bot/docs/design/credential-brokering.md",
+      "category": "crates",
+      "sizeBytes": 68443,
+      "lastModified": "2026-11-04T04:45:18.540Z"
+    },
+    {
+      "title": "credential-discovery",
+      "path": "crates/brave-bot/docs/design/credential-discovery.md",
+      "category": "crates",
+      "sizeBytes": 27379,
+      "lastModified": "2026-11-04T04:45:18.541Z"
+    },
+    {
+      "title": "manifest-choose",
+      "path": "crates/brave-bot/docs/design/manifest-choose.md",
+      "category": "crates",
+      "sizeBytes": 11099,
+      "lastModified": "2026-11-04T04:45:18.542Z"
+    },
+    {
+      "title": "app-dependencies",
+      "path": "crates/brave-bot/docs/design/mobile/app-dependencies.md",
+      "category": "crates",
+      "sizeBytes": 5779,
+      "lastModified": "2026-11-04T04:45:18.544Z"
+    },
+    {
+      "title": "app-shell",
+      "path": "crates/brave-bot/docs/design/mobile/app-shell.md",
+      "category": "crates",
+      "sizeBytes": 14907,
+      "lastModified": "2026-11-04T04:45:18.545Z"
+    },
+    {
+      "title": "architecture",
+      "path": "crates/brave-bot/docs/design/mobile/architecture.md",
+      "category": "crates",
+      "sizeBytes": 30790,
+      "lastModified": "2026-11-04T04:45:18.546Z"
+    },
+    {
+      "title": "client-contract",
+      "path": "crates/brave-bot/docs/design/mobile/client-contract.md",
+      "category": "crates",
+      "sizeBytes": 29763,
+      "lastModified": "2026-11-04T04:45:18.547Z"
+    },
+    {
+      "title": "decisions-and-tradeoffs",
+      "path": "crates/brave-bot/docs/design/mobile/decisions-and-tradeoffs.md",
+      "category": "crates",
+      "sizeBytes": 14873,
+      "lastModified": "2026-11-04T04:45:18.548Z"
+    },
+    {
+      "title": "executive-summary",
+      "path": "crates/brave-bot/docs/design/mobile/executive-summary.md",
+      "category": "crates",
+      "sizeBytes": 6005,
+      "lastModified": "2026-11-04T04:45:18.548Z"
+    },
+    {
+      "title": "implementation-plan",
+      "path": "crates/brave-bot/docs/design/mobile/implementation-plan.md",
+      "category": "crates",
+      "sizeBytes": 39099,
+      "lastModified": "2026-11-04T04:45:18.549Z"
+    },
+    {
+      "title": "open-questions",
+      "path": "crates/brave-bot/docs/design/mobile/open-questions.md",
+      "category": "crates",
+      "sizeBytes": 23347,
+      "lastModified": "2026-11-04T04:45:18.552Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/docs/design/mobile/README.md",
+      "category": "crates",
+      "sizeBytes": 11507,
+      "lastModified": "2026-11-04T04:45:18.543Z"
+    },
+    {
+      "title": "agent-configuration",
+      "path": "crates/brave-bot/docs/development/agent-configuration.md",
+      "category": "crates",
+      "sizeBytes": 8331,
+      "lastModified": "2026-11-04T04:45:18.555Z"
+    },
+    {
+      "title": "branch-protection",
+      "path": "crates/brave-bot/docs/development/branch-protection.md",
+      "category": "crates",
+      "sizeBytes": 3710,
+      "lastModified": "2026-11-04T04:45:18.555Z"
+    },
+    {
+      "title": "build-cache",
+      "path": "crates/brave-bot/docs/development/build-cache.md",
+      "category": "crates",
+      "sizeBytes": 2532,
+      "lastModified": "2026-11-04T04:45:18.558Z"
+    },
+    {
+      "title": "checks",
+      "path": "crates/brave-bot/docs/development/checks.md",
+      "category": "crates",
+      "sizeBytes": 40760,
+      "lastModified": "2026-11-04T04:45:18.558Z"
+    },
+    {
+      "title": "commits",
+      "path": "crates/brave-bot/docs/development/commits.md",
+      "category": "crates",
+      "sizeBytes": 4526,
+      "lastModified": "2026-11-04T04:45:18.559Z"
+    },
+    {
+      "title": "configuration",
+      "path": "crates/brave-bot/docs/development/configuration.md",
+      "category": "crates",
+      "sizeBytes": 3858,
+      "lastModified": "2026-11-04T04:45:18.559Z"
+    },
+    {
+      "title": "delegate-file-authority",
+      "path": "crates/brave-bot/docs/development/delegate-file-authority.md",
+      "category": "crates",
+      "sizeBytes": 5592,
+      "lastModified": "2026-11-04T04:45:18.561Z"
+    },
+    {
+      "title": "fuzzing",
+      "path": "crates/brave-bot/docs/development/fuzzing.md",
+      "category": "crates",
+      "sizeBytes": 11794,
+      "lastModified": "2026-11-04T04:45:18.562Z"
+    },
+    {
+      "title": "labelling-issues",
+      "path": "crates/brave-bot/docs/development/labelling-issues.md",
+      "category": "crates",
+      "sizeBytes": 16030,
+      "lastModified": "2026-11-04T04:45:18.563Z"
+    },
+    {
+      "title": "localization",
+      "path": "crates/brave-bot/docs/development/localization.md",
+      "category": "crates",
+      "sizeBytes": 3193,
+      "lastModified": "2026-11-04T04:45:18.564Z"
+    },
+    {
+      "title": "maintainer-jobs",
+      "path": "crates/brave-bot/docs/development/maintainer-jobs.md",
+      "category": "crates",
+      "sizeBytes": 8309,
+      "lastModified": "2026-11-04T04:45:18.564Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/docs/development/README.md",
+      "category": "crates",
+      "sizeBytes": 3238,
+      "lastModified": "2026-11-04T04:45:18.554Z"
+    },
+    {
+      "title": "releasing",
+      "path": "crates/brave-bot/docs/development/releasing.md",
+      "category": "crates",
+      "sizeBytes": 24491,
+      "lastModified": "2026-11-04T04:45:18.565Z"
+    },
+    {
+      "title": "reviewing-for-the-rule",
+      "path": "crates/brave-bot/docs/development/reviewing-for-the-rule.md",
+      "category": "crates",
+      "sizeBytes": 13791,
+      "lastModified": "2026-11-04T04:45:18.566Z"
+    },
+    {
+      "title": "security-scan",
+      "path": "crates/brave-bot/docs/development/security-scan.md",
+      "category": "crates",
+      "sizeBytes": 4031,
+      "lastModified": "2026-11-04T04:45:18.567Z"
+    },
+    {
+      "title": "spec-enforced-development",
+      "path": "crates/brave-bot/docs/development/spec-enforced-development.md",
+      "category": "crates",
+      "sizeBytes": 1480,
+      "lastModified": "2026-11-04T04:45:18.567Z"
+    },
+    {
+      "title": "testing-the-interface",
+      "path": "crates/brave-bot/docs/development/testing-the-interface.md",
+      "category": "crates",
+      "sizeBytes": 851,
+      "lastModified": "2026-11-04T04:45:18.568Z"
+    },
+    {
+      "title": "undo-coverage",
+      "path": "crates/brave-bot/docs/development/undo-coverage.md",
+      "category": "crates",
+      "sizeBytes": 5556,
+      "lastModified": "2026-11-04T04:45:18.569Z"
+    },
+    {
+      "title": "version-stamp",
+      "path": "crates/brave-bot/docs/development/version-stamp.md",
+      "category": "crates",
+      "sizeBytes": 2272,
+      "lastModified": "2026-11-04T04:45:18.570Z"
+    },
+    {
+      "title": "getting-started",
+      "path": "crates/brave-bot/docs/getting-started.md",
+      "category": "crates",
+      "sizeBytes": 14943,
+      "lastModified": "2026-11-04T04:45:18.572Z"
+    },
+    {
+      "title": "acp",
+      "path": "crates/brave-bot/docs/specs/acp.md",
+      "category": "crates",
+      "sizeBytes": 15395,
+      "lastModified": "2026-11-04T04:45:18.575Z"
+    },
+    {
+      "title": "addressing-a-definition",
+      "path": "crates/brave-bot/docs/specs/addressing-a-definition.md",
+      "category": "crates",
+      "sizeBytes": 43031,
+      "lastModified": "2026-11-04T04:45:18.576Z"
+    },
+    {
+      "title": "auto-mode",
+      "path": "crates/brave-bot/docs/specs/auto-mode.md",
+      "category": "crates",
+      "sizeBytes": 16522,
+      "lastModified": "2026-11-04T04:45:18.577Z"
+    },
+    {
+      "title": "backends",
+      "path": "crates/brave-bot/docs/specs/backends.md",
+      "category": "crates",
+      "sizeBytes": 412685,
+      "lastModified": "2026-11-04T04:45:18.580Z"
+    },
+    {
+      "title": "background-sessions",
+      "path": "crates/brave-bot/docs/specs/background-sessions.md",
+      "category": "crates",
+      "sizeBytes": 46013,
+      "lastModified": "2026-11-04T04:45:18.581Z"
+    },
+    {
+      "title": "browser",
+      "path": "crates/brave-bot/docs/specs/browser.md",
+      "category": "crates",
+      "sizeBytes": 430238,
+      "lastModified": "2026-11-04T04:45:18.585Z"
+    },
+    {
+      "title": "chatgpt-sign-in",
+      "path": "crates/brave-bot/docs/specs/chatgpt-sign-in.md",
+      "category": "crates",
+      "sizeBytes": 257277,
+      "lastModified": "2026-11-04T04:45:18.586Z"
+    },
+    {
+      "title": "checkouts",
+      "path": "crates/brave-bot/docs/specs/checkouts.md",
+      "category": "crates",
+      "sizeBytes": 96483,
+      "lastModified": "2026-11-04T04:45:18.587Z"
+    },
+    {
+      "title": "cli",
+      "path": "crates/brave-bot/docs/specs/cli.md",
+      "category": "crates",
+      "sizeBytes": 217434,
+      "lastModified": "2026-11-04T04:45:18.589Z"
+    },
+    {
+      "title": "commands",
+      "path": "crates/brave-bot/docs/specs/commands.md",
+      "category": "crates",
+      "sizeBytes": 140777,
+      "lastModified": "2026-11-04T04:45:18.591Z"
+    },
+    {
+      "title": "commits",
+      "path": "crates/brave-bot/docs/specs/commits.md",
+      "category": "crates",
+      "sizeBytes": 38412,
+      "lastModified": "2026-11-04T04:45:18.592Z"
+    },
+    {
+      "title": "compaction",
+      "path": "crates/brave-bot/docs/specs/compaction.md",
+      "category": "crates",
+      "sizeBytes": 41058,
+      "lastModified": "2026-11-04T04:45:18.592Z"
+    },
+    {
+      "title": "connectors",
+      "path": "crates/brave-bot/docs/specs/connectors.md",
+      "category": "crates",
+      "sizeBytes": 26489,
+      "lastModified": "2026-11-04T04:45:18.593Z"
+    },
+    {
+      "title": "crash-reports",
+      "path": "crates/brave-bot/docs/specs/crash-reports.md",
+      "category": "crates",
+      "sizeBytes": 20354,
+      "lastModified": "2026-11-04T04:45:18.594Z"
+    },
+    {
+      "title": "credential-protection",
+      "path": "crates/brave-bot/docs/specs/credential-protection.md",
+      "category": "crates",
+      "sizeBytes": 113850,
+      "lastModified": "2026-11-04T04:45:18.595Z"
+    },
+    {
+      "title": "deep-links",
+      "path": "crates/brave-bot/docs/specs/deep-links.md",
+      "category": "crates",
+      "sizeBytes": 11665,
+      "lastModified": "2026-11-04T04:45:18.596Z"
+    },
+    {
+      "title": "definition-memory",
+      "path": "crates/brave-bot/docs/specs/definition-memory.md",
+      "category": "crates",
+      "sizeBytes": 66122,
+      "lastModified": "2026-11-04T04:45:18.597Z"
+    },
+    {
+      "title": "delegation",
+      "path": "crates/brave-bot/docs/specs/delegation.md",
+      "category": "crates",
+      "sizeBytes": 106586,
+      "lastModified": "2026-11-04T04:45:18.598Z"
+    },
+    {
+      "title": "diagnostic-log",
+      "path": "crates/brave-bot/docs/specs/diagnostic-log.md",
+      "category": "crates",
+      "sizeBytes": 20897,
+      "lastModified": "2026-11-04T04:45:18.599Z"
+    },
+    {
+      "title": "dropping",
+      "path": "crates/brave-bot/docs/specs/dropping.md",
+      "category": "crates",
+      "sizeBytes": 33028,
+      "lastModified": "2026-11-04T04:45:18.599Z"
+    },
+    {
+      "title": "file-watches",
+      "path": "crates/brave-bot/docs/specs/file-watches.md",
+      "category": "crates",
+      "sizeBytes": 32696,
+      "lastModified": "2026-11-04T04:45:18.600Z"
+    },
+    {
+      "title": "files-mode",
+      "path": "crates/brave-bot/docs/specs/files-mode.md",
+      "category": "crates",
+      "sizeBytes": 24092,
+      "lastModified": "2026-11-04T04:45:18.601Z"
+    },
+    {
+      "title": "goal",
+      "path": "crates/brave-bot/docs/specs/goal.md",
+      "category": "crates",
+      "sizeBytes": 28925,
+      "lastModified": "2026-11-04T04:45:18.602Z"
+    },
+    {
+      "title": "grounding",
+      "path": "crates/brave-bot/docs/specs/grounding.md",
+      "category": "crates",
+      "sizeBytes": 15966,
+      "lastModified": "2026-11-04T04:45:18.602Z"
+    },
+    {
+      "title": "hooks",
+      "path": "crates/brave-bot/docs/specs/hooks.md",
+      "category": "crates",
+      "sizeBytes": 52916,
+      "lastModified": "2026-11-04T04:45:18.602Z"
+    },
+    {
+      "title": "import",
+      "path": "crates/brave-bot/docs/specs/import.md",
+      "category": "crates",
+      "sizeBytes": 64345,
+      "lastModified": "2026-11-04T04:45:18.605Z"
+    },
+    {
+      "title": "incognito",
+      "path": "crates/brave-bot/docs/specs/incognito.md",
+      "category": "crates",
+      "sizeBytes": 19782,
+      "lastModified": "2026-11-04T04:45:18.606Z"
+    },
+    {
+      "title": "info-panel",
+      "path": "crates/brave-bot/docs/specs/info-panel.md",
+      "category": "crates",
+      "sizeBytes": 37246,
+      "lastModified": "2026-11-04T04:45:18.607Z"
+    },
+    {
+      "title": "instructions",
+      "path": "crates/brave-bot/docs/specs/instructions.md",
+      "category": "crates",
+      "sizeBytes": 68435,
+      "lastModified": "2026-11-04T04:45:18.608Z"
+    },
+    {
+      "title": "labels",
+      "path": "crates/brave-bot/docs/specs/labels.md",
+      "category": "crates",
+      "sizeBytes": 89085,
+      "lastModified": "2026-11-04T04:45:18.609Z"
+    },
+    {
+      "title": "layering",
+      "path": "crates/brave-bot/docs/specs/layering.md",
+      "category": "crates",
+      "sizeBytes": 51250,
+      "lastModified": "2026-11-04T04:45:18.609Z"
+    },
+    {
+      "title": "local-host",
+      "path": "crates/brave-bot/docs/specs/local-host.md",
+      "category": "crates",
+      "sizeBytes": 26126,
+      "lastModified": "2026-11-04T04:45:18.610Z"
+    },
+    {
+      "title": "localization",
+      "path": "crates/brave-bot/docs/specs/localization.md",
+      "category": "crates",
+      "sizeBytes": 17358,
+      "lastModified": "2026-11-04T04:45:18.610Z"
+    },
+    {
+      "title": "loop",
+      "path": "crates/brave-bot/docs/specs/loop.md",
+      "category": "crates",
+      "sizeBytes": 34570,
+      "lastModified": "2026-11-04T04:45:18.612Z"
+    },
+    {
+      "title": "manifest",
+      "path": "crates/brave-bot/docs/specs/manifest.md",
+      "category": "crates",
+      "sizeBytes": 46901,
+      "lastModified": "2026-11-04T04:45:18.613Z"
+    },
+    {
+      "title": "mcp-servers",
+      "path": "crates/brave-bot/docs/specs/mcp-servers.md",
+      "category": "crates",
+      "sizeBytes": 197121,
+      "lastModified": "2026-11-04T04:45:18.614Z"
+    },
+    {
+      "title": "mcp",
+      "path": "crates/brave-bot/docs/specs/mcp.md",
+      "category": "crates",
+      "sizeBytes": 35904,
+      "lastModified": "2026-11-04T04:45:18.615Z"
+    },
+    {
+      "title": "mouse",
+      "path": "crates/brave-bot/docs/specs/mouse.md",
+      "category": "crates",
+      "sizeBytes": 170574,
+      "lastModified": "2026-11-04T04:45:18.617Z"
+    },
+    {
+      "title": "naming-files",
+      "path": "crates/brave-bot/docs/specs/naming-files.md",
+      "category": "crates",
+      "sizeBytes": 29514,
+      "lastModified": "2026-11-04T04:45:18.618Z"
+    },
+    {
+      "title": "network-egress",
+      "path": "crates/brave-bot/docs/specs/network-egress.md",
+      "category": "crates",
+      "sizeBytes": 51706,
+      "lastModified": "2026-11-04T04:45:18.618Z"
+    },
+    {
+      "title": "open-loops",
+      "path": "crates/brave-bot/docs/specs/open-loops.md",
+      "category": "crates",
+      "sizeBytes": 15022,
+      "lastModified": "2026-11-04T04:45:18.619Z"
+    },
+    {
+      "title": "pasting",
+      "path": "crates/brave-bot/docs/specs/pasting.md",
+      "category": "crates",
+      "sizeBytes": 38928,
+      "lastModified": "2026-11-04T04:45:18.620Z"
+    },
+    {
+      "title": "permission-modes",
+      "path": "crates/brave-bot/docs/specs/permission-modes.md",
+      "category": "crates",
+      "sizeBytes": 50912,
+      "lastModified": "2026-11-04T04:45:18.620Z"
+    },
+    {
+      "title": "permissions",
+      "path": "crates/brave-bot/docs/specs/permissions.md",
+      "category": "crates",
+      "sizeBytes": 99934,
+      "lastModified": "2026-11-04T04:45:18.623Z"
+    },
+    {
+      "title": "plugins",
+      "path": "crates/brave-bot/docs/specs/plugins.md",
+      "category": "crates",
+      "sizeBytes": 13296,
+      "lastModified": "2026-11-04T04:45:18.623Z"
+    },
+    {
+      "title": "premium-credentials",
+      "path": "crates/brave-bot/docs/specs/premium-credentials.md",
+      "category": "crates",
+      "sizeBytes": 30241,
+      "lastModified": "2026-11-04T04:45:18.624Z"
+    },
+    {
+      "title": "processors",
+      "path": "crates/brave-bot/docs/specs/processors.md",
+      "category": "crates",
+      "sizeBytes": 32771,
+      "lastModified": "2026-11-04T04:45:18.626Z"
+    },
+    {
+      "title": "prompting",
+      "path": "crates/brave-bot/docs/specs/prompting.md",
+      "category": "crates",
+      "sizeBytes": 135655,
+      "lastModified": "2026-11-04T04:45:18.630Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/docs/specs/README.md",
+      "category": "crates",
+      "sizeBytes": 27262,
+      "lastModified": "2026-11-04T04:45:18.575Z"
+    },
+    {
+      "title": "recall",
+      "path": "crates/brave-bot/docs/specs/recall.md",
+      "category": "crates",
+      "sizeBytes": 35593,
+      "lastModified": "2026-11-04T04:45:18.631Z"
+    },
+    {
+      "title": "references",
+      "path": "crates/brave-bot/docs/specs/references.md",
+      "category": "crates",
+      "sizeBytes": 7894,
+      "lastModified": "2026-11-04T04:45:18.631Z"
+    },
+    {
+      "title": "releases",
+      "path": "crates/brave-bot/docs/specs/releases.md",
+      "category": "crates",
+      "sizeBytes": 58815,
+      "lastModified": "2026-11-04T04:45:18.632Z"
+    },
+    {
+      "title": "routing",
+      "path": "crates/brave-bot/docs/specs/routing.md",
+      "category": "crates",
+      "sizeBytes": 45640,
+      "lastModified": "2026-11-04T04:45:18.634Z"
+    },
+    {
+      "title": "sandboxing",
+      "path": "crates/brave-bot/docs/specs/sandboxing.md",
+      "category": "crates",
+      "sizeBytes": 372496,
+      "lastModified": "2026-11-04T04:45:18.637Z"
+    },
+    {
+      "title": "schedule",
+      "path": "crates/brave-bot/docs/specs/schedule.md",
+      "category": "crates",
+      "sizeBytes": 21840,
+      "lastModified": "2026-11-04T04:45:18.637Z"
+    },
+    {
+      "title": "scroller",
+      "path": "crates/brave-bot/docs/specs/scroller.md",
+      "category": "crates",
+      "sizeBytes": 30089,
+      "lastModified": "2026-11-04T04:45:18.638Z"
+    },
+    {
+      "title": "session-messages",
+      "path": "crates/brave-bot/docs/specs/session-messages.md",
+      "category": "crates",
+      "sizeBytes": 25072,
+      "lastModified": "2026-11-04T04:45:18.638Z"
+    },
+    {
+      "title": "session-view",
+      "path": "crates/brave-bot/docs/specs/session-view.md",
+      "category": "crates",
+      "sizeBytes": 24309,
+      "lastModified": "2026-11-04T04:45:18.639Z"
+    },
+    {
+      "title": "sessions-screen",
+      "path": "crates/brave-bot/docs/specs/sessions-screen.md",
+      "category": "crates",
+      "sizeBytes": 53106,
+      "lastModified": "2026-11-04T04:45:18.640Z"
+    },
+    {
+      "title": "sessions",
+      "path": "crates/brave-bot/docs/specs/sessions.md",
+      "category": "crates",
+      "sizeBytes": 137526,
+      "lastModified": "2026-11-04T04:45:18.641Z"
+    },
+    {
+      "title": "shell-integration",
+      "path": "crates/brave-bot/docs/specs/shell-integration.md",
+      "category": "crates",
+      "sizeBytes": 8406,
+      "lastModified": "2026-11-04T04:45:18.642Z"
+    },
+    {
+      "title": "shell-mode",
+      "path": "crates/brave-bot/docs/specs/shell-mode.md",
+      "category": "crates",
+      "sizeBytes": 15556,
+      "lastModified": "2026-11-04T04:45:18.642Z"
+    },
+    {
+      "title": "skill-evals",
+      "path": "crates/brave-bot/docs/specs/skill-evals.md",
+      "category": "crates",
+      "sizeBytes": 11828,
+      "lastModified": "2026-11-04T04:45:18.642Z"
+    },
+    {
+      "title": "skills",
+      "path": "crates/brave-bot/docs/specs/skills.md",
+      "category": "crates",
+      "sizeBytes": 47508,
+      "lastModified": "2026-11-04T04:45:18.643Z"
+    },
+    {
+      "title": "state-directory",
+      "path": "crates/brave-bot/docs/specs/state-directory.md",
+      "category": "crates",
+      "sizeBytes": 35810,
+      "lastModified": "2026-11-04T04:45:18.643Z"
+    },
+    {
+      "title": "terminal-input",
+      "path": "crates/brave-bot/docs/specs/terminal-input.md",
+      "category": "crates",
+      "sizeBytes": 248732,
+      "lastModified": "2026-11-04T04:45:18.644Z"
+    },
+    {
+      "title": "terminal-transcript",
+      "path": "crates/brave-bot/docs/specs/terminal-transcript.md",
+      "category": "crates",
+      "sizeBytes": 111152,
+      "lastModified": "2026-11-04T04:45:18.646Z"
+    },
+    {
+      "title": "advisor",
+      "path": "crates/brave-bot/docs/specs/tools/advisor.md",
+      "category": "crates",
+      "sizeBytes": 9651,
+      "lastModified": "2026-11-04T04:45:18.646Z"
+    },
+    {
+      "title": "ask-user",
+      "path": "crates/brave-bot/docs/specs/tools/ask-user.md",
+      "category": "crates",
+      "sizeBytes": 32019,
+      "lastModified": "2026-11-04T04:45:18.647Z"
+    },
+    {
+      "title": "command-line",
+      "path": "crates/brave-bot/docs/specs/tools/command-line.md",
+      "category": "crates",
+      "sizeBytes": 75372,
+      "lastModified": "2026-11-04T04:45:18.647Z"
+    },
+    {
+      "title": "download-url",
+      "path": "crates/brave-bot/docs/specs/tools/download-url.md",
+      "category": "crates",
+      "sizeBytes": 7445,
+      "lastModified": "2026-11-04T04:45:18.647Z"
+    },
+    {
+      "title": "edit-file",
+      "path": "crates/brave-bot/docs/specs/tools/edit-file.md",
+      "category": "crates",
+      "sizeBytes": 17919,
+      "lastModified": "2026-11-04T04:45:18.648Z"
+    },
+    {
+      "title": "fetch-url",
+      "path": "crates/brave-bot/docs/specs/tools/fetch-url.md",
+      "category": "crates",
+      "sizeBytes": 24751,
+      "lastModified": "2026-11-04T04:45:18.648Z"
+    },
+    {
+      "title": "list-files",
+      "path": "crates/brave-bot/docs/specs/tools/list-files.md",
+      "category": "crates",
+      "sizeBytes": 13800,
+      "lastModified": "2026-11-04T04:45:18.649Z"
+    },
+    {
+      "title": "load-skill",
+      "path": "crates/brave-bot/docs/specs/tools/load-skill.md",
+      "category": "crates",
+      "sizeBytes": 8498,
+      "lastModified": "2026-11-04T04:45:18.649Z"
+    },
+    {
+      "title": "lsp",
+      "path": "crates/brave-bot/docs/specs/tools/lsp.md",
+      "category": "crates",
+      "sizeBytes": 65652,
+      "lastModified": "2026-11-04T04:45:18.650Z"
+    },
+    {
+      "title": "propose-rule",
+      "path": "crates/brave-bot/docs/specs/tools/propose-rule.md",
+      "category": "crates",
+      "sizeBytes": 4612,
+      "lastModified": "2026-11-04T04:45:18.650Z"
+    },
+    {
+      "title": "read-file",
+      "path": "crates/brave-bot/docs/specs/tools/read-file.md",
+      "category": "crates",
+      "sizeBytes": 33884,
+      "lastModified": "2026-11-04T04:45:18.651Z"
+    },
+    {
+      "title": "read-git",
+      "path": "crates/brave-bot/docs/specs/tools/read-git.md",
+      "category": "crates",
+      "sizeBytes": 37751,
+      "lastModified": "2026-11-04T04:45:18.652Z"
+    },
+    {
+      "title": "read-output",
+      "path": "crates/brave-bot/docs/specs/tools/read-output.md",
+      "category": "crates",
+      "sizeBytes": 20474,
+      "lastModified": "2026-11-04T04:45:18.654Z"
+    },
+    {
+      "title": "recall",
+      "path": "crates/brave-bot/docs/specs/tools/recall.md",
+      "category": "crates",
+      "sizeBytes": 3736,
+      "lastModified": "2026-11-04T04:45:18.655Z"
+    },
+    {
+      "title": "remember",
+      "path": "crates/brave-bot/docs/specs/tools/remember.md",
+      "category": "crates",
+      "sizeBytes": 4328,
+      "lastModified": "2026-11-04T04:45:18.655Z"
+    },
+    {
+      "title": "repo-map",
+      "path": "crates/brave-bot/docs/specs/tools/repo-map.md",
+      "category": "crates",
+      "sizeBytes": 5899,
+      "lastModified": "2026-11-04T04:45:18.656Z"
+    },
+    {
+      "title": "request-path",
+      "path": "crates/brave-bot/docs/specs/tools/request-path.md",
+      "category": "crates",
+      "sizeBytes": 18464,
+      "lastModified": "2026-11-04T04:45:18.656Z"
+    },
+    {
+      "title": "run",
+      "path": "crates/brave-bot/docs/specs/tools/run.md",
+      "category": "crates",
+      "sizeBytes": 189929,
+      "lastModified": "2026-11-04T04:45:18.657Z"
+    },
+    {
+      "title": "schedule-next",
+      "path": "crates/brave-bot/docs/specs/tools/schedule-next.md",
+      "category": "crates",
+      "sizeBytes": 7571,
+      "lastModified": "2026-11-04T04:45:18.657Z"
+    },
+    {
+      "title": "search-skills",
+      "path": "crates/brave-bot/docs/specs/tools/search-skills.md",
+      "category": "crates",
+      "sizeBytes": 4055,
+      "lastModified": "2026-11-04T04:45:18.657Z"
+    },
+    {
+      "title": "search",
+      "path": "crates/brave-bot/docs/specs/tools/search.md",
+      "category": "crates",
+      "sizeBytes": 32277,
+      "lastModified": "2026-11-04T04:45:18.658Z"
+    },
+    {
+      "title": "set-link",
+      "path": "crates/brave-bot/docs/specs/tools/set-link.md",
+      "category": "crates",
+      "sizeBytes": 6643,
+      "lastModified": "2026-11-04T04:45:18.658Z"
+    },
+    {
+      "title": "spawn-agent",
+      "path": "crates/brave-bot/docs/specs/tools/spawn-agent.md",
+      "category": "crates",
+      "sizeBytes": 14137,
+      "lastModified": "2026-11-04T04:45:18.658Z"
+    },
+    {
+      "title": "spawn-processor",
+      "path": "crates/brave-bot/docs/specs/tools/spawn-processor.md",
+      "category": "crates",
+      "sizeBytes": 14063,
+      "lastModified": "2026-11-04T04:45:18.660Z"
+    },
+    {
+      "title": "todo-write",
+      "path": "crates/brave-bot/docs/specs/tools/todo-write.md",
+      "category": "crates",
+      "sizeBytes": 2643,
+      "lastModified": "2026-11-04T04:45:18.660Z"
+    },
+    {
+      "title": "tool-surface",
+      "path": "crates/brave-bot/docs/specs/tools/tool-surface.md",
+      "category": "crates",
+      "sizeBytes": 28206,
+      "lastModified": "2026-11-04T04:45:18.660Z"
+    },
+    {
+      "title": "vet-content",
+      "path": "crates/brave-bot/docs/specs/tools/vet-content.md",
+      "category": "crates",
+      "sizeBytes": 33488,
+      "lastModified": "2026-11-04T04:45:18.661Z"
+    },
+    {
+      "title": "watch-file",
+      "path": "crates/brave-bot/docs/specs/tools/watch-file.md",
+      "category": "crates",
+      "sizeBytes": 6924,
+      "lastModified": "2026-11-04T04:45:18.661Z"
+    },
+    {
+      "title": "write-file",
+      "path": "crates/brave-bot/docs/specs/tools/write-file.md",
+      "category": "crates",
+      "sizeBytes": 19515,
+      "lastModified": "2026-11-04T04:45:18.661Z"
+    },
+    {
+      "title": "trace",
+      "path": "crates/brave-bot/docs/specs/trace.md",
+      "category": "crates",
+      "sizeBytes": 40333,
+      "lastModified": "2026-11-04T04:45:18.663Z"
+    },
+    {
+      "title": "triggers",
+      "path": "crates/brave-bot/docs/specs/triggers.md",
+      "category": "crates",
+      "sizeBytes": 17845,
+      "lastModified": "2026-11-04T04:45:18.664Z"
+    },
+    {
+      "title": "trust-map",
+      "path": "crates/brave-bot/docs/specs/trust-map.md",
+      "category": "crates",
+      "sizeBytes": 157234,
+      "lastModified": "2026-11-04T04:45:18.664Z"
+    },
+    {
+      "title": "turns",
+      "path": "crates/brave-bot/docs/specs/turns.md",
+      "category": "crates",
+      "sizeBytes": 65928,
+      "lastModified": "2026-11-04T04:45:18.665Z"
+    },
+    {
+      "title": "updates",
+      "path": "crates/brave-bot/docs/specs/updates.md",
+      "category": "crates",
+      "sizeBytes": 29772,
+      "lastModified": "2026-11-04T04:45:18.668Z"
+    },
+    {
+      "title": "vetting",
+      "path": "crates/brave-bot/docs/specs/vetting.md",
+      "category": "crates",
+      "sizeBytes": 52736,
+      "lastModified": "2026-11-04T04:45:18.668Z"
+    },
+    {
+      "title": "watching",
+      "path": "crates/brave-bot/docs/specs/watching.md",
+      "category": "crates",
+      "sizeBytes": 50156,
+      "lastModified": "2026-11-04T04:45:18.670Z"
+    },
+    {
+      "title": "worktrees",
+      "path": "crates/brave-bot/docs/specs/worktrees.md",
+      "category": "crates",
+      "sizeBytes": 35384,
+      "lastModified": "2026-11-04T04:45:18.670Z"
+    },
+    {
+      "title": "xai-sign-in",
+      "path": "crates/brave-bot/docs/specs/xai-sign-in.md",
+      "category": "crates",
+      "sizeBytes": 131508,
+      "lastModified": "2026-11-04T04:45:18.673Z"
+    },
+    {
+      "title": "agents",
+      "path": "crates/brave-bot/docs/website/docs/customize/agents.md",
+      "category": "crates",
+      "sizeBytes": 28181,
+      "lastModified": "2026-11-04T04:45:18.677Z"
+    },
+    {
+      "title": "configuration",
+      "path": "crates/brave-bot/docs/website/docs/customize/configuration.md",
+      "category": "crates",
+      "sizeBytes": 101572,
+      "lastModified": "2026-11-04T04:45:18.678Z"
+    },
+    {
+      "title": "effort",
+      "path": "crates/brave-bot/docs/website/docs/customize/effort.md",
+      "category": "crates",
+      "sizeBytes": 4562,
+      "lastModified": "2026-11-04T04:45:18.679Z"
+    },
+    {
+      "title": "hooks",
+      "path": "crates/brave-bot/docs/website/docs/customize/hooks.md",
+      "category": "crates",
+      "sizeBytes": 15651,
+      "lastModified": "2026-11-04T04:45:18.679Z"
+    },
+    {
+      "title": "importing",
+      "path": "crates/brave-bot/docs/website/docs/customize/importing.md",
+      "category": "crates",
+      "sizeBytes": 11248,
+      "lastModified": "2026-11-04T04:45:18.679Z"
+    },
+    {
+      "title": "instructions",
+      "path": "crates/brave-bot/docs/website/docs/customize/instructions.md",
+      "category": "crates",
+      "sizeBytes": 21962,
+      "lastModified": "2026-11-04T04:45:18.680Z"
+    },
+    {
+      "title": "language",
+      "path": "crates/brave-bot/docs/website/docs/customize/language.md",
+      "category": "crates",
+      "sizeBytes": 4617,
+      "lastModified": "2026-11-04T04:45:18.680Z"
+    },
+    {
+      "title": "managed-settings",
+      "path": "crates/brave-bot/docs/website/docs/customize/managed-settings.md",
+      "category": "crates",
+      "sizeBytes": 7204,
+      "lastModified": "2026-11-04T04:45:18.680Z"
+    },
+    {
+      "title": "brave",
+      "path": "crates/brave-bot/docs/website/docs/customize/mcp/brave.md",
+      "category": "crates",
+      "sizeBytes": 39052,
+      "lastModified": "2026-11-04T04:45:18.684Z"
+    },
+    {
+      "title": "calendar",
+      "path": "crates/brave-bot/docs/website/docs/customize/mcp/calendar.md",
+      "category": "crates",
+      "sizeBytes": 6496,
+      "lastModified": "2026-11-04T04:45:18.684Z"
+    },
+    {
+      "title": "github",
+      "path": "crates/brave-bot/docs/website/docs/customize/mcp/github.md",
+      "category": "crates",
+      "sizeBytes": 7347,
+      "lastModified": "2026-11-04T04:45:18.685Z"
+    },
+    {
+      "title": "gmail",
+      "path": "crates/brave-bot/docs/website/docs/customize/mcp/gmail.md",
+      "category": "crates",
+      "sizeBytes": 7059,
+      "lastModified": "2026-11-04T04:45:18.687Z"
+    },
+    {
+      "title": "mcp-servers",
+      "path": "crates/brave-bot/docs/website/docs/customize/mcp-servers.md",
+      "category": "crates",
+      "sizeBytes": 53714,
+      "lastModified": "2026-11-04T04:45:18.681Z"
+    },
+    {
+      "title": "memory",
+      "path": "crates/brave-bot/docs/website/docs/customize/memory.md",
+      "category": "crates",
+      "sizeBytes": 3465,
+      "lastModified": "2026-11-04T04:45:18.687Z"
+    },
+    {
+      "title": "model",
+      "path": "crates/brave-bot/docs/website/docs/customize/model.md",
+      "category": "crates",
+      "sizeBytes": 4301,
+      "lastModified": "2026-11-04T04:45:18.688Z"
+    },
+    {
+      "title": "premium",
+      "path": "crates/brave-bot/docs/website/docs/customize/premium.md",
+      "category": "crates",
+      "sizeBytes": 6579,
+      "lastModified": "2026-11-04T04:45:18.689Z"
+    },
+    {
+      "title": "anthropic",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/anthropic.md",
+      "category": "crates",
+      "sizeBytes": 5827,
+      "lastModified": "2026-11-04T04:45:18.690Z"
+    },
+    {
+      "title": "bedrock",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/bedrock.md",
+      "category": "crates",
+      "sizeBytes": 8892,
+      "lastModified": "2026-11-04T04:45:18.692Z"
+    },
+    {
+      "title": "chatgpt",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/chatgpt.md",
+      "category": "crates",
+      "sizeBytes": 23777,
+      "lastModified": "2026-11-04T04:45:18.693Z"
+    },
+    {
+      "title": "google-vertex",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/google-vertex.md",
+      "category": "crates",
+      "sizeBytes": 4882,
+      "lastModified": "2026-11-04T04:45:18.694Z"
+    },
+    {
+      "title": "llama-server",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/llama-server.md",
+      "category": "crates",
+      "sizeBytes": 3400,
+      "lastModified": "2026-11-04T04:45:18.695Z"
+    },
+    {
+      "title": "lm-studio",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/lm-studio.md",
+      "category": "crates",
+      "sizeBytes": 3297,
+      "lastModified": "2026-11-04T04:45:18.695Z"
+    },
+    {
+      "title": "ollama",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/ollama.md",
+      "category": "crates",
+      "sizeBytes": 3183,
+      "lastModified": "2026-11-04T04:45:18.695Z"
+    },
+    {
+      "title": "openai-compatible",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/openai-compatible.md",
+      "category": "crates",
+      "sizeBytes": 19322,
+      "lastModified": "2026-11-04T04:45:18.697Z"
+    },
+    {
+      "title": "openai",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/openai.md",
+      "category": "crates",
+      "sizeBytes": 6098,
+      "lastModified": "2026-11-04T04:45:18.697Z"
+    },
+    {
+      "title": "openrouter",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/openrouter.md",
+      "category": "crates",
+      "sizeBytes": 2105,
+      "lastModified": "2026-11-04T04:45:18.698Z"
+    },
+    {
+      "title": "xai",
+      "path": "crates/brave-bot/docs/website/docs/customize/providers/xai.md",
+      "category": "crates",
+      "sizeBytes": 10872,
+      "lastModified": "2026-11-04T04:45:18.700Z"
+    },
+    {
+      "title": "signing-in",
+      "path": "crates/brave-bot/docs/website/docs/customize/signing-in.md",
+      "category": "crates",
+      "sizeBytes": 12203,
+      "lastModified": "2026-11-04T04:45:18.701Z"
+    },
+    {
+      "title": "skills",
+      "path": "crates/brave-bot/docs/website/docs/customize/skills.md",
+      "category": "crates",
+      "sizeBytes": 17007,
+      "lastModified": "2026-11-04T04:45:18.701Z"
+    },
+    {
+      "title": "theme",
+      "path": "crates/brave-bot/docs/website/docs/customize/theme.md",
+      "category": "crates",
+      "sizeBytes": 2422,
+      "lastModified": "2026-11-04T04:45:18.702Z"
+    },
+    {
+      "title": "development",
+      "path": "crates/brave-bot/docs/website/docs/development.md",
+      "category": "crates",
+      "sizeBytes": 6362,
+      "lastModified": "2026-11-04T04:45:18.703Z"
+    },
+    {
+      "title": "how-it-works",
+      "path": "crates/brave-bot/docs/website/docs/how-it-works.md",
+      "category": "crates",
+      "sizeBytes": 13793,
+      "lastModified": "2026-11-04T04:45:18.703Z"
+    },
+    {
+      "title": "install",
+      "path": "crates/brave-bot/docs/website/docs/install.md",
+      "category": "crates",
+      "sizeBytes": 14339,
+      "lastModified": "2026-11-04T04:45:18.705Z"
+    },
+    {
+      "title": "intro",
+      "path": "crates/brave-bot/docs/website/docs/intro.md",
+      "category": "crates",
+      "sizeBytes": 5256,
+      "lastModified": "2026-11-04T04:45:18.706Z"
+    },
+    {
+      "title": "quickstart",
+      "path": "crates/brave-bot/docs/website/docs/quickstart.md",
+      "category": "crates",
+      "sizeBytes": 5190,
+      "lastModified": "2026-11-04T04:45:18.707Z"
+    },
+    {
+      "title": "cli",
+      "path": "crates/brave-bot/docs/website/docs/reference/cli.md",
+      "category": "crates",
+      "sizeBytes": 102461,
+      "lastModified": "2026-11-04T04:45:18.711Z"
+    },
+    {
+      "title": "commands",
+      "path": "crates/brave-bot/docs/website/docs/reference/commands.md",
+      "category": "crates",
+      "sizeBytes": 116381,
+      "lastModified": "2026-11-04T04:45:18.712Z"
+    },
+    {
+      "title": "lsp-tool",
+      "path": "crates/brave-bot/docs/website/docs/reference/lsp-tool.md",
+      "category": "crates",
+      "sizeBytes": 14608,
+      "lastModified": "2026-11-04T04:45:18.713Z"
+    },
+    {
+      "title": "run-tool",
+      "path": "crates/brave-bot/docs/website/docs/reference/run-tool.md",
+      "category": "crates",
+      "sizeBytes": 48517,
+      "lastModified": "2026-11-04T04:45:18.714Z"
+    },
+    {
+      "title": "tools",
+      "path": "crates/brave-bot/docs/website/docs/reference/tools.md",
+      "category": "crates",
+      "sizeBytes": 95944,
+      "lastModified": "2026-11-04T04:45:18.716Z"
+    },
+    {
+      "title": "audit-trail",
+      "path": "crates/brave-bot/docs/website/docs/security/audit-trail.md",
+      "category": "crates",
+      "sizeBytes": 16984,
+      "lastModified": "2026-11-04T04:45:18.718Z"
+    },
+    {
+      "title": "permission-modes",
+      "path": "crates/brave-bot/docs/website/docs/security/permission-modes.md",
+      "category": "crates",
+      "sizeBytes": 16970,
+      "lastModified": "2026-11-04T04:45:18.720Z"
+    },
+    {
+      "title": "permission-rules",
+      "path": "crates/brave-bot/docs/website/docs/security/permission-rules.md",
+      "category": "crates",
+      "sizeBytes": 11618,
+      "lastModified": "2026-11-04T04:45:18.721Z"
+    },
+    {
+      "title": "permissions",
+      "path": "crates/brave-bot/docs/website/docs/security/permissions.md",
+      "category": "crates",
+      "sizeBytes": 31367,
+      "lastModified": "2026-11-04T04:45:18.722Z"
+    },
+    {
+      "title": "sandbox",
+      "path": "crates/brave-bot/docs/website/docs/security/sandbox.md",
+      "category": "crates",
+      "sizeBytes": 12877,
+      "lastModified": "2026-11-04T04:45:18.722Z"
+    },
+    {
+      "title": "security",
+      "path": "crates/brave-bot/docs/website/docs/security/security.md",
+      "category": "crates",
+      "sizeBytes": 53977,
+      "lastModified": "2026-11-04T04:45:18.724Z"
+    },
+    {
+      "title": "trust",
+      "path": "crates/brave-bot/docs/website/docs/security/trust.md",
+      "category": "crates",
+      "sizeBytes": 36482,
+      "lastModified": "2026-11-04T04:45:18.725Z"
+    },
+    {
+      "title": "vetting",
+      "path": "crates/brave-bot/docs/website/docs/security/vetting.md",
+      "category": "crates",
+      "sizeBytes": 21379,
+      "lastModified": "2026-11-04T04:45:18.725Z"
+    },
+    {
+      "title": "troubleshooting",
+      "path": "crates/brave-bot/docs/website/docs/troubleshooting.md",
+      "category": "crates",
+      "sizeBytes": 15670,
+      "lastModified": "2026-11-04T04:45:18.726Z"
+    },
+    {
+      "title": "context",
+      "path": "crates/brave-bot/docs/website/docs/using/context.md",
+      "category": "crates",
+      "sizeBytes": 17200,
+      "lastModified": "2026-11-04T04:45:18.728Z"
+    },
+    {
+      "title": "editors",
+      "path": "crates/brave-bot/docs/website/docs/using/editors.md",
+      "category": "crates",
+      "sizeBytes": 4584,
+      "lastModified": "2026-11-04T04:45:18.729Z"
+    },
+    {
+      "title": "headless",
+      "path": "crates/brave-bot/docs/website/docs/using/headless.md",
+      "category": "crates",
+      "sizeBytes": 19041,
+      "lastModified": "2026-11-04T04:45:18.729Z"
+    },
+    {
+      "title": "incognito",
+      "path": "crates/brave-bot/docs/website/docs/using/incognito.md",
+      "category": "crates",
+      "sizeBytes": 6879,
+      "lastModified": "2026-11-04T04:45:18.731Z"
+    },
+    {
+      "title": "interactive-mode",
+      "path": "crates/brave-bot/docs/website/docs/using/interactive-mode.md",
+      "category": "crates",
+      "sizeBytes": 55342,
+      "lastModified": "2026-11-04T04:45:18.732Z"
+    },
+    {
+      "title": "manifest-mode",
+      "path": "crates/brave-bot/docs/website/docs/using/manifest-mode.md",
+      "category": "crates",
+      "sizeBytes": 9465,
+      "lastModified": "2026-11-04T04:45:18.732Z"
+    },
+    {
+      "title": "rewind",
+      "path": "crates/brave-bot/docs/website/docs/using/rewind.md",
+      "category": "crates",
+      "sizeBytes": 5155,
+      "lastModified": "2026-11-04T04:45:18.732Z"
+    },
+    {
+      "title": "sessions-screen",
+      "path": "crates/brave-bot/docs/website/docs/using/sessions-screen.md",
+      "category": "crates",
+      "sizeBytes": 10194,
+      "lastModified": "2026-11-04T04:45:18.733Z"
+    },
+    {
+      "title": "sessions",
+      "path": "crates/brave-bot/docs/website/docs/using/sessions.md",
+      "category": "crates",
+      "sizeBytes": 40858,
+      "lastModified": "2026-11-04T04:45:18.734Z"
+    },
+    {
+      "title": "shell-mode",
+      "path": "crates/brave-bot/docs/website/docs/using/shell-mode.md",
+      "category": "crates",
+      "sizeBytes": 5955,
+      "lastModified": "2026-11-04T04:45:18.734Z"
+    },
+    {
+      "title": "transcript",
+      "path": "crates/brave-bot/docs/website/docs/using/transcript.md",
+      "category": "crates",
+      "sizeBytes": 45180,
+      "lastModified": "2026-11-04T04:45:18.738Z"
+    },
+    {
+      "title": "vi-mode",
+      "path": "crates/brave-bot/docs/website/docs/using/vi-mode.md",
+      "category": "crates",
+      "sizeBytes": 16198,
+      "lastModified": "2026-11-04T04:45:18.739Z"
+    },
+    {
+      "title": "watches",
+      "path": "crates/brave-bot/docs/website/docs/using/watches.md",
+      "category": "crates",
+      "sizeBytes": 9476,
+      "lastModified": "2026-11-04T04:45:18.740Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/docs/website/README.md",
+      "category": "crates",
+      "sizeBytes": 2896,
+      "lastModified": "2026-11-04T04:45:18.674Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-bot/README.md",
+      "category": "crates",
+      "sizeBytes": 9539,
+      "lastModified": "2026-11-04T04:45:17.561Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "crates/brave-kuchikiki/CHANGELOG.md",
+      "category": "crates",
+      "sizeBytes": 21241,
+      "lastModified": "2026-11-04T04:46:17.098Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-kuchikiki/README.md",
+      "category": "crates",
+      "sizeBytes": 548,
+      "lastModified": "2026-11-04T04:46:17.099Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-kuchikiki/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 194,
+      "lastModified": "2026-11-04T04:46:17.100Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-search-cli/README.md",
+      "category": "crates",
+      "sizeBytes": 19628,
+      "lastModified": "2026-11-04T04:45:21.680Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "crates/brave-star/adss/CHANGELOG.md",
+      "category": "crates",
+      "sizeBytes": 1158,
+      "lastModified": "2026-11-04T04:45:22.678Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/adss/README.md",
+      "category": "crates",
+      "sizeBytes": 519,
+      "lastModified": "2026-11-04T04:45:22.682Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-star/adss/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 297,
+      "lastModified": "2026-11-04T04:45:22.683Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/ppoprf/README.md",
+      "category": "crates",
+      "sizeBytes": 135,
+      "lastModified": "2026-11-04T04:45:22.687Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-star/ppoprf/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 308,
+      "lastModified": "2026-11-04T04:45:22.687Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/README.md",
+      "category": "crates",
+      "sizeBytes": 2179,
+      "lastModified": "2026-11-04T04:45:22.676Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-star/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 297,
+      "lastModified": "2026-11-04T04:45:22.677Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "crates/brave-star/sharks/CHANGELOG.md",
+      "category": "crates",
+      "sizeBytes": 2138,
+      "lastModified": "2026-11-04T04:45:22.703Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/sharks/README.md",
+      "category": "crates",
+      "sizeBytes": 2107,
+      "lastModified": "2026-11-04T04:45:22.708Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/star/README.md",
+      "category": "crates",
+      "sizeBytes": 551,
+      "lastModified": "2026-11-04T04:45:22.739Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/brave-star/star/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 297,
+      "lastModified": "2026-11-04T04:45:22.742Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/brave-star/star-wasm/www/README.md",
+      "category": "crates",
+      "sizeBytes": 207,
+      "lastModified": "2026-11-04T04:45:22.730Z"
+    },
+    {
+      "title": "BRAVE CRATES",
+      "path": "crates/BRAVE_CRATES.md",
+      "category": "crates",
+      "sizeBytes": 5641,
+      "lastModified": "2026-11-04T05:30:29.508Z"
+    },
+    {
+      "title": "BUN WEBKIT V8 ARCHITECTURE",
+      "path": "crates/BUN_WEBKIT_V8_ARCHITECTURE.md",
+      "category": "crates",
+      "sizeBytes": 21267,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "ARCHITECTURE",
+      "path": "crates/deno-core/ARCHITECTURE.md",
+      "category": "crates",
+      "sizeBytes": 6738,
+      "lastModified": "2026-11-04T05:07:47.982Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/core/README.md",
+      "category": "crates",
+      "sizeBytes": 1329,
+      "lastModified": "2026-11-04T05:07:47.986Z"
+    },
+    {
+      "title": "LICENSE",
+      "path": "crates/deno-core/LICENSE.md",
+      "category": "crates",
+      "sizeBytes": 1074,
+      "lastModified": "2026-11-04T05:07:47.983Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/ops/op2/README.md",
+      "category": "crates",
+      "sizeBytes": 22854,
+      "lastModified": "2026-11-04T05:07:48.034Z"
+    },
+    {
+      "title": "valid args",
+      "path": "crates/deno-core/ops/op2/valid_args.md",
+      "category": "crates",
+      "sizeBytes": 20846,
+      "lastModified": "2026-11-04T05:07:48.074Z"
+    },
+    {
+      "title": "valid retvals",
+      "path": "crates/deno-core/ops/op2/valid_retvals.md",
+      "category": "crates",
+      "sizeBytes": 11534,
+      "lastModified": "2026-11-04T05:07:48.074Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/ops/README.md",
+      "category": "crates",
+      "sizeBytes": 296,
+      "lastModified": "2026-11-04T05:07:48.027Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/README.md",
+      "category": "crates",
+      "sizeBytes": 146,
+      "lastModified": "2026-11-04T05:07:47.983Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/serde_v8/README.md",
+      "category": "crates",
+      "sizeBytes": 2015,
+      "lastModified": "2026-11-04T05:07:48.079Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-core/unsync/README.md",
+      "category": "crates",
+      "sizeBytes": 149,
+      "lastModified": "2026-11-04T05:10:06.631Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-error/README.md",
+      "category": "crates",
+      "sizeBytes": 3905,
+      "lastModified": "2026-11-04T05:07:42.844Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-fastwebsockets/benches/README.md",
+      "category": "crates",
+      "sizeBytes": 430,
+      "lastModified": "2026-11-04T05:07:45.082Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-fastwebsockets/README.md",
+      "category": "crates",
+      "sizeBytes": 4502,
+      "lastModified": "2026-11-04T05:07:45.079Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-import-map/README.md",
+      "category": "crates",
+      "sizeBytes": 806,
+      "lastModified": "2026-11-04T05:07:43.788Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-import-map/rs-lib/README.md",
+      "category": "crates",
+      "sizeBytes": 240,
+      "lastModified": "2026-11-04T05:07:43.790Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/deno-media-type/README.md",
+      "category": "crates",
+      "sizeBytes": 146,
+      "lastModified": "2026-11-04T05:07:46.134Z"
+    },
+    {
+      "title": "DENO V8 CRATES",
+      "path": "crates/DENO_V8_CRATES.md",
+      "category": "crates",
+      "sizeBytes": 20333,
+      "lastModified": "2026-11-04T05:30:29.504Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/obscura/README.md",
+      "category": "crates",
+      "sizeBytes": 1238,
+      "lastModified": "2026-11-04T04:34:29.950Z"
+    },
+    {
+      "title": "FONT-PROVENANCE",
+      "path": "crates/obscura-render/assets/FONT-PROVENANCE.md",
+      "category": "crates",
+      "sizeBytes": 370,
+      "lastModified": "2026-11-04T04:34:29.833Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-cssparser/README.md",
+      "category": "crates",
+      "sizeBytes": 2227,
+      "lastModified": "2026-11-04T04:34:32.076Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-engine/components/bluetooth/README.md",
+      "category": "crates",
+      "sizeBytes": 5188,
+      "lastModified": "2026-11-04T04:35:33.760Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-engine/components/fonts/tests/support/dejavu-fonts-ttf-2.37/README.md",
+      "category": "crates",
+      "sizeBytes": 2556,
+      "lastModified": "2026-11-04T04:35:33.835Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-engine/components/hyper_serde/README.md",
+      "category": "crates",
+      "sizeBytes": 1194,
+      "lastModified": "2026-11-04T04:35:33.895Z"
+    },
+    {
+      "title": "JS-Servos-only-GC",
+      "path": "crates/servo-engine/components/script/docs/JS-Servos-only-GC.md",
+      "category": "crates",
+      "sizeBytes": 16995,
+      "lastModified": "2026-11-04T04:35:34.001Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-engine/components/script_bindings/third_party/ply/README.md",
+      "category": "crates",
+      "sizeBytes": 8998,
+      "lastModified": "2026-11-04T04:35:34.345Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-engine/ffi/capi/README.md",
+      "category": "crates",
+      "sizeBytes": 450,
+      "lastModified": "2026-11-04T04:35:34.727Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-euclid/README.md",
+      "category": "crates",
+      "sizeBytes": 245,
+      "lastModified": "2026-11-04T04:34:32.971Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-fnv/README.md",
+      "category": "crates",
+      "sizeBytes": 2325,
+      "lastModified": "2026-11-04T04:35:40.198Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-font-kit/README.md",
+      "category": "crates",
+      "sizeBytes": 4134,
+      "lastModified": "2026-11-04T04:34:34.949Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-gaol/README.md",
+      "category": "crates",
+      "sizeBytes": 3089,
+      "lastModified": "2026-11-04T04:35:40.954Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-hyper-serde/README.md",
+      "category": "crates",
+      "sizeBytes": 1194,
+      "lastModified": "2026-11-04T04:35:33.895Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-ipc-channel/README.md",
+      "category": "crates",
+      "sizeBytes": 6054,
+      "lastModified": "2026-11-04T04:34:33.881Z"
+    },
+    {
+      "title": "architecture",
+      "path": "crates/servo-pathfinder/doc/architecture.md",
+      "category": "crates",
+      "sizeBytes": 1334,
+      "lastModified": "2026-11-04T04:34:37.654Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-pathfinder/README.md",
+      "category": "crates",
+      "sizeBytes": 6235,
+      "lastModified": "2026-11-04T04:34:37.589Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-pathfinder/resources/shaders/README.md",
+      "category": "crates",
+      "sizeBytes": 254,
+      "lastModified": "2026-11-04T04:34:37.719Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-pathfinder/shaders/README.md",
+      "category": "crates",
+      "sizeBytes": 1411,
+      "lastModified": "2026-11-04T04:34:37.774Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-rcdom/README.md",
+      "category": "crates",
+      "sizeBytes": 451,
+      "lastModified": "2026-11-04T04:34:31.015Z"
+    },
+    {
+      "title": "LICENSE",
+      "path": "crates/servo-rcdom/wpt-tree-construction-tests/LICENSE.md",
+      "category": "crates",
+      "sizeBytes": 1500,
+      "lastModified": "2026-11-04T04:34:31.027Z"
+    },
+    {
+      "title": "bug report",
+      "path": "crates/servo-rust-url/.github/ISSUE_TEMPLATE/bug_report.md",
+      "category": "crates",
+      "sizeBytes": 325,
+      "lastModified": "2026-11-04T04:35:36.770Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-rust-url/data-url/README.md",
+      "category": "crates",
+      "sizeBytes": 737,
+      "lastModified": "2026-11-04T04:35:36.776Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-rust-url/debug_metadata/README.md",
+      "category": "crates",
+      "sizeBytes": 5187,
+      "lastModified": "2026-11-04T04:35:36.779Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-rust-url/idna/README.md",
+      "category": "crates",
+      "sizeBytes": 4104,
+      "lastModified": "2026-11-04T04:35:36.782Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-rust-url/README.md",
+      "category": "crates",
+      "sizeBytes": 1303,
+      "lastModified": "2026-11-04T04:35:36.773Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "crates/servo-rust-url/SECURITY.md",
+      "category": "crates",
+      "sizeBytes": 574,
+      "lastModified": "2026-11-04T04:35:36.773Z"
+    },
+    {
+      "title": "UPGRADING",
+      "path": "crates/servo-rust-url/UPGRADING.md",
+      "category": "crates",
+      "sizeBytes": 13381,
+      "lastModified": "2026-11-04T04:35:36.773Z"
+    },
+    {
+      "title": "CODE OF CONDUCT",
+      "path": "crates/servo-smallvec/.github/CODE_OF_CONDUCT.md",
+      "category": "crates",
+      "sizeBytes": 108,
+      "lastModified": "2026-11-04T04:35:35.832Z"
+    },
+    {
+      "title": "CONTRIBUTING",
+      "path": "crates/servo-smallvec/.github/CONTRIBUTING.md",
+      "category": "crates",
+      "sizeBytes": 128,
+      "lastModified": "2026-11-04T04:35:35.832Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-smallvec/.github/README.md",
+      "category": "crates",
+      "sizeBytes": 1359,
+      "lastModified": "2026-11-04T04:35:35.833Z"
+    },
+    {
+      "title": "AGENTS",
+      "path": "crates/servo-smallvec/AGENTS.md",
+      "category": "crates",
+      "sizeBytes": 1687,
+      "lastModified": "2026-11-04T04:35:35.834Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-smallvec/README.md",
+      "category": "crates",
+      "sizeBytes": 3447,
+      "lastModified": "2026-11-04T04:35:35.837Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-string-cache/README.md",
+      "category": "crates",
+      "sizeBytes": 1413,
+      "lastModified": "2026-11-04T04:35:38.591Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-stylo/README.md",
+      "category": "crates",
+      "sizeBytes": 7396,
+      "lastModified": "2026-11-04T04:34:39.065Z"
+    },
+    {
+      "title": "CHANGES",
+      "path": "crates/servo-stylo/selectors/CHANGES.md",
+      "category": "crates",
+      "sizeBytes": 184,
+      "lastModified": "2026-11-04T04:34:39.069Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-stylo/selectors/README.md",
+      "category": "crates",
+      "sizeBytes": 1171,
+      "lastModified": "2026-11-04T04:34:39.069Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-stylo/style/README.md",
+      "category": "crates",
+      "sizeBytes": 195,
+      "lastModified": "2026-11-04T04:34:39.079Z"
+    },
+    {
+      "title": "SYNCING",
+      "path": "crates/servo-stylo/SYNCING.md",
+      "category": "crates",
+      "sizeBytes": 1850,
+      "lastModified": "2026-11-04T04:34:39.066Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-surfman/README.md",
+      "category": "crates",
+      "sizeBytes": 4222,
+      "lastModified": "2026-11-04T04:34:35.893Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-tendril/README.md",
+      "category": "crates",
+      "sizeBytes": 163,
+      "lastModified": "2026-11-04T04:35:37.615Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-uluru/README.md",
+      "category": "crates",
+      "sizeBytes": 460,
+      "lastModified": "2026-11-04T04:35:39.370Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/examples/README.md",
+      "category": "crates",
+      "sizeBytes": 159,
+      "lastModified": "2026-11-04T04:34:40.958Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/glsl-to-cxx/README.md",
+      "category": "crates",
+      "sizeBytes": 1012,
+      "lastModified": "2026-11-04T04:34:40.964Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/peek-poke/peek-poke-derive/README.md",
+      "category": "crates",
+      "sizeBytes": 2042,
+      "lastModified": "2026-11-04T04:34:40.970Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/peek-poke/README.md",
+      "category": "crates",
+      "sizeBytes": 2042,
+      "lastModified": "2026-11-04T04:34:40.968Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/README.md",
+      "category": "crates",
+      "sizeBytes": 2203,
+      "lastModified": "2026-11-04T04:34:40.950Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/swgl/README.md",
+      "category": "crates",
+      "sizeBytes": 11859,
+      "lastModified": "2026-11-04T04:34:40.974Z"
+    },
+    {
+      "title": "blob",
+      "path": "crates/servo-webrender/webrender/doc/blob.md",
+      "category": "crates",
+      "sizeBytes": 4504,
+      "lastModified": "2026-11-04T04:34:40.981Z"
+    },
+    {
+      "title": "CLIPPING AND POSITIONING",
+      "path": "crates/servo-webrender/webrender/doc/CLIPPING_AND_POSITIONING.md",
+      "category": "crates",
+      "sizeBytes": 8416,
+      "lastModified": "2026-11-04T04:34:40.981Z"
+    },
+    {
+      "title": "swizzling",
+      "path": "crates/servo-webrender/webrender/doc/swizzling.md",
+      "category": "crates",
+      "sizeBytes": 3365,
+      "lastModified": "2026-11-04T04:34:40.983Z"
+    },
+    {
+      "title": "text-rendering",
+      "path": "crates/servo-webrender/webrender/doc/text-rendering.md",
+      "category": "crates",
+      "sizeBytes": 15406,
+      "lastModified": "2026-11-04T04:34:40.983Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/wrench/README.md",
+      "category": "crates",
+      "sizeBytes": 1256,
+      "lastModified": "2026-11-04T04:34:41.062Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-webrender/wr_glyph_rasterizer/README.md",
+      "category": "crates",
+      "sizeBytes": 49,
+      "lastModified": "2026-11-04T04:34:41.052Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-xml5ever/examples/README.md",
+      "category": "crates",
+      "sizeBytes": 8281,
+      "lastModified": "2026-11-04T04:34:31.060Z"
+    },
+    {
+      "title": "README",
+      "path": "crates/servo-xml5ever/README.md",
+      "category": "crates",
+      "sizeBytes": 2615,
+      "lastModified": "2026-11-04T04:34:31.059Z"
+    },
+    {
+      "title": "SERVO CRATES",
+      "path": "crates/SERVO_CRATES.md",
+      "category": "crates",
+      "sizeBytes": 13944,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "Adding-a-CDP-method-or-Web-API",
+      "path": "docs/Adding-a-CDP-method-or-Web-API.md",
+      "category": "docs",
+      "sizeBytes": 5125,
+      "lastModified": "2026-11-04T05:30:29.512Z"
+    },
+    {
+      "title": "Architecture-overview",
+      "path": "docs/Architecture-overview.md",
+      "category": "docs",
+      "sizeBytes": 9449,
+      "lastModified": "2026-11-04T05:30:29.508Z"
+    },
+    {
+      "title": "Build-from-source",
+      "path": "docs/Build-from-source.md",
+      "category": "docs",
+      "sizeBytes": 3145,
+      "lastModified": "2026-11-04T05:30:29.510Z"
+    },
+    {
+      "title": "CDP-media",
+      "path": "docs/CDP-media.md",
+      "category": "docs",
+      "sizeBytes": 1652,
+      "lastModified": "2026-11-04T05:30:29.512Z"
+    },
+    {
+      "title": "CHROMIUM TRACKING AND AUTOMATION",
+      "path": "docs/CHROMIUM_TRACKING_AND_AUTOMATION.md",
+      "category": "docs",
+      "sizeBytes": 4008,
+      "lastModified": "2026-11-04T06:51:42.051Z"
+    },
+    {
+      "title": "CLI-reference",
+      "path": "docs/CLI-reference.md",
+      "category": "docs",
+      "sizeBytes": 10309,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "Configure-stealth-and-proxies",
+      "path": "docs/Configure-stealth-and-proxies.md",
+      "category": "docs",
+      "sizeBytes": 4491,
+      "lastModified": "2026-11-04T05:30:29.508Z"
+    },
+    {
+      "title": "Connect-Puppeteer-or-Playwright",
+      "path": "docs/Connect-Puppeteer-or-Playwright.md",
+      "category": "docs",
+      "sizeBytes": 6881,
+      "lastModified": "2026-11-04T05:30:29.512Z"
+    },
+    {
+      "title": "Environment-variables",
+      "path": "docs/Environment-variables.md",
+      "category": "docs",
+      "sizeBytes": 13145,
+      "lastModified": "2026-11-04T05:30:29.504Z"
+    },
+    {
+      "title": "Extract-data",
+      "path": "docs/Extract-data.md",
+      "category": "docs",
+      "sizeBytes": 2830,
+      "lastModified": "2026-11-04T05:30:29.510Z"
+    },
+    {
+      "title": "INDEX",
+      "path": "docs/INDEX.md",
+      "category": "docs",
+      "sizeBytes": 2369,
+      "lastModified": "2026-11-04T07:02:40.303Z"
+    },
+    {
+      "title": "Installation",
+      "path": "docs/Installation.md",
+      "category": "docs",
+      "sizeBytes": 2918,
+      "lastModified": "2026-11-04T05:30:29.510Z"
+    },
+    {
+      "title": "Intercept-and-modify-requests",
+      "path": "docs/Intercept-and-modify-requests.md",
+      "category": "docs",
+      "sizeBytes": 2710,
+      "lastModified": "2026-11-04T05:30:29.511Z"
+    },
+    {
+      "title": "Markdown-extraction",
+      "path": "docs/Markdown-extraction.md",
+      "category": "docs",
+      "sizeBytes": 1544,
+      "lastModified": "2026-11-04T05:30:29.512Z"
+    },
+    {
+      "title": "Persist-cookies-and-storage",
+      "path": "docs/Persist-cookies-and-storage.md",
+      "category": "docs",
+      "sizeBytes": 4506,
+      "lastModified": "2026-11-04T05:30:29.512Z"
+    },
+    {
+      "title": "README",
+      "path": "docs/README.md",
+      "category": "docs",
+      "sizeBytes": 2421,
+      "lastModified": "2026-11-04T05:30:29.511Z"
+    },
+    {
+      "title": "Run-in-production-at-scale",
+      "path": "docs/Run-in-production-at-scale.md",
+      "category": "docs",
+      "sizeBytes": 7719,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "STYLE GUIDE",
+      "path": "docs/STYLE_GUIDE.md",
+      "category": "docs",
+      "sizeBytes": 4255,
+      "lastModified": "2026-11-04T07:02:12.564Z"
+    },
+    {
+      "title": "Testing-and-debugging",
+      "path": "docs/Testing-and-debugging.md",
+      "category": "docs",
+      "sizeBytes": 8777,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "ULTIMATE 2026 STACK",
+      "path": "docs/ULTIMATE_2026_STACK.md",
+      "category": "docs",
+      "sizeBytes": 61874,
+      "lastModified": "2026-11-04T05:30:29.509Z"
+    },
+    {
+      "title": "Use-as-a-Rust-library",
+      "path": "docs/Use-as-a-Rust-library.md",
+      "category": "docs",
+      "sizeBytes": 6391,
+      "lastModified": "2026-11-04T05:30:29.511Z"
+    },
+    {
+      "title": "Use-the-MCP-server",
+      "path": "docs/Use-the-MCP-server.md",
+      "category": "docs",
+      "sizeBytes": 8255,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "Use-with-Playwright",
+      "path": "docs/Use-with-Playwright.md",
+      "category": "docs",
+      "sizeBytes": 8789,
+      "lastModified": "2026-11-04T05:30:29.505Z"
+    },
+    {
+      "title": "Use-with-Puppeteer",
+      "path": "docs/Use-with-Puppeteer.md",
+      "category": "docs",
+      "sizeBytes": 6225,
+      "lastModified": "2026-11-04T05:30:29.513Z"
+    },
+    {
+      "title": "VERIFIED TEST KNOWLEDGE BASE",
+      "path": "docs/VERIFIED_TEST_KNOWLEDGE_BASE.md",
+      "category": "docs",
+      "sizeBytes": 47016,
+      "lastModified": "2026-11-04T06:53:47.182Z"
+    },
+    {
+      "title": "Watch-agent-sessions-live",
+      "path": "docs/Watch-agent-sessions-live.md",
+      "category": "docs",
+      "sizeBytes": 4460,
+      "lastModified": "2026-11-04T05:30:29.509Z"
+    },
+    {
+      "title": "Your-first-fetch",
+      "path": "docs/Your-first-fetch.md",
+      "category": "docs",
+      "sizeBytes": 2158,
+      "lastModified": "2026-11-04T05:30:29.511Z"
+    },
+    {
+      "title": "GEMINI",
+      "path": "GEMINI.md",
+      "category": "root",
+      "sizeBytes": 712,
+      "lastModified": "2026-11-04T07:02:21.839Z"
+    },
+    {
+      "title": "README",
+      "path": "packages/brave-search-mcp/README.md",
+      "category": "packages",
+      "sizeBytes": 21923,
+      "lastModified": "2026-11-04T04:51:45.496Z"
+    },
+    {
+      "title": "AGENTS",
+      "path": "packages/web-plugin/rules/AGENTS.md",
+      "category": "packages",
+      "sizeBytes": 1695,
+      "lastModified": "2026-11-04T06:15:34.030Z"
+    },
+    {
+      "title": "brave-search-shields",
+      "path": "packages/web-plugin/skills/web/references/brave-search-shields.md",
+      "category": "packages",
+      "sizeBytes": 1177,
+      "lastModified": "2026-11-04T06:15:13.246Z"
+    },
+    {
+      "title": "cli-reference",
+      "path": "packages/web-plugin/skills/web/references/cli-reference.md",
+      "category": "packages",
+      "sizeBytes": 2517,
+      "lastModified": "2026-11-04T06:16:08.941Z"
+    },
+    {
+      "title": "dual-runtime-bun-v8",
+      "path": "packages/web-plugin/skills/web/references/dual-runtime-bun-v8.md",
+      "category": "packages",
+      "sizeBytes": 2497,
+      "lastModified": "2026-11-04T06:15:23.542Z"
+    },
+    {
+      "title": "mcp-tools",
+      "path": "packages/web-plugin/skills/web/references/mcp-tools.md",
+      "category": "packages",
+      "sizeBytes": 3659,
+      "lastModified": "2026-11-04T06:15:08.239Z"
+    },
+    {
+      "title": "servo-stylo-geometry",
+      "path": "packages/web-plugin/skills/web/references/servo-stylo-geometry.md",
+      "category": "packages",
+      "sizeBytes": 1411,
+      "lastModified": "2026-11-04T06:15:17.945Z"
+    },
+    {
+      "title": "ultimate-2026-stack",
+      "path": "packages/web-plugin/skills/web/references/ultimate-2026-stack.md",
+      "category": "packages",
+      "sizeBytes": 1778,
+      "lastModified": "2026-11-04T06:16:08.941Z"
+    },
+    {
+      "title": "verified-targets-knowledge",
+      "path": "packages/web-plugin/skills/web/references/verified-targets-knowledge.md",
+      "category": "packages",
+      "sizeBytes": 47016,
+      "lastModified": "2026-11-04T06:53:47.182Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "packages/web-plugin/skills/web/SKILL.md",
+      "category": "packages",
+      "sizeBytes": 8917,
+      "lastModified": "2026-11-04T06:29:34.023Z"
+    },
+    {
+      "title": "README",
+      "path": "README.md",
+      "category": "root",
+      "sizeBytes": 10642,
+      "lastModified": "2026-11-04T05:29:56.273Z"
+    },
+    {
+      "title": "media-emulation",
+      "path": "render-repros/media-emulation.md",
+      "category": "render-repros",
+      "sizeBytes": 1391,
+      "lastModified": "2026-11-04T04:34:29.981Z"
+    },
+    {
+      "title": "SECURITY",
+      "path": "SECURITY.md",
+      "category": "root",
+      "sizeBytes": 5459,
+      "lastModified": "2026-11-04T04:34:29.727Z"
+    },
+    {
+      "title": "AGENTS",
+      "path": "skills/brave-search/AGENTS.md",
+      "category": "skills",
+      "sizeBytes": 3440,
+      "lastModified": "2026-11-04T04:45:09.714Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/clawhub/bx-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 15314,
+      "lastModified": "2026-11-04T04:45:09.717Z"
+    },
+    {
+      "title": "api-key-setup",
+      "path": "skills/brave-search/docs/api-key-setup.md",
+      "category": "skills",
+      "sizeBytes": 3311,
+      "lastModified": "2026-11-04T04:45:09.717Z"
+    },
+    {
+      "title": "README",
+      "path": "skills/brave-search/README.md",
+      "category": "skills",
+      "sizeBytes": 13242,
+      "lastModified": "2026-11-04T04:45:09.716Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/answers/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 9341,
+      "lastModified": "2026-11-04T04:45:09.718Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/bx/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 9302,
+      "lastModified": "2026-11-04T04:45:09.719Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/images-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 5617,
+      "lastModified": "2026-11-04T04:45:09.719Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/llm-context/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 13081,
+      "lastModified": "2026-11-04T04:45:09.720Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/local-descriptions/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 4086,
+      "lastModified": "2026-11-04T04:45:09.721Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/local-place-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 13498,
+      "lastModified": "2026-11-04T04:45:09.721Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/local-pois/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 7671,
+      "lastModified": "2026-11-04T04:45:09.721Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/news-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 8127,
+      "lastModified": "2026-11-04T04:45:09.722Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 9302,
+      "lastModified": "2026-11-04T04:45:09.719Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/spellcheck/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 2323,
+      "lastModified": "2026-11-04T04:45:09.723Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/suggest/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 3562,
+      "lastModified": "2026-11-04T04:45:09.724Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/videos-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 7268,
+      "lastModified": "2026-11-04T04:45:09.724Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/brave-search/skills/web-search/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 14857,
+      "lastModified": "2026-11-04T04:45:09.725Z"
+    },
+    {
+      "title": "SKILL",
+      "path": "skills/obscura/SKILL.md",
+      "category": "skills",
+      "sizeBytes": 6110,
+      "lastModified": "2026-11-04T04:34:29.997Z"
+    },
+    {
+      "title": "README",
+      "path": "vendor/cosmic-text/README.md",
+      "category": "vendor",
+      "sizeBytes": 3721,
+      "lastModified": "2026-11-04T04:34:29.999Z"
+    },
+    {
+      "title": "README",
+      "path": "vendor/taffy/README.md",
+      "category": "vendor",
+      "sizeBytes": 7565,
+      "lastModified": "2026-11-04T04:34:30.022Z"
+    },
+    {
+      "title": "bug report",
+      "path": "vendor/wreq-util/.github/ISSUE_TEMPLATE/bug_report.md",
+      "category": "vendor",
+      "sizeBytes": 872,
+      "lastModified": "2026-11-04T04:34:30.045Z"
+    },
+    {
+      "title": "custom",
+      "path": "vendor/wreq-util/.github/ISSUE_TEMPLATE/custom.md",
+      "category": "vendor",
+      "sizeBytes": 136,
+      "lastModified": "2026-11-04T04:34:30.045Z"
+    },
+    {
+      "title": "feature request",
+      "path": "vendor/wreq-util/.github/ISSUE_TEMPLATE/feature_request.md",
+      "category": "vendor",
+      "sizeBytes": 615,
+      "lastModified": "2026-11-04T04:34:30.046Z"
+    },
+    {
+      "title": "CHANGELOG",
+      "path": "vendor/wreq-util/CHANGELOG.md",
+      "category": "vendor",
+      "sizeBytes": 2311,
+      "lastModified": "2026-11-04T04:34:30.047Z"
+    },
+    {
+      "title": "README",
+      "path": "vendor/wreq-util/README.md",
+      "category": "vendor",
+      "sizeBytes": 2343,
+      "lastModified": "2026-11-04T04:34:30.049Z"
+    }
+  ]
+}

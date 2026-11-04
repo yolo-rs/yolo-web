@@ -366,7 +366,7 @@ export function createWebCli(): Command {
     .option("--json", "Output as JSON")
     .action(async (opts: { json?: boolean }) => {
       const hostInfo = BunHostRuntimeInfo.inspect();
-      const v8Config = new V8PageIsolateConfig({ maxOldSpaceMb: 1024 });
+      const v8Config = new V8PageIsolateConfig({ maxOldSpaceSizeMb: 1024 });
 
       const info = {
         name: "web",

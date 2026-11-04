@@ -30,6 +30,8 @@
     "aot:human-browser": "bun build --compile --bytecode --minify apps/human-browser/src/server.ts --outfile dist/yolo-human-browser",
     "aot:agent-runner": "bun build --compile --bytecode --minify apps/ai-agent-runner/src/index.ts --outfile dist/yolo-agent-runner",
     "aot:all": "bun run aot:web && bun run aot:web-mcp && bun run aot:human-browser && bun run aot:agent-runner",
+    "docs:generate": "bun run scripts/generate-docs.ts",
+    "docs:manifest": "bun run scripts/generate-docs.ts",
     "rust:info": "cargo run -p yolo-browser-cli -- info",
     "rust:build": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render",
     "rust:build:lto": "cargo build --profile release-dist -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
