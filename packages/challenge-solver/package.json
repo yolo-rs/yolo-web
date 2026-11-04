@@ -1,0 +1,23 @@
+{
+  "name": "@yolo-web/challenge-solver",
+  "version": "0.1.0",
+  "description": "2026 Chromium-native human stealth & challenge resolution engine for Cloudflare Turnstile, Cloudflare Managed Challenge, Google reCAPTCHA v2/v3, and Google IPP attestation",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check",
+    "fmt": "bun fmt",
+    "lint": "bun lint"
+  },
+  "dependencies": {
+    "@yolo-web/brave-shields": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/cdp-client": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*"
+  }
+}

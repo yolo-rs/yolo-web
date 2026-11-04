@@ -18,6 +18,10 @@ import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
 } from "@yolo-web/bun-v8-bridge";
+import {
+  ChallengeSolverEngine,
+  CHROMIUM_2026_DEFAULT_PROFILE,
+} from "@yolo-web/challenge-solver";
 
 export interface UnifiedTool {
   name: string;
@@ -717,6 +721,36 @@ export function createUnifiedWebTools(): UnifiedTool[] {
         properties: {},
       },
     },
+    {
+      name: "browser_resolve_challenge",
+      description:
+        "[Legitimate Chromium 2026] Detect and naturally solve Cloudflare Turnstile, Cloudflare Managed Challenge, Google reCAPTCHA, or Google IPP",
+      category: "browser-automation",
+      inputSchema: {
+        type: "object",
+        properties: {
+          html: {
+            type: "string",
+            description: "HTML content of current page or interstitial",
+          },
+          url: {
+            type: "string",
+            description: "Current page URL",
+          },
+        },
+        required: ["html"],
+      },
+    },
+    {
+      name: "browser_chromium_legitimacy_script",
+      description:
+        "[Legitimate Chromium 2026] Retrieve authentic Chromium desktop legitimacy script (masking webdriver, ANGLE WebGL2, client hints)",
+      category: "browser-automation",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
   ];
   tools.push(...v8Tools);
 
@@ -725,6 +759,7 @@ export function createUnifiedWebTools(): UnifiedTool[] {
 
 const defaultShields = new BraveShieldsEngine();
 const defaultFingerprint = new BraveFingerprintProtection();
+const defaultChallengeSolver = new ChallengeSolverEngine();
 
 export async function handleUnifiedWebToolCall(
   name: string,
@@ -913,6 +948,41 @@ export async function handleUnifiedWebToolCall(
                 null,
                 2,
               ),
+            },
+          ],
+        };
+      }
+
+      case "browser_resolve_challenge": {
+        const html = String(args.html ?? "");
+        const detection = defaultChallengeSolver.detectChallenge(html);
+        const solution = await defaultChallengeSolver.solveChallenge(detection);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  detection,
+                  solution,
+                  engine: "Chromium 2026 Challenge Solver",
+                  profile: CHROMIUM_2026_DEFAULT_PROFILE,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case "browser_chromium_legitimacy_script": {
+        const script = defaultChallengeSolver.generateChromiumLegitimacyScript();
+        return {
+          content: [
+            {
+              type: "text",
+              text: script,
             },
           ],
         };

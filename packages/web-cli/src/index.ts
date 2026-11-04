@@ -19,6 +19,10 @@ import {
   SERVO_CONSOLIDATED_CRATES,
 } from "@yolo-web/servo-bridge";
 import {
+  ChallengeSolverEngine,
+  CHROMIUM_2026_DEFAULT_PROFILE,
+} from "@yolo-web/challenge-solver";
+import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
 } from "@yolo-web/bun-v8-bridge";
@@ -211,7 +215,35 @@ export function createWebCli(): Command {
       }
     });
 
-  // 6. web mcp (Unified MCP Server)
+  // 6. web solve <htmlFileOrUrl> (2026 Challenge Resolution)
+  program
+    .command("solve")
+    .description(
+      "Detect and resolve Cloudflare Turnstile, Cloudflare Managed Challenge, Google reCAPTCHA, or Google IPP",
+    )
+    .argument("<target>", "HTML file path or raw HTML string")
+    .action(async (target: string) => {
+      let content = target;
+      if (await Bun.file(target).exists()) {
+        content = await Bun.file(target).text();
+      }
+      const solver = new ChallengeSolverEngine();
+      const detection = solver.detectChallenge(content);
+      const solution = await solver.solveChallenge(detection);
+      console.log(
+        JSON.stringify(
+          {
+            detection,
+            solution,
+            legitimacyProfile: CHROMIUM_2026_DEFAULT_PROFILE,
+          },
+          null,
+          2,
+        ),
+      );
+    });
+
+  // 7. web mcp (Unified MCP Server)
   program
     .command("mcp")
     .description("Run the unified 'web' MCP server over stdio or HTTP")
