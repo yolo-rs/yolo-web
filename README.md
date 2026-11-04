@@ -1,5 +1,13 @@
 # YOLO-Web (`yolo-rs/yolo-web`)
 
+## Install as an agent plugin
+
+```
+/plugin marketplace add yolo-rs/yolo-web
+/plugin install yolo-web --marketplace yolo-rs/yolo-web
+```
+
+
 **Unified Chromium-Compatible Browser Engine & Monorepo in Full Rust + Bun for AI Agents and Humans.**
 
 Consolidated from three open-source browser engines under **[`github.com/orgs/yolo-rs`](https://github.com/orgs/yolo-rs/repositories)**:
