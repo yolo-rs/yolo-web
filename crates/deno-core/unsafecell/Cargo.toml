@@ -1,0 +1,13 @@
+# Copyright 2018-2025 the Deno authors. MIT license.
+
+[package]
+name = "deno_unsafecell"
+version = "0.2.0"
+authors = ["the Deno authors"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/denoland/deno_core"
+description = "Zero-cost RcLike UnsafeCell wrapper with debug borrow checking for V8 isolate state"
+
+[lib]
+path = "src/lib.rs"

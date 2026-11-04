@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
 `Browser::builder()` configures the engine: `.stealth(bool)`, `.proxy(url)`, `.user_agent(ua)`, `.storage_dir(dir)`, then `.build()`. `Browser::new()` uses defaults.
 
 `Page`:
+
 - `goto(url).await` navigate and wait for load
 - `content()` rendered HTML
 - `url()` current URL

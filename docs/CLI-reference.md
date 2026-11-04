@@ -64,14 +64,14 @@ requests a fixed `N`-second delay. `--timeout` separately bounds navigation.
 
 `--dump` values:
 
-| Value      | Output                                                    |
-| ---------- | --------------------------------------------------------- |
-| `html`     | Rendered HTML (default)                                   |
-| `text`     | Plain text                                                |
-| `markdown` | Markdown conversion                                       |
-| `links`    | Links as URL and optional tab-separated text, one per line                        |
-| `assets`   | Every external resource, one JSON object per line (DOM assets plus `fetch()`/XHR requests) |
-| `original` | Raw HTTP response body (binary-safe, bypasses the engine) |
+| Value      | Output                                                                                            |
+| ---------- | ------------------------------------------------------------------------------------------------- |
+| `html`     | Rendered HTML (default)                                                                           |
+| `text`     | Plain text                                                                                        |
+| `markdown` | Markdown conversion                                                                               |
+| `links`    | Links as URL and optional tab-separated text, one per line                                        |
+| `assets`   | Every external resource, one JSON object per line (DOM assets plus `fetch()`/XHR requests)        |
+| `original` | Raw HTTP response body (binary-safe, bypasses the engine)                                         |
 | `cookies`  | All cookies in the jar as a JSON array, including HttpOnly cookies invisible to `document.cookie` |
 
 ## `obscura serve`
@@ -160,14 +160,21 @@ tool list. Streaming screencasts are available through CDP rather than MCP.
 JSON response per command on stdout. For example:
 
 ```json
-{"cmd":"navigate","url":"https://example.com/"}
+{ "cmd": "navigate", "url": "https://example.com/" }
 ```
 
 A completed navigation includes the final document's HTTP status alongside the
 existing title and URL:
 
 ```json
-{"ok":true,"result":{"title":"Example Domain","url":"https://example.com/","status":200}}
+{
+  "ok": true,
+  "result": {
+    "title": "Example Domain",
+    "url": "https://example.com/",
+    "status": 200
+  }
+}
 ```
 
 `status` is the main document's final HTTP response code after redirects, not a
@@ -188,7 +195,11 @@ are unchanged.
 one response per command to stdout. Select a readiness mode per navigation:
 
 ```json
-{"cmd":"navigate","url":"https://example.com","waitUntil":"domcontentloaded"}
+{
+  "cmd": "navigate",
+  "url": "https://example.com",
+  "waitUntil": "domcontentloaded"
+}
 ```
 
 `waitUntil` accepts `load`, `domcontentloaded`, `networkidle0`, or `networkidle2`.

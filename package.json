@@ -23,10 +23,14 @@
     "fmt": "bun fmt",
     "fmt:check": "bun fmt --check",
     "lint": "bun lint",
+    "aot:human-browser": "bun build --compile --bytecode --minify apps/human-browser/src/server.ts --outfile dist/yolo-human-browser",
+    "aot:agent-runner": "bun build --compile --bytecode --minify apps/ai-agent-runner/src/index.ts --outfile dist/yolo-agent-runner",
+    "aot:all": "bun run aot:human-browser && bun run aot:agent-runner",
     "rust:info": "cargo run -p yolo-browser-cli -- info",
     "rust:build": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render",
+    "rust:build:lto": "cargo build --profile release-dist -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
     "rust:build:stealth": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
-    "rust:test": "cargo test -p yolo-browser -p obscura-ssrf -p obscura-dom -p euclid -p uluru -p fnv -p servo-svg -p servo-timers"
+    "rust:test": "cargo test -p yolo-browser -p obscura-ssrf -p obscura-dom -p euclid -p uluru -p fnv -p servo-svg -p kuchikiki -p bravebot-core -p adblock -p deno_error@0.7.3 -p import_map -p fastwebsockets -p deno_media_type -p deno_unsync -p deno_unsafecell --lib"
   },
   "devDependencies": {
     "@types/bun": "latest",

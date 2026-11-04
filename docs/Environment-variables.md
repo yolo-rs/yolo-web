@@ -96,16 +96,16 @@ OBSCURA_PROXY=http://proxy.example.com:8080 obscura serve
 
 Values below are non-negative integers. Byte limits use bytes, not MiB.
 
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `OBSCURA_FETCH_MAX_BODY_BYTES` | 104857600 for JS fetch/XHR; 33554432 for modules | Maximum buffered response size. Setting it overrides both defaults. |
-| `OBSCURA_NETWORK_BODY_BUFFER_ENTRIES` | 128 | Maximum retained response bodies in each page/runtime cache. Zero disables retention. |
-| `OBSCURA_NETWORK_BODY_BUFFER_BYTES` | 2097152 | Largest individual response body retained for CDP retrieval. Zero disables retention; this is not a total-cache byte limit. |
-| `OBSCURA_IO_STREAM_MAX_ENTRIES` | 32 | Maximum open CDP response-body streams per connection. |
-| `OBSCURA_IO_STREAM_MAX_BYTES` | 268435456 | Total bytes retained by those streams. Oldest streams are evicted when a limit is exceeded. |
-| `OBSCURA_MAX_LIVE_FRAMES` | 64 | Maximum live child frames per page, including initial realms awaiting adoption. |
-| `OBSCURA_FRAME_MESSAGE_QUEUE_ENTRIES` | 4096 | Maximum queued cross-frame messages. |
-| `OBSCURA_FRAME_MESSAGE_QUEUE_BYTES` | 8388608 | Maximum bytes in the cross-frame message queue. |
+| Variable                              | Default                                          | Effect                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `OBSCURA_FETCH_MAX_BODY_BYTES`        | 104857600 for JS fetch/XHR; 33554432 for modules | Maximum buffered response size. Setting it overrides both defaults.                                                         |
+| `OBSCURA_NETWORK_BODY_BUFFER_ENTRIES` | 128                                              | Maximum retained response bodies in each page/runtime cache. Zero disables retention.                                       |
+| `OBSCURA_NETWORK_BODY_BUFFER_BYTES`   | 2097152                                          | Largest individual response body retained for CDP retrieval. Zero disables retention; this is not a total-cache byte limit. |
+| `OBSCURA_IO_STREAM_MAX_ENTRIES`       | 32                                               | Maximum open CDP response-body streams per connection.                                                                      |
+| `OBSCURA_IO_STREAM_MAX_BYTES`         | 268435456                                        | Total bytes retained by those streams. Oldest streams are evicted when a limit is exceeded.                                 |
+| `OBSCURA_MAX_LIVE_FRAMES`             | 64                                               | Maximum live child frames per page, including initial realms awaiting adoption.                                             |
+| `OBSCURA_FRAME_MESSAGE_QUEUE_ENTRIES` | 4096                                             | Maximum queued cross-frame messages.                                                                                        |
+| `OBSCURA_FRAME_MESSAGE_QUEUE_BYTES`   | 8388608                                          | Maximum bytes in the cross-frame message queue.                                                                             |
 
 Disabling response-body retention does not disable network events. Reading an
 evicted CDP body or stream returns an error.
@@ -114,14 +114,14 @@ evicted CDP body or stream returns an error.
 
 These settings require a render-enabled build.
 
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `OBSCURA_SHOT_W` / `OBSCURA_SHOT_H` | 1280 / 720 | CLI screenshot viewport in CSS pixels, set before navigation. |
-| `OBSCURA_SHOT_ANIMATION_TIME_MS` | Live timeline | Sample CSS animations at a finite, non-negative time for a CLI screenshot. |
-| `OBSCURA_RENDER_RESOURCE_DEADLINE_MS` | 3000 | Resource preparation budget before CLI/CDP screenshots, in milliseconds. |
-| `OBSCURA_RENDER_RESOURCE_WARMUP_MS` | 1000 | Resource preparation budget before navigation scripts, in milliseconds. |
-| `OBSCURA_RENDER_RESOURCE_POST_SCRIPT_WARMUP_MS` | 1000 | Resource preparation budget after navigation scripts, in milliseconds. |
-| `OBSCURA_RENDER_RESOURCE_SETTLE_WARMUP_MS` | 1000 | Resource preparation budget after settling, bounded by its remaining time. |
+| Variable                                        | Default       | Effect                                                                     |
+| ----------------------------------------------- | ------------- | -------------------------------------------------------------------------- |
+| `OBSCURA_SHOT_W` / `OBSCURA_SHOT_H`             | 1280 / 720    | CLI screenshot viewport in CSS pixels, set before navigation.              |
+| `OBSCURA_SHOT_ANIMATION_TIME_MS`                | Live timeline | Sample CSS animations at a finite, non-negative time for a CLI screenshot. |
+| `OBSCURA_RENDER_RESOURCE_DEADLINE_MS`           | 3000          | Resource preparation budget before CLI/CDP screenshots, in milliseconds.   |
+| `OBSCURA_RENDER_RESOURCE_WARMUP_MS`             | 1000          | Resource preparation budget before navigation scripts, in milliseconds.    |
+| `OBSCURA_RENDER_RESOURCE_POST_SCRIPT_WARMUP_MS` | 1000          | Resource preparation budget after navigation scripts, in milliseconds.     |
+| `OBSCURA_RENDER_RESOURCE_SETTLE_WARMUP_MS`      | 1000          | Resource preparation budget after settling, bounded by its remaining time. |
 
 For example:
 

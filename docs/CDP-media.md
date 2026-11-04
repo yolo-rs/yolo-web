@@ -4,7 +4,12 @@
 `prefers-reduced-motion` in its `features` array:
 
 ```json
-{"features":[{"name":"prefers-color-scheme","value":"dark"},{"name":"prefers-reduced-motion","value":"reduce"}]}
+{
+  "features": [
+    { "name": "prefers-color-scheme", "value": "dark" },
+    { "name": "prefers-reduced-motion", "value": "reduce" }
+  ]
+}
 ```
 
 Color-scheme values are `dark`, `light`, `no-preference`, and the empty string.

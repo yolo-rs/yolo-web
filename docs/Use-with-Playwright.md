@@ -10,10 +10,10 @@ bun add playwright
 ## Connect
 
 ```js
-import { chromium } from 'playwright';
+import { chromium } from "playwright";
 
-const browser = await chromium.connectOverCDP('ws://127.0.0.1:9222');
-const context = browser.contexts()[0] || await browser.newContext();
+const browser = await chromium.connectOverCDP("ws://127.0.0.1:9222");
+const context = browser.contexts()[0] || (await browser.newContext());
 const page = await context.newPage();
 ```
 
@@ -22,9 +22,9 @@ Use `connectOverCDP`, not `connect`. Playwright's `connect` speaks Playwright's 
 ## Navigate
 
 ```js
-await page.goto('https://example.com');
-await page.goto('https://example.com', { waitUntil: 'load' });
-await page.goto('https://example.com', { waitUntil: 'networkidle' });
+await page.goto("https://example.com");
+await page.goto("https://example.com", { waitUntil: "load" });
+await page.goto("https://example.com", { waitUntil: "networkidle" });
 ```
 
 Default is `load`. Other values include `domcontentloaded`, `networkidle`, and
@@ -39,10 +39,12 @@ preserves literal markup as text instead of parsing it as HTML.
 ```js
 const title = await page.evaluate(() => document.title);
 
-const items = await page.$$eval('.item', els => els.map(el => ({
-  text: el.textContent,
-  href: el.querySelector('a')?.href,
-})));
+const items = await page.$$eval(".item", (els) =>
+  els.map((el) => ({
+    text: el.textContent,
+    href: el.querySelector("a")?.href,
+  })),
+);
 ```
 
 ## SVG element interfaces
@@ -57,31 +59,33 @@ method or rendering feature.
 ## Interact
 
 ```js
-await page.click('#login-button');
-await page.fill('#username', 'alice');
-await page.fill('#password', 'secret');
+await page.click("#login-button");
+await page.fill("#username", "alice");
+await page.fill("#password", "secret");
 
-await page.waitForSelector('#dashboard');
+await page.waitForSelector("#dashboard");
 await page.waitForFunction(() => window.appReady === true);
 ```
 
 ## Locators
 
 ```js
-await page.locator('button.submit').click();
-await page.getByRole('button', { name: 'Submit' }).click();
-await page.getByLabel('Email').fill('alice@example.com');
+await page.locator("button.submit").click();
+await page.getByRole("button", { name: "Submit" }).click();
+await page.getByLabel("Email").fill("alice@example.com");
 ```
 
 ## Cookies
 
 ```js
-await context.addCookies([{
-  name: 'session',
-  value: 'abc123',
-  domain: 'example.com',
-  path: '/',
-}]);
+await context.addCookies([
+  {
+    name: "session",
+    value: "abc123",
+    domain: "example.com",
+    path: "/",
+  },
+]);
 
 const cookies = await context.cookies();
 ```
@@ -89,8 +93,8 @@ const cookies = await context.cookies();
 ## Intercept requests
 
 ```js
-await page.route('**/*', route => {
-  if (route.request().resourceType() === 'image') {
+await page.route("**/*", (route) => {
+  if (route.request().resourceType() === "image") {
     route.abort();
   } else {
     route.continue();
@@ -102,8 +106,8 @@ await page.route('**/*', route => {
 
 ```js
 const client = await context.newCDPSession(page);
-await client.send('HeapProfiler.collectGarbage'); // Optional explicit collection.
-const heap = await client.send('Runtime.getHeapUsage');
+await client.send("HeapProfiler.collectGarbage"); // Optional explicit collection.
+const heap = await client.send("Runtime.getHeapUsage");
 console.log(heap.usedSize, heap.totalSize, heap.backingStorageSize);
 await client.detach();
 ```
@@ -143,8 +147,8 @@ const page1 = await context.newPage();
 const page2 = await context.newPage();
 
 await Promise.all([
-  page1.goto('https://a.example.com'),
-  page2.goto('https://b.example.com'),
+  page1.goto("https://a.example.com"),
+  page2.goto("https://b.example.com"),
 ]);
 ```
 
@@ -155,13 +159,13 @@ run on separate threads and can execute in parallel.
 
 ```js
 await page.setViewportSize({ width: 1440, height: 1000 });
-await page.screenshot({ path: 'viewport.png' });
+await page.screenshot({ path: "viewport.png" });
 
 await page.evaluate(() => window.scrollTo(0, 1200));
-await page.screenshot({ path: 'scrolled.png' });
+await page.screenshot({ path: "scrolled.png" });
 
-await page.screenshot({ path: 'full-page.png', fullPage: true });
-await page.pdf({ path: 'page.pdf', format: 'A4', printBackground: true });
+await page.screenshot({ path: "full-page.png", fullPage: true });
+await page.pdf({ path: "page.pdf", format: "A4", printBackground: true });
 ```
 
 A normal screenshot captures the live viewport and scroll position;
@@ -175,14 +179,14 @@ session to the page, acknowledge every frame, and detach it when finished:
 ```js
 const client = await context.newCDPSession(page);
 
-client.on('Page.screencastFrame', async ({ data, sessionId }) => {
-  const jpeg = Buffer.from(data, 'base64');
+client.on("Page.screencastFrame", async ({ data, sessionId }) => {
+  const jpeg = Buffer.from(data, "base64");
   // Consume or forward `jpeg` here.
-  await client.send('Page.screencastFrameAck', { sessionId });
+  await client.send("Page.screencastFrameAck", { sessionId });
 });
 
-await client.send('Page.startScreencast', {
-  format: 'jpeg',
+await client.send("Page.startScreencast", {
+  format: "jpeg",
   quality: 80,
   maxWidth: 1280,
   maxHeight: 720,
@@ -190,7 +194,7 @@ await client.send('Page.startScreencast', {
 
 // ...navigate, scroll, and interact...
 
-await client.send('Page.stopScreencast');
+await client.send("Page.stopScreencast");
 await client.detach();
 ```
 
@@ -199,7 +203,7 @@ Frames are activity-driven page captures, not fixed-rate desktop video.
 ## Disconnect
 
 ```js
-await browser.close();  // closes the CDP connection, leaves obscura serve running
+await browser.close(); // closes the CDP connection, leaves obscura serve running
 ```
 
 ## Fetch cancellation

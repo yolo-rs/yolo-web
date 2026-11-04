@@ -81,6 +81,9 @@ async fn main() -> Result<()> {
                 println!("=== {} v{} ({}) ===", info.name, info.version, info.organization);
                 println!("Repository      : {}", info.repository);
                 println!("JS/TS Toolchain : {}", info.js_toolchain);
+                println!("Host Plane      : {}", info.host_runtime_plane);
+                println!("Guest Plane     : {}", info.guest_browser_plane);
+                println!("Optimization    : {}", info.optimization_profile);
                 println!(
                     "Obscura Crates  : {} ({})",
                     info.obscura_crates.len(),
@@ -95,6 +98,11 @@ async fn main() -> Result<()> {
                     "Brave Crates    : {} ({})",
                     info.brave_crates.len(),
                     info.brave_crates.join(", ")
+                );
+                println!(
+                    "Deno/V8 Crates  : {} ({})",
+                    info.deno_v8_crates.len(),
+                    info.deno_v8_crates.join(", ")
                 );
             }
         }

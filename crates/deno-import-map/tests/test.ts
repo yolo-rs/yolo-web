@@ -1,0 +1,107 @@
+// Copyright 2021-2025 the Deno authors. All rights reserved. MIT license.
+
+import {
+  assertEquals,
+  assertThrows,
+  // deno-lint-ignore no-import-prefix
+} from "jsr:@std/assert@1.0.14";
+import { parseFromJson } from "../js/mod.ts";
+
+Deno.test({
+  name: "parseFromJson() - object import map",
+  fn() {
+    const importMap = parseFromJson(
+      "file:///a/import-map.json",
+      {
+        imports: {
+          "jsdom": "https://esm.sh/jsdom",
+        },
+      },
+    );
+    assertEquals(
+      importMap.resolve("jsdom", "https://deno.land/x/oak/mod.ts"),
+      "https://esm.sh/jsdom",
+    );
+    assertThrows(
+      () => {
+        importMap.resolve("notfound", "https://deno.land/x/oak/mod.ts");
+      },
+      Error,
+      "not a dependency",
+    );
+  },
+});
+
+Deno.test({
+  name: "parseFromJson() - JSON string",
+  fn() {
+    const importMap = parseFromJson(
+      "file:///a/import-map.json",
+      JSON.stringify({
+        imports: {
+          "jsdom": "https://esm.sh/jsdom",
+        },
+      }),
+    );
+    assertEquals(
+      importMap.resolve("jsdom", "https://deno.land/x/oak/mod.ts"),
+      "https://esm.sh/jsdom",
+    );
+    assertThrows(
+      () => {
+        importMap.resolve("notfound", "https://deno.land/x/oak/mod.ts");
+      },
+      Error,
+      "not a dependency",
+    );
+  },
+});
+
+Deno.test({
+  name: "ImportMap - resolve() - jsr",
+  fn() {
+    const importMap = parseFromJson(
+      "file:///a/import-map.json",
+      {
+        imports: {
+          "@std/assert": "jsr:@std/assert",
+          "@std/testing": "jsr:@std/testing",
+        },
+      },
+    );
+    assertEquals(
+      importMap.resolve("@std/assert", "https://deno.land/x/oak/mod.ts"),
+      "jsr:@std/assert",
+    );
+    // no expand imports, so it doesn't work
+    assertThrows(
+      () => {
+        importMap.resolve("@std/assert/test", "https://deno.land/x/oak/mod.ts");
+      },
+      Error,
+      "not a dependency",
+    );
+  },
+});
+
+Deno.test({
+  name: "ImportMap - resolve() - jsr expand imports",
+  fn() {
+    const importMap = parseFromJson(
+      "file:///a/import-map.json",
+      {
+        imports: {
+          "@std/assert": "jsr:@std/assert",
+          "@std/testing": "jsr:@std/testing",
+        },
+      },
+      {
+        expandImports: true,
+      },
+    );
+    assertEquals(
+      importMap.resolve("@std/testing/bdd", "https://deno.land/x/oak/mod.ts"),
+      "jsr:/@std/testing/bdd",
+    );
+  },
+});

@@ -1,0 +1,72 @@
+# Copyright 2018-2025 the Deno authors. MIT license.
+
+[package]
+name = "deno_core"
+version = "0.412.0"
+authors = ["the Deno authors"]
+edition = "2024"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/denoland/deno_core"
+description = "A modern JavaScript/TypeScript runtime built with V8, Rust, and Tokio"
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["include_icu_data", "v8_use_custom_libcxx", "reactor-tokio"]
+reactor-tokio = []
+include_icu_data = ["deno_core_icudata"]
+v8_use_custom_libcxx = ["v8/use_custom_libcxx"]
+v8_enable_pointer_compression = ["v8/v8_enable_pointer_compression"]
+v8_enable_v8_checks = ["v8/v8_enable_v8_checks"]
+include_js_files_for_snapshotting = []
+unsafe_runtime_options = []
+unsafe_use_unprotected_platform = []
+snapshot_flags_eager_parse = []
+uv_compat_export = []
+
+[dependencies]
+anyhow = "1"
+az = "1.2.1"
+bincode = "1"
+bit-set = "0.8.0"
+bit-vec = "0.8.0"
+boxed_error = "0.2.3"
+bytes = ">=1.6.0"
+capacity_builder = "0.5.0"
+cooked-waker = "5"
+deno_core_icudata = { version = "0.77.0", optional = true }
+deno_error = { version = "0.7.0", path = "../../deno-error", features = ["serde_json", "serde", "url", "tokio"] }
+deno_ops = { version = "0.288.0", path = "../ops" }
+deno_path_util = "0.6.0"
+deno_unsync = { version = "0.4.4", path = "../unsync" }
+futures = "0.3.31"
+indexmap = "2.8.0"
+inventory = "0.3.21"
+libc = "0.2.171"
+parking_lot = "0.12.3"
+percent-encoding = "2.3.1"
+pin-project = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+serde_v8 = { version = "0.321.0", path = "../serde_v8" }
+smallvec = "1.14"
+sourcemap = "9.1.2"
+static_assertions = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+url = { version = "2", features = ["serde", "expose_internals"] }
+v8 = { version = "150.4.0", default-features = false }
+wasm_dep_analyzer = "0.4.0"
+
+[dev-dependencies]
+bencher = "0.1"
+criterion = "0.5"
+deno_ast = { version = "=0.52.0", features = ["transpiling"] }
+fastrand = "2"
+paste = "1.0"
+pretty_assertions = "1.4.1"
+rstest = "0"
+twox-hash = { version = "2.1.0", default-features = false, features = ["xxhash64"] }
+unicycle = "0.10.2"

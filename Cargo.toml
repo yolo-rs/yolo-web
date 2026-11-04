@@ -63,6 +63,16 @@ members = [
     "crates/brave-star/ppoprf",
     "crates/brave-star/sharks",
     "crates/brave-bot",
+
+    # Consolidated Deno & V8 Runtime Crates (FastWebSockets, WICG Import Maps, Media Types, JS/DOM Errors, V8 Unsync Reactor)
+    "crates/deno-error",
+    "crates/deno-error/macros",
+    "crates/deno-import-map",
+    "crates/deno-fastwebsockets",
+    "crates/deno-media-type",
+    "crates/deno-core/unsync",
+    "crates/deno-core/unsafecell",
+    "crates/deno-core/parking_lot",
 ]
 default-members = [
     "crates/yolo-browser",
@@ -95,6 +105,9 @@ exclude = [
     "crates/brave-star/star",
     "crates/brave-star/star-wasm",
     "crates/brave-bot/crates",
+    "crates/deno-core/core",
+    "crates/deno-core/ops",
+    "crates/deno-core/serde_v8",
 ]
 
 [workspace.package]
@@ -146,6 +159,16 @@ adblock = { path = "crates/brave-adblock" }
 kuchikiki = { path = "crates/brave-kuchikiki" }
 sta-rs = { path = "crates/brave-star" }
 bravebot-core = { path = "crates/brave-bot" }
+
+# Consolidated Deno & V8 dependencies
+deno_error = { path = "crates/deno-error", features = ["serde", "serde_json", "url"] }
+deno_error_macro = { path = "crates/deno-error/macros" }
+import_map = { path = "crates/deno-import-map" }
+fastwebsockets = { path = "crates/deno-fastwebsockets" }
+deno_media_type = { path = "crates/deno-media-type" }
+deno_unsync = { path = "crates/deno-core/unsync" }
+deno_unsafecell = { path = "crates/deno-core/unsafecell" }
+deno_core_parking_lot = { path = "crates/deno-core/parking_lot" }
 
 # Layout & Rasterization
 taffy = { version = "0.12", path = "vendor/taffy" }
@@ -199,18 +222,38 @@ hyper = "1.6"
 mime = "0.3"
 encoding_rs = { version = "0.8", features = ["serde"] }
 
+# Maximum Performance Release Profile: Full Fat LTO + Single Codegen Unit + Opt-Level 3
+# Note: panic = "unwind" is strictly preserved so V8 #[op2] FFI boundaries in obscura-js
+# remain 100% panic-safe via std::panic::catch_unwind.
 [profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 panic = "unwind"
 
+# Fast Iterative Release Profile (Thin LTO + Parallel Codegen)
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+
+# Production Distribution Binary Profile (Fat LTO + Symbol Stripping)
 [profile.release-dist]
 inherits = "release"
-opt-level = "s"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 
 [patch.crates-io]
 euclid = { path = "crates/servo-euclid" }
 fnv = { path = "crates/servo-fnv" }
 uluru = { path = "crates/servo-uluru" }
+deno_unsync = { path = "crates/deno-core/unsync" }
 

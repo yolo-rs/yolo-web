@@ -13,6 +13,7 @@
   "license": "MIT",
   "author": "Brave Software, Inc. (https://brave.com)",
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": "./src/server.ts"
   },

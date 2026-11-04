@@ -46,12 +46,12 @@ CLI default is `load`. For faster returns on slow sites:
 obscura fetch https://my-spa.example --wait-until domcontentloaded --eval "document.title"
 ```
 
-| Level              | Returns when                                  |
-| ------------------ | --------------------------------------------- |
-| `domcontentloaded` | HTML parsed, scripts ran                      |
-| `load`             | All subresources finished (default)           |
-| `networkidle2`     | ≤2 network connections active for 500ms       |
-| `networkidle0`     | 0 network connections active for 500ms        |
+| Level              | Returns when                            |
+| ------------------ | --------------------------------------- |
+| `domcontentloaded` | HTML parsed, scripts ran                |
+| `load`             | All subresources finished (default)     |
+| `networkidle2`     | ≤2 network connections active for 500ms |
+| `networkidle0`     | 0 network connections active for 500ms  |
 
 Puppeteer and Playwright default to `load`. Set `waitUntil` explicitly to choose
 a different readiness condition.

@@ -19,11 +19,11 @@ the same `page` object. The viewer polls for a JPEG twice a second and sends it
 to local browser tabs over Server-Sent Events using `Bun.serve`.
 
 ```ts
-import puppeteer from 'puppeteer-core';
+import puppeteer from "puppeteer-core";
 
 const token = Bun.env.OBSCURA_CDP_TOKEN;
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://127.0.0.1:9222',
+  browserWSEndpoint: "ws://127.0.0.1:9222",
   headers: token ? { Authorization: `Bearer ${token}` } : {},
 });
 const page = await browser.newPage();
@@ -45,16 +45,17 @@ events.onmessage = event => {
 </script>`;
 
 const server = Bun.serve({
-  hostname: '127.0.0.1',
+  hostname: "127.0.0.1",
   port: 8080,
   fetch(req) {
     const url = new URL(req.url);
-    if (url.pathname !== '/events') {
+    if (url.pathname !== "/events") {
       return new Response(html, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
-    let activeController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let activeController: ReadableStreamDefaultController<Uint8Array> | null =
+      null;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         activeController = controller;
@@ -69,9 +70,9 @@ const server = Bun.serve({
     });
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-store',
-        Connection: 'keep-alive',
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
       },
     });
   },
@@ -79,23 +80,27 @@ const server = Bun.serve({
 
 async function capture() {
   try {
-    latest = (await page.screenshot({ type: 'jpeg', quality: 70, encoding: 'base64' })) as string;
+    latest = (await page.screenshot({
+      type: "jpeg",
+      quality: 70,
+      encoding: "base64",
+    })) as string;
     const payload = encoder.encode(`data:${latest}\n\n`);
     for (const client of clients) client.enqueue(payload);
   } catch (error) {
-    if (!stopping) console.error('Capture failed:', (error as Error).message);
+    if (!stopping) console.error("Capture failed:", (error as Error).message);
   }
   if (!stopping) setTimeout(capture, 500);
 }
 
-process.once('SIGINT', async () => {
+process.once("SIGINT", async () => {
   stopping = true;
   for (const client of clients) client.close();
   server.stop(true);
   await browser.disconnect();
 });
 
-await page.goto('https://example.com');
+await page.goto("https://example.com");
 capture();
 // Continue automation here with the same `page` object.
 ```

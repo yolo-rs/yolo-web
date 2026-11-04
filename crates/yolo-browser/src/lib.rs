@@ -45,6 +45,17 @@ pub mod brave {
     pub use kuchikiki;
 }
 
+/// Re-exported Deno & V8 browser runtime crates consolidated into the monorepo.
+pub mod deno_v8 {
+    pub use deno_core_parking_lot as parking_lot;
+    pub use deno_error;
+    pub use deno_media_type as media_type;
+    pub use deno_unsafecell as unsafecell;
+    pub use deno_unsync as unsync;
+    pub use fastwebsockets;
+    pub use import_map;
+}
+
 use adblock::lists::{FilterSet, ParseOptions};
 use adblock::request::Request as AdblockRequest;
 use adblock::Engine as BraveAdblockEngine;
@@ -256,9 +267,13 @@ pub struct MonorepoEngineInfo {
     pub repository: &'static str,
     pub version: &'static str,
     pub js_toolchain: &'static str,
+    pub host_runtime_plane: &'static str,
+    pub guest_browser_plane: &'static str,
+    pub optimization_profile: &'static str,
     pub obscura_crates: Vec<&'static str>,
     pub servo_crates: Vec<&'static str>,
     pub brave_crates: Vec<&'static str>,
+    pub deno_v8_crates: Vec<&'static str>,
 }
 
 pub fn engine_info() -> MonorepoEngineInfo {
@@ -267,7 +282,10 @@ pub fn engine_info() -> MonorepoEngineInfo {
         organization: "yolo-rs",
         repository: "https://github.com/yolo-rs/yolo-web",
         version: env!("CARGO_PKG_VERSION"),
-        js_toolchain: "bun (zero nodejs)",
+        js_toolchain: "bun v1.4.4+ (full rust ~200 crates + webkit/jsc + cranelift aot, zero nodejs)",
+        host_runtime_plane: "yolo-rs/bun (Full Rust + C++ WebKit/JavaScriptCore + Riptide GC + Cranelift AoT)",
+        guest_browser_plane: "yolo-rs/v8 + yolo-rs/rusty_v8 + yolo-rs/deno_core (Chromium V8 Isolate per Tab)",
+        optimization_profile: "Cargo LTO=fat, codegen-units=1, opt-level=3, panic=unwind + Bun AoT (--compile --bytecode --minify --trim)",
         obscura_crates: vec![
             "obscura",
             "obscura-browser",
@@ -319,6 +337,16 @@ pub fn engine_info() -> MonorepoEngineInfo {
             "brave-search-cli",
             "brave-star",
             "brave-bot",
+        ],
+        deno_v8_crates: vec![
+            "deno-core",
+            "deno-error",
+            "deno-import-map",
+            "deno-fastwebsockets",
+            "deno-media-type",
+            "deno-unsync",
+            "deno-unsafecell",
+            "deno-core-parking-lot",
         ],
     }
 }
@@ -375,5 +403,23 @@ mod tests {
         let session = YoloBrowserSession::new(EngineMode::AiAgent, YoloViewport::default());
         assert!(session.validate_url("https://example.com/path").is_ok());
         assert!(session.validate_url("http://127.0.0.1:8080/admin").is_err());
+    }
+
+    #[test]
+    fn deno_v8_media_type_and_import_map_resolve_correctly() {
+        let base_url = url::Url::parse("https://yolo-rs.dev/app/index.html").unwrap();
+        let map_res = deno_v8::import_map::parse_from_json(
+            base_url.clone(),
+            r#"{"imports": {"@yolo/sdk": "./sdk/mod.js"}}"#,
+        )
+        .expect("valid WICG import map");
+        let resolved = map_res
+            .import_map
+            .resolve("@yolo/sdk", &base_url)
+            .expect("resolved import map specifier");
+        assert_eq!(resolved.as_str(), "https://yolo-rs.dev/app/sdk/mod.js");
+
+        let media = deno_v8::media_type::MediaType::from_specifier(&resolved);
+        assert_eq!(media, deno_v8::media_type::MediaType::JavaScript);
     }
 }

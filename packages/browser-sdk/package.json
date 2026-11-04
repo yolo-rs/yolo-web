@@ -11,7 +11,8 @@
   "dependencies": {
     "@yolo-web/shared": "workspace:*",
     "@yolo-web/cdp-client": "workspace:*",
-    "@yolo-web/mcp-client": "workspace:*"
+    "@yolo-web/mcp-client": "workspace:*",
+    "@yolo-web/bun-v8-bridge": "workspace:*"
   },
   "scripts": {
     "test": "bun test"

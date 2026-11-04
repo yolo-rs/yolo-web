@@ -58,6 +58,15 @@ adblock = { workspace = true }
 kuchikiki = { workspace = true }
 bravebot-core = { workspace = true }
 
+# Consolidated Deno & V8 runtime crates
+deno_error = { workspace = true }
+import_map = { workspace = true }
+fastwebsockets = { workspace = true }
+deno_media_type = { workspace = true }
+deno_unsync = { workspace = true }
+deno_unsafecell = { workspace = true }
+deno_core_parking_lot = { workspace = true }
+
 # Async & serialization
 tokio = { workspace = true }
 serde = { workspace = true }

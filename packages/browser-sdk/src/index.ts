@@ -7,6 +7,7 @@
 export * from "@yolo-web/shared";
 export * from "@yolo-web/cdp-client";
 export * from "@yolo-web/mcp-client";
+export * from "@yolo-web/bun-v8-bridge";
 
 import {
   type PdfOptions,

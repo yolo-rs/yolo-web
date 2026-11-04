@@ -83,6 +83,7 @@ Snapshots and interactive-element listings exclude HTML/ARIA-hidden content;
 render builds also apply computed CSS visibility. Hidden text explicitly
 referenced by a visible control can still supply its accessible name. These are
 compact browsing context, not a claim of complete accessibility conformance.
+
 - `browser_get_attribute`, `browser_count`, `browser_search`: read an attribute, count matches, find text.
 
 Interact:

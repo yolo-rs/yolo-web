@@ -16,6 +16,10 @@ YOLO-Web is a unified Chromium-compatible browser engine in full Rust + Bun for 
    - Keep `panic = "unwind"` in `[profile.release]` so V8 FFI ops remain panic-safe via `std::panic::catch_unwind`.
    - For crates that instantiate V8 isolates (`obscura-js`, `obscura-browser`, `obscura-cdp`), run multi-test suites via `cargo nextest run` so each test executes in its own process.
 
-3. **Catalogs**:
-   - See [`crates/SERVO_CRATES.md`](crates/SERVO_CRATES.md) for all 31 consolidated Servo crates.
-   - See [`crates/BRAVE_CRATES.md`](crates/BRAVE_CRATES.md) for all consolidated Brave Rust crates and Shield packages.
+## Catalogs & Architectural Specifications
+
+- See [`crates/SERVO_CRATES.md`](crates/SERVO_CRATES.md) for all 31 consolidated Servo crates.
+- See [`crates/BRAVE_CRATES.md`](crates/BRAVE_CRATES.md) for all consolidated Brave Rust crates and Shield packages.
+- See [`crates/DENO_V8_CRATES.md`](crates/DENO_V8_CRATES.md) for all consolidated Deno & V8 runtime crates.
+- See [`crates/BUN_WEBKIT_V8_ARCHITECTURE.md`](crates/BUN_WEBKIT_V8_ARCHITECTURE.md) for the Dual-Runtime Architecture (Plane 1: 100% Native Bun v1.4.4+ Full Rust ~200 crates + C++ WebKit/JSC + Cranelift AoT with zero Zig; Plane 2: 100% Chromium V8 for browser web rendering).
+- See [`docs/ULTIMATE_2026_STACK.md`](docs/ULTIMATE_2026_STACK.md) for the 2026 Scraper, Crawler, Browser & AoT/LTO Performance Blueprint.

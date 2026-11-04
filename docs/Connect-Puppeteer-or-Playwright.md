@@ -20,14 +20,14 @@ bun add puppeteer-core
 ```
 
 ```js
-import puppeteer from 'puppeteer-core';
+import puppeteer from "puppeteer-core";
 
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://127.0.0.1:9222',
+  browserWSEndpoint: "ws://127.0.0.1:9222",
 });
 
 const page = await browser.newPage();
-await page.goto('https://example.com');
+await page.goto("https://example.com");
 console.log(await page.title()); // "Example Domain"
 
 await browser.disconnect();
@@ -42,13 +42,13 @@ bun add playwright
 ```
 
 ```js
-import { chromium } from 'playwright';
+import { chromium } from "playwright";
 
-const browser = await chromium.connectOverCDP('ws://127.0.0.1:9222');
-const context = browser.contexts()[0] || await browser.newContext();
+const browser = await chromium.connectOverCDP("ws://127.0.0.1:9222");
+const context = browser.contexts()[0] || (await browser.newContext());
 const page = await context.newPage();
 
-await page.goto('https://example.com');
+await page.goto("https://example.com");
 console.log(await page.title());
 
 await browser.close();
@@ -64,17 +64,16 @@ Pass the same token in the client connection headers:
 ```js
 // Puppeteer
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://127.0.0.1:9222',
+  browserWSEndpoint: "ws://127.0.0.1:9222",
   headers: { Authorization: `Bearer ${process.env.OBSCURA_CDP_TOKEN}` },
 });
 ```
 
 ```js
 // Playwright
-const browser = await chromium.connectOverCDP(
-  'ws://127.0.0.1:9222',
-  { headers: { Authorization: `Bearer ${process.env.OBSCURA_CDP_TOKEN}` } },
-);
+const browser = await chromium.connectOverCDP("ws://127.0.0.1:9222", {
+  headers: { Authorization: `Bearer ${process.env.OBSCURA_CDP_TOKEN}` },
+});
 ```
 
 ## `waitUntil`
@@ -82,12 +81,12 @@ const browser = await chromium.connectOverCDP(
 Puppeteer and Playwright default to `load`. Set it explicitly when needed:
 
 ```js
-await page.goto('https://example.com', { waitUntil: 'load' });
+await page.goto("https://example.com", { waitUntil: "load" });
 ```
 
 | Value              | Returns when                            |
 | ------------------ | --------------------------------------- |
-| `domcontentloaded` | HTML parsed, scripts ran      |
+| `domcontentloaded` | HTML parsed, scripts ran                |
 | `load`             | All subresources finished (default)     |
 | `networkidle2`     | ≤2 network connections active for 500ms |
 | `networkidle0`     | 0 network connections active for 500ms  |
@@ -122,9 +121,9 @@ in that context; navigation creates a fresh context.
 
 ```js
 await page.setViewport({ width: 1440, height: 1000 });
-await page.screenshot({ path: 'viewport.png' });
-await page.screenshot({ path: 'full-page.png', fullPage: true });
-await page.pdf({ path: 'page.pdf', format: 'A4', printBackground: true });
+await page.screenshot({ path: "viewport.png" });
+await page.screenshot({ path: "full-page.png", fullPage: true });
+await page.pdf({ path: "page.pdf", format: "A4", printBackground: true });
 ```
 
 Rendering is included in official binaries and requires `--features render`

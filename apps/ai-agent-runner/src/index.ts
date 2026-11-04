@@ -121,7 +121,7 @@ export class YoloAiAgentRunner {
   }
 }
 
-if (import.meta.main) {
+async function runCli(): Promise<void> {
   const runner = new YoloAiAgentRunner();
   const res = await runner.executePlan("Verify YOLO-Web AI Agent Pipeline", [
     {
@@ -135,4 +135,8 @@ if (import.meta.main) {
     { action: "extract-markdown" },
   ]);
   console.log(JSON.stringify(res, null, 2));
+}
+
+if (import.meta.main) {
+  void runCli();
 }

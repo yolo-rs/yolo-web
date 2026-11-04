@@ -119,7 +119,7 @@ for Playwright frame locators or iframe screenshot fidelity.
 
 ```js
 // bootstrap.js helper; the reference node determines the parent.
-_dom('insert_before', newNid, refNid);
+_dom("insert_before", newNid, refNid);
 ```
 
 Adding a Web API usually means:

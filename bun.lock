@@ -15,6 +15,7 @@
       "dependencies": {
         "@yolo-web/brave-shields": "workspace:*",
         "@yolo-web/browser-sdk": "workspace:*",
+        "@yolo-web/bun-v8-bridge": "workspace:*",
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
@@ -27,6 +28,7 @@
       "dependencies": {
         "@yolo-web/brave-shields": "workspace:*",
         "@yolo-web/browser-sdk": "workspace:*",
+        "@yolo-web/bun-v8-bridge": "workspace:*",
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
@@ -56,10 +58,15 @@
       "name": "@yolo-web/browser-sdk",
       "version": "0.1.0",
       "dependencies": {
+        "@yolo-web/bun-v8-bridge": "workspace:*",
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
         "@yolo-web/shared": "workspace:*",
       },
+    },
+    "packages/bun-v8-bridge": {
+      "name": "@yolo-web/bun-v8-bridge",
+      "version": "0.2.0",
     },
     "packages/cdp-client": {
       "name": "@yolo-web/cdp-client",
@@ -100,6 +107,8 @@
     "@yolo-web/brave-shields": ["@yolo-web/brave-shields@workspace:packages/brave-shields"],
 
     "@yolo-web/browser-sdk": ["@yolo-web/browser-sdk@workspace:packages/browser-sdk"],
+
+    "@yolo-web/bun-v8-bridge": ["@yolo-web/bun-v8-bridge@workspace:packages/bun-v8-bridge"],
 
     "@yolo-web/cdp-client": ["@yolo-web/cdp-client@workspace:packages/cdp-client"],
 

@@ -10,10 +10,10 @@ bun add puppeteer-core
 ## Connect
 
 ```js
-import puppeteer from 'puppeteer-core';
+import puppeteer from "puppeteer-core";
 
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://127.0.0.1:9222',
+  browserWSEndpoint: "ws://127.0.0.1:9222",
 });
 ```
 
@@ -23,9 +23,12 @@ Use `puppeteer-core`, not `puppeteer`. The `puppeteer` package bundles a Chrome 
 
 ```js
 const page = await browser.newPage();
-await page.goto('https://example.com');
-await page.goto('https://example.com', { waitUntil: 'load' });
-await page.goto('https://example.com', { waitUntil: 'networkidle0', timeout: 60000 });
+await page.goto("https://example.com");
+await page.goto("https://example.com", { waitUntil: "load" });
+await page.goto("https://example.com", {
+  waitUntil: "networkidle0",
+  timeout: 60000,
+});
 ```
 
 Default `waitUntil` is `load`. Other values: `domcontentloaded`, `networkidle2`, `networkidle0`.
@@ -36,9 +39,9 @@ Default `waitUntil` is `load`. Other values: `domcontentloaded`, `networkidle2`,
 const title = await page.evaluate(() => document.title);
 
 const items = await page.evaluate(() => {
-  return Array.from(document.querySelectorAll('.item')).map(el => ({
+  return Array.from(document.querySelectorAll(".item")).map((el) => ({
     text: el.textContent,
-    href: el.querySelector('a')?.href,
+    href: el.querySelector("a")?.href,
   }));
 });
 ```
@@ -46,11 +49,11 @@ const items = await page.evaluate(() => {
 ## Interact
 
 ```js
-await page.click('#login-button');
-await page.type('#username', 'alice');
-await page.type('#password', 'secret');
+await page.click("#login-button");
+await page.type("#username", "alice");
+await page.type("#password", "secret");
 
-await page.waitForSelector('#dashboard');
+await page.waitForSelector("#dashboard");
 await page.waitForFunction(() => window.appReady === true);
 ```
 
@@ -58,10 +61,10 @@ await page.waitForFunction(() => window.appReady === true);
 
 ```js
 await page.setCookie({
-  name: 'session',
-  value: 'abc123',
-  domain: 'example.com',
-  path: '/',
+  name: "session",
+  value: "abc123",
+  domain: "example.com",
+  path: "/",
   httpOnly: true,
   secure: true,
 });
@@ -76,8 +79,8 @@ For session persistence across runs see [Persist cookies and storage](Persist-co
 ```js
 await page.setRequestInterception(true);
 
-page.on('request', req => {
-  if (req.resourceType() === 'image') {
+page.on("request", (req) => {
+  if (req.resourceType() === "image") {
     req.abort();
   } else {
     req.continue();
@@ -95,12 +98,12 @@ settings still control retention; disabling retention does not disable events.
 ## Expose a Bun host callback
 
 ```js
-await page.exposeFunction('logFromPage', (msg) => {
-  console.log('page:', msg);
+await page.exposeFunction("logFromPage", (msg) => {
+  console.log("page:", msg);
 });
 
 await page.evaluate(() => {
-  window.logFromPage('hello from the browser');
+  window.logFromPage("hello from the browser");
 });
 ```
 
@@ -111,8 +114,8 @@ const page1 = await browser.newPage();
 const page2 = await browser.newPage();
 
 await Promise.all([
-  page1.goto('https://a.example.com'),
-  page2.goto('https://b.example.com'),
+  page1.goto("https://a.example.com"),
+  page2.goto("https://b.example.com"),
 ]);
 ```
 
@@ -123,13 +126,13 @@ run on separate threads and can execute in parallel.
 
 ```js
 await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
-await page.screenshot({ path: 'viewport.png' });
+await page.screenshot({ path: "viewport.png" });
 
 await page.evaluate(() => window.scrollTo(0, 1200));
-await page.screenshot({ path: 'scrolled.png' });
+await page.screenshot({ path: "scrolled.png" });
 
-await page.screenshot({ path: 'full-page.png', fullPage: true });
-await page.pdf({ path: 'page.pdf', format: 'A4', printBackground: true });
+await page.screenshot({ path: "full-page.png", fullPage: true });
+await page.pdf({ path: "page.pdf", format: "A4", printBackground: true });
 ```
 
 A normal screenshot captures the live viewport and scroll position;
@@ -143,14 +146,14 @@ when finished:
 ```js
 const client = await page.createCDPSession();
 
-client.on('Page.screencastFrame', async ({ data, sessionId }) => {
-  const jpeg = Buffer.from(data, 'base64');
+client.on("Page.screencastFrame", async ({ data, sessionId }) => {
+  const jpeg = Buffer.from(data, "base64");
   // Consume or forward `jpeg` here.
-  await client.send('Page.screencastFrameAck', { sessionId });
+  await client.send("Page.screencastFrameAck", { sessionId });
 });
 
-await client.send('Page.startScreencast', {
-  format: 'jpeg',
+await client.send("Page.startScreencast", {
+  format: "jpeg",
   quality: 80,
   maxWidth: 1280,
   maxHeight: 720,
@@ -158,7 +161,7 @@ await client.send('Page.startScreencast', {
 
 // ...navigate, scroll, and interact...
 
-await client.send('Page.stopScreencast');
+await client.send("Page.stopScreencast");
 await client.detach();
 ```
 
@@ -167,7 +170,7 @@ Frames are activity-driven page captures, not fixed-rate desktop video.
 ## Disconnect
 
 ```js
-await browser.disconnect();  // leaves obscura serve running
+await browser.disconnect(); // leaves obscura serve running
 ```
 
 ## Page lifecycle
