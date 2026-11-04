@@ -1,0 +1,13 @@
+{
+  "name": "yolo-rs",
+  "owner": {
+    "name": "yolo-rs"
+  },
+  "plugins": [
+    {
+      "description": "Yolo Web: unified Rust+Bun browser engine, CDP, search and MCP for agents",
+      "name": "yolo-web",
+      "source": "./"
+    }
+  ]
+}

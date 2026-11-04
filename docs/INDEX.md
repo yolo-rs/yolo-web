@@ -35,6 +35,7 @@ Welcome to the **YOLO-Web Wiki & Knowledge Engine**. This manifest catalogs all 
 ## 4. Documentation Generation & MDX Pipeline
 
 To compile or regenerate documentation artifacts:
+
 ```bash
 # Generate documentation index and verify cross-links
 bun run docs:build

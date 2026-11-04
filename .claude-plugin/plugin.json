@@ -1,0 +1,17 @@
+{
+  "name": "yolo-web",
+  "version": "0.8.0",
+  "description": "Yolo Web: unified Rust+Bun browser engine, CDP, search and MCP for agents",
+  "author": {
+    "name": "yolo-rs"
+  },
+  "homepage": "https://github.com/yolo-rs/yolo-web",
+  "license": "Apache-2.0",
+  "skills": "./skills",
+  "mcpServers": {
+    "yolo-web": {
+      "args": ["run", "--cwd", "packages/web-mcp", "start"],
+      "command": "bun"
+    }
+  }
+}
