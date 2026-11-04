@@ -1,9 +1,18 @@
-import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { describe, expect, it } from 'bun:test';
 import { isLoopbackHostname, parsePort, readBraveApiKeyFromFile } from './utils.js';
+
+const assert = {
+  equal(actual: unknown, expected: unknown): void {
+    expect(actual).toEqual(expected);
+  },
+  match(actual: string, pattern: RegExp): void {
+    expect(actual).toMatch(pattern);
+  },
+};
+
+const tempRoot = Bun.env.TMPDIR ?? Bun.env.TEMP ?? Bun.env.TMP ?? process.cwd();
+const tempFile = (name: string): string =>
+  `${tempRoot.replace(/[\\/]$/, '')}/brave-api-key-${crypto.randomUUID()}-${name}`;
 
 describe('parsePort', () => {
   it('accepts valid integer ports', () => {
@@ -76,38 +85,36 @@ describe('isLoopbackHostname', () => {
 });
 
 describe('readBraveApiKeyFromFile', () => {
-  it('reads and trims API keys from a file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'brave-api-key-'));
-    const filePath = join(dir, 'key.txt');
-    writeFileSync(filePath, 'test-api-key\n');
+  it('reads and trims API keys from a file', async () => {
+    const filePath = tempFile('key.txt');
+    await Bun.write(filePath, 'test-api-key\n');
 
-    const result = readBraveApiKeyFromFile(filePath);
-
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.key, 'test-api-key');
+    try {
+      const result = await readBraveApiKeyFromFile(filePath);
+      assert.equal(result.ok, true);
+      if (result.ok) assert.equal(result.key, 'test-api-key');
+    } finally {
+      await Bun.file(filePath).delete();
     }
   });
 
-  it('rejects empty files', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'brave-api-key-'));
-    const filePath = join(dir, 'empty.txt');
-    writeFileSync(filePath, '\n');
+  it('rejects empty files', async () => {
+    const filePath = tempFile('empty.txt');
+    await Bun.write(filePath, '\n');
 
-    const result = readBraveApiKeyFromFile(filePath);
-
-    assert.equal(result.ok, false);
-    if (!result.ok) {
-      assert.match(result.error, /empty/i);
+    try {
+      const result = await readBraveApiKeyFromFile(filePath);
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /empty/i);
+    } finally {
+      await Bun.file(filePath).delete();
     }
   });
 
-  it('reports missing files with the path and reason', () => {
-    const result = readBraveApiKeyFromFile('definitely-not-a-real-api-key-file');
-
+  it('reports missing files with the path and reason', async () => {
+    const filePath = tempFile('missing.txt');
+    const result = await readBraveApiKeyFromFile(filePath);
     assert.equal(result.ok, false);
-    if (!result.ok) {
-      assert.match(result.error, /definitely-not-a-real-api-key-file/);
-    }
+    if (!result.ok) assert.match(result.error, /brave-api-key/);
   });
 });

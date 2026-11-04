@@ -1,29 +1,28 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { KnowledgeIndexDb, type TargetDomain } from "./index.js";
-import { join } from "node:path";
-import { unlinkSync, existsSync } from "node:fs";
 
-const TEST_DB = join(process.cwd(), "data", "knowledge", "test_indexer.sqlite");
+const tempRoot =
+  Bun.env.TMPDIR ?? Bun.env.TEMP ?? Bun.env.TMP ?? `${process.cwd()}/.tmp`;
+const TEST_DB = `${tempRoot.replace(/[\\/]$/, "")}/yolo-web-test-indexer.sqlite`;
+
+async function removeIfPresent(path: string): Promise<void> {
+  const file = Bun.file(path);
+  if (await file.exists()) await file.delete();
+}
 
 describe("@yolo-web/knowledge-indexer - SQLite DB & RAG Feeder", () => {
   let db: KnowledgeIndexDb;
 
-  beforeAll(() => {
-    if (existsSync(TEST_DB)) unlinkSync(TEST_DB);
+  beforeAll(async () => {
+    await removeIfPresent(TEST_DB);
     db = new KnowledgeIndexDb(TEST_DB);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     db.close();
-    try {
-      if (existsSync(TEST_DB)) unlinkSync(TEST_DB);
-      const wal = `${TEST_DB}-wal`;
-      const shm = `${TEST_DB}-shm`;
-      if (existsSync(wal)) unlinkSync(wal);
-      if (existsSync(shm)) unlinkSync(shm);
-    } catch {
-      // Ignored on Windows if file handle is delayed
-    }
+    await Promise.all(
+      [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`].map(removeIfPresent),
+    );
   });
 
   it("inserts verified test knowledge records across the 4 key target domains", () => {

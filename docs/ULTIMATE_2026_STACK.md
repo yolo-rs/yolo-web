@@ -1,7 +1,7 @@
 # YOLO-Web Ultimate 2026 Stack: Scrapers, Crawlers & Browser Intelligence Architecture
 
-> **Status:** Definitive 2026 Architectural Blueprint & Repository Selection Report  
-> **Repository:** [`yolo-rs/yolo-web`](https://github.com/yolo-rs/yolo-web) (`C:\src\yolo-web`)  
+> **Status:** Legacy aspirational research blueprint; verify each claim against the canonical [architecture](ARCHITECTURE.mdx), current code, and upstream documentation.
+> **Repository:** [`yolo-rs/yolo-web`](https://github.com/yolo-rs/yolo-web) (workspace root)
 > **Baseline Engine Consolidation:** **Servo** (31 crates) + **Obscura** (10 crates) + **Brave** (8 crates) + **Bun v1.4.4+**  
 > **Audit Date:** November 2026 (Live GitHub API + `git_ingest` + `Context7` Deep Inspection)
 

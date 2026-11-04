@@ -23,15 +23,124 @@ import {
   CHROMIUM_2026_DEFAULT_PROFILE,
 } from "@yolo-web/challenge-solver";
 import { ChromiumTrackingEngine } from "@yolo-web/chromium-tracker";
+import { ENGINE_MANAGER_REGISTRY, fetchChromeForTestingChannels, findEngine, inspectEngine, packageCommand, packageCommandInvocations, sourceCheckoutCommand, type PackageManager } from "../../chromium-tracker/src/engine-manager";
+import { YoloBrowser } from "@yolo-web/browser-sdk";
 import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
 } from "@yolo-web/bun-v8-bridge";
 import { createWebMcpServer } from "../../web-mcp/src/server.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { Errno, strerror } from "@yolo-web/posix-bun";
+import { crawl, inspectGitRemote, listGitHubRepositories, synthesizeMarkdown } from "@yolo-web/web-crawler";
+
+function describeSpawnError(error: unknown): string {
+  const value = error as { code?: unknown; message?: unknown };
+  const message = typeof value?.message === "string" ? value.message : String(error);
+  if (typeof value?.code !== "string" || !Object.hasOwn(Errno, value.code)) return message;
+  const errno = Errno[value.code as keyof typeof Errno];
+  return `${message} (${value.code}: ${strerror(errno)})`;
+}
 
 export function createWebCli(): Command {
   const program = new Command();
+
+  program.command("crawl")
+    .description("Crawl a bounded set of public pages and save provenance-first JSON and Markdown")
+    .argument("<urls...>", "HTTP(S) seed URLs")
+    .option("--depth <number>", "Maximum link depth (0-8)", "1")
+    .option("--max-pages <number>", "Maximum pages to fetch", "50")
+    .option("--delay-ms <number>", "Minimum delay between requests", "700")
+    .option("--output <path>", "JSON crawl output", "crawl.json")
+    .option("--markdown <path>", "Markdown synthesis output", "crawl.md")
+    .option("--include-body", "Include raw response text in the JSON capture")
+    .option("--ignore-robots", "Do not apply robots.txt exclusions")
+    .action(async (urls: string[], opts: { depth: string; maxPages: string; delayMs: string; output: string; markdown: string; includeBody?: boolean; ignoreRobots?: boolean }) => {
+      const result = await crawl({ seeds: urls, maxDepth: Number(opts.depth), maxPages: Number(opts.maxPages), delayMs: Number(opts.delayMs), respectRobots: !opts.ignoreRobots, includeBody: opts.includeBody });
+      await Bun.write(opts.output, `${JSON.stringify(result, null, 2)}\n`);
+      await Bun.write(opts.markdown, synthesizeMarkdown(result));
+      console.log(JSON.stringify({ pages: result.pages.length, output: opts.output, markdown: opts.markdown, policy: result.policy }, null, 2));
+    });
+
+  program.command("github-repos")
+    .description("List a GitHub organization or user's public repositories by star count through the REST API")
+    .argument("<owner>", "GitHub owner login")
+    .option("--kind <kind>", "Owner kind: org or user", "org")
+    .option("--pages <number>", "Maximum 100-repository pages", "5")
+    .option("--output <path>", "Write JSON to this file instead of stdout")
+    .action(async (owner: string, opts: { kind: string; pages: string; output?: string }) => {
+      if (opts.kind !== "org" && opts.kind !== "user") throw new Error("--kind must be org or user");
+      const result = await listGitHubRepositories(owner, { ownerType: opts.kind, maxPages: Number(opts.pages), token: process.env.GITHUB_TOKEN });
+      const json = `${JSON.stringify(result, null, 2)}\n`;
+      if (opts.output) await Bun.write(opts.output, json);
+      else console.log(json);
+    });
+
+  program.command("git-head")
+    .description("Read the symbolic default branch and HEAD commit from a public Git HTTPS remote")
+    .argument("<remote>", "HTTPS Git URL")
+    .action(async (remote: string) => console.log(JSON.stringify(await inspectGitRemote(remote), null, 2)));
+
+  const engines = program.command("engines").description("Manage browser engine catalog and upstream versions");
+  engines.command("list").description("List supported browser targets").action(() => {
+    console.table(ENGINE_MANAGER_REGISTRY.map(({ id, name, family, channel, kind }) => ({ id, name, family, channel, kind })));
+  });
+  engines.command("status [id]").description("Show catalog metadata and detect local executables/source roots").action(async (id?: string) => {
+    const entries = id ? [findEngine(id)] : ENGINE_MANAGER_REGISTRY;
+    const results = await Promise.all(entries.map(async (entry) => ({ ...entry, local: await inspectEngine(entry) })));
+    console.log(JSON.stringify(results, null, 2));
+  });
+  engines.command("versions").description("Fetch current Chrome for Testing channel versions").action(async () => {
+    console.log(JSON.stringify(await fetchChromeForTestingChannels(), null, 2));
+  });
+  for (const action of ["install", "update"] as const) {
+    engines.command(`${action} <id>`).requiredOption("--manager <manager>").option("--execute").action(async (id: string, options: { manager: string; execute?: boolean }) => {
+      const entry = findEngine(id);
+      const cmd = packageCommand(entry, options.manager as PackageManager, action);
+      const invocations = packageCommandInvocations(entry, options.manager as PackageManager, action);
+      if (!cmd || !invocations) throw new Error(`${id} has no verified ${options.manager} package mapping.`);
+      console.log(`Provider trust: ${entry.packages?.[options.manager as PackageManager]?.trust}. ${entry.packages?.[options.manager as PackageManager]?.note ?? ""}`);
+      if (!options.execute) { console.log(`Plan only (add --execute to run): ${cmd}`); return; }
+      for (const invocation of invocations) {
+        const child = Bun.spawn([invocation.program, ...invocation.args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+        const code = await child.exited;
+        if (code !== 0) throw new Error(`${invocation.program} exited with status ${code}`);
+      }
+    });
+  }
+
+  program.command("zig")
+    .description("Run the yolo-zig toolchain dispatcher (set YOLO_ZIG_ROOT or check out yolo-zig beside yolo-web)")
+    .argument("[args...]", "Arguments forwarded to tools/yolo-zig.ts")
+    .allowUnknownOption(true)
+    .action(async (args: string[] = []) => {
+      const zigRoot = process.env.YOLO_ZIG_ROOT ?? `${import.meta.dir}/../../../../yolo-zig`;
+      const dispatcher = `${zigRoot}/tools/yolo-zig.ts`;
+      if (!(await Bun.file(dispatcher).exists())) {
+        throw new Error(`Cannot find yolo-zig dispatcher at ${dispatcher}; set YOLO_ZIG_ROOT to its checkout.`);
+      }
+      try {
+        const child = Bun.spawn([process.execPath, dispatcher, ...args], {
+          cwd: zigRoot,
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        process.exitCode = await child.exited;
+      } catch (error) {
+        throw new Error(`Could not start yolo-zig: ${describeSpawnError(error)}`, { cause: error });
+      }
+    });
+
+  engines.command("source <id> <destination>").option("--execute").action(async (id: string, destination: string, options: { execute?: boolean }) => {
+    const entry = findEngine(id);
+    const cmd = sourceCheckoutCommand(entry, destination);
+    console.log(options.execute ? `Running: ${cmd}` : `Plan only (add --execute to run): ${cmd}`);
+    if (!options.execute) return;
+    const child = Bun.spawn(["git", "clone", ...(entry.branch ? ["--branch", entry.branch, "--single-branch"] : []), entry.repo!, destination], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    const code = await child.exited;
+    if (code !== 0) throw new Error(`git exited with status ${code}`);
+  });
 
   program
     .name("web")
@@ -56,11 +165,6 @@ export function createWebCli(): Command {
       "Dump format: text, html, markdown, links, original",
       "text",
     )
-    .option(
-      "--stealth",
-      "Enable anti-fingerprinting and TLS impersonation",
-      true,
-    )
     .option("--no-shields", "Disable Brave Shields ad & tracker blocking")
     .action(async (url: string, opts: Record<string, unknown>) => {
       const shields = new BraveShieldsEngine();
@@ -71,38 +175,32 @@ export function createWebCli(): Command {
         const check = shields.checkNetworkRequest({
           url: sanitizedUrl,
           sourceUrl: "https://localhost",
-          resourceType: "document",
+          resourceType: "main_frame",
         });
         if (check.blocked) {
           console.error(
             `[web shields] Blocked navigation to ${sanitizedUrl} by rule: ${check.matchedRule}`,
           );
-          process.exit(1);
+          throw new Error(`Brave Shields blocked the navigation: ${check.matchedRule}`);
         }
       }
 
-      console.error(
-        `[web fetch] Navigating to ${sanitizedUrl} (stealth: ${Boolean(opts.stealth)})`,
-      );
-      // When Rust obscura-cli or CDP daemon is available, delegates via YoloBrowserSdk
-      if (opts.markdown) {
-        console.log(
-          `\n# Page content from ${sanitizedUrl}\n\n*Rendered with Chromium V8 & Obscura DOM engine*`,
-        );
-      } else {
-        console.log(
-          JSON.stringify(
-            {
-              url: sanitizedUrl,
-              status: 200,
-              engine: "Chromium V8 + Obscura",
-              stealth: Boolean(opts.stealth),
-              shields: opts.shields !== false,
-            },
-            null,
-            2,
-          ),
-        );
+      const endpoint = process.env.YOLO_CDP_ENDPOINT ?? `http://127.0.0.1:${process.env.YOLO_CDP_PORT ?? "9222"}`;
+      const browser = await YoloBrowser.connect({ cdpUrl: endpoint, token: process.env.YOLO_CDP_TOKEN });
+      try {
+        const page = await browser.newPage();
+        await page.goto(sanitizedUrl, { waitUntil: "domcontentloaded" });
+        if (typeof opts.screenshot === "string") await page.screenshot({ path: opts.screenshot });
+        if (typeof opts.pdf === "string") await page.pdf({ path: opts.pdf, printBackground: true });
+        let output: unknown;
+        if (typeof opts.eval === "string") output = await page.evaluate(opts.eval);
+        else if (opts.markdown || opts.dump === "markdown") output = await page.markdown();
+        else if (opts.dump === "html" || opts.dump === "original") output = await page.content();
+        else if (opts.dump === "links") output = await page.evaluate("Array.from(document.querySelectorAll('a[href]'),a=>({text:(a.innerText||a.getAttribute('aria-label')||'').trim(),href:a.href,title:a.title}))");
+        else output = await page.evaluate("document.body?.innerText ?? ''");
+        console.log(typeof output === "string" ? output : JSON.stringify(output, null, 2));
+      } finally {
+        await browser.disconnect();
       }
     });
 
@@ -218,11 +316,11 @@ export function createWebCli(): Command {
       }
     });
 
-  // 6. web solve <htmlFileOrUrl> (2026 Challenge Resolution)
+  // 6. web solve <htmlFileOrUrl> (challenge detection only)
   program
     .command("solve")
     .description(
-      "Detect and resolve Cloudflare Turnstile, Cloudflare Managed Challenge, Google reCAPTCHA, or Google IPP",
+      "Detect common verification challenges and report whether resolution is supported (interactive challenges require the site's user flow)",
     )
     .argument("<target>", "HTML file path or raw HTML string")
     .action(async (target: string) => {
@@ -306,7 +404,7 @@ export function createWebCli(): Command {
     .action(async (action: string, opts: { json?: boolean }) => {
       const tracker = new ChromiumTrackingEngine();
       if (action === "patches") {
-        const patches = tracker.getManagedPatches();
+        const patches = tracker.getPatchProposals();
         console.log(JSON.stringify(patches, null, 2));
       } else if (action === "channels") {
         const channels = await tracker.fetchChromiumChannels();
@@ -349,9 +447,9 @@ export function createWebCli(): Command {
             console.log(`  - Brave   : ${report.downstreams.brave.tag} (${report.downstreams.brave.title})`);
             console.log(`  - Helium  : ${report.downstreams.helium.tag} (${report.downstreams.helium.title})`);
           }
-          console.log(`\n[YOLO-Web Managed Patches]`);
+          console.log(`\n[YOLO-Web Chromium Patch Proposals (not applied)]`);
           for (const p of report.patches) {
-            console.log(`  - [${p.applied ? 'APPLIED' : 'PENDING'}] ${p.name} (${p.patchStrategy}) -> ${p.upstreamFile}`);
+            console.log(`  - [${p.status.toUpperCase()}] ${p.name} (${p.patchStrategy}) -> ${p.upstreamFile}`);
           }
         }
       }

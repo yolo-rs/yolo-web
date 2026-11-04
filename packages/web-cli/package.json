@@ -41,7 +41,9 @@
     "@yolo-web/chromium-tracker": "workspace:*",
     "@yolo-web/mcp-client": "workspace:*",
     "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/web-crawler": "workspace:*",
     "@yolo-web/shared": "workspace:*",
+    "@yolo-web/posix-bun": "workspace:*",
     "commander": "^15.0.0"
   }
 }

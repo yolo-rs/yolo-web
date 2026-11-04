@@ -1,4 +1,8 @@
 /target/
+/.tmp/
+/out/
+/src/yolo-vendor/*
+!/src/yolo-vendor/README.mdx
 node_modules/
 build.log
 *.pdb
@@ -10,3 +14,5 @@ Thumbs.db
 !.env.example
 dist/
 out/
+/third_party/chrome-devtools-mcp/
+/third_party/vercel-agent-skills/

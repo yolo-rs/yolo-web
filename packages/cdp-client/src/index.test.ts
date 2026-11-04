@@ -59,6 +59,9 @@ describe("@yolo-web/cdp-client", () => {
             case "Target.attachToTarget":
               reply({ sessionId: "session-1" });
               break;
+            case "Target.closeTarget":
+              reply({ success: msg.params?.targetId === "target-1" });
+              break;
             case "Page.navigate":
               reply({ frameId: "frame-1", loaderId: "loader-1" });
               break;
@@ -140,5 +143,6 @@ describe("@yolo-web/cdp-client", () => {
 
     const nodes = await client.querySelectorAll(".item");
     expect(nodes).toEqual([10, 11, 12]);
+    expect(await client.closeTarget(targetId)).toBe(true);
   });
 });

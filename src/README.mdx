@@ -1,0 +1,7 @@
+# YOLO-Web native source tree
+
+This is the repository's native source root. YOLO-Web-owned C and C++ implementations belong directly in component directories here, following the naming and build conventions of the upstream project they integrate with. Use normal Chromium naming such as `.cc`, `.h`, and `BUILD.gn` for Chromium-facing components, without an extra language-only directory layer.
+
+This tree currently has no native Chromium embedder implementation. Chromium-specific sources must follow the pinned checkout's C++ style, GN targets, allowed language features, process boundaries, and dependency graph. The Chromium source root is `${CHROMIUM_ROOT}/src`; this repository's `src/` is a separate source root. Record integration as a reviewed patch/overlay before adding Chromium-dependent code here.
+
+Do not add an independent CMake graph, vendor Blink/V8/Skia/Dawn here, or bypass Chromium's sandbox by moving renderer responsibilities into Rust or Bun. See [the architecture](../docs/ARCHITECTURE.mdx) and [the style guide](../docs/STYLE_GUIDE.mdx).

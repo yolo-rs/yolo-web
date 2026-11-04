@@ -1,6 +1,7 @@
 [install]
 exact = false
 peer = true
+linker = "hoisted"
 
 [test]
 coverage = false

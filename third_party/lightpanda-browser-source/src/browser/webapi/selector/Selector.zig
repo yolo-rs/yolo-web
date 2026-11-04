@@ -1,0 +1,647 @@
+// Copyright (C) 2023-2025  Lightpanda (Selecy SAS)
+//
+// Francis Bouvier <francis@lightpanda.io>
+// Pierre Tachoire <pierre@lightpanda.io>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+const std = @import("std");
+const lp = @import("lightpanda");
+
+const Node = @import("../Node.zig");
+const Frame = @import("../../Frame.zig");
+const Browser = @import("../../Browser.zig");
+
+const Parser = @import("Parser.zig");
+pub const List = @import("List.zig");
+const ClockCache = @import("../../../ClockCache.zig").ClockCache;
+
+const String = lp.String;
+const Allocator = std.mem.Allocator;
+
+// translate a Selector error to a DOMException known type.
+pub fn mapErrorToDOM(err: anyerror) anyerror {
+    return switch (err) {
+        error.InvalidSelector,
+        error.InvalidAttributeSelector,
+        error.InvalidIDSelector,
+        error.InvalidClassSelector,
+        error.UnknownPseudoClass,
+        error.InvalidTagSelector,
+        error.InvalidPseudoClass,
+        error.InvalidNthPattern,
+        => error.SyntaxError,
+        else => err,
+    };
+}
+
+pub fn parseLeaky(arena: Allocator, input: []const u8) ![]const Selector {
+    if (input.len == 0) {
+        return error.SyntaxError;
+    }
+    return Parser.parseList(arena, input);
+}
+
+/// One-off synthesized selectors use the `*Uncached` variants instead.
+/// The result is freed when its entry is evicted, which any later parse can
+/// do: use it right away, never hold it across another parse or into JS.
+pub fn cachedParse(browser: *Browser, input: []const u8) ![]const Selector {
+    return browser.selector_cache.parse(input);
+}
+
+/// On the Browser because a parsed selector references no Frame/Context, so
+/// entries survive navigation. Per-entry arena so eviction can free one entry.
+pub const Cache = struct {
+    // Caps retained memory, not correctness.
+    const max_entries = 1024;
+
+    clock: ClockCache(Entry),
+
+    const Entry = struct {
+        arena: std.heap.ArenaAllocator,
+        selectors: []const Selector,
+    };
+
+    pub fn init(allocator: Allocator) Cache {
+        return .{ .clock = .init(allocator, max_entries) };
+    }
+
+    pub fn deinit(self: *Cache) void {
+        for (self.clock.entries()) |*entry| {
+            entry.value.arena.deinit();
+        }
+        self.clock.deinit();
+    }
+
+    fn parse(self: *Cache, input: []const u8) ![]const Selector {
+        if (input.len == 0) {
+            return error.SyntaxError;
+        }
+        if (self.clock.get(input)) |entry| {
+            return entry.selectors;
+        }
+
+        // The AST borrows slices of its input, so dupe it into the arena.
+        var arena = std.heap.ArenaAllocator.init(self.clock.allocator);
+        errdefer arena.deinit();
+        const entry_arena = arena.allocator();
+        const selectors = try Parser.parseList(entry_arena, try entry_arena.dupe(u8, input));
+
+        switch (try self.clock.insert(input, .{ .arena = arena, .selectors = selectors })) {
+            .exists => unreachable,
+            .inserted => |evicted| if (evicted) |e| {
+                var evicted_arena = e.arena;
+                evicted_arena.deinit();
+            },
+        }
+        return selectors;
+    }
+};
+
+fn collectAll(arena: *lp.Arena, selectors: []const Selector, root: *Node, frame: *Frame) !*List {
+    var nodes: std.ArrayList(*Node) = .empty;
+
+    var nth: List.NthCache = .{ .allocator = frame.local_arena };
+    defer nth.deinit();
+
+    if (selectors.len == 1) {
+        try List.collect(arena.allocator(), root, selectors[0], &nodes, &nth, frame);
+    } else {
+        try List.collectAny(arena.allocator(), root, selectors, &nodes, &nth, frame);
+    }
+
+    const list = try arena.create(List);
+    list.* = .{
+        ._arena = arena,
+        ._nodes = nodes.items,
+    };
+    return list;
+}
+
+fn matchesAny(selectors: []const Selector, el: *Node.Element, scope: *Node, frame: *Frame) bool {
+    for (selectors) |selector| {
+        if (List.matches(el.asNode(), selector, scope, null, frame)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn querySelector(root: *Node, input: []const u8, frame: *Frame) !?*Node.Element {
+    return query(try cachedParse(frame._session.browser, input), root, frame);
+}
+
+pub fn querySelectorAll(root: *Node, input: []const u8, frame: *Frame) !*List {
+    const arena = try frame.getArena(.small, "querySelectorAll");
+    errdefer arena.release();
+    return collectAll(arena, try cachedParse(frame._session.browser, input), root, frame);
+}
+
+pub fn matches(el: *Node.Element, input: []const u8, frame: *Frame) !bool {
+    return matchesAny(try cachedParse(frame._session.browser, input), el, el.asNode(), frame);
+}
+
+// Like matches, but allows the caller to specify a scope node distinct from el.
+// Used by closest() so that :scope always refers to the original context element.
+pub fn matchesWithScope(el: *Node.Element, selector: []const Selector, scope: *Node.Element, frame: *Frame) !bool {
+    return matchesAny(selector, el, scope.asNode(), frame);
+}
+
+/// Uncached counterparts for one-off selectors (SelectorPath): parse into
+/// `arena` instead of caching. querySelectorAllUncached takes no arena — it uses
+/// the pooled arena backing its List.
+pub fn querySelectorUncached(arena: Allocator, root: *Node, input: []const u8, frame: *Frame) !?*Node.Element {
+    if (input.len == 0) {
+        return error.SyntaxError;
+    }
+    return query(try Parser.parseList(arena, input), root, frame);
+}
+
+pub fn querySelectorAllUncached(root: *Node, input: []const u8, frame: *Frame) !*List {
+    if (input.len == 0) {
+        return error.SyntaxError;
+    }
+    const arena = try frame.getArena(.small, "querySelectorAllUncached");
+    errdefer arena.release();
+    return collectAll(arena, try Parser.parseList(arena.allocator(), input), root, frame);
+}
+
+pub fn matchesUncached(arena: Allocator, el: *Node.Element, input: []const u8, frame: *Frame) !bool {
+    if (input.len == 0) {
+        return error.SyntaxError;
+    }
+    return matchesAny(try Parser.parseList(arena, input), el, el.asNode(), frame);
+}
+
+// Class attribute token separators as a mask
+const class_separators: u64 = (1 << '\t') | (1 << '\n') | (1 << 0x0C) | (1 << '\r') | (1 << ' ');
+
+inline fn isClassSeparator(c: u8) bool {
+    return c <= ' ' and (class_separators >> @intCast(c)) & 1 == 1;
+}
+
+pub fn classAttributeContains(class_attr: []const u8, class_name: []const u8) bool {
+    // Both callers pass a single parsed class name. `[class~="a b"]` is not
+    // this path, it goes through the attribute .word matcher.
+    if (comptime lp.IS_DEBUG) {
+        for (class_name) |c| {
+            std.debug.assert(isClassSeparator(c) == false);
+        }
+    }
+
+    const len = class_name.len;
+    const n = class_attr.len;
+    if (len == 0 or n < len) {
+        return false;
+    }
+
+    // 16 bytes at a time, a candidate is a position holding the name's first
+    // byte right after a separator (or at 0), with the name's last byte at
+    // +len-1. Only candidates get the full compare. The per-byte loop this
+    // replaced mispredicts on every first-byte hit; this has no per-byte
+    // branch. Measured on Zig 0.17, x86_64 baseline, against that loop,
+    // findScalarPos and findPos: faster on every shape, from 1.4x on one class
+    // to 3x on tailwind-length values. Wider vectors (AVX-512) were slower.
+    // Harness: demo/selector-bench.
+    const last = n - len;
+    const first: Block = @splat(class_name[0]);
+
+    if (n <= 16) {
+        const block = loadShort(class_attr);
+        const starts = (separatorMask(block) << 1) | 1;
+        const m = @as(u16, @bitCast(block == first)) & starts & maskUpTo(last);
+        return verifyCandidates(class_attr, class_name, 0, m);
+    }
+
+    const final: Block = @splat(class_name[len - 1]);
+    var carry: u16 = 1; // position 0 starts a token
+    var i: usize = 0;
+    while (i + 16 <= n and i <= last) : (i += 16) {
+        const block: Block = class_attr[i..][0..16].*;
+        const seps = separatorMask(block);
+        var m = @as(u16, @bitCast(block == first)) & ((seps << 1) | carry);
+        carry = seps >> 15;
+        if (i + len - 1 + 16 <= n) {
+            const tail: Block = class_attr[i + len - 1 ..][0..16].*;
+            m &= @bitCast(tail == final);
+        }
+        if (last - i < 15) {
+            m &= maskUpTo(last - i);
+        }
+        if (verifyCandidates(class_attr, class_name, i, m)) {
+            return true;
+        }
+    }
+    if (i > last) {
+        return false;
+    }
+
+    // One overlapping block ending at n instead of a per-byte tail, minus the
+    // positions the loop already covered (< i).
+    const base = n - 16;
+    const block: Block = class_attr[base..][0..16].*;
+    const starts = (separatorMask(block) << 1) | @intFromBool(isClassSeparator(class_attr[base - 1]));
+    var m = @as(u16, @bitCast(block == first)) & starts;
+    m &= ~maskUpTo(i - base - 1) & maskUpTo(last - base);
+    return verifyCandidates(class_attr, class_name, base, m);
+}
+
+const Block = @Vector(16, u8);
+
+// Bit i set when block[i] is a class separator.
+inline fn separatorMask(block: Block) u16 {
+    const space = block == @as(Block, @splat(' '));
+    // \t \n \f \r, i.e. 0x09..0x0D except 0x0B
+    const control = (block >= @as(Block, @splat('\t'))) & (block <= @as(Block, @splat('\r'))) & (block != @as(Block, @splat(0x0B)));
+    return @bitCast(space | control);
+}
+
+// Bits 0..k set, k <= 15.
+inline fn maskUpTo(k: usize) u16 {
+    return @truncate((@as(u32, 2) << @intCast(k)) -% 1);
+}
+
+// The 1..16 bytes of `bytes`, zero padded, built from overlapping in-bounds
+// loads so nothing reads past the slice.
+inline fn loadShort(bytes: []const u8) Block {
+    const n = bytes.len;
+    var lo: u64 = 0;
+    var hi: u64 = 0;
+    if (n >= 8) {
+        lo = std.mem.readInt(u64, bytes[0..8], .little);
+        if (n > 8) {
+            hi = std.mem.readInt(u64, bytes[n - 8 ..][0..8], .little) >> @intCast((16 - n) * 8);
+        }
+    } else if (n >= 4) {
+        const a: u64 = std.mem.readInt(u32, bytes[0..4], .little);
+        const b: u64 = std.mem.readInt(u32, bytes[n - 4 ..][0..4], .little);
+        lo = a | (b << @intCast((n - 4) * 8));
+    } else {
+        lo = @as(u64, bytes[0]) | (@as(u64, bytes[n / 2]) << @intCast((n / 2) * 8)) | (@as(u64, bytes[n - 1]) << @intCast((n - 1) * 8));
+    }
+    return @bitCast([2]u64{ lo, hi });
+}
+
+// Bit k of `mask` is a token start at base+k holding the name's first byte.
+inline fn verifyCandidates(class_attr: []const u8, class_name: []const u8, base: usize, mask: u16) bool {
+    var m = mask;
+    while (m != 0) : (m &= m - 1) {
+        const at = base + @ctz(m);
+        const end = at + class_name.len;
+        if ((end == class_attr.len or isClassSeparator(class_attr[end])) and std.mem.eql(u8, class_attr[at..end], class_name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn classAttributeContainsCase(class_attr: []const u8, class_name: []const u8, case_insensitive: bool) bool {
+    if (case_insensitive == false) {
+        return classAttributeContains(class_attr, class_name);
+    }
+
+    if (class_name.len == 0) {
+        return false;
+    }
+
+    var it = std.mem.tokenizeAny(u8, class_attr, &[_]u8{ '\t', '\n', 0x0C, '\r', ' ' });
+    while (it.next()) |token| {
+        if (std.ascii.eqlIgnoreCase(token, class_name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub const Part = union(enum) {
+    id: []const u8,
+    class: []const u8,
+    tag: Node.Element.Tag, // optimized, for known tags
+    tag_name: []const u8, // fallback for custom/unknown tags
+    universal, // '*' any element
+    pseudo_class: PseudoClass,
+    attribute: Attribute,
+    pseudo_element, // Matches no element.
+    never, // never maches (and doesn't carry additional meaning like pseudo_element)
+};
+
+pub const Attribute = struct {
+    // Lowercased for the HTML-element case-insensitive match.
+    name: String,
+    // As written in the selector: attribute names match case-sensitively on
+    // foreign (SVG/MathML) elements, whose attributes are stored unnormalized.
+    original_name: String,
+    matcher: AttributeMatcher,
+    value_case: AttributeValueCase,
+};
+
+pub const AttributeValueCase = enum {
+    sensitive,
+    insensitive,
+    // No flag on an attribute whose value HTML compares without case: case
+    // insensitive on HTML elements only.
+    html_legacy,
+};
+
+pub const AttributeMatcher = union(enum) {
+    presence,
+    exact: []const u8,
+    word: []const u8,
+    prefix_dash: []const u8,
+    starts_with: []const u8,
+    ends_with: []const u8,
+    substring: []const u8,
+};
+
+pub const PseudoClass = union(enum) {
+    // State pseudo-classes
+    modal,
+    popover_open,
+    checked,
+    disabled,
+    enabled,
+    indeterminate,
+
+    // Form validation
+    valid,
+    invalid,
+    required,
+    optional,
+    in_range,
+    out_of_range,
+    placeholder_shown,
+    read_only,
+    read_write,
+    default,
+
+    // User interaction
+    hover,
+    active,
+    focus,
+    focus_within,
+    focus_visible,
+
+    // Link states
+    link,
+    visited,
+    any_link,
+    target,
+
+    // Tree structural
+    root,
+    scope,
+    empty,
+    first_child,
+    last_child,
+    only_child,
+    first_of_type,
+    last_of_type,
+    only_of_type,
+    nth_child: NthPattern,
+    nth_last_child: NthPattern,
+    nth_child_of: NthOf, // :nth-child(An+B of S)
+    nth_last_child_of: NthOf, // :nth-last-child(An+B of S)
+    nth_of_type: NthPattern,
+    nth_last_of_type: NthPattern,
+
+    // Custom elements
+    defined,
+
+    // Functional
+    lang: []const u8,
+    not: []const Selector, // :not() - CSS Level 4: supports full selectors and comma-separated lists
+    is: []const Selector, // :is() - matches any of the selectors
+    where: []const Selector, // :where() - like :is() but with zero specificity
+    has: []const Selector, // :has() - element containing descendants matching selector
+};
+
+pub const NthPattern = struct {
+    a: i32, // coefficient (e.g., 2 in "2n+1")
+    b: i32, // offset (e.g., 1 in "2n+1")
+
+    // Common patterns:
+    // odd: a=2, b=1
+    // even: a=2, b=0
+    // 3n+1: a=3, b=1
+    // 5: a=0, b=5
+};
+
+// :nth-child(An+B of S) counts only the siblings matching S
+pub const NthOf = struct {
+    pattern: NthPattern,
+    selectors: []const Selector,
+};
+
+// Combinator represents the relationship between two compound selectors
+pub const Combinator = enum {
+    descendant, // ' ' - any descendant
+    child, // '>' - direct child
+    next_sibling, // '+' - immediately following sibling
+    subsequent_sibling, // '~' - any following sibling
+};
+
+// A compound selector is multiple parts that all match the same element
+//   "div.class#id" -> [tag(div), class("class"), id("id")]
+pub const Compound = struct {
+    parts: []const Part,
+
+    pub fn format(self: Compound, writer: *std.Io.Writer) !void {
+        for (self.parts) |part| switch (part) {
+            .id => |val| {
+                try writer.writeByte('#');
+                try writer.writeAll(val);
+            },
+            .class => |val| {
+                try writer.writeByte('.');
+                try writer.writeAll(val);
+            },
+            .tag => |val| try writer.writeAll(@tagName(val)),
+            .tag_name => |val| try writer.writeAll(val),
+            .universal => try writer.writeByte('*'),
+            .pseudo_class => |val| {
+                try writer.writeByte(':');
+                try writer.writeAll(@tagName(val));
+            },
+            .attribute => |attr| {
+                try writer.print("[{f}", .{attr.original_name});
+                const op: []const u8, const value: []const u8 = switch (attr.matcher) {
+                    .presence => {
+                        try writer.writeByte(']');
+                        continue;
+                    },
+                    .exact => |v| .{ "=", v },
+                    .word => |v| .{ "~=", v },
+                    .prefix_dash => |v| .{ "|=", v },
+                    .starts_with => |v| .{ "^=", v },
+                    .ends_with => |v| .{ "$=", v },
+                    .substring => |v| .{ "*=", v },
+                };
+                try writer.print("{s}\"{s}\"", .{ op, value });
+                if (attr.value_case == .insensitive) {
+                    try writer.writeAll(" i");
+                }
+                try writer.writeByte(']');
+            },
+            .pseudo_element => try writer.writeAll("::pseudo-element"),
+            .never => try writer.writeAll("[never]"),
+        };
+    }
+};
+
+// A segment represents a compound selector with the combinator that precedes it
+pub const Segment = struct {
+    compound: Compound,
+    combinator: Combinator,
+
+    pub fn format(self: Segment, writer: *std.Io.Writer) !void {
+        switch (self.combinator) {
+            .descendant => try writer.writeByte(' '),
+            .child => try writer.writeAll(" > "),
+            .next_sibling => try writer.writeAll(" + "),
+            .subsequent_sibling => try writer.writeAll(" ~ "),
+        }
+        return self.compound.format(writer);
+    }
+};
+
+// A full selector is the first compound plus subsequent segments
+//   "div > p + span" -> { first: [tag(div)], segments: [{child, [tag(p)]}, {next_sibling, [tag(span)]}] }
+pub const Selector = struct {
+    first: Compound,
+    segments: []const Segment,
+
+    pub fn rightmost(self: Selector) Compound {
+        if (self.segments.len == 0) {
+            return self.first;
+        }
+        return self.segments[self.segments.len - 1].compound;
+    }
+
+    /// Such a selector matches no element.
+    pub fn hasPseudoElement(self: Selector) bool {
+        const parts = self.rightmost().parts;
+        return parts[parts.len - 1] == .pseudo_element;
+    }
+
+    pub fn format(self: Selector, writer: *std.Io.Writer) !void {
+        try self.first.format(writer);
+        for (self.segments) |segment| {
+            try segment.format(writer);
+        }
+    }
+};
+
+pub fn query(selectors: []const Selector, root: *Node, frame: *Frame) !?*Node.Element {
+    var nth: List.NthCache = .{ .allocator = frame.local_arena };
+    defer nth.deinit();
+
+    if (selectors.len != 1) {
+        const node = List.initOneAny(root, selectors, &nth, frame) orelse return null;
+        return node.is(Node.Element);
+    }
+
+    const selector = selectors[0];
+    // Fast path: single compound with only an ID selector. With
+    // duplicate ids, the general walk below finds the first one under root.
+    if (selector.segments.len == 0 and selector.first.parts.len == 1) {
+        const first = selector.first.parts[0];
+        if (first == .id) {
+            switch (Frame.getUniqueElementByIdFromNode(root, first.id)) {
+                .none => return null,
+                .one => |el| {
+                    const node = el.asNode();
+                    if (node != root and root.contains(node)) {
+                        return el;
+                    }
+                    return null;
+                },
+                .many => {},
+            }
+        }
+    }
+
+    const node = List.initOne(root, selector, &nth, frame) orelse return null;
+    return node.is(Node.Element);
+}
+
+const testing = @import("../../../testing.zig");
+
+test "Selector: classAttributeContains" {
+    // hit at each token position, and the whole value as one token
+    try testing.expectEqual(true, classAttributeContains("row", "row"));
+    try testing.expectEqual(true, classAttributeContains("row cell", "row"));
+    try testing.expectEqual(true, classAttributeContains("cell row", "row"));
+    try testing.expectEqual(true, classAttributeContains("a row b", "row"));
+
+    // a substring of a token is not a token
+    try testing.expectEqual(false, classAttributeContains("rows", "row"));
+    try testing.expectEqual(false, classAttributeContains("brow", "row"));
+    try testing.expectEqual(false, classAttributeContains("arrow-key", "row"));
+    // ...but a real token after a false start still matches
+    try testing.expectEqual(true, classAttributeContains("rows row", "row"));
+    try testing.expectEqual(true, classAttributeContains("row-a row", "row"));
+
+    // every HTML whitespace separates, 0x0B (VT) does not
+    for ([_]u8{ '\t', '\n', 0x0C, '\r', ' ' }) |ws| {
+        try testing.expectEqual(true, classAttributeContains(&.{ 'a', ws, 'r', 'o', 'w' }, "row"));
+    }
+    try testing.expectEqual(false, classAttributeContains(&.{ 'a', 0x0B, 'r', 'o', 'w' }, "row"));
+
+    // degenerate inputs
+    try testing.expectEqual(false, classAttributeContains("", "row"));
+    try testing.expectEqual(false, classAttributeContains("row", ""));
+    try testing.expectEqual(false, classAttributeContains("ro", "row"));
+    try testing.expectEqual(false, classAttributeContains("   ", "row"));
+    try testing.expectEqual(true, classAttributeContains("  row  ", "row"));
+
+    // case sensitivity is the caller's choice
+    try testing.expectEqual(false, classAttributeContains("ROW", "row"));
+    try testing.expectEqual(true, classAttributeContainsCase("ROW", "row", true));
+    try testing.expectEqual(false, classAttributeContainsCase("ROWS", "row", true));
+
+    // around the 16-byte block edges, the name at the very start and end
+    try testing.expectEqual(true, classAttributeContains("aaaaaaaaaaaaaaa row", "row"));
+    try testing.expectEqual(true, classAttributeContains("aaaaaaaaaaaaaa row", "row"));
+    try testing.expectEqual(true, classAttributeContains("aaaaaaaaaaaaaaaaaaaaaaaaaaaa row", "row"));
+    try testing.expectEqual(true, classAttributeContains("row aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "row"));
+    try testing.expectEqual(false, classAttributeContains("aaaaaaaaaaaaaaaaaaaaaaaaaaaa arow", "row"));
+    try testing.expectEqual(false, classAttributeContains("aaaaaaaaaaaaaaaaaaaaaaaaaaaa rows", "row"));
+    try testing.expectEqual(false, classAttributeContains("aaaaaaaaaaaaaaa\x0brow", "row"));
+}
+
+test "Selector: classAttributeContains matches a token split" {
+    // Small alphabet so partial matches and separators are frequent.
+    const alphabet = [_]u8{ 'a', 'b', 'a', 'b', ' ', '\t', 0x0B, '\n', 'c' };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+
+    var attr_buf: [80]u8 = undefined;
+    var name_buf: [6]u8 = undefined;
+    for (0..10_000) |_| {
+        const attr = attr_buf[0..random.uintAtMost(usize, attr_buf.len)];
+        for (attr) |*c| c.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+        const name = name_buf[0..random.intRangeAtMost(usize, 1, name_buf.len)];
+        for (name) |*c| c.* = "abc"[random.uintLessThan(usize, 3)];
+
+        var expected = false;
+        var it = std.mem.tokenizeAny(u8, attr, &.{ '\t', '\n', 0x0C, '\r', ' ' });
+        while (it.next()) |token| {
+            if (std.mem.eql(u8, token, name)) {
+                expected = true;
+                break;
+            }
+        }
+        try testing.expectEqual(expected, classAttributeContains(attr, name));
+    }
+}

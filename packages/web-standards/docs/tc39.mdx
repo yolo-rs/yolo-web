@@ -1,0 +1,20 @@
+# TC39 ECMAScript Proposals
+
+TC39 steers the evolution of JavaScript/ECMAScript through a 5-stage process:
+
+- **Stage 0**: Strawperson (Input ideas)
+- **Stage 1**: Proposal (Formal problem definition and champions)
+- **Stage 2**: Draft (Precise spec syntax and semantics)
+- **Stage 3**: Candidate (Complete spec text and signing off)
+- **Stage 4**: Finished (Shipped in 2+ implementations, ready for inclusion)
+
+## Tracking Proposals
+
+```typescript
+import { StandardsLoader } from "@yolo-web/standards";
+
+const loader = new StandardsLoader();
+const tc39 = await loader.loadTC39();
+const stage3 = tc39.proposals.filter(p => p.stage === 3);
+console.log(`Stage 3 proposals: ${stage3.map(p => p.name).join(", ")}`);
+```

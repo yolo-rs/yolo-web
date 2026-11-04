@@ -1,0 +1,31 @@
+{
+  "name": "@yolo-web/chromium",
+  "version": "0.2.0",
+  "description": "Bun-native Chromium launcher, CDP connection, profiles, and Obscura alias",
+  "license": "MIT AND Apache-2.0",
+  "type": "module",
+  "types": "./types/chromium.d.ts",
+  "bin": {
+    "yolo-web-chromium": "./src/cli.ts"
+  },
+  "files": ["src", "types", "README.md", "LICENSE"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./bun-plugin": "./src/bun-plugin.ts",
+    "./cli": "./src/cli.ts",
+    "./chromium": "./src/modules/chromium.ts",
+    "./obscura": "./src/modules/obscura.ts",
+    "./fetch": "./src/modules/fetch.ts",
+    "./passwords": "./src/passwords.ts",
+    "./manifests": "./src/modules/chrome-manifests.ts",
+    "./types": "./types/chromium.d.ts"
+  },
+  "dependencies": {
+    "@yolo-web/bun-plugin": "workspace:*"
+  },
+  "scripts": {
+    "check": "bun check --no-script",
+    "test": "bun test",
+    "status": "bun src/cli.ts status"
+  }
+}

@@ -228,6 +228,8 @@ export class YoloBrowser implements AsyncDisposable {
   async newPage(initialUrl = "about:blank"): Promise<YoloPage> {
     const targetId = await this.cdp.createTarget(initialUrl);
     const sessionId = await this.cdp.attachToTarget(targetId, true);
+    await this.cdp.send("Page.enable");
+    await this.cdp.send("Runtime.enable");
     this.info.activeTargetId = targetId;
     return new YoloPage(targetId, sessionId, this.cdp, this.mcp);
   }

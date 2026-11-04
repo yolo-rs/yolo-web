@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<meta name=lp-mode content=test>
+<script src="../../../testing.js"></script>
+
+<script id=supports>
+{
+  testing.expectEqual(true, HTMLScriptElement.supports('classic'));
+  testing.expectEqual(true, HTMLScriptElement.supports('module'));
+  testing.expectEqual(true, HTMLScriptElement.supports('importmap'));
+  testing.diverges("Chrome supports this", () => {
+    testing.expectEqual(false, HTMLScriptElement.supports('speculationrules'));
+  });
+  testing.expectEqual(false, HTMLScriptElement.supports('Module'));
+}
+</script>

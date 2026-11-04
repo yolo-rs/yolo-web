@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
+import { YoloCdpClient } from "@yolo-web/cdp-client";
 /**
- * YOLO-Web Human + AI Co-Pilot Browser Workbench
- * Powered by 100% native Bun (`Bun.serve`, `Bun.spawn`, `WebSocket`)
- * Uniting Servo (HTML5/CSS3/Euclid/WebRender) + Obscura (V8/DOM/CDP/MCP/Stealth) + Brave (Adblock/Shields)
+ * YOLO-Web browser service. It owns CDP lifecycle, policy, browser APIs, and
+ * screenshots; the user-facing workbench is hosted by yolo-ui.
  */
 
 export interface WorkbenchConfig {
@@ -11,6 +11,8 @@ export interface WorkbenchConfig {
   hostname?: string;
   stealth: boolean;
   braveShields: boolean;
+  cdpEndpoint?: string;
+  cdpToken?: string;
 }
 
 const TRACKING_PARAMS = new Set([
@@ -53,216 +55,86 @@ export function sanitizeUrlWithBraveShields(rawUrl: string): {
   }
 }
 
-export function renderHumanBrowserHtml(config: WorkbenchConfig): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>YOLO-Web Browser — Servo + Obscura + Brave (Rust + Bun)</title>
-  <style>
-    :root {
-      --bg: #0b0d12;
-      --panel: #131722;
-      --border: #232a3b;
-      --accent: #ff5500;
-      --servo: #2dd4bf;
-      --obscura: #a855f7;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-      display: grid;
-      grid-template-rows: 56px 1fr 32px;
-      height: 100vh;
-      overflow: hidden;
-    }
-    header {
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 0 14px;
-    }
-    .brand {
-      font-weight: 700;
-      font-size: 14px;
-      letter-spacing: 0.03em;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      white-space: nowrap;
-    }
-    .badge {
-      font-size: 11px;
-      padding: 2px 7px;
-      border-radius: 999px;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }
-    .badge-servo { color: var(--servo); border-color: rgba(45, 212, 191, 0.35); }
-    .badge-obscura { color: var(--obscura); border-color: rgba(168, 85, 247, 0.35); }
-    .badge-brave { color: var(--accent); border-color: rgba(255, 85, 0, 0.35); }
-    #url-input {
-      flex: 1;
-      background: #090b10;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 7px 12px;
-      font-family: ui-monospace, monospace;
-      font-size: 13px;
-    }
-    button {
-      background: #1e2434;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 6px 12px;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    button:hover { border-color: var(--servo); }
-    main {
-      display: grid;
-      grid-template-columns: 1fr 320px;
-      height: 100%;
-      overflow: hidden;
-    }
-    #viewport-wrap {
-      display: grid;
-      place-items: center;
-      background: #06080b;
-      position: relative;
-      overflow: auto;
-    }
-    #viewport-img {
-      max-width: 100%;
-      max-height: 100%;
-      border: 1px solid var(--border);
-      cursor: crosshair;
-    }
-    aside {
-      background: var(--panel);
-      border-left: 1px solid var(--border);
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      overflow-y: auto;
-      font-size: 12px;
-    }
-    footer {
-      background: var(--panel);
-      border-top: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 14px;
-      font-size: 11px;
-      color: var(--muted);
-      font-family: ui-monospace, monospace;
-    }
-    pre {
-      background: #090b10;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px;
-      overflow: auto;
-      margin: 0;
-      font-size: 11px;
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <div class="brand">
-      <span>YOLO-WEB</span>
-      <span class="badge badge-servo">Servo</span>
-      <span class="badge badge-obscura">Obscura V8/CDP</span>
-      <span class="badge badge-brave">Brave Shields</span>
-    </div>
-    <input id="url-input" type="url" value="https://example.com" placeholder="Enter URL (Brave Shields active)..." />
-    <button id="go-btn">Navigate</button>
-  </header>
-  <main>
-    <div id="viewport-wrap">
-      <img id="viewport-img" alt="Live Rust Browser Viewport" />
-    </div>
-    <aside>
-      <strong>Engine Telemetry (Rust + Bun)</strong>
-      <pre id="telemetry-box">Connecting to CDP :${config.cdpPort}...</pre>
-      <strong>JS / Selector Co-Pilot</strong>
-      <input id="eval-input" placeholder="document.title" style="background:#090b10;color:#fff;border:1px solid #232a3b;padding:6px;border-radius:4px;" />
-      <button id="eval-btn">Evaluate in V8</button>
-      <pre id="eval-output">Ready.</pre>
-    </aside>
-  </main>
-  <footer>
-    <span id="status-text">stream: connecting</span>
-    <span>CDP :${config.cdpPort} | Stealth: ${config.stealth ? "ON" : "OFF"} | Brave Shields: ${config.braveShields ? "ON" : "OFF"}</span>
-  </footer>
-  <script type="module">
-    const img = document.getElementById("viewport-img");
-    const statusText = document.getElementById("status-text");
-    const telemetryBox = document.getElementById("telemetry-box");
-    const urlInput = document.getElementById("url-input");
-    const evalInput = document.getElementById("eval-input");
-    const evalOutput = document.getElementById("eval-output");
-
-    let prevBlobUrl = null;
-    const es = new EventSource("/events");
-    es.onopen = () => (statusText.textContent = "stream: live (SSE)");
-    es.onerror = () => (statusText.textContent = "stream: reconnecting");
-    es.onmessage = (e) => {
-      const bytes = Uint8Array.from(atob(e.data), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
-      img.src = url;
-      if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
-      prevBlobUrl = url;
-    };
-
-    async function refreshStatus() {
-      const res = await fetch("/api/status");
-      if (res.ok) {
-        telemetryBox.textContent = JSON.stringify(await res.json(), null, 2);
-      }
-    }
-    refreshStatus();
-
-    document.getElementById("go-btn").onclick = async () => {
-      const res = await fetch("/api/navigate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: urlInput.value }),
-      });
-      evalOutput.textContent = JSON.stringify(await res.json(), null, 2);
-    };
-
-    document.getElementById("eval-btn").onclick = async () => {
-      const res = await fetch("/api/eval", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expression: evalInput.value || "document.title" }),
-      });
-      evalOutput.textContent = JSON.stringify(await res.json(), null, 2);
-    };
-  </script>
-</body>
-</html>`;
+export function validateBrowserNavigationUrl(rawUrl: string): URL | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === "http:" || url.protocol === "https:") return url;
+    if (url.href === "about:blank") return url;
+    if (url.protocol === "data:") return url;
+  } catch {
+    // Invalid absolute URL.
+  }
+  return null;
 }
 
 export function startHumanBrowserServer(config: WorkbenchConfig) {
   const sseClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const frameClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const encoder = new TextEncoder();
   let latestFrameBase64: string | null = null;
   let strippedTrackerCount = 0;
+  let cdp: YoloCdpClient | null = null;
+  let browserTargetId: string | null = null;
+  let browserSessionId: string | null = null;
+  let cdpError: string | null = null;
+  let browserVersion: Awaited<ReturnType<YoloCdpClient["getVersion"]>> | null =
+    null;
+  let cdpConnecting: Promise<YoloCdpClient> | null = null;
+  let screenshotTimer: ReturnType<typeof setInterval> | null = null;
+  let screenshotInFlight = false;
+
+  const ensureCdp = async () => {
+    if (cdp && browserSessionId) return cdp;
+    if (cdpConnecting) return cdpConnecting;
+    cdpConnecting = (async () => {
+      const client = await YoloCdpClient.connect({
+        endpoint: config.cdpEndpoint ?? `http://127.0.0.1:${config.cdpPort}`,
+        token: config.cdpToken,
+        timeoutMs: 5_000,
+      });
+      try {
+        browserVersion = await client.getVersion();
+        const targetId = await client.createTarget("about:blank");
+        const sessionId = await client.attachToTarget(targetId, true);
+        client.setSessionId(sessionId);
+        await client.send("Page.enable");
+        await client.send("Runtime.enable");
+        cdp = client;
+        browserTargetId = targetId;
+        browserSessionId = sessionId;
+        cdpError = null;
+        screenshotTimer = setInterval(async () => {
+          if (
+            !cdp ||
+            (sseClients.size === 0 && frameClients.size === 0) ||
+            screenshotInFlight
+          )
+            return;
+          screenshotInFlight = true;
+          try {
+            const frame = await cdp.captureScreenshot({
+              format: "jpeg",
+              quality: 65,
+            });
+            broadcastFrame(Buffer.from(frame).toString("base64"));
+          } catch (error) {
+            cdpError = error instanceof Error ? error.message : String(error);
+          } finally {
+            screenshotInFlight = false;
+          }
+        }, 1000);
+        return client;
+      } catch (error) {
+        await client.close();
+        throw error;
+      }
+    })();
+    try {
+      return await cdpConnecting;
+    } finally {
+      cdpConnecting = null;
+    }
+  };
 
   const broadcastFrame = (base64Frame: string) => {
     latestFrameBase64 = base64Frame;
@@ -274,50 +146,160 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
         sseClients.delete(controller);
       }
     }
+    const binaryFrame = Uint8Array.from(atob(base64Frame), (character) =>
+      character.charCodeAt(0),
+    );
+    const header = encoder.encode(
+      `--yolo-frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${binaryFrame.byteLength}\r\n\r\n`,
+    );
+    const trailer = encoder.encode("\r\n");
+    const frame = new Uint8Array(
+      header.byteLength + binaryFrame.byteLength + trailer.byteLength,
+    );
+    frame.set(header, 0);
+    frame.set(binaryFrame, header.byteLength);
+    frame.set(trailer, header.byteLength + binaryFrame.byteLength);
+    for (const controller of frameClients) {
+      try {
+        controller.enqueue(frame);
+      } catch {
+        frameClients.delete(controller);
+      }
+    }
   };
 
   const server = Bun.serve({
     port: config.httpPort,
     hostname: config.hostname ?? "127.0.0.1",
     routes: {
-      "/": () =>
-        new Response(renderHumanBrowserHtml(config), {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        }),
+      "/healthz": () =>
+        Response.json({ ok: true, service: "yolo-web-human-browser-api" }),
+      "/stream": async () => {
+        try {
+          await ensureCdp();
+        } catch {
+          return new Response("Chromium CDP is unavailable.", { status: 503 });
+        }
+        let activeController: ReadableStreamDefaultController<Uint8Array> | null =
+          null;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeController = controller;
+            frameClients.add(controller);
+          },
+          cancel() {
+            if (activeController) frameClients.delete(activeController);
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "multipart/x-mixed-replace; boundary=yolo-frame",
+            "Cache-Control": "no-store, no-transform",
+            "X-Accel-Buffering": "no",
+          },
+        });
+      },
       "/api/status": () =>
         Response.json({
-          engine: "yolo-web (Servo + Obscura + Brave)",
+          implementation:
+            "Bun-hosted workbench with external CDP browser rendering",
+          browserConnected: Boolean(cdp && browserSessionId),
+          browserVersion,
+          browserIntegration: cdp ? "connected" : "lazy-cdp-client",
+          browserTargetId,
+          browserIntegrationMessage: cdpError,
           runtime: `Bun v${Bun.version}`,
           cdpPort: config.cdpPort,
-          httpPort: server.port,
+          httpPort: config.httpPort,
           stealth: config.stealth,
           braveShields: config.braveShields,
           strippedTrackerCount,
-          connectedViewers: sseClients.size,
+          connectedViewers: sseClients.size + frameClients.size,
         }),
       "/api/navigate": {
         POST: async (req) => {
-          const body = (await req.json()) as { url?: string };
-          const rawUrl = body.url ?? "https://example.com";
-          const sanitized = config.braveShields
-            ? sanitizeUrlWithBraveShields(rawUrl)
-            : { cleanUrl: rawUrl, strippedParams: [] };
-          strippedTrackerCount += sanitized.strippedParams.length;
-          return Response.json({
-            ok: true,
-            requestedUrl: rawUrl,
-            navigatedUrl: sanitized.cleanUrl,
-            braveShieldsStripped: sanitized.strippedParams,
-          });
+          let body: { url?: string };
+          try {
+            body = (await req.json()) as { url?: string };
+          } catch {
+            return Response.json(
+              { ok: false, error: "request body must be valid JSON" },
+              { status: 400 },
+            );
+          }
+          try {
+            const rawUrl = body.url?.trim();
+            if (!rawUrl)
+              return Response.json(
+                { ok: false, error: "url is required" },
+                { status: 400 },
+              );
+            if (!validateBrowserNavigationUrl(rawUrl)) {
+              return Response.json(
+                {
+                  ok: false,
+                  error: "url must use http, https, data, or about:blank",
+                },
+                { status: 400 },
+              );
+            }
+            const sanitized = config.braveShields
+              ? sanitizeUrlWithBraveShields(rawUrl)
+              : { cleanUrl: rawUrl, strippedParams: [] };
+            const client = await ensureCdp();
+            const result = await client.navigate(sanitized.cleanUrl);
+            strippedTrackerCount += sanitized.strippedParams.length;
+            return Response.json(
+              {
+                ok: !result.errorText,
+                requestedUrl: rawUrl,
+                navigatedUrl: sanitized.cleanUrl,
+                braveShieldsStripped: sanitized.strippedParams,
+                ...result,
+              },
+              { status: result.errorText ? 502 : 200 },
+            );
+          } catch (error) {
+            cdpError = error instanceof Error ? error.message : String(error);
+            return Response.json(
+              { ok: false, error: cdpError },
+              { status: 503 },
+            );
+          }
         },
       },
       "/api/eval": {
         POST: async (req) => {
-          const body = (await req.json()) as { expression?: string };
-          return Response.json({
-            ok: true,
-            expression: body.expression ?? "document.title",
-          });
+          let body: { expression?: string };
+          try {
+            body = (await req.json()) as { expression?: string };
+          } catch {
+            return Response.json(
+              { ok: false, error: "request body must be valid JSON" },
+              { status: 400 },
+            );
+          }
+          try {
+            const expression = body.expression?.trim();
+            if (!expression)
+              return Response.json(
+                { ok: false, error: "expression is required" },
+                { status: 400 },
+              );
+            const client = await ensureCdp();
+            return Response.json({
+              ok: true,
+              expression,
+              value: await client.evaluate(expression),
+            });
+          } catch (error) {
+            cdpError = error instanceof Error ? error.message : String(error);
+            const unavailable = !cdp || !browserSessionId;
+            return Response.json(
+              { ok: false, error: cdpError },
+              { status: unavailable ? 503 : 500 },
+            );
+          }
         },
       },
       "/events": () => {
@@ -354,7 +336,31 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
   return {
     server,
     broadcastFrame,
-    stop: () => server.stop(true),
+    stop: async () => {
+      if (screenshotTimer) clearInterval(screenshotTimer);
+      for (const controller of [...sseClients, ...frameClients]) {
+        try {
+          controller.close();
+        } catch {
+          /* Client disconnected during shutdown. */
+        }
+      }
+      sseClients.clear();
+      frameClients.clear();
+      if (cdp && browserTargetId) {
+        try {
+          await cdp.closeTarget(browserTargetId);
+        } catch {
+          // The browser may already have disconnected; still close our socket.
+        }
+      }
+      await cdp?.close();
+      cdp = null;
+      browserTargetId = null;
+      browserSessionId = null;
+      browserVersion = null;
+      server.stop(true);
+    },
   };
 }
 
@@ -368,6 +374,6 @@ if (import.meta.main) {
     braveShields: true,
   });
   console.log(
-    `YOLO-Web Human + AI Browser Workbench running at http://127.0.0.1:${server.port}`,
+    `YOLO-Web browser CDP API listening at http://127.0.0.1:${server.port}`,
   );
 }

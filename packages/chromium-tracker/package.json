@@ -1,12 +1,13 @@
 {
   "name": "@yolo-web/chromium-tracker",
   "version": "0.1.0",
-  "description": "2026 Upstream Chromium, Depot Tools, CEF, Brave, and Helium Automated Tracking, Forking & Patch Pipeline for YOLO-Web",
+  "description": "Cross-platform browser-engine catalog and Chromium depot_tools workflow helpers for YOLO-Web",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
     "test": "bun test",
     "track": "bun run src/cli.ts",
+    "engines": "bun run src/cli.ts engines",
     "sync": "bun run src/cli.ts sync",
     "patch": "bun run src/cli.ts patch"
   },

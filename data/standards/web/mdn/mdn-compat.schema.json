@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MDN Web Docs Browser Compatibility Schema",
+  "description": "Schema definition for MDN browser compatibility data (BCD) features and support statements",
+  "type": "object",
+  "properties": {
+    "feature": { "type": "string" },
+    "mdn_url": { "type": "string", "format": "uri" },
+    "support": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "version_added": { "type": ["string", "boolean", "null"] },
+          "version_removed": { "type": ["string", "boolean", "null"] },
+          "prefix": { "type": "string" },
+          "notes": { "type": ["string", "array"] }
+        },
+        "required": ["version_added"]
+      }
+    },
+    "subfeatures": {
+      "type": "object"
+    }
+  },
+  "required": ["feature", "support"]
+}

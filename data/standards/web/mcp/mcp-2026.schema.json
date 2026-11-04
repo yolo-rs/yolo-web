@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Model Context Protocol (MCP) 2026 Specification Schema",
+  "description": "Schema definition for MCP 2026 protocol specifications, capabilities, transports, and JSON-RPC message contracts",
+  "type": "object",
+  "properties": {
+    "version": { "type": "string" },
+    "protocolVersion": { "type": "string" },
+    "transports": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["stdio", "sse", "websocket", "memory"] }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "object",
+          "properties": {
+            "tools": { "type": "boolean" },
+            "resources": { "type": "boolean" },
+            "prompts": { "type": "boolean" },
+            "logging": { "type": "boolean" },
+            "streaming": { "type": "boolean" }
+          }
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "roots": { "type": "boolean" },
+            "sampling": { "type": "boolean" },
+            "experimental": { "type": "object" }
+          }
+        }
+      },
+      "required": ["server", "client"]
+    },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["request", "notification"] },
+          "paramsSchema": { "type": "object" },
+          "resultSchema": { "type": "object" }
+        }
+      }
+    }
+  },
+  "required": ["version", "protocolVersion", "transports", "capabilities", "methods"]
+}

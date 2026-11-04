@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "sideEffects": false,
-  "description": "Interactive Human + AI Co-Pilot Browser Workbench powered by Bun.serve, Servo, Obscura CDP, and Brave Shields",
+  "description": "Bun CDP service for browser control, policy, status, and screenshot streaming",
   "scripts": {
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",

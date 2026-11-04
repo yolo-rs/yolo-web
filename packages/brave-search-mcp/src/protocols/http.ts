@@ -1,35 +1,42 @@
-import { randomUUID } from 'node:crypto';
-import express, { type Request, type Response } from 'express';
 import config from '../config.js';
 import createMcpServer from '../server.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { ListToolsRequest, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { ListToolsRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createDnsRebindingGuard } from './rebinding.js';
 
-const yieldGenericServerError = (res: Response) => {
-  res.status(500).json({
+const genericServerError = () =>
+  Response.json({
     id: null,
     jsonrpc: '2.0',
     error: { code: -32603, message: 'Internal server error' },
-  });
-};
+  }, { status: 500 });
 
-const transports = new Map<string, StreamableHTTPServerTransport>();
+const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
 const isListToolsRequest = (value: unknown): value is ListToolsRequest =>
   ListToolsRequestSchema.safeParse(value).success;
 
-const getTransport = async (request: Request): Promise<StreamableHTTPServerTransport> => {
+const getTransport = async (request: Request): Promise<WebStandardStreamableHTTPServerTransport> => {
   // Check for an existing session
-  const sessionId = request.headers['mcp-session-id'] as string;
+  const sessionId = request.headers.get('mcp-session-id');
 
   if (sessionId && transports.has(sessionId)) {
     return transports.get(sessionId)!;
   }
 
   // We have a special case where we'll permit ListToolsRequest w/o a session ID
-  if (!sessionId && isListToolsRequest(request.body)) {
-    const transport = new StreamableHTTPServerTransport({
+  let body: unknown;
+  if (!sessionId) {
+    try {
+      body = await request.clone().json();
+    } catch {
+      body = undefined;
+    }
+  }
+
+  if (!sessionId && isListToolsRequest(body)) {
+    const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
 
@@ -38,19 +45,22 @@ const getTransport = async (request: Request): Promise<StreamableHTTPServerTrans
     return transport;
   }
 
-  let transport: StreamableHTTPServerTransport;
+  let transport: WebStandardStreamableHTTPServerTransport;
 
   if (config.stateless) {
     // Some contexts (e.g. AgentCore) may prefer or require a stateless transport
-    transport = new StreamableHTTPServerTransport({
+    transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
   } else {
     // Otherwise, start a new transport/session
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
+    transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (sessionId) => {
         transports.set(sessionId, transport);
+      },
+      onsessionclosed: (sessionId) => {
+        transports.delete(sessionId);
       },
     });
   }
@@ -60,57 +70,41 @@ const getTransport = async (request: Request): Promise<StreamableHTTPServerTrans
   return transport;
 };
 
-const createApp = () => {
-  const app = express();
-
-  app.use(
-    '/mcp',
-    createDnsRebindingGuard({
+const guardRequest = createDnsRebindingGuard({
       allowedHosts: config.allowedHosts,
       allowedOrigins: config.allowedOrigins,
-    })
-  );
+});
 
-  app.use('/mcp', express.json());
+export const createApp = async (request: Request): Promise<Response> => {
+  const pathname = new URL(request.url).pathname;
+  if (pathname === '/ping') return Response.json({ message: 'pong' });
+  if (pathname !== '/mcp') return new Response('Not found', { status: 404 });
 
-  app.all('/mcp', async (req: Request, res: Response) => {
-    try {
-      const transport = await getTransport(req);
-      await transport.handleRequest(req, res, req.body);
-    } catch (error) {
-      console.error(error);
-      if (!res.headersSent) {
-        yieldGenericServerError(res);
-      }
-    }
-  });
+  const denied = guardRequest(request);
+  if (denied) return denied;
 
-  app.all('/ping', (req: Request, res: Response) => {
-    res.status(200).json({ message: 'pong' });
-  });
-
-  return app;
+  try {
+    const transport = await getTransport(request);
+    return await transport.handleRequest(request);
+  } catch (error) {
+    console.error(error);
+    return genericServerError();
+  }
 };
 
 const start = () => {
   if (!config.ready) {
-    console.error('Invalid configuration');
-    process.exit(1);
+    throw new Error('Invalid configuration');
   }
 
-  const app = createApp();
-  const server = app.listen(config.port, config.host);
-
-  server.on('listening', () => {
+  try {
+    Bun.serve({ hostname: config.host, port: config.port, fetch: createApp });
     console.log(`Server is running on http://${config.host}:${config.port}/mcp`);
-  });
-
-  server.on('error', (error: NodeJS.ErrnoException) => {
-    const detail =
-      error.code === 'EADDRINUSE' ? `port ${config.port} is already in use` : error.message;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
     console.error(`Unable to start HTTP server: ${detail}`);
-    process.exit(1);
-  });
+    throw error;
+  }
 };
 
 export default { start, createApp };

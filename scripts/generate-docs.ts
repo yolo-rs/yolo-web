@@ -2,11 +2,8 @@
 /**
  * @yolo-web/docs-generator
  * Automated documentation generator, manifest compiler & wiki indexer
- * Follows Google Documentation standards and Bun native markdown tooling.
+ * Scans repository Markdown and MDX with Bun-native filesystem APIs.
  */
-
-import { readdir, stat } from "node:fs/promises";
-import { join, relative } from "node:path";
 
 interface DocEntry {
   title: string;
@@ -16,30 +13,40 @@ interface DocEntry {
   lastModified: string;
 }
 
-async function scanDocs(dir: string, baseDir: string): Promise<DocEntry[]> {
+async function scanDocs(rootDir: string): Promise<DocEntry[]> {
   const entries: DocEntry[] = [];
-  const files = await readdir(dir, { withFileTypes: true });
+  const ignoredDirectories = new Set([
+    ".git",
+    "node_modules",
+    "dist",
+    "target",
+    "out",
+  ]);
+  const glob = new Bun.Glob("**/*");
 
-  for (const file of files) {
-    const fullPath = join(dir, file.name);
-    if (file.isDirectory() && file.name !== "node_modules" && file.name !== ".git") {
-      const sub = await scanDocs(fullPath, baseDir);
-      entries.push(...sub);
-    } else if (file.isFile() && (file.name.endsWith(".md") || file.name.endsWith(".mdx"))) {
-      const fileStat = await stat(fullPath);
-      const relPath = relative(baseDir, fullPath).replace(/\\/g, "/");
-      const title = file.name.replace(/\.(md|mdx)$/, "").replace(/_/g, " ");
-      const category = relPath.includes("/") ? relPath.split("/")[0] : "root";
+  for await (const filePath of glob.scan({ cwd: rootDir, onlyFiles: true })) {
+    const relPath = filePath.replace(/\\/g, "/");
+    if (relPath.split("/").some((part) => ignoredDirectories.has(part)))
+      continue;
+    if (!/\.mdx?$/i.test(relPath)) continue;
 
-      entries.push({
-        title,
-        path: relPath,
-        category,
-        sizeBytes: fileStat.size,
-        lastModified: fileStat.mtime.toISOString(),
-      });
-    }
+    const pathParts = relPath.split("/");
+    const fileName = pathParts.at(-1)!;
+    const title = fileName.replace(/\.mdx?$/i, "").replace(/_/g, " ");
+    const category = pathParts.length > 1 ? pathParts[0] : "root";
+    const file = Bun.file(`${rootDir}/${relPath}`);
+    const metadata = await file.stat();
+
+    entries.push({
+      title,
+      path: relPath,
+      category,
+      sizeBytes: metadata.size,
+      lastModified: metadata.mtime.toISOString(),
+    });
   }
+
+  entries.sort((a, b) => a.path.localeCompare(b.path));
 
   return entries;
 }
@@ -48,17 +55,19 @@ async function main() {
   const rootDir = process.cwd();
   console.log(`[docs-generator] Scanning documentation across ${rootDir}...`);
 
-  const docs = await scanDocs(rootDir, rootDir);
+  const docs = await scanDocs(rootDir);
   const manifest = {
     generatedAt: new Date().toISOString(),
-    standard: "Google Open Source & Chromium Documentation Guidelines",
+    standard: "YOLO-Web MDX and Markdown catalog",
     totalDocuments: docs.length,
     documents: docs,
   };
 
-  const outputPath = join(rootDir, "docs", "manifest.json");
+  const outputPath = `${rootDir.replace(/[\\/]$/, "")}/docs/manifest.json`;
   await Bun.write(outputPath, JSON.stringify(manifest, null, 2));
-  console.log(`[docs-generator] Wrote ${docs.length} document entries to ${outputPath}`);
+  console.log(
+    `[docs-generator] Wrote ${docs.length} document entries to ${outputPath}`,
+  );
 }
 
 main().catch((err) => {

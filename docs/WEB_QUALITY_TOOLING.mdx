@@ -1,0 +1,54 @@
+# Web quality tooling
+
+This repository uses Bun for its owned JavaScript and TypeScript tooling. Browser automation, lab audits, and production field metrics are separate data sources and should be reported separately.
+
+## Installed tools
+
+The root development toolchain includes Google Lighthouse, Lighthouse CI, and the Vercel CLI as Bun-managed development dependencies. Run their package executables through `bunx` or project scripts; do not install a second Node/npm toolchain in this repository.
+
+The Google Chrome DevTools MCP project bundles an MCP server, a terminal CLI, and skills for Chrome debugging, accessibility, LCP, cookies, and memory debugging. Its upstream README requires Node.js LTS and npm. That runtime requirement is incompatible with YOLO-Web's Bun-only rule, so this repository does not configure or run that server. Use the Bun-native `@yolo-web/cdp-client`, `@yolo-web/browser-sdk`, and `web-mcp` instead for Chrome/CDP automation. If upstream later supports Bun explicitly, verify the exact package release before changing this boundary.
+
+Google Chrome's `modern-web-guidance` skill is installed under `.agents/skills` with its curated local guide set. It normally invokes an npm CLI and its package declares a Node engine; the local skill has a YOLO-Web adaptation that uses `bunx --bun` only and falls back to its bundled guides if Bun cannot execute the package. CLI compatibility has not been claimed or installed as a project dependency.
+
+Vercel Labs' `agent-browser` repository also provides a discovery skill and is Apache-2.0 licensed. Its published CLI is a native Rust binary, but the package declares Node.js >=22 and the source build requires Node.js and pnpm; the discovery skill requires that CLI on PATH. Since that install path is incompatible with this repository's Bun-only rule, the skill and CLI are not installed. YOLO-Web's Bun CDP client remains the supported automation path.
+
+## Lighthouse lab audit
+
+Start an app with the repository's Bun command, then audit its URL:
+
+```powershell
+bun run dev
+bunx lighthouse http://127.0.0.1:8080 --only-categories=accessibility,best-practices,seo,performance --output=html --output-path=artifacts/lighthouse.html
+```
+
+For CI, use Lighthouse CI's `lhci autorun` with a checked-in configuration and a stable local preview server. Keep reports as build artifacts. Lab results depend on Chrome version, host load, and throttling; compare runs under the same conditions.
+
+## Chrome DevTools and accessibility
+
+Use YOLO-Web's MCP browser tools (`browser_snapshot`, `browser_interactive_elements`, `browser_console_messages`, `browser_network_requests`, `browser_screenshot`) against a Chrome instance exposed over CDP. Configure `YOLO_CDP_ENDPOINT` (default `http://127.0.0.1:9222`) and optionally `YOLO_CDP_TOKEN`. Chrome must be launched with an authorized remote-debugging endpoint; keep it bound to loopback unless a separately secured remote setup is intended.
+
+Lighthouse accessibility is an automated audit and does not replace keyboard, screen reader, focus, zoom, reduced-motion, and manual semantic checks. Use the Vercel `web-design-guidelines` skill for UI review, and treat its findings as review guidance rather than runtime measurements.
+
+## Vercel field measurements
+
+The Vercel CLI can query Speed Insights metrics for a linked, authenticated Vercel project. `vercel metrics` reports field measurements such as LCP, INP, CLS, FCP, and TTFB from real users. It cannot produce those measurements for an unlinked local checkout. Enable Speed Insights in the actual Vercel project before treating it as an available data source.
+
+Field metrics and Lighthouse lab scores answer different questions. Use Lighthouse for reproducible controlled page-load audits; use Speed Insights to understand deployed user experience across actual visits and devices. Do not combine their scores into one number.
+
+## Vercel skills
+
+The project skills in `.agents/skills` include the upstream Vercel Labs `web-design-guidelines`, `react-best-practices`, and `vercel-optimize` instructions. Vercel's collection does not currently list a standalone SEO skill, so `.agents/skills/google-seo` provides a project-local workflow grounded in Google Search Central.
+
+`vercel-optimize` needs an authenticated Vercel account/project and deployed metrics to make its data-led recommendations. Use it only when that project context exists. React-specific guidance applies to React code; the human-browser frontend now lives in `yolo-ui/apps/yolo-browser-workbench` and uses Bun/Hono JSX, so prefer the web design guidelines there. YOLO-Web itself owns the CDP API and media service.
+
+## Sources
+
+- [Chrome DevTools MCP repository and requirements](https://github.com/ChromeDevTools/chrome-devtools-mcp)
+- [Lighthouse overview](https://developer.chrome.com/docs/lighthouse/overview/)
+- [Lighthouse CI getting started](https://github.com/GoogleChrome/lighthouse-ci/blob/main/docs/getting-started.md)
+- [Vercel Labs agent skills](https://github.com/vercel-labs/agent-skills)
+- [Vercel CLI](https://vercel.com/docs/cli)
+- [Query Speed Insights from the Vercel CLI](https://vercel.com/changelog/query-speed-insights-from-the-vercel-cli)
+- [Vercel Speed Insights metrics](https://vercel.com/docs/speed-insights/metrics)
+- [Google Search developer guide](https://developers.google.com/search/docs/fundamentals/get-started-developers)
+- [Google sitemap overview](https://developers.google.com/search/docs/crawling-indexing/sitemaps/overview)

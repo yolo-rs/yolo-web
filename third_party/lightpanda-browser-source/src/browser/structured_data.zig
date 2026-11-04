@@ -1,0 +1,1093 @@
+// Copyright (C) 2023-2026  Lightpanda (Selecy SAS)
+//
+// Francis Bouvier <francis@lightpanda.io>
+// Pierre Tachoire <pierre@lightpanda.io>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+const std = @import("std");
+const lp = @import("lightpanda");
+
+const Frame = @import("Frame.zig");
+const URL = @import("URL.zig");
+const TreeWalker = @import("webapi/TreeWalker.zig");
+const Element = @import("webapi/Element.zig");
+const Node = @import("webapi/Node.zig");
+
+const Allocator = std.mem.Allocator;
+const String = lp.String;
+
+/// Key-value pair for structured data properties.
+pub const Property = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+const AlternateLink = struct {
+    href: []const u8,
+    hreflang: ?[]const u8,
+    type: ?[]const u8,
+    title: ?[]const u8,
+};
+
+/// A relation discovered in the HTTP `Link:` response header (RFC 8288),
+/// restricted to the registered relations an agent can act on.
+const LinkRel = struct {
+    rel: []const u8,
+    href: []const u8,
+};
+
+/// A microdata item, shaped like the HTML spec's JSON conversion:
+/// https://html.spec.whatwg.org/multipage/microdata.html#json
+const MicrodataItem = struct {
+    types: []const []const u8,
+    id: ?[]const u8,
+    // null for a repeat past MicrodataItems.max_output_items
+    properties: ?std.StringArrayHashMapUnmanaged(std.ArrayList(MicrodataValue)),
+    // items in its JSON, itself included
+    size: usize,
+
+    pub fn jsonStringify(self: *const MicrodataItem, jw: anytype) !void {
+        try jw.beginObject();
+        if (self.types.len > 0) {
+            try jw.objectField("type");
+            try jw.write(self.types);
+        }
+        if (self.id) |id| {
+            try jw.objectField("id");
+            try jw.write(id);
+        }
+        if (self.properties) |properties| {
+            try jw.objectField("properties");
+            try jw.beginObject();
+            for (properties.keys(), properties.values()) |name, values| {
+                try jw.objectField(name);
+                try jw.write(values.items);
+            }
+            try jw.endObject();
+        }
+        try jw.endObject();
+    }
+};
+
+const MicrodataValue = union(enum) {
+    text: []const u8,
+    item: *const MicrodataItem,
+
+    pub fn jsonStringify(self: MicrodataValue, jw: anytype) !void {
+        switch (self) {
+            .text => |t| try jw.write(t),
+            .item => |item| try jw.write(item),
+        }
+    }
+};
+
+const StructuredData = struct {
+    json_ld: []const []const u8,
+    microdata: []const *const MicrodataItem,
+    open_graph: []const Property,
+    twitter_card: []const Property,
+    meta: []const Property,
+    links: []const Property,
+    alternate: []const AlternateLink,
+    link_headers: []const LinkRel,
+
+    pub fn jsonStringify(self: *const StructuredData, jw: anytype) !void {
+        try jw.beginObject();
+
+        try jw.objectField("jsonLd");
+        try jw.write(self.json_ld);
+
+        try jw.objectField("openGraph");
+        try writeProperties(jw, self.open_graph);
+
+        try jw.objectField("twitterCard");
+        try writeProperties(jw, self.twitter_card);
+
+        try jw.objectField("meta");
+        try writeProperties(jw, self.meta);
+
+        try jw.objectField("links");
+        try writeProperties(jw, self.links);
+
+        if (self.alternate.len > 0) {
+            try jw.objectField("alternate");
+            try jw.beginArray();
+            for (self.alternate) |alt| {
+                try jw.beginObject();
+                try jw.objectField("href");
+                try jw.write(alt.href);
+                if (alt.hreflang) |v| {
+                    try jw.objectField("hreflang");
+                    try jw.write(v);
+                }
+                if (alt.type) |v| {
+                    try jw.objectField("type");
+                    try jw.write(v);
+                }
+                if (alt.title) |v| {
+                    try jw.objectField("title");
+                    try jw.write(v);
+                }
+                try jw.endObject();
+            }
+            try jw.endArray();
+        }
+
+        if (self.microdata.len > 0) {
+            try jw.objectField("microdata");
+            try jw.write(self.microdata);
+        }
+
+        // Emitted only when present so existing consumers of the CDP/MCP
+        // structured-data shape see no new key on sites without a `Link:`
+        // response header.
+        if (self.link_headers.len > 0) {
+            try jw.objectField("linkHeaders");
+            try jw.beginArray();
+            for (self.link_headers) |lh| {
+                try jw.beginObject();
+                try jw.objectField("rel");
+                try jw.write(lh.rel);
+                try jw.objectField("href");
+                try jw.write(lh.href);
+                try jw.endObject();
+            }
+            try jw.endArray();
+        }
+
+        try jw.endObject();
+    }
+};
+
+/// Serializes properties as a JSON object. When a key appears multiple times
+/// (e.g. multiple og:image tags), values are grouped into an array.
+/// Alternatives considered: always-array values (verbose), or an array of
+/// {key, value} pairs (preserves order but less ergonomic for consumers).
+fn writeProperties(jw: anytype, properties: []const Property) !void {
+    try jw.beginObject();
+    for (properties, 0..) |prop, i| {
+        // Skip keys already written by an earlier occurrence.
+        var already_written = false;
+        for (properties[0..i]) |prev| {
+            if (std.mem.eql(u8, prev.key, prop.key)) {
+                already_written = true;
+                break;
+            }
+        }
+        if (already_written) continue;
+
+        // Count total occurrences to decide string vs array.
+        var count: usize = 0;
+        for (properties) |p| {
+            if (std.mem.eql(u8, p.key, prop.key)) count += 1;
+        }
+
+        try jw.objectField(prop.key);
+        if (count == 1) {
+            try jw.write(prop.value);
+        } else {
+            try jw.beginArray();
+            for (properties) |p| {
+                if (std.mem.eql(u8, p.key, prop.key)) {
+                    try jw.write(p.value);
+                }
+            }
+            try jw.endArray();
+        }
+    }
+    try jw.endObject();
+}
+
+/// Extract all structured data from the frame.
+pub fn collectStructuredData(
+    root: *Node,
+    arena: Allocator,
+    frame: *Frame,
+) !StructuredData {
+    var json_ld: std.ArrayList([]const u8) = .empty;
+    var microdata: std.ArrayList(*const MicrodataItem) = .empty;
+    var open_graph: std.ArrayList(Property) = .empty;
+    var twitter_card: std.ArrayList(Property) = .empty;
+    var meta: std.ArrayList(Property) = .empty;
+    var links: std.ArrayList(Property) = .empty;
+    var alternate: std.ArrayList(AlternateLink) = .empty;
+    var link_headers: std.ArrayList(LinkRel) = .empty;
+
+    // Extract language from the root <html> element.
+    if (root.is(Element)) |root_el| {
+        if (root_el.getAttributeInterned("lang")) |lang| {
+            try meta.append(arena, .{ .key = "language", .value = lang });
+        }
+    } else {
+        // Root is document — check documentElement.
+        var children = root.childrenIterator();
+        while (children.next()) |child| {
+            const el = child.is(Element) orelse continue;
+            if (el.getTag() == .html) {
+                if (el.getAttributeInterned("lang")) |lang| {
+                    try meta.append(arena, .{ .key = "language", .value = lang });
+                }
+                break;
+            }
+        }
+    }
+
+    var microdata_items: MicrodataItems = .{};
+    var tw = TreeWalker.Full.init(root, .{});
+    while (tw.next()) |node| {
+        const el = node.is(Element) orelse continue;
+
+        // Top-level items; the ones with itemprop are values of another item.
+        if (isItem(el) and !el.hasAttributeSafe(comptime .wrap("itemprop"))) {
+            try microdata.append(arena, try collectMicrodataItem(el, arena, frame, &microdata_items));
+        }
+
+        switch (el.getTag()) {
+            .script => {
+                try collectJsonLd(el, arena, &json_ld);
+                tw.skipChildren();
+            },
+            .meta => collectMeta(el, &open_graph, &twitter_card, &meta, arena) catch {},
+            .title => try collectTitle(node, arena, &meta),
+            .link => try collectLink(el, arena, frame, &links, &alternate),
+            // Skip body subtree for non-JSON-LD — all other metadata is in <head>.
+            // JSON-LD can appear in <body> so we don't skip the whole body.
+            else => {},
+        }
+    }
+
+    // The `Link:` response header lives on the frame, not in the DOM, so it is
+    // collected separately from the navigation's retained headers.
+    try collectLinkHeaders(arena, frame, &link_headers);
+
+    return .{
+        .json_ld = json_ld.items,
+        .microdata = microdata.items,
+        .open_graph = open_graph.items,
+        .twitter_card = twitter_card.items,
+        .meta = meta.items,
+        .links = links.items,
+        .alternate = alternate.items,
+        .link_headers = link_headers.items,
+    };
+}
+
+/// Parse every `Link:` response header retained on the frame, surfacing only the
+/// registered, agent-useful relations. Relative targets are resolved against the
+/// frame's base URL, mirroring `collectLink`.
+fn collectLinkHeaders(
+    arena: Allocator,
+    frame: *Frame,
+    out: *std.ArrayList(LinkRel),
+) !void {
+    // Registered link relations we surface from the HTTP `Link:` response header
+    // (RFC 8288).
+    const header_link_rels = [_][]const u8{ "service-doc", "service-desc", "api" };
+
+    for (frame._http_headers.items) |header| {
+        if (std.mem.eql(u8, header.name, "link") == false) {
+            continue;
+        }
+
+        var it: LinkHeaderIterator = .{ .value = header.value };
+        while (it.next()) |entry| {
+            const rel_value = entry.rel orelse continue;
+
+            // The `rel` parameter is a space-separated list of relation types.
+            var rel_it = std.mem.tokenizeAny(u8, rel_value, " \t");
+            while (rel_it.next()) |rel_token| {
+                const known = for (header_link_rels) |candidate| {
+                    if (std.ascii.eqlIgnoreCase(rel_token, candidate)) {
+                        break candidate;
+                    }
+                } else continue;
+
+                const href = resolveUrl(arena, frame, entry.target);
+
+                // Drop duplicate (rel, href) pairs (it happens)
+                for (out.items) |existing| {
+                    if (std.mem.eql(u8, existing.rel, known) and std.mem.eql(u8, existing.href, href)) {
+                        break;
+                    }
+                } else {
+                    try out.append(arena, .{ .rel = known, .href = href });
+                }
+            }
+        }
+    }
+}
+
+/// One `< target >; param=value; ...` entry of an RFC 8288 `Link` header value.
+const LinkHeaderEntry = struct {
+    target: []const u8,
+    rel: ?[]const u8,
+};
+
+/// Splits a `Link:` header field value into its comma-separated link-values,
+/// skipping commas that fall inside the `<...>` target or a `"..."` quoted
+/// parameter value (RFC 8288 §3).
+const LinkHeaderIterator = struct {
+    i: usize = 0,
+    value: []const u8,
+
+    fn next(self: *LinkHeaderIterator) ?LinkHeaderEntry {
+        const v = self.value;
+
+        while (true) {
+            // Skip separators and whitespace between link-values. The comma that
+            // ended the previous link-value is consumed here.
+            for (v[self.i..]) |c| {
+                if (std.ascii.isWhitespace(c) == false and c != ',') {
+                    break;
+                }
+                self.i += 1;
+            } else {
+                return null;
+            }
+
+            // A link-value must begin with the angle-bracketed target.
+            if (v[self.i] != '<') {
+                self.skipToNextComma();
+                continue;
+            }
+
+            const target_start = self.i + 1;
+            const gt = std.mem.findScalarPos(u8, v, target_start, '>') orelse {
+                self.i = v.len;
+                return null;
+            };
+            const target = v[target_start..gt];
+            self.i = gt + 1;
+
+            // Parameters run to the next top-level comma, left at `self.i`.
+            const params_start = self.i;
+            self.skipToNextComma();
+            return .{ .target = target, .rel = extractRel(v[params_start..self.i]) };
+        }
+    }
+
+    // Advance until `self.i` sits on the next top-level comma (one outside a
+    // `"..."` quoted-string, honouring RFC 7230 backslash escapes) or the end
+    // of the value. The comma itself is left for the leading-separator skip.
+    fn skipToNextComma(self: *LinkHeaderIterator) void {
+        const v = self.value;
+        var in_quotes = false;
+        while (self.i < v.len) : (self.i += 1) {
+            const c = v[self.i];
+
+            if (c == ',' and in_quotes == false) {
+                return;
+            }
+
+            if (c == '\\' and in_quotes) {
+                // Skip the escaped byte; guard a trailing backslash.
+                if (self.i + 1 < v.len) {
+                    self.i += 1;
+                }
+            } else if (c == '"') {
+                in_quotes = !in_quotes;
+            }
+        }
+    }
+};
+
+/// Return the (unquoted) value of the `rel` parameter from a link-value's
+/// parameter list, or null when absent.
+fn extractRel(params: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |raw_param| {
+        const param = std.mem.trim(u8, raw_param, &std.ascii.whitespace);
+        const eq = std.mem.findScalarPos(u8, param, 0, '=') orelse continue;
+        const name = std.mem.trim(u8, param[0..eq], &std.ascii.whitespace);
+        if (std.ascii.eqlIgnoreCase(name, "rel") == false) {
+            continue;
+        }
+
+        var val = std.mem.trim(u8, param[eq + 1 ..], &std.ascii.whitespace);
+        if (val.len >= 2 and val[0] == '"' and val[val.len - 1] == '"') {
+            val = val[1 .. val.len - 1];
+        }
+        return val;
+    }
+    return null;
+}
+
+fn isItem(el: *Element) bool {
+    return el._namespace == .html and el.hasAttributeSafe(comptime .wrap("itemscope"));
+}
+
+/// A page's microdata items, each collected once: a later reference reuses it.
+const MicrodataItems = struct {
+    // null while the item is being collected, so reaching it again is a cycle
+    by_element: std.AutoHashMapUnmanaged(*Element, ?*const MicrodataItem) = .empty,
+    output_items: usize = 0,
+
+    // Like the spec, a shared item is printed in full at every reference, but
+    // sharing can nest (A and B both itemref C and D, which both itemref ...)
+    // and grow the output exponentially. Past this many items in the output,
+    // a repeat gets only its type and id.
+    const max_output_items = 10_000;
+
+    fn repeat(self: *MicrodataItems, arena: Allocator, item: *const MicrodataItem) !*const MicrodataItem {
+        if (self.output_items + item.size <= max_output_items) {
+            self.output_items += item.size;
+            return item;
+        }
+        self.output_items += 1;
+        const stub = try arena.create(MicrodataItem);
+        stub.* = .{ .types = item.types, .id = item.id, .properties = null, .size = 1 };
+        return stub;
+    }
+};
+
+fn collectMicrodataItem(
+    el: *Element,
+    arena: Allocator,
+    frame: *Frame,
+    items: *MicrodataItems,
+) Allocator.Error!*const MicrodataItem {
+    try items.by_element.put(arena, el, null);
+    items.output_items += 1;
+
+    var types: std.ArrayList([]const u8) = .empty;
+    if (el.getAttributeSafe(comptime .wrap("itemtype"))) |itemtype| {
+        var it = std.mem.tokenizeAny(u8, itemtype, &std.ascii.whitespace);
+        while (it.next()) |t| try types.append(arena, t);
+    }
+
+    // An itemid is only a global identifier on a typed item.
+    var id: ?[]const u8 = null;
+    if (types.items.len > 0) {
+        if (el.getAttributeSafe(comptime .wrap("itemid"))) |itemid| {
+            id = resolveUrl(arena, frame, itemid);
+        }
+    }
+
+    var properties: std.StringArrayHashMapUnmanaged(std.ArrayList(MicrodataValue)) = .empty;
+    var size: usize = 1;
+    var element_names: std.ArrayList([]const u8) = .empty;
+    for (try crawlMicrodataProperties(el, arena)) |prop_el| {
+        var value: MicrodataValue = if (isItem(prop_el))
+            try microdataItemValue(prop_el, arena, frame, items)
+        else
+            .{ .text = try microdataPropertyValue(prop_el, arena, frame) };
+
+        // a name repeated on the same element counts once
+        element_names.clearRetainingCapacity();
+        var names = std.mem.tokenizeAny(u8, prop_el.getAttributeSafe(comptime .wrap("itemprop")).?, &std.ascii.whitespace);
+        while (names.next()) |name| {
+            const repeated = for (element_names.items) |seen| {
+                if (std.mem.eql(u8, seen, name)) break true;
+            } else false;
+            if (repeated) continue;
+            // under a second name, an item is printed again
+            if (element_names.items.len > 0) if (value == .item) {
+                value = .{ .item = try items.repeat(arena, value.item) };
+            };
+            try element_names.append(arena, name);
+            const entry = try properties.getOrPutValue(arena, name, .empty);
+            try entry.value_ptr.append(arena, value);
+            if (value == .item) size += value.item.size;
+        }
+    }
+
+    const item = try arena.create(MicrodataItem);
+    item.* = .{ .types = types.items, .id = id, .properties = properties, .size = size };
+    try items.by_element.put(arena, el, item);
+    return item;
+}
+
+fn microdataItemValue(el: *Element, arena: Allocator, frame: *Frame, items: *MicrodataItems) !MicrodataValue {
+    const state = items.by_element.get(el) orelse return .{ .item = try collectMicrodataItem(el, arena, frame, items) };
+    // still being collected: the item contains itself, for which the spec has "ERROR"
+    const collected = state orelse return .{ .text = "ERROR" };
+    return .{ .item = try items.repeat(arena, collected) };
+}
+
+/// The elements carrying the item's properties, in tree order: its
+/// descendants and itemref targets, without descending into nested items.
+/// https://html.spec.whatwg.org/multipage/microdata.html#associating-names-with-items
+fn crawlMicrodataProperties(item: *Element, arena: Allocator) ![]*Element {
+    var results: std.ArrayList(*Element) = .empty;
+    var visited: std.AutoHashMapUnmanaged(*Element, void) = .empty;
+    var pending: std.ArrayList(*Element) = .empty;
+    try visited.put(arena, item, {});
+
+    // Without itemref targets, popping `pending` visits elements in tree order.
+    var has_targets = false;
+    if (item.getAttributeSafe(comptime .wrap("itemref"))) |itemref| {
+        // the item's whole tree: a detached one is scanned from the node given
+        const tree = item.asNode().getRootNode(.{});
+        var it = std.mem.tokenizeAny(u8, itemref, &std.ascii.whitespace);
+        while (it.next()) |id| {
+            if (Frame.getElementByIdFromNode(tree, id)) |target| {
+                try pending.append(arena, target);
+                has_targets = true;
+            }
+        }
+    }
+    try pushChildElements(item, arena, &pending);
+
+    while (pending.pop()) |candidate| {
+        if ((try visited.getOrPut(arena, candidate)).found_existing) continue;
+
+        if (!isItem(candidate)) {
+            try pushChildElements(candidate, arena, &pending);
+        }
+        if (candidate.getAttributeSafe(comptime .wrap("itemprop"))) |itemprop| {
+            var names = std.mem.tokenizeAny(u8, itemprop, &std.ascii.whitespace);
+            if (names.peek() != null) {
+                try results.append(arena, candidate);
+            }
+        }
+    }
+
+    if (has_targets) {
+        std.mem.sort(*Element, results.items, {}, struct {
+            fn lessThan(_: void, a: *Element, b: *Element) bool {
+                const FOLLOWING: u16 = 0x04;
+                return a.asNode().compareDocumentPosition(b.asNode()) & FOLLOWING != 0;
+            }
+        }.lessThan);
+    }
+    return results.items;
+}
+
+/// Last to first, so that popping them off `out` visits them in tree order.
+fn pushChildElements(el: *Element, arena: Allocator, out: *std.ArrayList(*Element)) !void {
+    var child = el.lastElementChild();
+    while (child) |c| : (child = c.previousElementSibling()) {
+        try out.append(arena, c);
+    }
+}
+
+/// https://html.spec.whatwg.org/multipage/microdata.html#values
+fn microdataPropertyValue(el: *Element, arena: Allocator, frame: *Frame) ![]const u8 {
+    switch (el.getTag()) {
+        .meta => return el.getAttributeInterned("content") orelse "",
+        .audio, .embed, .iframe, .img, .source, .track, .video => return urlAttribute(el, comptime .wrap("src"), arena, frame),
+        .a, .area, .link => return urlAttribute(el, comptime .wrap("href"), arena, frame),
+        .object => return urlAttribute(el, comptime .wrap("data"), arena, frame),
+        .data, .meter => return el.getAttributeSafe(comptime .wrap("value")) orelse "",
+        .time => if (el.getAttributeSafe(comptime .wrap("datetime"))) |datetime| return datetime,
+        else => {},
+    }
+    const text = el.asNode().getTextContentAlloc(arena) catch return error.OutOfMemory;
+    return std.mem.trim(u8, text, &std.ascii.whitespace);
+}
+
+fn urlAttribute(el: *Element, name: String, arena: Allocator, frame: *Frame) []const u8 {
+    return resolveUrl(arena, frame, el.getAttributeSafe(name) orelse return "");
+}
+
+/// Resolves against the frame's base URL, keeping the raw value when it can't.
+fn resolveUrl(arena: Allocator, frame: *Frame, raw: []const u8) []const u8 {
+    return URL.resolve(arena, frame.base(), raw, .{ .encoding = frame.charset }) catch raw;
+}
+
+fn collectJsonLd(
+    el: *Element,
+    arena: Allocator,
+    json_ld: *std.ArrayList([]const u8),
+) !void {
+    const type_attr = el.getAttributeInterned("type") orelse return;
+    if (!std.ascii.eqlIgnoreCase(type_attr, "application/ld+json")) return;
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    try el.asNode().getTextContent(&buf.writer);
+    const text = buf.written();
+    if (text.len > 0) {
+        try json_ld.append(arena, std.mem.trim(u8, text, &std.ascii.whitespace));
+    }
+}
+
+fn collectMeta(
+    el: *Element,
+    open_graph: *std.ArrayList(Property),
+    twitter_card: *std.ArrayList(Property),
+    meta: *std.ArrayList(Property),
+    arena: Allocator,
+) !void {
+    // charset: <meta charset="..."> (no content attribute needed).
+    if (el.getAttributeInterned("charset")) |charset| {
+        try meta.append(arena, .{ .key = "charset", .value = charset });
+    }
+
+    const content = el.getAttributeInterned("content") orelse return;
+
+    // Open Graph: <meta property="og:...">
+    if (el.getAttributeSafe(comptime .wrap("property"))) |property| {
+        if (std.mem.startsWith(u8, property, "og:")) {
+            try open_graph.append(arena, .{ .key = property[3..], .value = content });
+            return;
+        }
+        // Article, profile, etc. are OG sub-namespaces.
+        if (std.mem.startsWith(u8, property, "article:") or
+            std.mem.startsWith(u8, property, "profile:") or
+            std.mem.startsWith(u8, property, "book:") or
+            std.mem.startsWith(u8, property, "music:") or
+            std.mem.startsWith(u8, property, "video:"))
+        {
+            try open_graph.append(arena, .{ .key = property, .value = content });
+            return;
+        }
+    }
+
+    // Twitter Cards: <meta name="twitter:...">
+    if (el.getName()) |name| {
+        if (std.mem.startsWith(u8, name, "twitter:")) {
+            try twitter_card.append(arena, .{ .key = name[8..], .value = content });
+            return;
+        }
+
+        // Standard meta tags by name.
+        const known_names = [_][]const u8{
+            "description", "author",    "keywords",    "robots",
+            "viewport",    "generator", "theme-color",
+        };
+        for (known_names) |known| {
+            if (std.ascii.eqlIgnoreCase(name, known)) {
+                try meta.append(arena, .{ .key = known, .value = content });
+                return;
+            }
+        }
+    }
+
+    // http-equiv (e.g. Content-Type, refresh)
+    if (el.getAttributeSafe(comptime .wrap("http-equiv"))) |http_equiv| {
+        try meta.append(arena, .{ .key = http_equiv, .value = content });
+    }
+}
+
+fn collectTitle(
+    node: *Node,
+    arena: Allocator,
+    meta: *std.ArrayList(Property),
+) !void {
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    try node.getTextContent(&buf.writer);
+    const text = std.mem.trim(u8, buf.written(), &std.ascii.whitespace);
+    if (text.len > 0) {
+        try meta.append(arena, .{ .key = "title", .value = text });
+    }
+}
+
+fn collectLink(
+    el: *Element,
+    arena: Allocator,
+    frame: *Frame,
+    links: *std.ArrayList(Property),
+    alternate: *std.ArrayList(AlternateLink),
+) !void {
+    const rel = el.getAttributeInterned("rel") orelse return;
+    const raw_href = el.getAttributeInterned("href") orelse return;
+    const href = resolveUrl(arena, frame, raw_href);
+
+    if (std.ascii.eqlIgnoreCase(rel, "alternate")) {
+        try alternate.append(arena, .{
+            .href = href,
+            .hreflang = el.getAttributeSafe(comptime .wrap("hreflang")),
+            .type = el.getAttributeInterned("type"),
+            .title = el.getAttributeInterned("title"),
+        });
+        return;
+    }
+
+    const relevant_rels = [_][]const u8{
+        "canonical",        "icon",       "manifest", "shortcut icon",
+        "apple-touch-icon", "search",     "author",   "license",
+        "dns-prefetch",     "preconnect",
+    };
+    for (relevant_rels) |known| {
+        if (std.ascii.eqlIgnoreCase(rel, known)) {
+            try links.append(arena, .{ .key = known, .value = href });
+            return;
+        }
+    }
+}
+
+// --- Tests ---
+
+const testing = @import("../testing.zig");
+
+fn testStructuredData(html: []const u8) !StructuredData {
+    const frame = try testing.createFrame();
+    errdefer testing.test_session.closeAllPages();
+
+    const doc = frame.window._document;
+    const div = try doc.createElement("div", null, frame);
+    try Frame.parse.htmlAsChildren(frame, div.asNode(), html);
+
+    return collectStructuredData(div.asNode(), frame.call_arena, frame);
+}
+
+fn findProperty(props: []const Property, key: []const u8) ?[]const u8 {
+    for (props) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return null;
+}
+
+test "structured_data: json-ld" {
+    const data = try testStructuredData(
+        \\<script type="application/ld+json">
+        \\{"@context":"https://schema.org","@type":"Article","headline":"Test"}
+        \\</script>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(1, data.json_ld.len);
+    try testing.expect(std.mem.find(u8, data.json_ld[0], "Article") != null);
+}
+
+test "structured_data: microdata" {
+    const data = try testStructuredData(
+        \\<div itemscope itemtype="https://schema.org/Product" itemid="https://example.com/p/1">
+        \\  <h1 itemprop="name"> Lamp </h1>
+        \\  <img itemprop="image" src="https://example.com/lamp.jpg">
+        \\  <a itemprop="url" href="https://example.com/p/1">link</a>
+        \\  <div itemprop="offers" itemscope itemtype="https://schema.org/Offer">
+        \\    <meta itemprop="priceCurrency" content="USD">
+        \\    <data itemprop="price" value="19.99">$19.99</data>
+        \\    <time itemprop="validFrom" datetime="2026-10-01">October</time>
+        \\  </div>
+        \\  <span itemprop="color material color">steel</span>
+        \\</div>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try expectMicrodata(
+        \\[{"type":["https://schema.org/Product"],"id":"https://example.com/p/1","properties":{
+    ++
+        \\"name":["Lamp"],"image":["https://example.com/lamp.jpg"],"url":["https://example.com/p/1"],
+    ++
+        \\"offers":[{"type":["https://schema.org/Offer"],"properties":{"priceCurrency":["USD"],"price":["19.99"],"validFrom":["2026-10-01"]}}],
+    ++
+        \\"color":["steel"],"material":["steel"]}}]
+    , data);
+}
+
+test "structured_data: microdata itemref" {
+    const data = try testStructuredData(
+        \\<p id="early" itemprop="zero">0</p>
+        \\<div itemscope itemid="https://example.com/untyped" itemref="early missing"><span itemprop="one">1</span></div>
+    );
+    defer testing.test_session.closeAllPages();
+
+    // tree order, and no id without a type
+    try expectMicrodata(
+        \\[{"properties":{"zero":["0"],"one":["1"]}}]
+    , data);
+}
+
+test "structured_data: microdata cycle" {
+    const data = try testStructuredData(
+        \\<div itemscope><div id="x" itemprop="a" itemscope><div itemprop="b" itemscope itemref="x"></div></div></div>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try expectMicrodata(
+        \\[{"properties":{"a":[{"properties":{"b":[{"properties":{"a":["ERROR"]}}]}}]}}]
+    , data);
+}
+
+test "structured_data: microdata shared items" {
+    const data = try testStructuredData(
+        \\<div itemscope itemtype="https://schema.org/Event" itemref="loc"><span itemprop="name">A</span></div>
+        \\<div itemscope itemtype="https://schema.org/Event" itemref="loc"><span itemprop="name">B</span></div>
+        \\<div itemscope id="loc" itemprop="location" itemtype="https://schema.org/Place"><span itemprop="name">Hall</span></div>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try expectMicrodata(
+        \\[{"type":["https://schema.org/Event"],"properties":{"name":["A"],"location":[{"type":["https://schema.org/Place"],"properties":{"name":["Hall"]}}]}},
+    ++
+        \\{"type":["https://schema.org/Event"],"properties":{"name":["B"],"location":[{"type":["https://schema.org/Place"],"properties":{"name":["Hall"]}}]}}]
+    , data);
+}
+
+test "structured_data: microdata nested sharing is bounded" {
+    // Each level's two items both itemref the next level's two: 2^16 copies
+    // of the last level if every reference were printed in full.
+    var html: std.Io.Writer.Allocating = .init(testing.arena_allocator);
+    try html.writer.writeAll("<div itemscope itemref=\"a0 b0\"></div>");
+    for (0..16) |i| {
+        for ("ab") |p| {
+            try html.writer.print("<div itemscope id=\"{c}{d}\" itemprop=\"p\" itemref=\"a{d} b{d}\"></div>", .{ p, i, i + 1, i + 1 });
+        }
+    }
+    const data = try testStructuredData(html.written());
+    defer testing.test_session.closeAllPages();
+
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, data.microdata, .{});
+    defer testing.allocator.free(json);
+    // Past the limit, repeats keep only their type and id: one stub per
+    // reference in the page, so the output stays linear in its size.
+    try testing.expect(std.mem.count(u8, json, "{\"properties\"") <= MicrodataItems.max_output_items);
+    try testing.expect(std.mem.find(u8, json, "{}") != null);
+}
+
+test "structured_data: no microdata key without items" {
+    const data = try testStructuredData(
+        \\<span itemprop="orphan">no item</span>
+    );
+    defer testing.test_session.closeAllPages();
+
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, data, .{});
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.find(u8, json, "microdata") == null);
+}
+
+fn expectMicrodata(expected: []const u8, data: StructuredData) !void {
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, data.microdata, .{});
+    defer testing.allocator.free(json);
+    try testing.expectEqual(expected, json);
+}
+
+test "structured_data: multiple json-ld" {
+    const data = try testStructuredData(
+        \\<script type="application/ld+json">{"@type":"Organization"}</script>
+        \\<script type="application/ld+json">{"@type":"BreadcrumbList"}</script>
+        \\<script type="text/javascript">var x = 1;</script>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(2, data.json_ld.len);
+}
+
+test "structured_data: open graph" {
+    const data = try testStructuredData(
+        \\<meta property="og:title" content="My Page">
+        \\<meta property="og:description" content="A description">
+        \\<meta property="og:image" content="https://example.com/img.jpg">
+        \\<meta property="og:url" content="https://example.com">
+        \\<meta property="og:type" content="article">
+        \\<meta property="article:published_time" content="2026-03-10">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(6, data.open_graph.len);
+    try testing.expectEqual("My Page", findProperty(data.open_graph, "title").?);
+    try testing.expectEqual("article", findProperty(data.open_graph, "type").?);
+    try testing.expectEqual("2026-03-10", findProperty(data.open_graph, "article:published_time").?);
+}
+
+test "structured_data: open graph duplicate keys" {
+    const data = try testStructuredData(
+        \\<meta property="og:title" content="My Page">
+        \\<meta property="og:image" content="https://example.com/img1.jpg">
+        \\<meta property="og:image" content="https://example.com/img2.jpg">
+        \\<meta property="og:image" content="https://example.com/img3.jpg">
+    );
+    defer testing.test_session.closeAllPages();
+
+    // Duplicate keys are preserved as separate Property entries.
+    try testing.expectEqual(4, data.open_graph.len);
+
+    // Verify serialization groups duplicates into arrays.
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, data, .{});
+    defer testing.allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    const og = parsed.value.object.get("openGraph").?.object;
+    // "title" appears once → string.
+    switch (og.get("title").?) {
+        .string => {},
+        else => return error.TestUnexpectedResult,
+    }
+    // "image" appears 3 times → array.
+    switch (og.get("image").?) {
+        .array => |arr| try testing.expectEqual(3, arr.items.len),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "structured_data: twitter card" {
+    const data = try testStructuredData(
+        \\<meta name="twitter:card" content="summary_large_image">
+        \\<meta name="twitter:site" content="@example">
+        \\<meta name="twitter:title" content="My Page">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(3, data.twitter_card.len);
+    try testing.expectEqual("summary_large_image", findProperty(data.twitter_card, "card").?);
+    try testing.expectEqual("@example", findProperty(data.twitter_card, "site").?);
+}
+
+test "structured_data: meta tags" {
+    const data = try testStructuredData(
+        \\<title>Page Title</title>
+        \\<meta name="description" content="A test page">
+        \\<meta name="author" content="Test Author">
+        \\<meta name="keywords" content="test, example">
+        \\<meta name="robots" content="index, follow">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual("Page Title", findProperty(data.meta, "title").?);
+    try testing.expectEqual("A test page", findProperty(data.meta, "description").?);
+    try testing.expectEqual("Test Author", findProperty(data.meta, "author").?);
+    try testing.expectEqual("test, example", findProperty(data.meta, "keywords").?);
+    try testing.expectEqual("index, follow", findProperty(data.meta, "robots").?);
+}
+
+test "structured_data: link elements" {
+    const data = try testStructuredData(
+        \\<link rel="canonical" href="https://example.com/page">
+        \\<link rel="icon" href="/favicon.ico">
+        \\<link rel="manifest" href="/manifest.json">
+        \\<link rel="stylesheet" href="/style.css">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(3, data.links.len);
+    try testing.expectEqual("https://example.com/page", findProperty(data.links, "canonical").?);
+    // stylesheet should be filtered out
+    try testing.expectEqual(null, findProperty(data.links, "stylesheet"));
+}
+
+test "structured_data: alternate links" {
+    const data = try testStructuredData(
+        \\<link rel="alternate" href="https://example.com/fr" hreflang="fr" title="French">
+        \\<link rel="alternate" href="https://example.com/de" hreflang="de">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(2, data.alternate.len);
+    try testing.expectEqual("fr", data.alternate[0].hreflang.?);
+    try testing.expectEqual("French", data.alternate[0].title.?);
+    try testing.expectEqual("de", data.alternate[1].hreflang.?);
+    try testing.expectEqual(null, data.alternate[1].title);
+}
+
+test "structured_data: non-metadata elements ignored" {
+    const data = try testStructuredData(
+        \\<div>Just text</div>
+        \\<p>More text</p>
+        \\<a href="/link">Link</a>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(0, data.json_ld.len);
+    try testing.expectEqual(0, data.open_graph.len);
+    try testing.expectEqual(0, data.twitter_card.len);
+    try testing.expectEqual(0, data.meta.len);
+    try testing.expectEqual(0, data.links.len);
+}
+
+test "structured_data: charset and http-equiv" {
+    const data = try testStructuredData(
+        \\<meta charset="utf-8">
+        \\<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual("utf-8", findProperty(data.meta, "charset").?);
+    try testing.expectEqual("text/html; charset=utf-8", findProperty(data.meta, "Content-Type").?);
+}
+
+test "structured_data: parseLinkHeader - single link with quoted rel" {
+    var it: LinkHeaderIterator = .{ .value =
+        \\<https://api.example.com/openapi.json>; rel="service-desc"
+    };
+    const entry = it.next().?;
+    try testing.expectString("https://api.example.com/openapi.json", entry.target);
+    try testing.expectString("service-desc", entry.rel.?);
+    try testing.expectEqual(null, it.next());
+}
+
+test "structured_data: parseLinkHeader - multiple links and unquoted rel" {
+    var it: LinkHeaderIterator = .{ .value =
+        \\<https://docs.example.com/>; rel=service-doc, </style.css>; rel="stylesheet"; type="text/css"
+    };
+    const first = it.next().?;
+    try testing.expectString("https://docs.example.com/", first.target);
+    try testing.expectString("service-doc", first.rel.?);
+
+    const second = it.next().?;
+    try testing.expectString("/style.css", second.target);
+    // A comma inside the quoted type param must not split the link-value.
+    try testing.expectString("stylesheet", second.rel.?);
+
+    try testing.expectEqual(null, it.next());
+}
+
+test "structured_data: parseLinkHeader - escaped quote in param does not split link" {
+    // A backslash-escaped quote inside an earlier param must not terminate the
+    // quoted-string, so the comma inside it is not treated as a separator.
+    var it: LinkHeaderIterator = .{ .value =
+        \\<https://a/>; title="x\",y"; rel="service-doc"
+    };
+    const entry = it.next().?;
+    try testing.expectString("https://a/", entry.target);
+    try testing.expectString("service-doc", entry.rel.?);
+    try testing.expectEqual(null, it.next());
+}
+
+test "structured_data: link headers from response" {
+    const frame = try testing.createFrame();
+    defer testing.test_session.closeAllPages();
+
+    // Stand in for what frameHeaderDoneCallback records from the navigation.
+    try frame._http_headers.append(frame.page_arena, .{ .name = "link", .value =
+        \\<https://docs.example.com/>; rel="service-doc"
+    });
+    try frame._http_headers.append(frame.page_arena, .{ .name = "link", .value =
+        \\<https://api.example.com/spec>; rel="service-desc", </css/site.css>; rel="stylesheet"
+    });
+
+    const doc = frame.window._document;
+    const div = try doc.createElement("div", null, frame);
+    try Frame.parse.htmlAsChildren(frame, div.asNode(), "<title>Example</title>");
+
+    const data = try collectStructuredData(div.asNode(), frame.call_arena, frame);
+
+    // service-doc + service-desc are surfaced; stylesheet is filtered out.
+    try testing.expectEqual(2, data.link_headers.len);
+    try testing.expectString("service-doc", data.link_headers[0].rel);
+    try testing.expectString("https://docs.example.com/", data.link_headers[0].href);
+    try testing.expectString("service-desc", data.link_headers[1].rel);
+    try testing.expectString("https://api.example.com/spec", data.link_headers[1].href);
+}
+
+test "structured_data: no link header yields empty list" {
+    const data = try testStructuredData(
+        \\<link rel="canonical" href="https://example.com">
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(0, data.link_headers.len);
+}
+
+test "structured_data: mixed content" {
+    const data = try testStructuredData(
+        \\<title>My Site</title>
+        \\<meta property="og:title" content="OG Title">
+        \\<meta name="twitter:card" content="summary">
+        \\<meta name="description" content="A page">
+        \\<link rel="canonical" href="https://example.com">
+        \\<script type="application/ld+json">{"@type":"WebSite"}</script>
+    );
+    defer testing.test_session.closeAllPages();
+
+    try testing.expectEqual(1, data.json_ld.len);
+    try testing.expectEqual(1, data.open_graph.len);
+    try testing.expectEqual(1, data.twitter_card.len);
+    try testing.expectEqual("My Site", findProperty(data.meta, "title").?);
+    try testing.expectEqual("A page", findProperty(data.meta, "description").?);
+    try testing.expectEqual(1, data.links.len);
+}

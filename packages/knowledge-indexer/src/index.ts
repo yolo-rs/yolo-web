@@ -6,7 +6,14 @@
  */
 
 import { Database } from "bun:sqlite";
-import { join } from "node:path";
+
+const join = (...parts: string[]): string => {
+  const separator = parts[0]?.includes("\\") ? "\\" : "/";
+  return parts.reduce((path, part) => {
+    if (path.length === 0) return part;
+    return `${path.replace(/[\\/]+$/, "")}${separator}${part.replace(/^[\\/]+/, "")}`;
+  }, "");
+};
 
 export type TargetDomain =
   | "google.com"
@@ -43,7 +50,7 @@ export class KnowledgeIndexDb {
   constructor(customPath?: string) {
     this.dbPath =
       customPath ??
-      join(process.cwd(), "data", "knowledge", "yolo_web_knowledge.sqlite");
+      join(import.meta.dir, "../../../data/knowledge/yolo_web_knowledge.sqlite");
     this.db = new Database(this.dbPath, { create: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA synchronous = NORMAL;");
@@ -92,18 +99,20 @@ export class KnowledgeIndexDb {
 
     for (let i = 0; i < words.length; i++) {
       const word = words[i];
+      if (word === undefined) continue;
       let hash = 0;
       for (let j = 0; j < word.length; j++) {
         hash = (hash * 31 + word.charCodeAt(j)) >>> 0;
       }
-      vector[hash % dimensions] += 1.0;
+      const index = hash % dimensions;
+      vector[index] = (vector[index] ?? 0) + 1.0;
     }
 
     // Normalize to unit vector
     const norm = Math.hypot(...vector);
     if (norm > 0) {
       for (let k = 0; k < dimensions; k++) {
-        vector[k] /= norm;
+        vector[k] = (vector[k] ?? 0) / norm;
       }
     }
     return vector;
@@ -113,7 +122,7 @@ export class KnowledgeIndexDb {
     if (a.length !== b.length) return 0;
     let dot = 0;
     for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
+      dot += (a[i] ?? 0) * (b[i] ?? 0);
     }
     return dot;
   }
@@ -230,15 +239,10 @@ export class KnowledgeIndexDb {
    * Synchronizes verified test findings into Documentation and Skill Reference files.
    */
   async syncToDocsAndSkill(
-    docsPath = join(process.cwd(), "docs", "VERIFIED_TEST_KNOWLEDGE_BASE.md"),
+    docsPath = join(import.meta.dir, "../../../docs/VERIFIED_TEST_KNOWLEDGE_BASE.md"),
     skillRefPath = join(
-      process.cwd(),
-      "packages",
-      "web-plugin",
-      "skills",
-      "web",
-      "references",
-      "verified-targets-knowledge.md",
+      import.meta.dir,
+      "../../../packages/web-plugin/skills/web/references/verified-targets-knowledge.md",
     ),
   ): Promise<void> {
     const records = this.getAllRecords();
@@ -277,24 +281,14 @@ export class KnowledgeIndexDb {
     await Bun.write(docsPath, md);
     await Bun.write(skillRefPath, md);
 
-    // Also mirror into global user skill directory if present
-    const globalSkillRef = join(
-      "C:",
-      "Users",
-      "aphro",
-      ".gemini",
-      "config",
-      "plugins",
-      "web",
-      "skills",
-      "web",
-      "references",
-      "verified-targets-knowledge.md",
-    );
-    try {
-      await Bun.write(globalSkillRef, md);
-    } catch {
-      // ignore
+    // An optional caller-provided path enables global mirroring cross-platform.
+    const globalSkillRef = Bun.env.YOLO_WEB_GLOBAL_SKILL_REF;
+    if (globalSkillRef) {
+      try {
+        await Bun.write(globalSkillRef, md);
+      } catch {
+        // A caller-provided optional path may not be writable.
+      }
     }
   }
 

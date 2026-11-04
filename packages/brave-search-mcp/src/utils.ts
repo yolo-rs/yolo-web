@@ -1,14 +1,14 @@
-import { readFileSync } from 'node:fs';
-
 export function stringify(data: unknown, pretty = false) {
   return pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
 }
 
 type ReadBraveApiKeyFromFileResult = { ok: true; key: string } | { ok: false; error: string };
 
-export function readBraveApiKeyFromFile(filePath: string): ReadBraveApiKeyFromFileResult {
+export async function readBraveApiKeyFromFile(
+  filePath: string
+): Promise<ReadBraveApiKeyFromFileResult> {
   try {
-    const key = readFileSync(filePath, 'utf8').trim();
+    const key = (await Bun.file(filePath).text()).trim();
     if (key.length === 0) {
       return { ok: false, error: `API key file is empty: ${filePath}` };
     }

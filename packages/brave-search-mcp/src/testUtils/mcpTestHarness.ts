@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { after, before } from 'node:test';
+import { after, before } from 'bun:test';
 import createMcpServer from '../server.js';
 
 /**

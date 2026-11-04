@@ -1,0 +1,7 @@
+# Chromium patch queue
+
+This directory defines the location for ordered YOLO-Web patches against an explicitly pinned Chromium revision. No product patch queue is implemented here yet.
+
+Use one subdirectory per selected branch or milestone. Each patch must identify the upstream path and base commit, rationale, owner, license/provenance, build or test evidence, and removal condition. Keep patch order deterministic and verify apply/revert against a clean checkout. Do not commit generated Chromium dependencies or edit the `DEPS` graph outside an intentional upstream roll.
+
+Chromium source remains in the separate `${CHROMIUM_ROOT}/src` checkout. See [the architecture](../../docs/ARCHITECTURE.mdx) and [the rewrite plan](../../docs/ENGINE_REWRITE_PLAN.md).

@@ -1,0 +1,8 @@
+<html>
+<body><div>original</div></body>
+<script>
+  // A frameset is also a valid body, and document.body returns it.
+  const frameset = document.createElement('frameset');
+  frameset.setAttribute('rows', '50%,50%');
+  document.body = frameset;
+</script>

@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     # Unified Browser Engine & CLI App
     "crates/yolo-browser",
+    # Shared browser and web platform standards data/types.
+    "crates/yolo-standards",
     "apps/yolo-browser-cli",
+    # Vercel Labs' native Rust automation CLI; its Node/pnpm launcher is not used.
+    "crates/agent-browser",
 
     # Consolidated Obscura Crates (AI Agent, V8, DOM, CDP, MCP, Stealth, Render, SSRF)
     "crates/obscura-dom",
@@ -75,10 +79,7 @@ members = [
     "crates/deno-core/parking_lot",
 ]
 default-members = [
-    "crates/yolo-browser",
-    "apps/yolo-browser-cli",
-    "crates/obscura-cli",
-    "crates/obscura",
+    "crates/agent-browser",
 ]
 exclude = [
     "vendor/taffy",
@@ -117,7 +118,7 @@ authors = ["The YOLO-RS, Servo, Obscura & Brave Project Developers"]
 license = "Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/yolo-rs/yolo-web"
 homepage = "https://github.com/yolo-rs/yolo-web"
-description = "Unified Chromium-compatible browser monorepo in full Rust + Bun for AI agents and humans (Servo + Obscura + Brave)"
+description = "Cross-platform browser research and orchestration workspace with Rust crates and upstream engine workflows"
 publish = true
 rust-version = "1.85.0"
 
@@ -127,6 +128,7 @@ unexpected_cfgs = "allow"
 [workspace.dependencies]
 # Obscura workspace crates
 yolo-browser = { path = "crates/yolo-browser" }
+yolo-standards = { path = "crates/yolo-standards" }
 obscura = { path = "crates/obscura" }
 obscura-dom = { path = "crates/obscura-dom" }
 obscura-ssrf = { path = "crates/obscura-ssrf" }
@@ -174,11 +176,12 @@ deno_core_parking_lot = { path = "crates/deno-core/parking_lot" }
 taffy = { version = "0.12", path = "vendor/taffy" }
 tiny-skia = "0.12"
 ab_glyph = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Async, HTTP, Crypto & Utilities
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.26"
-reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "json", "rustls-tls", "rustls-tls-webpki-roots", "socks", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_core = "1.0"
 serde_bytes = "0.11"

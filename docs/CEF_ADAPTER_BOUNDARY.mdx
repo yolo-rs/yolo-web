@@ -1,0 +1,66 @@
+# CEF adapter boundary
+
+## Ownership
+
+YOLO-Web owns a future CEF engine adapter: CEF initialization, browser-process
+and renderer-process entry points, callbacks, navigation, DevTools/CDP access,
+and the versioned boundary that a host application can call. YOLO-UI owns the
+window, event loop, menus, frontend, and Tauri integration. Tauri must be a
+consumer of the adapter rather than a dependency of the engine crate.
+
+The existing `@yolo-web/chromium-tracker` CEF support is metadata and release
+tracking only. It does not load `libcef`, launch a CEF subprocess, or provide a
+browser runtime. No CEF engine crate or CEF distribution is currently part of
+the YOLO-Web Cargo workspace.
+
+## Preserved source and integration limit
+
+The legacy `bun-os-archive` checkout preserves the `aphrody-tauri-runtime-cef`
+implementation and its `vendor/cef-rs` submodule. The archived source is useful
+as implementation research, but the runtime is Tauri-specific: it depends on
+Tauri runtime/configuration crates, `tauri-winit`, platform windowing, and
+Tauri-specific browser-client and IPC types. Its callback and window lifecycle
+code cannot be moved as a standalone CEF adapter without extracting those
+interfaces and replacing the Tauri-owned state and dispatch paths.
+
+Archive provenance recorded in `bun-os-archive/docs/cef-rs.md`:
+
+- `aphrody-labs/cef-rs` submodule commit: `b1bc46da11e9bc4aedec17d00e7d7a7b28f30f3d`
+- Recorded upstream `tauri-apps/cef-rs` base: `163744c8286d5f593d89202c7807751a7898db28`
+- Archived Cargo API package identity: `cef` / `cef-dll-sys` `154.5.0`
+- The archive's selected CEF source target was Chromium `157.0.8099.0`; its
+  binding header API was `15600`. The archive documents that generated target
+  bindings and a compiled, qualified CEF distribution were still missing.
+
+These values describe separate revisions: the Cargo package version does not
+identify the Chromium source revision. The archived Tauri runtime therefore
+does not prove that the source-built CEF distribution was usable. It also does
+not match YOLO-Web's separately pinned Chromium source checkout, currently
+recorded as `159.0.8143.0`. CEF is its own build and distribution; a matching
+milestone label alone would not make it ABI-compatible with the Chromium
+checkout.
+
+## Integration gate
+
+Create a YOLO-Web-owned CEF crate only after its source and runtime inputs are
+qualified for a concrete host target. The first implementation should expose a
+narrow engine API and keep Tauri/windowing dependencies out of its Cargo graph.
+The YOLO-UI side should pass a native window handle and event-loop dispatch
+through an explicit host interface. Preserve CEF's subprocess, sandbox,
+resource, and shutdown requirements rather than presenting a CDP connection or
+a webview wrapper as a native embedder.
+
+Before claiming CEF support, record and verify all of the following:
+
+1. CEF source commit, Chromium commit, generated C API/header version, and the
+   matching `cef-rs` binding revision for Windows x64 and Linux x64.
+2. A compiled CEF distribution for each target, including required subprocess
+   and resource files, with the archive's style of build receipt and native API
+   hash qualification.
+3. A YOLO-Web adapter build and smoke run that initializes CEF, creates and
+   closes a browser, loads a local page, and reports the runtime version.
+4. A separate YOLO-UI host test proving the adapter works through its public
+   window/event-loop interface without importing Tauri types into YOLO-Web.
+
+Until those inputs and runs exist, CEF is tracked research and an archived
+integration, not a migrated or supported YOLO-Web engine.

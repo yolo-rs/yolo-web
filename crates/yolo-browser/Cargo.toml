@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Unified Chromium-compatible browser engine in full Rust for AI agents and humans, consolidating Servo, Obscura, and Brave crates."
+description = "Rust browser automation and engine research facade integrating Servo-derived, Obscura, Brave, and Deno components; does not provide Chromium compatibility."
 
 [features]
 default = ["render"]
+zig-ffi = ["dep:yolo-zig-ffi"]
 render = [
     "obscura/render",
     "obscura-browser/render",
@@ -66,6 +67,8 @@ deno_media_type = { workspace = true }
 deno_unsync = { workspace = true }
 deno_unsafecell = { workspace = true }
 deno_core_parking_lot = { workspace = true }
+yolo-standards = { workspace = true }
+yolo-zig-ffi = { version = "0.1.0", optional = true, features = ["link-yolo-zig"] }
 
 # Async & serialization
 tokio = { workspace = true }

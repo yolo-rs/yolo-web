@@ -23,6 +23,7 @@ import {
   CHROMIUM_2026_DEFAULT_PROFILE,
 } from "@yolo-web/challenge-solver";
 import { ChromiumTrackingEngine } from "@yolo-web/chromium-tracker";
+import { executeBrowserTool } from "./cdp-tools";
 
 export interface UnifiedTool {
   name: string;
@@ -725,7 +726,7 @@ export function createUnifiedWebTools(): UnifiedTool[] {
     {
       name: "browser_resolve_challenge",
       description:
-        "[Legitimate Chromium 2026] Detect and naturally solve Cloudflare Turnstile, Cloudflare Managed Challenge, Google reCAPTCHA, or Google IPP",
+        "Detect common verification challenge markers. This tool does not solve challenges or generate verification tokens; report unsupported types for user-driven verification.",
       category: "browser-automation",
       inputSchema: {
         type: "object",
@@ -954,22 +955,15 @@ export async function handleUnifiedWebToolCall(
         const expression = String(args.expression ?? "");
         const timeoutMs =
           typeof args.timeoutMs === "number" ? args.timeoutMs : 5000;
+        const result = await executeBrowserTool("browser_evaluate", {
+          script: expression,
+          timeoutMs,
+        });
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  prepared: true,
-                  expression,
-                  timeoutMs,
-                  targetRuntime: "Chromium V8 Page Isolate",
-                  isolationBoundary:
-                    "Host Bun (WebKit/JSC) -> Guest Browser (Chromium V8)",
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
@@ -987,7 +981,7 @@ export async function handleUnifiedWebToolCall(
                 {
                   detection,
                   solution,
-                  engine: "Chromium 2026 Challenge Solver",
+                  engine: "YOLO-Web challenge detector (resolution unsupported)",
                   profile: CHROMIUM_2026_DEFAULT_PROFILE,
                 },
                 null,
@@ -1025,7 +1019,7 @@ export async function handleUnifiedWebToolCall(
 
       case "chromium_managed_patches": {
         const tracker = new ChromiumTrackingEngine();
-        const patches = tracker.getManagedPatches();
+        const patches = tracker.getPatchProposals();
         return {
           content: [
             {
@@ -1036,21 +1030,13 @@ export async function handleUnifiedWebToolCall(
         };
       }
 
-      // --- Default Browser Automation Tools (Fall back or mock response) ---
+      // --- Browser automation over the configured live Chromium CDP endpoint ---
       default: {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                status: "executed",
-                tool: name,
-                arguments: args,
-                timestamp: new Date().toISOString(),
-              }),
-            },
-          ],
-        };
+        if (!OBSCURA_EXTENDED_TOOLS.some((tool) => tool.name === name)) {
+          throw new Error(`Unknown web tool '${name}'.`);
+        }
+        const result = await executeBrowserTool(name, args);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
     }
   } catch (error) {

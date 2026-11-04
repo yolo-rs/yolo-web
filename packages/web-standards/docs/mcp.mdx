@@ -1,0 +1,24 @@
+# YOLO-Web MCP Registry Profile
+
+This file describes the MCP capabilities and method names tracked in YOLO-Web's registry profile. It is implementation metadata, not a copy of or replacement for the normative MCP specification. The server's current entry points are stdio and Streamable HTTP; do not infer protocol support from a transport label in this profile.
+
+## Transport Labels Stored in the Profile
+
+The snapshot stores the labels `stdio`, `sse`, `websocket`, and `memory` for ecosystem tracking. These labels are not a claim that YOLO-Web's MCP server implements each transport. The current server offers stdio and Streamable HTTP.
+
+## Capabilities
+
+1. **Tools**: Callable execution primitives with JSON Schema parameter definitions.
+2. **Resources**: Structured and unstructured contextual data access.
+3. **Prompts**: Templated instructions and context prompts.
+4. **Experimental metadata**: Optional profile keys used to track implementation experiments; they are not normative MCP capabilities.
+
+## Usage
+
+```typescript
+import { StandardsLoader } from "@yolo-web/standards";
+
+const loader = new StandardsLoader();
+const mcp = await loader.loadMCP2026();
+console.log(`MCP Version: ${mcp.version}, Transports: ${mcp.transports.join(", ")}`);
+```

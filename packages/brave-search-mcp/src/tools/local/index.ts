@@ -148,10 +148,10 @@ export const formatOpeningHours = (
   // `current_day` is optional, and is omitted when the location is closed
   // today, so only seed the "today" entry when the API actually provided one.
   if (today.length > 0) {
-    dayHours.push([
-      `today (${today[0].full_name.toLowerCase()})`,
-      today.map(({ opens, closes }) => `${opens}-${closes}`),
-    ]);
+    const todayName = today[0]?.full_name.toLowerCase();
+    if (todayName) {
+      dayHours.push([`today (${todayName})`, today.map(({ opens, closes }) => `${opens}-${closes}`)]);
+    }
   }
 
   // Add the rest of the days to the response
