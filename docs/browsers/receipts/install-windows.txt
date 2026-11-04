@@ -1,0 +1,30 @@
+# receipt: scripts/browsers/install-windows.ps1 (detect-then-install)
+# host: APHRODY   date: 2026-11-04 23:57:05 +01:00
+# command: pwsh -File scripts/browsers/install-windows.ps1
+
+winget: v1.30.140-preview
+mode: INSTALL  dryrun: False
+
+SKIP   Chrome Canary    Google.Chrome.Canary (present 159.0.8142.0)
+SKIP   Edge Canary      Microsoft.Edge.Canary (present 159.0.4382.0)
+SKIP   Firefox Nightly  Mozilla.Firefox.Nightly.MSIX (present 161.2611.308.0)
+
+=== state ===
+Chrome Canary    Google.Chrome.Canary           159.0.8142.0
+Edge Canary      Microsoft.Edge.Canary          159.0.4382.0
+Firefox Nightly  Mozilla.Firefox.Nightly.MSIX   161.2611.308.0
+
+# --- uninstall plan (dry-run, nothing removed): pwsh -File install-windows.ps1 -Uninstall -DryRun ---
+winget: v1.30.140-preview
+mode: UNINSTALL  dryrun: True
+
+REMOVE Chrome Canary    Google.Chrome.Canary
+REMOVE Edge Canary      Microsoft.Edge.Canary
+REMOVE Firefox Nightly  Mozilla.Firefox.Nightly.MSIX
+
+=== state ===
+Chrome Canary    Google.Chrome.Canary           159.0.8142.0
+Edge Canary      Microsoft.Edge.Canary          159.0.4382.0
+Firefox Nightly  Mozilla.Firefox.Nightly.MSIX   161.2611.308.0
+
+# NOTE: all three present before run; detect-then-install skipped all. No install performed, no disk consumed.
