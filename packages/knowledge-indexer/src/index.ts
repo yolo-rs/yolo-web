@@ -9,7 +9,14 @@ import { Database } from "bun:sqlite";
 import { join } from "node:path";
 
 export type TargetDomain =
-  "google.com" | "cloudflare.com" | "chromium.org" | "chromiumos.org";
+  | "google.com"
+  | "cloudflare.com"
+  | "chromium.org"
+  | "chromiumos.org"
+  | "code.google.com"
+  | "googlesource.com"
+  | "opensource.google"
+  | "depot_tools";
 
 export interface TestKnowledgeRecord {
   id?: number;
@@ -242,6 +249,10 @@ export class KnowledgeIndexDb {
       "cloudflare.com",
       "chromium.org",
       "chromiumos.org",
+      "code.google.com",
+      "googlesource.com",
+      "opensource.google",
+      "depot_tools",
     ];
     let md = `# YOLO-Web Verified Test Knowledge Base (RAG & Index Feeder)\n\n`;
     md += `*Generated automatically from recursive test suites targeting Google, Cloudflare, Chromium, and ChromiumOS.*\n\n`;

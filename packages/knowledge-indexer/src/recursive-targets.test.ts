@@ -141,6 +141,110 @@ const TARGETS: TargetSeed[] = [
       </html>
     `,
   },
+  {
+    domain: "code.google.com",
+    rootUrl: "https://code.google.com/",
+    subpaths: ["archive/", "archive/search", "apis/"],
+    expectedSelectors: [
+      "div.archive-header",
+      "input#search-projects",
+      "ul.project-list",
+      "a.project-link",
+    ],
+    testHtmlTemplate: (path, depth) => `
+      <!doctype html>
+      <html lang="en">
+        <head><title>Google Code Archive - Depth ${depth} - ${path}</title></head>
+        <body>
+          <div class="archive-header"><h1>Google Code Project Archive</h1><p>Historical repository catalog of Google Open Source software.</p></div>
+          <form class="archive-search"><input id="search-projects" value="v8 chromium" /><button type="submit">Search Archive</button></form>
+          <ul class="project-list">
+            <li><a class="project-link" href="/p/chromium/">Chromium Archive</a></li>
+            <li><a class="project-link" href="/p/v8/">V8 Archive</a></li>
+          </ul>
+        </body>
+      </html>
+    `,
+  },
+  {
+    domain: "googlesource.com",
+    rootUrl: "https://chromium.googlesource.com/",
+    subpaths: ["chromium/src.git", "v8/v8.git", "chromiumos/manifest.git"],
+    expectedSelectors: [
+      "header.Site-header",
+      "nav.RepoShortlog",
+      "table.git-log",
+      "span.commit-sha",
+    ],
+    testHtmlTemplate: (path, depth) => `
+      <!doctype html>
+      <html lang="en">
+        <head><title>Google Git Source - Depth ${depth} - ${path}</title></head>
+        <body>
+          <header class="Site-header"><h1>Chromium Google Git Repositories</h1></header>
+          <nav class="RepoShortlog"><a href="+log/refs/heads/main">Git Log</a><a href="+show/refs/heads/main">Tree</a></nav>
+          <table class="git-log">
+            <tr><td class="commit-sha">7a4b1c2</td><td class="log-message">Reland: V8 optimize Cranelift bytecode interop</td></tr>
+            <tr><td class="commit-sha">9f3d2e1</td><td class="log-message">Roll depot_tools to latest version</td></tr>
+          </table>
+        </body>
+      </html>
+    `,
+  },
+  {
+    domain: "opensource.google",
+    rootUrl: "https://opensource.google/",
+    subpaths: ["projects/", "documentation/", "philosophy/"],
+    expectedSelectors: [
+      "nav.site-nav",
+      "section.projects-grid",
+      "div.project-card",
+      "a.docs-link",
+    ],
+    testHtmlTemplate: (path, depth) => `
+      <!doctype html>
+      <html lang="en">
+        <head><title>Google Open Source - Depth ${depth} - ${path}</title></head>
+        <body>
+          <nav class="site-nav"><a href="/projects">Google Open Source Projects</a></nav>
+          <section class="projects-grid">
+            <div class="project-card"><h3>Chromium</h3><p>Open source browser project</p><a class="docs-link" href="https://www.chromium.org">Visit</a></div>
+            <div class="project-card"><h3>V8</h3><p>High-performance JavaScript and WebAssembly engine</p><a class="docs-link" href="https://v8.dev">Visit</a></div>
+            <div class="project-card"><h3>Go</h3><p>Build fast, reliable, and efficient software</p></div>
+          </section>
+        </body>
+      </html>
+    `,
+  },
+  {
+    domain: "depot_tools",
+    rootUrl: "https://chromium.googlesource.com/chromium/tools/depot_tools/",
+    subpaths: ["+/main/README.md", "+/main/gclient.py", "+/main/fetch.py"],
+    expectedSelectors: [
+      "div.repo-readme",
+      "code.cli-command",
+      "table.tool-inventory",
+      "span.tool-name",
+    ],
+    testHtmlTemplate: (path, depth) => `
+      <!doctype html>
+      <html lang="en">
+        <head><title>Chromium depot_tools - Depth ${depth} - ${path}</title></head>
+        <body>
+          <div class="repo-readme">
+            <h1>depot_tools: Chromium and Google Source Toolchain</h1>
+            <p>Essential developer utilities: gclient, fetch, ninja, gn, git-cl, and repo sync.</p>
+            <code class="cli-command">git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git</code>
+          </div>
+          <table class="tool-inventory">
+            <tr><td class="tool-name">gclient</td><td>Multi-repository meta-checkout tool</td></tr>
+            <tr><td class="tool-name">gn</td><td>Meta-build system for Ninja</td></tr>
+            <tr><td class="tool-name">git-cl</td><td>Gerrit code review tool for git</td></tr>
+          </table>
+        </body>
+      </html>
+    `,
+  },
 ];
 
 describe("Recursive Web Target Test Matrix (Google, Cloudflare, Chromium, ChromiumOS)", () => {
@@ -239,5 +343,26 @@ describe("Recursive Web Target Test Matrix (Google, Cloudflare, Chromium, Chromi
     );
     expect(crosQuery.length).toBe(1);
     expect(crosQuery[0].targetDomain).toBe("chromiumos.org");
+
+    const depotToolsQuery = db.ragSearch(
+      "depot_tools gclient fetch ninja gn git-cl",
+      1,
+    );
+    expect(depotToolsQuery.length).toBe(1);
+    expect(depotToolsQuery[0].targetDomain).toBe("depot_tools");
+
+    const gitSourceQuery = db.ragSearch(
+      "Google Git shortlog commit sha v8 src.git",
+      1,
+    );
+    expect(gitSourceQuery.length).toBe(1);
+    expect(gitSourceQuery[0].targetDomain).toBe("googlesource.com");
+
+    const openSourceQuery = db.ragSearch(
+      "Google Open Source projects Chromium V8 Go",
+      1,
+    );
+    expect(openSourceQuery.length).toBe(1);
+    expect(openSourceQuery[0].targetDomain).toBe("opensource.google");
   });
 });
