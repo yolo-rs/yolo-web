@@ -1,0 +1,20 @@
+# Commits reviewed by the update-docs skill and deliberately left for a later
+# run, with why. The baseline in docs-updated-to-sha cannot hold these: it says
+# everything before it was folded in, and the next span begins after it, so a
+# commit skipped mid-span would never be offered again.
+#
+# `docs-ref.py changes` replays these ahead of the new span. Drop one with
+# `docs-ref.py resolve <sha>` once its behaviour is documented.
+
+035a6112c4d7118e1aa8135e8d4154d5313e88d9 credential-protection.md is status: proposed with every clause verified-by: none, so documenting it would describe behaviour not in force; fold it in when the spec goes normative and its clauses are pinned
+cb739c3c9dc4288bfaf26f2d84218b6aec64d1bf DROP-10: the drop list a front end sends over the protocol is desktop or bridge behaviour, and no page describes a desktop or bridge front end yet; fold it in when one exists
+2244053d19eaaefbc29ad54465a6ab29000b711c credential-protection.md is status: proposed; fold in when the spec goes normative and its clauses are pinned
+bf261766f1e2515c07c825c8015959dc19c0c091 credential-protection.md is status: proposed; fold in when the spec goes normative and its clauses are pinned
+28314a051423276ef323112ea42dca132b4f3c00 credential-protection.md is status: proposed; fold in when the spec goes normative and its clauses are pinned
+76c0c2005f5c6d51523dbacbb4c2eb37cbc6397d desktop bot behaviour: no page describes a desktop or bridge front end; fold in when one exists
+7d72a2a7bcbb5ab5534cb647080b83ab2d4766d2 desktop bot behaviour: no page describes a desktop or bridge front end; fold in when one exists
+3fc779fecc65b8c7e80355fd556be0d9dc68012c desktop bot behaviour: no page describes a desktop or bridge front end; fold in when one exists
+bde5d3328608ff42b409ed65f927df490d9d6135 desktop bot behaviour: no page describes a desktop or bridge front end; fold in when one exists
+ef30af9290f7c64519440a1417db260b9dc7653a desktop bot behaviour: no page describes a desktop or bridge front end; fold in when one exists
+fae7fdfdce5a7096d638fb2eb50ccfabaaec48cb MEMORY-11 is not built per its spec (definition-memory.md); fold in when the migration ships
+128df4ef5889060593646eabed57ca9890f09c1f Connector definitions (manifest runs fetching and acting through installed connector definitions) have no page: docs/specs/connectors.md says documented-by none. Write a page on installing a connector definition and the authority it carries, then resolve.

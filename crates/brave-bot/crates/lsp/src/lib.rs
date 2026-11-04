@@ -1,0 +1,321 @@
+//! Language server client: positions in, locations out.
+//!
+//! What makes this admissible where a shell is not is the shape of a request. An operation from a
+//! closed set, a path, and two integers: all routing, no payload, nothing a person could not
+//! approve on its own. [tools/lsp.md] is the spec, and LSP-3 is the clause to read first, because
+//! the interesting part is not the request but the answer.
+//!
+//! An answer is split in two, and the split is visible in the types here. A [`protocol::Location`]
+//! is structure: a path, a line, a character, a symbol kind and an optional end line, read off the
+//! server's index. It has nowhere for prose to sit, deliberately, and that is what lets it reach
+//! the planner whatever the trust map says about the file it names. Hover text is the other half:
+//! bytes the file chose, so it is labelled from the trust map and quarantined like anything else
+//! nobody vouched for.
+//!
+//! This is native rather than an MCP server for the reason [mcp.md] gives: a call whose parts must
+//! be labelled separately cannot go behind a boundary that labels the whole thing at once.
+//!
+//! [tools/lsp.md]: ../../../docs/specs/tools/lsp.md
+//! [mcp.md]: ../../../docs/specs/mcp.md
+
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "the test names its program")
+)]
+
+pub mod protocol;
+pub mod server;
+#[cfg(test)]
+mod testutil;
+
+pub use protocol::{Diagnostics, Location, Operation, SymbolKind};
+pub use server::{
+    BuildTooling, Declared, Language, Question, Roster, Served, Server, Servers, Starting,
+};
+
+use bravebot_core::policy::Denial;
+use std::fmt;
+
+pub type LspResult<T> = Result<T, LspError>;
+
+/// What one question produced.
+///
+/// The fields are on two footings, which is LSP-3 in the shape of a struct. `locations` and
+/// `diagnostics` are structure and travel; `text` is content and is labelled by whoever holds the
+/// trust map.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Answer {
+    /// Where the server says the thing is. Never carries a byte the file wrote.
+    pub locations: Vec<Location>,
+    /// The text at the position, for the operations that report any. For `diagnostics` it is the
+    /// server's messages about the file, one entry per diagnostic, which are as much content as a
+    /// hover.
+    pub text: Option<String>,
+    /// What the server published about the file, for `diagnostics` alone: severities and lines,
+    /// with nowhere for a message to sit (LSP-13).
+    pub diagnostics: Option<Diagnostics>,
+    /// Whether the index was still building, so this answer may be short of the truth.
+    ///
+    /// LSP-7. A fact about the answer rather than a sentence inside it, so it survives quarantine:
+    /// a notice written into a body nobody may read tells nobody anything.
+    pub partial: bool,
+}
+
+#[derive(Debug)]
+pub enum LspError {
+    /// A person was asked whether to start the server and said no.
+    Refused { language: server::Served },
+    /// The policy refused the call.
+    Denied(Denial),
+    /// This file's language has no server in the table.
+    NoServerFor { path: String },
+    /// A whole-tree query was asked before any server was running, so there is nothing to ask.
+    NoServerForQuery,
+    /// The server for this language is not installed.
+    NoBinary {
+        language: server::Served,
+        program: String,
+    },
+    /// The server was there and did not start.
+    Start {
+        language: server::Served,
+        detail: String,
+    },
+    /// The server exited while we were talking to it.
+    Exited { language: server::Served },
+    /// The transport failed, or the server sent something unusable.
+    Transport {
+        language: server::Served,
+        detail: String,
+    },
+    /// The server was sent a file and published nothing about it inside the budget.
+    ///
+    /// Not an answer about the code: a server that says nothing has not said the file is clean, and
+    /// a quick pass it never refines is indistinguishable from silence (LSP-13).
+    NoReport { language: server::Served },
+    /// The server did not answer inside the budget.
+    TimedOut {
+        language: server::Served,
+        method: String,
+    },
+    /// The server returned a JSON-RPC error.
+    ///
+    /// The `message` the server sent with it is not here, and [`protocol::RpcError`] does not keep
+    /// it either. LSP-5: "a server that can read the disk is not a server that can put prose in
+    /// the planner's context", and a JSON-RPC error message is exactly a place for prose to sit. It
+    /// is free text the server composes, with nothing constraining what goes in it, so this process
+    /// has no way to know whether one holds an identifier, a path or a line of the file being
+    /// analysed. What is reported is structure: which language, which method was put, and the code
+    /// the protocol assigns to the failure.
+    Server {
+        language: server::Served,
+        code: i64,
+        method: String,
+    },
+    /// The operation named is not one of ours.
+    UnknownOperation { named: String },
+}
+
+/// Each variant says which of LSP-6's three failures it is, in words that cannot be mistaken for an
+/// answer about the code. "No references found" and "no server ran" must never render alike.
+impl fmt::Display for LspError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused { language } => write!(
+                f,
+                "the {} language server was not started, because the user declined; nothing here \
+                 says anything about the code, and asking again will not change it",
+                language.as_str()
+            ),
+            Self::Denied(denial) => write!(f, "{denial}"),
+            Self::NoServerForQuery => write!(
+                f,
+                "workspaceSymbol searches a language server's index and no server is running yet, \
+                 so this question was not asked of one; ask about a symbol in a file first, which \
+                 starts the server for that file's language, then this will search it"
+            ),
+            Self::NoServerFor { path } => write!(
+                f,
+                "no language server is configured for {path}, so this question was not asked of \
+                 one; nothing here says anything about the code"
+            ),
+            Self::NoBinary { language, program } => write!(
+                f,
+                "the {} language server is not installed: {program} was not found on PATH, so \
+                 this question was not asked of one",
+                language.as_str()
+            ),
+            Self::Start { language, detail } => write!(
+                f,
+                "the {} language server did not start: {detail}",
+                language.as_str()
+            ),
+            Self::Exited { language } => write!(
+                f,
+                "the {} language server exited before replying",
+                language.as_str()
+            ),
+            Self::Transport { language, detail } => write!(
+                f,
+                "the {} language server sent something unusable: {detail}",
+                language.as_str()
+            ),
+            Self::NoReport { language } => write!(
+                f,
+                "the {} language server did not report on this file in time, which does not mean \
+                 it has no errors",
+                language.as_str()
+            ),
+            Self::TimedOut { language, method } => write!(
+                f,
+                "the {} language server did not answer {method} in time",
+                language.as_str()
+            ),
+            Self::Server {
+                language,
+                code,
+                method,
+            } => write!(
+                f,
+                "the {} language server returned error {code} for {method}; anything it said \
+                 about that is the server's own text and is not reported here",
+                language.as_str()
+            ),
+            Self::UnknownOperation { named } => write!(
+                f,
+                "'{named}' is not an operation this tool offers; the operations are \
+                 goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, \
+                 goToImplementation, incomingCalls, outgoingCalls and diagnostics"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LspError {}
+
+impl LspError {
+    /// Whether no server answered, as opposed to one that answered and came back empty.
+    ///
+    /// The distinction LSP-6 exists for: a planner that reads "no references" as proof will delete a
+    /// function that is called from a file no server ever indexed. A refusal belongs here too, since
+    /// a server nobody allowed to start is a server that said nothing.
+    pub fn is_absence_of_a_server(&self) -> bool {
+        matches!(
+            self,
+            Self::NoServerFor { .. }
+                | Self::NoServerForQuery
+                | Self::NoBinary { .. }
+                | Self::Start { .. }
+                | Self::Refused { .. }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An answer with nothing in it is still an answer, and must be distinguishable from never
+    /// having asked. LSP-6.
+    #[test]
+    fn an_empty_answer_is_not_an_absent_server() {
+        let empty = Answer::default();
+        assert!(empty.locations.is_empty());
+        assert!(!empty.partial);
+
+        assert!(
+            LspError::NoServerFor {
+                path: "a.txt".into()
+            }
+            .is_absence_of_a_server()
+        );
+        assert!(
+            LspError::NoBinary {
+                language: server::Language::Rust.into(),
+                program: "rust-analyzer".into()
+            }
+            .is_absence_of_a_server()
+        );
+        assert!(
+            LspError::Start {
+                language: server::Language::Rust.into(),
+                detail: "boom".into()
+            }
+            .is_absence_of_a_server()
+        );
+
+        // A server that answered and failed is not an absent one.
+        assert!(
+            !LspError::Server {
+                language: server::Language::Rust.into(),
+                code: -32601,
+                method: "textDocument/implementation".into()
+            }
+            .is_absence_of_a_server()
+        );
+        assert!(
+            !LspError::TimedOut {
+                language: server::Language::Rust.into(),
+                method: "textDocument/references".into()
+            }
+            .is_absence_of_a_server()
+        );
+    }
+
+    /// LSP-1: a name off the closed set is refused, and the refusal says what the set is so the
+    /// planner does not spend a round guessing.
+    #[test]
+    fn an_unknown_operation_names_the_ones_that_exist() {
+        let said = LspError::UnknownOperation {
+            named: "workspace/applyEdit".into(),
+        }
+        .to_string();
+        assert!(said.contains("not an operation"), "{said}");
+        assert!(said.contains("goToDefinition"), "{said}");
+        assert!(said.contains("findReferences"), "{said}");
+        assert!(said.contains("diagnostics"), "{said}");
+    }
+
+    /// No failure may read as a statement about the code. This is the whole of LSP-6's why.
+    #[test]
+    fn no_failure_reads_as_an_answer_about_the_code() {
+        let failures = [
+            LspError::NoServerFor {
+                path: "a.txt".into(),
+            },
+            LspError::NoBinary {
+                language: server::Language::Rust.into(),
+                program: "rust-analyzer".into(),
+            },
+            LspError::Start {
+                language: server::Language::Rust.into(),
+                detail: "boom".into(),
+            },
+            LspError::Exited {
+                language: server::Language::Rust.into(),
+            },
+            LspError::NoReport {
+                language: server::Language::Rust.into(),
+            },
+            LspError::TimedOut {
+                language: server::Language::Rust.into(),
+                method: "textDocument/references".into(),
+            },
+            LspError::Server {
+                language: server::Language::Rust.into(),
+                code: -32601,
+                method: "textDocument/implementation".into(),
+            },
+        ];
+        for failure in failures {
+            let said = failure.to_string();
+            for forbidden in ["no references", "no matches", "not used", "nothing found"] {
+                assert!(
+                    !said.contains(forbidden),
+                    "{said} reads as an answer about the code"
+                );
+            }
+        }
+    }
+}

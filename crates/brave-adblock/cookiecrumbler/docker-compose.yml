@@ -1,0 +1,109 @@
+x-brave-base: &brave_base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  init: true
+  image: ${DOCKER_REPOSITORY:-brave/cookiecrumbler}:latest
+  volumes:
+    - .:/app
+  env_file: .env
+  ports:
+    - "3000:3000"
+
+services:
+  brave:
+    <<: *brave_base
+    profiles: [""]
+
+  brave_litellm:
+    <<: *brave_base
+    environment:
+      - OPENAI_BASE_URL=http://litellm:4000
+      - OPENAI_API_KEY=sk-litellm
+      - OPENAI_MODEL=meta.llama3-8b-instruct-v1:0
+    profiles:
+      - litellm
+    depends_on:
+      litellm:
+        condition: service_healthy
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.81.6.rc.2
+    profiles:
+      - litellm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    command:
+      - "--config=/app/config.yaml"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - DATABASE_URL=postgresql://llmproxy:llmproxy@litellm_db:5432/litellm
+      - STORE_MODEL_IN_DB=True
+      - STORE_PROMPTS_IN_SPEND_LOGS=True
+      - LITELLM_MASTER_KEY=sk-litellm
+    healthcheck: # Defines the health check configuration for the container
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" # Command to execute for health check
+      interval: 30s # Perform health check every 30 seconds
+      timeout: 10s # Health check command times out after 10 seconds
+      retries: 3 # Retry up to 3 times if health check fails
+      start_period: 40s # Wait 40 seconds after container start before beginning health checks
+    depends_on:
+      litellm_db:
+        condition: service_healthy
+
+  litellm_db:
+    image: postgres
+    profiles:
+      - litellm
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: llmproxy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  brave_ollama:
+    <<: *brave_base
+    environment:
+      - OPENAI_BASE_URL=http://ollama:11434/v1
+    profiles:
+      - ollama
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama_data:/root/.ollama
+    command: ["serve"]
+    # requires Docker Compose v2.30+
+    post_start:
+      - command:
+          - /bin/sh
+          - -c
+          - |
+            apt-get update && \
+            apt-get install -y curl --no-install-recommends && \
+            curl http://localhost:11434/api/pull \
+              -H 'Content-Type: application/json' \
+              -d '{"name": "llama3", "stream": true}'
+        user: root
+
+volumes:
+  ollama_data:
+  postgres_data:

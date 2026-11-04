@@ -1,0 +1,1423 @@
+---
+id: CRED
+title: Credential protection
+status: proposed
+governs:
+  - crates/core/src/ambient.rs
+  - crates/config/src/lib.rs
+  - crates/config/src/env_var.rs
+  - crates/config/src/keys.rs
+  - crates/config/src/provider.rs
+  - crates/config/src/settings.rs
+  - crates/ui-bridge/src/settings.rs
+  - crates/bedrock/src/credentials.rs
+  - crates/signing/src/sigv4.rs
+  - crates/core/src/credentials.rs
+  - crates/agent/src/findings.rs
+  - crates/sandbox/src/crash.rs
+  - crates/skus/src/secret.rs
+  - crates/skus/src/store.rs
+  - crates/tui/src/hidden.rs
+guards:
+  - symbol: Secret::expose
+documented-by:
+  - docs/website/docs/customize/configuration.md
+  - docs/website/docs/security/security.md
+  - docs/website/docs/security/sandbox.md
+---
+
+## Scope
+
+The credentials already on a person's machine, the ones bravebot adds, and what an agent does with
+a secret: what it can end up holding, which of those it should hold at all, where the ones it must
+hold are kept, what a grant binds, and who enforces each bound.
+
+The typed credential value does not become a labelled value, which is the split that puts this in a
+file of its own. Labelled content may nevertheless contain credential material.
+
+
+
+
+
+## Where credentials come from
+
+Four tables, split by location and then by author.
+
+### Already on the machine, outside the working tree
+
+Present whether or not an agent ever runs. 
+
+| Group | Where it lives |
+| --- | --- |
+| OS stores | `~/Library/Keychains/login.keychain-db`; `%APPDATA%\Microsoft\Credentials`, `\Protect`; `~/.local/share/keyrings/`, `~/.local/share/kwalletd/`; `~/.password-store/`; `keyctl` session |
+| Shell & env | `~/.bashrc`, `~/.zshrc`, `~/.zshenv`, `~/.profile`, `~/.bash_profile`; `~/.bash_history`, `~/.zsh_history`, `~/.zsh_sessions/`, `~/.bash_sessions/`, `~/.local/share/fish/fish_history`, `~/.psql_history`, `~/.mysql_history`, `~/.node_repl_history`, `~/.python_history`, `~/.rediscli_history`, `~/.sqlite_history`, `~/.dbshell`, `~/.mongodb/mongosh/mongosh_repl_history`; agent env, including the `env` block of `~/.bravebot/settings.json` |
+| SSH | `~/.ssh/id_rsa`, `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, custom names; `~/.ssh/config`; `*.ppk`; `\\wsl$\...\home\<user>\.ssh` |
+| Git | `~/.git-credentials`; `~/.gitconfig`; `~/.netrc`, `_netrc`; `~/.config/gh/hosts.yml`, `~/.config/glab-cli/config.yml`, `~/.config/hub` |
+| Cloud | `~/.aws/credentials`, `~/.aws/config`, `AWS_*` env; `~/.aws/sso/cache/*.json`, `~/.aws/cli/cache/`; `~/.config/gcloud/credentials.db`, `~/.config/gcloud/access_tokens.db`, `~/.config/gcloud/application_default_credentials.json`, SA JSON; `~/.azure/msal_token_cache.json`, `~/.azure/azureProfile.json`; `~/.config/vercel/auth.json`, `~/.config/netlify/config.json`, `~/.fly/config.yml`, `~/.config/doctl/`, `~/.supabase/`, `~/.config/rclone/`; `http://169.254.169.254`, Codespaces token endpoint |
+| Containers | `~/.docker/config.json`, `~/.config/containers/auth.json`; `~/.kube/config`, `~/.kube/cache/`; `/var/run/secrets/kubernetes.io/serviceaccount/token`; `~/.config/helm/repositories.yaml` |
+| Registries | `~/.npmrc`, `~/.yarnrc.yml`; `~/.pypirc`, `~/.config/pip/pip.conf`; `~/.m2/settings.xml`, `~/.gradle/gradle.properties`; `~/.cargo/credentials.toml`, `~/.nuget/NuGet/NuGet.Config`, `~/.composer/auth.json`, `~/.gem/credentials`; `~/.cache/huggingface/token`, `GOPRIVATE` + netrc |
+| IaC & secrets | `~/.terraformrc`, `~/.terraform.d/credentials.tfrc.json`; `~/.pulumi/credentials.json`; `~/.vault-token`; `~/.config/sops/age/keys.txt`, `*.agekey`, vault password files; `~/.gitlab-runner/config.toml`; the 1Password CLI's `~/.config/op/` |
+| Databases | `~/.pgpass`, `~/.my.cnf`, `~/.mylogin.cnf`; DBeaver `credentials-config.json` under `~/.local/share/DBeaverData/` or `~/Library/DBeaverData/`, JetBrains password safe, TablePlus, pgAdmin `~/.pgadmin/pgadmin4.db` |
+| IDE & agent | `claude_desktop_config.json` in `~/Library/Application Support/Claude/`; another agent's own auth: `~/.claude/.credentials.json` at mode 0600, or the login keychain item it falls back from, `~/.claude.json`, `~/.codex/`, `~/.gemini/` and `~/.local/share/opencode/auth.json`; `settings.json`, Settings Sync, extension storage: `~/.config/Code/`, `~/Library/Application Support/Code/`; `~/.config/JetBrains/*/options/`; agent transcripts / tool logs: session dirs, undo history, and this agent's own `~/.bravebot/sessions/`; `~/.config/github-copilot/hosts.json` |
+| Browser | `Login Data`, `Cookies`, `Web Data`, `Local State`; `logins.json`, `key4.db`, `cookies.sqlite`; `userDataDir`, `storageState.json` outside the tree |
+| Certs & signing | `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore` outside the tree; mkcert `rootCA-key.pem`; `~/.android/debug.keystore`, release keystores; `~/Library/MobileDevice/Provisioning Profiles/`, App Store Connect `.p8`; code-signing certs: OS keychain / cert store |
+| Network & host | `*.ovpn`, `~/.config/openconnect/`; SMB credential files under the home directory; the X display's cookie `~/.Xauthority` |
+| API clients | `~/Postman/`, environment exports, and Postman's own `~/.config/Postman/`, `~/Library/Application Support/Postman/`; `~/.config/Insomnia/`, `~/Library/Application Support/Insomnia/`, `~/.config/Bruno/`, `~/Library/Application Support/Bruno/` |
+| User files | `notes.txt`, `passwords.txt`, `creds.txt` on Desktop / Documents; KeePass `.kdbx`, Bitwarden `data.json`, Enpass |
+| Indirect | `~/Downloads`, `~/Desktop`; memory artifacts: core dumps, swap / hibernation file, crash reports; Docker layers with `ARG`/`COPY .env`, published bundles |
+
+**Some things in that space are not credentials and are listed nowhere above.**
+`~/.ssh/known_hosts` and `authorized_keys` are a recon and persistence surface.
+`/var/run/docker.sock` and `$SSH_AUTH_SOCK` are access paths rather than stored values: nothing is
+handed over and nobody can refuse, which is the case [CRED-5](#CRED-5) takes off the scale.
+`/proc/<pid>/environ`, a clipboard manager and a terminal's scrollback are channels a credential
+passes through rather than places one is kept. And a mail store, a notes application, a synchronised
+folder or a backup is where a credential *ended up*: that is the leakage row of the table below,
+which owes detection rather than a tier.
+
+Root-owned files are also absent, `/etc/shadow` and `/etc/NetworkManager/system-connections`
+included. This agent runs as the person and cannot read them, so listing them would claim a reach
+the design does not have.
+
+### Added by the user, in the working tree
+
+Committed or created by hand. An entry marked `(either)` is one an agentic turn also produces in the
+ordinary course, and a turn that writes one is attributed to the turn rather than to the person.
+
+| Group | Where it lives |
+| --- | --- |
+| App config | `.env`, `.env.local`, `.env.production`, `.env.test`; `.envrc`, `.envrc.local`; `config/*.yml`, `application.properties`, `settings.py`, `appsettings.json`; `database.yml`, `alembic.ini`, ORM config; project `.npmrc`, `.yarnrc.yml`, `pip.conf`, `.pypirc` (either) |
+| Infra & deploy | `docker-compose.yml`, `docker-compose.override.yml`; `Dockerfile` `ENV` / `ARG`; `Secret` objects, `values.yaml`, kustomize overlays; `serverless.yml`, `vercel.json`, `fly.toml`, `netlify.toml` (either) |
+| IaC | `*.tfvars`, `*.auto.tfvars`; inventory files, `group_vars/`, `values.yaml` (either) |
+| CI/CD | `.github/workflows/*.yml`, `.gitlab-ci.yml`, `.circleci/config.yml`; `scripts/*.sh`, `Makefile`, `justfile` (either) |
+| Agent & IDE | `.mcp.json`, `.cursor/mcp.json`; `CLAUDE.md`, `.cursorrules`, `AGENTS.md`; `.vscode/launch.json`, `.vscode/settings.json`, `.idea/` (either) |
+| Tests & fixtures | hardcoded keys in `conftest.py`, `*.spec.ts` (either). committed Postman / Insomnia exports, `*.http`, `*.rest` |
+| Keys & certs | `*.pem`, `*.key`, `*.p12`, `*.jks` inside the repo (either). GCP SA key, `google-services.json`, Firebase config copied in |
+| Docs & records | README and docs examples: real keys in code samples and quickstarts (either). `*.ipynb` source cells and saved outputs; `notes.md`, `TODO.md`, `setup.txt` |
+| Byproducts | `.env.swp`, `.env.swo`, `.env.save` |
+| Git directory | `.git/config`, whose remote URL may carry a token inline; committed objects: git objects, packfiles, reflog, stashes, tags; tracker text: commit messages, PR and issue bodies drafted from the tree (either) |
+
+### Added by the agent, in the working tree
+
+Only a turn puts these here. This is the half that can be enforced, because a finding in a diff a
+turn just produced has exactly one author.
+
+| Group | Where it lives |
+| --- | --- |
+| App config | `SECRET_KEY_BASE`, Django `SECRET_KEY`, `NEXTAUTH_SECRET`, `JWT_SECRET` |
+| IaC | `terraform.tfstate`, `*.tfstate.backup` |
+| Tests & fixtures | `storageState.json`, recorded auth state; `seeds/`, migrations creating DB users |
+| Keys & certs | generated local certs: dev certs and local CA output written to the tree |
+| Byproducts | `logs/`, `*.log`, `npm-debug.log`; `*.sql`, `*.dump`, `*.csv` written during a task; `.env.bak`, `config.yml.orig`, `*.orig` where a turn copied a file before editing it, which the edit tool does not do for it |
+
+
+### Added by the agent, outside the working tree
+
+What this agent keeps for itself, and what a turn brings into existence elsewhere. The first
+group is the program: those paths are in this repository and nothing else writes them. The rest a
+turn reaches by running a command, so they are what the tool surface makes possible rather than
+features anything here implements.
+
+| Group | Where it lives |
+| --- | --- |
+| Its own auth | the signing key and key id that sign a request to the default backend, baked into the binary at build time and masked rather than encrypted, so one build's key is every install's key; the Backtrace submission URL, baked and masked the same way, whose token can add crash reports to one project and read nothing ([crash-reports.md](crash-reports.md#CRASH-3)); `~/.bravebot/gateway-keys.json`, kept to the account that wrote it by a mode of 0600 on Unix and a protected one-account access-control list on Windows, the gateway keys `bravebot auth login gateway` or the desktop window's key window stored, one per provider id; `~/.bravebot/brave-key.json`, kept the same way, the key `bravebot auth login brave` or the desktop window's key window stored for Brave's premium service, sent as a bearer token to Brave's premium host alone ([PREM-2](premium-credentials.md#PREM-2), [PREM-14](premium-credentials.md#PREM-14)); `~/.bravebot/chatgpt-account.json`, kept the same way, the access token and refresh token `bravebot auth login chatgpt` or the desktop window's own sign-in stored for a ChatGPT account ([CHATGPT-6](chatgpt-sign-in.md#CHATGPT-6)); `~/.bravebot/xai-account.json`, kept the same way, the access token and refresh token `bravebot auth login xai` or the desktop window's own sign-in stored for an xAI account ([XAI-5](xai-sign-in.md#XAI-5)). With Bedrock opted into instead, the AWS CLI's own cache, listed under Cloud above |
+| What it keeps beside that | `~/.bravebot/history`, every submitted prompt across runs; `~/.bravebot/sessions/<project-key>/<id>.json` and its trail beside it, and the record holds the conversation rather than a title, so it carries whatever file content the planner was shown until nothing has written the record for the retention period, 30 days where none is stated ([state-directory.md](state-directory.md#STATE-4)); `~/.bravebot/mcp.json`, which holds each value `bravebot mcp add -e NAME=value` stored for a server, often an API key, at a mode of 0600 on Unix (values for an HTTP server's headers are read from the environment at launch and never stored); `/export`, which writes a transcript as markdown inside the working directory |
+| Its own project settings | `.bravebot/settings.json` and `.bravebot/settings.local.json` in a checkout, a layer over the one at home, which on some machines carries credentials |
+| Minted access, by a turn | `~/.ssh/`, then deploy key or `authorized_keys`; `gh auth login`, `~/.config/gh/hosts.yml`; `aws iam create-access-key` → `~/.aws/credentials`; `gcloud iam service-accounts keys create`; `az ad sp create-for-rbac`; `npm token create`, `docker login`, `helm registry login` |
+| Generated by a turn, stored outside the tree | `~/.ngrok2/ngrok.yml`, `~/.cloudflared/*.json`; `mkcert -install` |
+| Pushed to a remote by a turn | `gh secret set`, GitLab CI variables; PaaS env vars: Vercel, Netlify, Fly; k8s `Secret` objects, Vault paths; webhook registration: third-party SaaS |
+
+
+
+## How to protect each of these
+
+Five answers, strongest first. Take the strongest the far end allows. Anything weaker is a
+deliberate, recorded choice, and the walk below is what records it.
+
+**1. Not read at all.** The value stays where it is and nothing brings it into the agent. This is
+the only answer that costs no one a decision, and the only one that works before anybody is asked.
+Everything outside the working tree has it already: `read_file`, `write_file`, `edit_file` and
+`search` resolve a path and refuse one that lands outside, symlinks included. Its strict form
+covers what the agent authenticates with, `~/.bravebot/gateway-keys.json`,
+`~/.bravebot/brave-key.json`, `~/.bravebot/chatgpt-account.json`, `~/.bravebot/xai-account.json`, a
+`~/.bravebot/leo-premium.json` that an earlier version left, and the credentials that sign or authorise a model request, which CRED-14 puts
+out of reach of every program, prompt and record with no legitimate exception. A program a turn runs under the confined default is refused `~/.bravebot` as
+it is refused `~/.ssh` ([SANDBOX-12](sandboxing.md#SANDBOX-12)), except `~/.bravebot/sessions`,
+which it reads and never writes, as it reads `~/.ssh/config`. No `allowRead` or `allowWrite`
+row, scope variable or `/reach` grant lifts the rest, and none grants a write there. Two things get past it: a command a turn runs
+with `sandbox` off, and `/add-dir`, which makes a named directory reachable for the session.
+
+**2. Something else performs the action.** The agent asks for an outcome and never sees a secret.
+A hardware key signs and a touch refuses; a signing agent with per-use confirmation does the same;
+a broker sends the mail or calls the API and reports what happened. This is the strongest answer
+that still gets work done, and it needs a performer to exist for the operation, which is the only
+reason most of the inventory does not have it.
+
+**3. A placeholder, substituted at the boundary.** For actions only the agent can perform, such as
+`git push` or an arbitrary HTTP call, the agent holds a stand-in and something on the way out
+swaps in the real value for one named destination. The agent still holds nothing, so on custody
+this is what performing the action is, and on authority it is not: the boundary bounds where a
+request may go and where the value may appear in it, and does not bound which operation is asked
+for. A performer exposes one action; a substituted credential exposes every action the far end
+will accept at that destination. It costs a proxy, a local certificate authority, and a rule about
+where in a request the placeholder may appear.
+
+**4. A temporary credential, minted for the occasion.** A real secret, but bounded before it is
+issued and ended by whoever issued it: an installation token for one repository, an assumed-role
+session, a lease, a single-use batch. The bound has to be enforced by something the agent cannot
+impersonate, and it has to have an end. Scope without an end is not this answer.
+
+**5. A permanent credential.** A bearer secret that sits here indefinitely. This is where most
+of the inventory sits today, and it is a position rather than a protection: what is owed is
+detection, because the credential outlives every decision made about it. Leakage happens too: the
+tree may hold credentials nobody decided anything about, and what a turn writes needs scanning.
+
+### Which of these each group can reach
+
+| group | best of answers 2 to 5 | what stops it there |
+| --- | --- | --- |
+| hardware keys and tokens: a security key, a TPM, a smart card | performed | nothing. The key cannot leave, the agent asks for a signature, and a touch is a refusal |
+| signing agents: `ssh-agent`, `gpg-agent` | performed, with per-use confirmation | without confirmation nothing is handed over and nobody can refuse, which is off the scale rather than protected |
+| SaaS API keys: payments, comms, workspace, observability, model providers | performed | a performer has to exist for the operation. The protocol is ordinary and the payload is readable, so this is a question of building it |
+| site logins and session cookies | performed | a performer that fills the form on the credential's own origin. A grabbed cookie is a bearer token and is permanent |
+| databases | performed | a proxy can mediate because it may read the query. Where it may not, the payload condition fails |
+| `git push` over HTTPS, arbitrary HTTP | placeholder | nothing can perform these whole, so substitution at the boundary is the ceiling |
+| cloud: static keys and CLI caches | temporary | the issuer mints assumed sessions with a policy the agent cannot widen, and ends them. Performing needs something that signs each request |
+| forge access: a personal token, a CLI login | temporary | an installation token for one repository is the bounded derivative. Performing fails only for want of a performer |
+| secret managers and vaults | temporary | a lease is the bound and the issuer enforces it. What is behind the lease starts its own walk |
+| container registries and package registries | permanent, usually | the counterparty refuses. Most registries have no derived form, and many will not expire a publish token |
+| code signing and platform keystores | performed where the key is in hardware, permanent where it is a file | decided by where the key lives, not by the protocol |
+| project and infrastructure config in the tree | whatever the underlying credential reaches | the file is a location, not an issuer |
+| sockets and metadata endpoints: a container socket, an instance metadata service | none of these | nothing is handed over and nobody can refuse, so there is no custody to bound. Answered where the capability is granted |
+| leakage: histories, packfiles, transcripts, dumps, backups, swap | none of these | not credentials. They are where a permanent one ended up, and they are why detection is owed |
+
+### How the walk decides which you get
+
+Answers 2 to 5 are the four tiers, and three gates separate them. Start at the top and walk down.
+Failing a gate drops exactly one tier, nothing skips a tier, and nothing climbs back without the
+arrangement changing.
+
+```
+                    Delegated
+                        │
+   gate 1 ── can something the agent cannot impersonate decide each use, and refuse?
+        │ no, and nothing is handed over ──→ off the scale: unbounded authority
+        ↓ no, and material must be handed over
+                     Granted
+                        │
+   gate 2 ── can the issuer mint a bounded derivative, enforced beyond the agent's reach?
+        ↓ no
+                   Held briefly
+                        │
+   gate 3 ── can the issuer mint on demand and enforce death, unrefreshable without authority?
+        ↓ no
+                      Held
+```
+
+**Delegated** covers answers 2 and 3, because in both the agent holds nothing and something it
+cannot impersonate decides every use. **Granted** and **Held briefly** are both answer 4, differing
+in whether the bound or the lifetime is what the issuer enforces. **Held** is answer 5.
+
+**The obligations ratchet downward.** Each drop inherits everything owed below it, so Held carries
+all three. That accumulation is what makes a drop a cost rather than a shrug.
+
+
+
+
+### Where the design lives
+
+| answer | what delivers it |
+| --- | --- |
+| 1. not read at all | the workspace boundary in this repository: every tool that names a file resolves the path and refuses one outside the tree. Past that, [sandboxing.md](sandboxing.md) specifies credential scopes but holds only for the stdio servers it covers, and says itself that nothing in that section binds a `run` until a profile exists |
+| 2. something else performs | [brokering](../design/credential-brokering.md): the authority holds the credential and carries out the action whole. |
+| 3. a placeholder | [brokering](../design/credential-brokering.md): a stand-in the agent holds, swapped at the egress boundary for one named destination|
+| 4. a temporary credential | [brokering](../design/credential-brokering.md): something bounded and expiring, with the issuer enforcing both ends.|
+| 5. a permanent credential | [discovery](../design/credential-discovery.md): find it before the tree is read, show it, and carry a disposition that outlives the run. |
+
+**Only one route runs upward.** A credential found at answer 5 reaches answer 2 through discovery's
+enrol disposition, and only where a performer exists for the operation. Deny, remove and accept all
+stay at 5. Nothing else in this document moves a credential from a weaker answer to a stronger one.
+
+
+## Clauses
+
+Everything above is commentary. These are the rules.
+
+<a id="CRED-1"></a>
+### CRED-1: a secret never becomes a labelled value except through one named exposure
+
+Nothing the type carrying a credential offers yields its bytes, and it offers no equality at
+all. Printing it, converting it or serialising it does not, and both its debug and display output
+redact. Where a credential genuinely has to be compared, the comparison is made in constant time by
+the component that owns it, never by an operator on the type. One named call exposes the value, and
+it is the only one.
+
+This is a guarantee about a type, not about meaning. Ordinary labelled content can contain
+credential material, which is what the tree inventory is a list of.
+
+**Why.** A credential that could become a labelled value could be taint-joined, relabelled, or
+handed to a gate that forgot the case. None of that is reachable if the conversion does not exist.
+
+**Why no equality.** An equality operator answers a question about the bytes, so it recovers them a
+guess at a time, and the derived form compares in time proportional to the shared prefix. The type
+carrying a label already refuses equality for the same reason
+([LABEL-4](labels.md#LABEL-4)); the type carrying a secret has the stronger claim to it.
+
+`verified-by: bravebot_config::lib::secrets_are_redacted_in_debug_and_display`
+`verified-by: by-construction (Debug and Display both redact; no Deref, AsRef, Borrow, Serialize or From impl or derive exists; equality is pinned by the compile_fail doctest on Secret in crates/config/src/lib.rs, since a derive is not spelled impl and a reader grepping for one would miss it)`
+
+<a id="CRED-2"></a>
+### CRED-2: every credential carries a tier, and the tier is where its gate walk stopped
+
+A credential in use has a recorded tier, arrived at by walking down from Delegated. Where there is
+custody and no recorded walk, the tier is Held, because that is the one that assumes nothing. A
+credential nothing reads has no tier, and neither does the off-the-scale case CRED-5 covers.
+
+**Why.** The walk is the only thing that distinguishes a credential somebody reasoned about from one
+that ended up wherever it ended up. Defaulting the unexamined case to the top would let silence
+claim the strongest tier.
+
+**Where it is recorded.** On the record [CRED-25](#CRED-25) uses, which is the one per-credential
+record there is, and read by the same surface: `doctor` names the tier under the account of what
+would end the credential. The tier is the one entry on that record every credential in it owes
+whatever its tier, which is why the record reaches past the two tiers CRED-25 asks an account of.
+
+**What stands where.** Every credential the record holds stands at Held: the signing key, the AWS
+credentials, a gateway's token, the premium key and the ChatGPT and xAI sign-ins. The premium key's
+walk drops at all three gates, each recorded as one nobody attempted, as a gateway token's does: the
+premium host issues one key, this program presents it itself with nothing deciding a use, and nothing
+here has asked that host for a narrower or a shorter one. It has no figure for how quickly a leak
+would be noticed, revoking it at the premium host leaves nothing minted from it working, and it is
+not derived from another credential, so it has no binding to record. `bravebot auth logout brave`
+ends this machine's custody and leaves the key working at the premium service, which is the only
+place that revokes it. Granted and Held briefly remain
+tiers a credential can stand at, and none does.
+
+`verified-by: bravebot_config::lib::every_credential_in_the_record_stands_at_a_tier_the_walk_arrived_at`
+`verified-by: bravebot_config::lib::a_premium_key_is_a_credential_this_configuration_holds`
+`verified-by: bravebot_cli::doctor::each_tier_a_credential_can_stand_at_is_reported_in_its_own_words`
+`verified-by: bravebot_cli::running::doctor_names_the_tier_of_every_credential_it_accounts_for`
+`verified-by: bravebot_cli::running::doctor_accounts_for_the_premium_key_at_the_tier_its_walk_stopped_at`
+
+<a id="CRED-3"></a>
+### CRED-3: a gate fails only for a stated reason, and dropping pays what the gate says it costs
+
+Each drop records which of the gate's conditions failed, and whether the counterparty refused or
+nobody attempted it. Those are different answers and they end at the same tier.
+
+**Why.** Without the record a tier is an assertion. A gate the counterparty refused is a fact about
+the world and a gate nobody attempted is a decision somebody made, and only the second is ours to
+revisit.
+
+**Where it is recorded.** Beside the tier, on the record [CRED-25](#CRED-25) uses and read by the
+same surface: a credential's walk is the drops it took, in the order the gates are asked, and
+`doctor` prints one line per drop under the account of what would end it. The number of drops is
+the tier, since failing a gate drops exactly one and nothing skips one, so a walk and a tier that
+disagree are a disagreement rather than a silence.
+
+`verified-by: bravebot_config::lib::a_credentials_walk_holds_one_drop_per_gate_it_failed_and_stops_at_its_tier`
+`verified-by: bravebot_config::lib::every_drop_this_configuration_records_is_one_nobody_attempted`
+`verified-by: bravebot_cli::doctor::a_reason_is_reported_for_exactly_the_drops_the_record_holds`
+`verified-by: bravebot_cli::doctor::a_drop_is_reported_with_the_gate_and_the_answer_the_record_holds`
+`verified-by: bravebot_cli::doctor::every_drop_has_its_own_account_of_the_condition_it_failed`
+`verified-by: bravebot_cli::running::doctor_accounts_for_every_drop_of_each_credentials_walk`
+
+<a id="CRED-4"></a>
+### CRED-4: nothing climbs a tier without the arrangement changing
+
+A credential moves up only when what is true about it changes: a performer appears, an issuer offers
+a bound, a value becomes mintable on demand. Rewriting a justification moves nothing.
+
+**Why.** The gates ask about the arrangement, so only the arrangement answers them. A tier that can
+be argued upward is a tier that will be.
+
+`verified-by: bravebot_config::lib::a_gateways_walk_is_the_same_whatever_host_it_names`
+`verified-by: bravebot_config::lib::every_credential_in_the_record_stands_at_a_tier_the_walk_arrived_at`
+`verified-by: bravebot_config::lib::removing_denying_or_accepting_changes_no_tier`
+`verified-by: bravebot_config::lib::a_credentials_binding_does_not_move_its_tier`
+
+<a id="CRED-5"></a>
+### CRED-5: authority with no custody and no refusal leaves the scale, and is declared where it is granted
+
+Where nothing is handed over and nobody can refuse a use, the credential is on no tier. It is named
+where the capability is granted and recorded when it is used.
+
+**Why.** A logged-in tool, a live socket and a metadata endpoint have no custody to rank and no
+bound to enforce, so placing them on the scale would put unbounded authority at the top of it. The
+one thing available before confinement is that nobody grants it thinking they granted less.
+
+`verified-by: bravebot_core::ambient::a_line_that_reaches_a_container_daemon_names_it`
+`verified-by: bravebot_core::ambient::a_tool_that_spends_on_one_command_is_named_for_that_command_alone`
+`verified-by: bravebot_core::ambient::the_metadata_service_is_named_by_the_address_and_not_by_the_argument`
+`verified-by: bravebot_core::ambient::a_numeric_spelling_of_the_metadata_address_is_the_metadata_service`
+`verified-by: bravebot_core::ambient::a_numeric_spelling_of_another_address_is_not_the_metadata_service`
+`verified-by: bravebot_core::ambient::a_signed_part_is_not_a_spelling_of_the_metadata_address`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_names_the_ambient_authority_a_line_reaches`
+`verified-by: bravebot_tui::confirm::grants::a_fetch_prompt_says_what_the_metadata_service_is`
+`verified-by: bravebot_agent::turn::spending_an_ambient_authority_is_recorded_in_the_trail_and_an_ordinary_line_is_not`
+`verified-by: bravebot_agent::turn::an_ambient_authority_is_recorded_for_a_line_the_credential_scan_refuses`
+
+<a id="CRED-6"></a>
+### CRED-6: a handle the agent can redeem alone is not a handle
+
+Gate 1 passes only where redeeming what the agent holds needs the assent of something it cannot
+impersonate. Where the agent can redeem it unaided, it is the credential under another name and the
+gate has already failed.
+
+**Why.** This is the test that keeps Delegated from being a relabelling exercise. Both answers that
+reach it rest on what the agent holds being useless by itself.
+
+`verified-by: bravebot_config::lib::each_gate_asks_the_conditions_its_clauses_name`
+
+<a id="CRED-7"></a>
+### CRED-7: a bound is decided before issue and enforced beyond the agent's reach
+
+Gate 2 passes only where the bound on a derived artifact is fixed before it is issued and fails
+closed where the agent cannot reach it. A bound the agent's own code checks is not a bound.
+
+**Why.** A program running as the person presents itself as any other, so a check the agent could
+impersonate answers to whoever is asking. A bound enforced past that point survives the agent's side
+being wrong, which is the only reason a derivative is worth having.
+
+`verified-by: bravebot_config::lib::each_gate_asks_the_conditions_its_clauses_name`
+
+<a id="CRED-8"></a>
+### CRED-8: a bound with no end does not pass gate 2
+
+A derived artifact that is narrow and permanent does not pass. Narrowing is worth doing and does not
+move the tier.
+
+**Why.** Scope and time are separate properties and a permanent narrow secret is a static secret
+with a small reach. Letting scope alone pass the gate would let gate 3's work be skipped by doing
+gate 2's twice.
+
+`verified-by: bravebot_config::lib::each_gate_asks_the_conditions_its_clauses_name`
+
+<a id="CRED-9"></a>
+### CRED-9: the issuer ends the credential's life, and refresh without authority is not expiry
+
+Gate 3 passes only where the value is minted for a named step and killed by the issuer. A value the
+agent can renew without further authority is permanent, whatever its stated lifetime.
+
+**Why.** Refreshable-without-asking is the common false pass: a fifteen-minute token the agent
+renews by itself is a permanent credential with extra steps, and belongs at Held.
+
+**What this leaves the AWS session credential at.** Held. The AWS CLI is asked for credentials as
+each request is built, and what renews one is an export that asks nobody: the next session comes
+from whatever the profile chains to, for as long as that lasts. How long that is is a question
+about `~/.aws/config`, which nothing here reads, so a `role_arn` over a long-lived key in a file
+and an SSO chain arrive as one arrangement, the CLI answering an export. Its walk drops at gate 3
+on the agent renewing it without further authority, and [CRED-3](#CRED-3) records that drop as one
+nobody attempted: reading the profile chain, and finding one whose renewal a person has to sit
+through, would be a different arrangement. So the stated expiry ends that copy rather than this
+program's access, which is what the record and the report say.
+
+`verified-by: bravebot_config::lib::no_credential_this_program_holds_stands_at_held_briefly`
+`verified-by: bravebot_bedrock::credentials::a_session_this_program_re_mints_unaided_is_recorded_at_held`
+
+<a id="CRED-10"></a>
+### CRED-10: a brief window is sized against detection, and the size is recorded
+
+Where a credential is at Held briefly, the record says how quickly a leak would be noticed and acted
+on. That figure does not establish the tier and does not move it.
+
+**Why.** The issuer's enforcement is what bounds the credential, and it holds whether or not anybody
+notices: a thirty-second token that cannot be refreshed is worth nothing on the thirty-first second
+to an attacker nobody has detected. What detection decides is whether the window is short enough for
+what the credential reaches, which is a judgement about this deployment rather than a fact about the
+arrangement.
+
+**Why it is not a tier test.** [CRED-2](#CRED-2) fixes the tier at where the gate walk stopped and
+[CRED-4](#CRED-4) lets nothing move it but the arrangement. Response time is neither, so a tier that
+depended on it could be lost by a rota change. The obligation stays because a window nobody sized is
+a number somebody liked.
+
+**Where it is recorded.** Beside the tier, on the same record [CRED-25](#CRED-25) uses, and read by
+the same surface: `doctor` prints the figure under the account of what would end the credential. The
+tier and the figure are separate answers on that record, so a credential standing at Held briefly
+with nothing sized is a disagreement rather than a silence.
+
+**What stands there, and what the figure survives.** Nothing this program holds stands at Held
+briefly: the one arrangement whose bound reads as a window is an AWS session credential, and
+[CRED-9](#CRED-9) puts it at Held. Its figure stays, because the obligations ratchet downward and
+a drop sheds none of them, and because detection is the whole of what a permanent credential is
+owed. What the drop changes is what the figure decides. At Held briefly it says whether the window
+is short enough for what the credential reaches; at Held there is no window, and it says how long
+a leak runs before anybody goes to the surface [CRED-25](#CRED-25) names. So a credential at Held
+briefly has a figure and one at Held may, which is one direction rather than two.
+
+`verified-by: bravebot_config::lib::a_credential_at_held_briefly_is_sized_against_detection`
+`verified-by: bravebot_cli::doctor::how_soon_a_leak_is_noticed_is_reported_for_exactly_the_credentials_the_record_sizes`
+
+<a id="CRED-11"></a>
+### CRED-11: a turn does not copy a credential somewhere weaker than where it was
+
+No turn writes a credential, or anything derived from one that would authenticate in its place,
+anywhere less protected than where it already sits: the tree, a build or deployment file, an
+instruction file the agent reads back, a pre-edit backup, a log, a transcript, a terminal, or a
+commit. A person putting one somewhere is theirs to do and this does not reach it.
+
+**Why.** This is the row of the tree inventory nothing else covers, because it is the one the agent
+causes. Everything after it follows on its own: a secret in a file is read back by a later turn,
+reaches the planner once the tree is vouched for, survives in a backup nobody deletes, and is pushed
+like any other change.
+
+**A line a turn runs is one of the ways it writes.** The check does not belong to the write tools:
+a command line reaches a file through a redirection, and the line itself is a place, since it is
+drawn on a screen, kept in the record of the round and readable by every account on the machine
+while the program lives. So the line is scanned as the turn's own words before anything is
+compiled or shown, and what the line left at each destination it opened is scanned once it has
+stopped, at the label that destination's own effect is recorded under. The second of those two
+cannot refuse before the fact, because the program opens the file itself: what it buys is the
+value being taken back out of the tree rather than never reaching it, and the costs below say
+what that is worth and where it stops.
+
+`verified-by: bravebot_agent::turn::a_credential_the_line_itself_carries_stops_the_line`
+`verified-by: bravebot_agent::turn::a_credential_a_run_line_redirects_into_the_tree_does_not_stay_there`
+`verified-by: bravebot_agent::turn::a_credential_the_destination_already_held_does_not_refuse_the_line_carrying_it`
+`verified-by: bravebot_agent::workspace::a_destination_that_is_not_there_has_no_text_to_scan`
+`verified-by: bravebot_agent::workspace::a_destination_exactly_the_size_of_the_budget_is_read_in_full`
+`verified-by: bravebot_agent::workspace::a_destination_one_byte_past_the_budget_is_not_read`
+`verified-by: bravebot_agent::workspace::a_destination_with_a_byte_that_is_not_text_is_decoded_with_the_rest_kept`
+
+<a id="CRED-12"></a>
+### CRED-12: withdrawn, replaced by CRED-13
+
+Replaced by CRED-13, which owns creation. This stated that a credential a turn creates walks the
+gates as it is created and is not created where the walk cannot be run. CRED-2 already requires a
+recorded tier for every credential in use, and CRED-13 already refuses the creation where the value
+cannot go to the authority, so this said the same thing a third time in weaker terms.
+
+<a id="CRED-13"></a>
+### CRED-13: a credential a turn creates is created into the authority
+
+Where a turn brings a credential into existence, by asking a service to mint one, generating key
+material, or choosing a secret a project will authenticate with, the value goes to the authority in
+the same step and its tier is recorded then. It is not written to the tree, to a file under the
+machine, to a record, or to a terminal, and what the tree receives is a reference. Where the value
+cannot be created into the authority, the credential is not created and the turn says so.
+
+**Why.** CRED-11 forbids copying a credential somewhere weaker than where it already sits, and a
+credential a turn has just generated sits nowhere. There is no weaker place, so nothing reaches the
+first place it lands. Creation is the only moment a value has no prior location, which is exactly
+when a rule phrased around its prior location stops meaning anything.
+
+**Why into the authority rather than merely not into the tree.** A generated key written to a file
+on the machine is at Held before anyone has walked a gate, and the walk then ratifies where the
+value already sits instead of deciding it. Creating into the authority is what leaves the walk
+something to decide.
+
+**What the refusal says.** A credential created as a file is the value and nothing else, so there
+is no room in it for the reference CRED-11's refusal asks for, and a planner told to write one
+there writes it into the file a framework reads as the key. What that turn is told instead is that
+nothing was created, that generating another and writing it elsewhere is the same refusal again,
+and that the person is the one who creates the value. Telling the two apart is a question about the
+body rather than about the finding: a value inside a document was copied from wherever it already
+sat, and a value that is the whole file had no prior location.
+
+**Who may answer it.** A person shown the bytes, or the flag somebody passed so as not to be asked.
+Where the scan found a value a person decides about, asking and accepting edits put the write to
+the person ([MODE-2](permission-modes.md#MODE-2)), and bypassing answers it as it answers every
+other question ([MODE-4](permission-modes.md#MODE-4)). Plan mode refuses it as it refuses any
+write. A value that declared itself is refused before any of this, in every mode. Nothing else
+standing answers it: a rule allowing the path, a vouch in the trust map, an approved manifest plan,
+or an earlier plain yes to the same path. Those decide whether a write needs approval, and a finding
+makes it need one whatever they said. Where nobody can be asked and the run is not bypassing, the
+write is refused. All three writes that reach a person are covered: a whole-file write, an edit that
+leaves the file holding only the value, and a manifest step. What decides this is the finding, never
+the body.
+
+**How long an answer lasts.** A plain yes covers that write and nothing after it: not the next value
+in the same file, and not the same value in another. The question offers two longer answers, and
+only a question about a credential offers them:
+
+```
+  y write it    a always this session    r remember it    n leave it alone    ctrl-c stop the turn
+```
+
+- `a` settles whether this file may hold a secret for the rest of the session.
+- `r` settles it for every session begun in this directory, by adding the file to the record of
+  remembered command lines ([RUN-19](tools/run.md#RUN-19)), on that record's terms: it is read
+  immediately before the question, a turn nobody could put a prompt to reads none, and the prompt names the file the entry
+  goes to. It is offered only where the session may add to that record, which an incognito one may
+  not ([INCOG-5](incognito.md#INCOG-5)), and only for a file inside the directory it is kept for.
+
+Both are about the file the write lands in as the workspace resolves it, never the name the planner
+gave. The same name in another checkout, the same name after `/cd`, and a name a link sends
+elsewhere are other files, and are asked about. Both settle the secret and nothing else: a write the
+person would be asked about for its own sake still is, and that question offers neither key. `a`
+ends with the session, so `/cd`, `/clear`, `/branch` and `--resume` start without it, a delegate
+starts without it, and so does a manifest run. A key the prompt did not draw grants nothing,
+whatever a front end sends back. The terminal draws both; the desktop front end and `--plain`
+([CLI-14](cli.md#CLI-14)) offer yes and no.
+
+`verified-by: bravebot_agent::turn::a_credential_created_as_a_whole_file_is_not_created_and_the_planner_is_told_so`
+`verified-by: bravebot_agent::permission_mode::accepting_edits_puts_a_credential_write_to_the_person_and_bypassing_answers_it`
+`verified-by: bravebot_agent::turn::only_bypassing_answers_a_credential_write`
+`verified-by: bravebot_agent::turn::only_bypassing_answers_an_edit_that_leaves_a_file_holding_a_credential`
+`verified-by: bravebot_agent::turn::a_yes_to_a_credential_write_covers_no_write_after_it`
+`verified-by: bravebot_agent::turn::always_for_a_credential_write_covers_that_file_and_no_other`
+`verified-by: bravebot_agent::turn::always_for_a_credential_write_settles_the_secret_and_not_the_write`
+`verified-by: bravebot_agent::turn::always_for_an_edit_that_leaves_a_credential_covers_the_next_edit_to_that_file`
+`verified-by: bravebot_agent::turn::a_standing_answer_the_prompt_did_not_offer_grants_nothing`
+`verified-by: bravebot_agent::turn::remembering_a_credential_write_covers_later_sessions_in_that_directory_only`
+`verified-by: bravebot_agent::turn::remembering_is_offered_only_for_a_file_inside_the_directory`
+`verified-by: bravebot_agent::turn::a_delegate_inherits_no_always_for_a_credential_write`
+`verified-by: bravebot_agent::manifest::approving_a_plan_is_not_approving_a_credential_it_writes`
+`verified-by: bravebot_agent::manifest::bypassing_answers_a_credential_a_plan_writes`
+`verified-by: bravebot_agent::manifest::always_for_a_planned_credential_covers_a_later_step_to_the_same_file`
+`verified-by: bravebot_agent::incognito::no_file_a_credential_may_be_created_in_is_written_down`
+`verified-by: bravebot_agent::remembered::a_file_written_by_one_session_is_read_back_by_another_in_that_directory_only`
+`verified-by: bravebot_agent::remembered::a_file_outside_the_directory_is_neither_written_nor_read`
+`verified-by: bravebot_agent::remembered::a_directory_sharing_a_key_with_another_is_not_answered_by_its_files`
+`verified-by: bravebot_agent::remembered::a_file_no_rendering_can_show_is_read_back_as_itself`
+`verified-by: bravebot_agent::remembered::a_file_entry_this_build_does_not_fully_understand_covers_nothing`
+`verified-by: bravebot_core::remembered::a_file_entry_covers_that_file_only`
+`verified-by: bravebot_tui::confirm::write::the_write_keys_bind_only_the_standing_answers_the_prompt_offers`
+`verified-by: bravebot_tui::confirm::write::the_write_keys_separate_this_session_from_every_session`
+`verified-by: bravebot_tui::confirm::write::a_write_prompt_draws_the_standing_answers_it_offers_and_no_other`
+`verified-by: bravebot_tui::confirm::write::a_write_prompt_offering_both_standing_answers_draws_every_key_whole`
+`verified-by: bravebot_ui_bridge::refusal::an_answered_write_gets_the_answer_that_was_sent`
+`verified-by: bravebot_tui::credential_mode_tests::bypassing_writes_a_credential_without_asking`
+`verified-by: bravebot_tui::credential_mode_tests::always_for_a_credential_covers_a_later_write_to_the_same_file`
+`verified-by: bravebot_tui::credential_mode_tests::always_for_a_credential_does_not_follow_the_session_through_cd`
+`verified-by: bravebot_tui::credential_mode_tests::always_for_a_credential_does_not_outlive_clear`
+`verified-by: bravebot_core::credentials::a_generated_key_standing_as_a_whole_file_is_recognised`
+`verified-by: bravebot_core::credentials::a_file_that_is_the_value_is_told_from_one_that_mentions_it`
+`verified-by: bravebot_core::credentials::blank_lines_around_the_value_are_not_contents`
+
+<a id="CRED-14"></a>
+### CRED-14: the credentials this agent holds for itself reach no program, no prompt and no record
+
+What this agent authenticates with, and anything it holds to spend on the person's behalf, are
+never written to a session record and never shown except as a redaction. Removing them from the
+environment of a program the agent starts is the same rule [tools/run.md](tools/run.md) already
+states and pins, covering the signing key, its key id and every variable a gateway's provider
+block names as the home of its token, exempting a line the person typed at the `!` prompt, and switched off
+only by an environment variable rather than by any settings file. The gateway variables come from the
+effective provider configuration ([RUN-12](tools/run.md#RUN-12)), so a block naming a variable of its
+own is covered without a list of well-known gateways.
+
+**Why not wider.** The person's own environment is left alone: asking a program to use credentials
+they already have is an ordinary request, and a name filter cannot tell one of those from an
+exfiltration.
+
+**What it does not reach.** Where the backend is reached through Bedrock, what this agent
+authenticates with is the machine's own cloud credentials, and those are the ones the paragraph above deliberately leaves in place: the clause
+holds for the signing key and does not hold for that configuration. Withholding there is a question
+about the profile this agent resolved for itself, which it knows, rather than about a name. The CLI
+that resolves them is a program this agent started all the same, so it is handed what the person's
+own environment holds and none of what this agent authenticates with.
+
+**A gateway's bearer key.** The key an `openai` entry sends in `authorization` is in no error text, no event
+of the run, no line of the diagnostic log and nothing a completed reply holds, on the roster path and on both
+chat paths, including where the service repeats the key in the body of its refusal. A one-shot run through the
+entry, answered or refused, leaves it in no file under the state directory, the record of the session and its trail
+included, and in nothing the run prints.
+
+**The stored ChatGPT sign-in.** `~/.bravebot/chatgpt-account.json` holds an access token and a refresh
+token ([CHATGPT-6](chatgpt-sign-in.md#CHATGPT-6)), and this clause holds them as it holds the gateway
+keys. They are in the secret type, so a print of one is a redaction. The file is one of the locations a
+program a turn runs is refused ([SANDBOX-12](sandboxing.md#SANDBOX-12)), and the browser opener the
+sign-in command starts is handed none of the variables this clause removes. A run that signs in, renews
+and fails leaves none of the values of the sign-in in the streams of each command, the debug log, the files
+left in the home or the environment of a program a turn starts ([CHATGPT-8](chatgpt-sign-in.md#CHATGPT-8)).
+
+**The stored xAI sign-in.** `~/.bravebot/xai-account.json` holds an access token and a refresh token
+([XAI-5](xai-sign-in.md#XAI-5)), and this clause holds them as it holds the ChatGPT sign-in's: they are in
+the secret type, so a print of one is a redaction, the file is one of the locations a program a turn runs is
+refused ([SANDBOX-12](sandboxing.md#SANDBOX-12)), and the sign-in command starts no program. A run that signs
+in leaves none of the values of the sign-in in the streams of each command or the files left in the home, but
+the file that holds the tokens, and the command writes no log ([XAI-8](xai-sign-in.md#XAI-8)). The access token is
+presented to `api.x.ai` alone, as a bearer on a request that follows no redirect, and the refresh token to
+`auth.x.ai` alone ([XAI-1](xai-sign-in.md#XAI-1), [XAI-16](xai-sign-in.md#XAI-16)). A turn that fails on the
+account says a sentence chosen from the step and a status, and repeats nothing a reply said, since an error
+body carried the account's team identifier ([XAI-15](xai-sign-in.md#XAI-15)).
+
+**The stored premium key.** `~/.bravebot/brave-key.json` holds the key
+([PREM-14](premium-credentials.md#PREM-14)), and this clause holds it as it holds the gateway keys. It
+is in the secret type from the read of its file on, so a print of it is a redaction. The file is one
+of the locations a program a turn runs is refused ([SANDBOX-12](sandboxing.md#SANDBOX-12)). The
+command that stores it says the file and never the key, and `auth status` and `doctor` print neither
+([PREM-16](premium-credentials.md#PREM-16)). No variable carries the key, so there is none to take
+out of the environment of a program.
+
+**The state directory is out of a Windows grant.** A stage on Windows is refused when a directory
+the session was opened on is, holds or lies inside `~/.bravebot`, since the grant would hand a
+program the gateway keys and `settings.json` and a Windows container cannot be refused a path
+inside it ([SANDBOX-18](sandboxing.md#SANDBOX-18)). Linux and macOS refuse the directory inside
+the grant ([SANDBOX-12](sandboxing.md#SANDBOX-12)).
+
+**MCP HTTP headers read from the environment.** An HTTP MCP server declaration ([SERVERS-18](mcp-servers.md#SERVERS-18)) reads headers and authorization tokens from named environment variables at launch. The secret values are never written to `~/.bravebot/mcp.json`, never drawn in approval prompts, `get`, or `list` output, and are attached in flight only to outgoing requests matching the declared socket. Any redirect hop across sockets strips both socket-scoped headers and `Authorization`.
+
+**The record is closed elsewhere.** No field of the trail can hold a credential, because
+[TRACE-2](trace.md#TRACE-2) admits only a gate name, a capability, a label, a path or a slot id.
+That is a stronger answer than a redaction rule and it is why this clause does not restate one; what
+is owed there is the test, which scans the trail for every secret the process holds.
+
+`verified-by: bravebot_bedrock::credentials::this_agents_own_credentials_reach_none_of_the_aws_cli_this_crate_starts`
+`verified-by: bravebot_cli::push_identity::a_program_started_here_is_not_handed_this_agents_own_credentials`
+`verified-by: bravebot_cli::running::doctor_push_identity_hands_none_of_this_agents_credentials_to_the_programs_it_starts`
+`verified-by: bravebot_agent::usability::a_program_the_suite_starts_is_not_handed_this_agents_signing_key`
+`verified-by: bravebot_agent::usability::the_gh_the_login_row_starts_is_not_handed_this_agents_signing_key`
+`verified-by: bravebot_tui::editor::an_editor_a_click_opens_is_not_handed_this_agents_credentials_and_the_prompt_editor_is`
+`verified-by: bravebot_tui::editor::the_editor_a_click_opens_is_started_without_this_agents_own_credentials`
+`verified-by: bravebot_bedrock::credentials::the_machines_own_aws_configuration_still_reaches_the_cli`
+`verified-by: bravebot_config::scrub::a_name_from_the_settings_file_is_not_one_of_this_agents_own`
+`verified-by: bravebot_config::scrub::the_variables_a_provider_block_names_are_withheld`
+`verified-by: bravebot_agent::exec::a_gateways_environment_token_does_not_reach_a_program_it_runs`
+`verified-by: bravebot_agent::confine::a_windows_session_on_the_home_directory_is_refused_for_the_state_directory`
+`verified-by: bravebot_agent::confine::a_stage_reads_the_machine_and_is_refused_the_credential_locations`
+`verified-by: bravebot_sandbox::base::the_run_base_reads_the_session_records_and_no_other_file_in_the_state_directory`
+`verified-by: bravebot_cli::brave::a_typed_key_is_stored_private_and_never_said`
+`verified-by: bravebot_cli::running::auth_status_brave_reports_a_stored_key_without_the_key`
+`verified-by: bravebot_skus::chatgpt::account::the_tokens_are_redacted_wherever_the_account_is_printed`
+`verified-by: bravebot_tui::opener::the_opener_is_not_handed_this_agents_own_credentials`
+`verified-by: bravebot_cli::chatgpt_account::no_value_of_a_chatgpt_sign_in_reaches_an_output_of_a_run_that_signs_in_renews_and_fails`
+`verified-by: bravebot_skus::xai::account::the_tokens_are_redacted_wherever_the_account_is_printed`
+`verified-by: bravebot_cli::xai_sign_in::a_sign_in_runs_end_to_end_and_no_value_it_handled_is_shown_or_kept_but_in_the_file`
+`verified-by: bravebot_aichat::client::an_openai_key_is_in_no_error_event_log_or_reply_on_the_roster_and_chat_paths`
+`verified-by: bravebot_cli::running::an_openai_key_is_in_no_file_a_run_writes_and_nothing_it_prints`
+
+<a id="CRED-15"></a>
+### CRED-15: what a turn reads is scanned before the planner receives it
+
+The text a read would hand the planner is scanned first, with the layers CRED-16 uses and under
+CRED-18 and CRED-19. On a finding the result is held back and the person is asked whether to go
+ahead, told that the read would expose a credential to the model. The question names the path and
+the finding, which is a kind, a location and a masked preview, and never the value. On yes the
+result reaches the planner as it would have; on no the planner is told the read was declined
+because the file holds what looks like a credential, and gets none of its text. The finding goes to
+the person and never to the planner, whichever way it was answered, which is what CRED-19 requires
+of a finding however it arose.
+
+The lines `edit_file` returns around a change are such a read: they are text from the file, and they
+are scanned and asked about in the same way, under the same answer per file
+([EDIT-4](tools/edit-file.md#EDIT-4)). The edit stays whichever way the question is answered, and
+the planner is told it landed.
+
+**Why the ordering is the whole design.** The planner's context goes to whoever performs inference,
+so a file handed to it has been handed to them. A scan that ran afterwards would be reporting a
+disclosure that had already happened, which is why this runs at the read rather than at the end of
+the turn or at the moment somebody vouches for the tree.
+
+**Only trusted text is scanned.** A read of content nobody vouched for hands the planner a
+reference rather than bytes, so there is nothing disclosed to hold back, and reading those bytes to
+decide whether to ask would be a decision taken from untrusted content, which
+[labels.md](labels.md) admits nowhere. It is the same bound a credential written through a
+reference falls under, and the Known costs record both.
+
+**What the question covers, and for how long.** The file, for the session or until the working
+directory moves. An answer writes no rule, moves no credential between tiers and grants nothing a
+gate reads: the read was already allowed by the trust map before the scan ran, which is what
+CRED-17 means by a finding deciding nothing. Remembering it per path is what stops a planner
+reading the same `.env` on round after round putting the same question up each time. A file's
+history is that file's: a key a commit shows is asked about under the path it was committed at, so
+agreeing to one file's key agrees to nothing about another's. It does not outlive the session, and
+the Known costs say what that rests on. Nor does it outlive a move of the working directory: a file
+inside it is kept under its name from there, which from the new one names another file, so every
+answer is dropped ([TRUST-13](trust-map.md#TRUST-13)).
+
+A live session keeps these answers after a turn fails or is cancelled, including when a later
+context load fails. They are not written into the session record, so reopening asks again, and so
+does a session carrying on in a copy with `/branch` ([SESSION-31](sessions.md#SESSION-31)).
+
+`verified-by: bravebot_agent::turn::retention::ordinary_endings_retain_live_exposure_answers`
+`verified-by: bravebot_tui::undo_tests::ordinary_tui_endings_keep_exact_approvals_advice_and_exposure`
+
+**What the trail records about the answer.** A yes writes one `approval` entry naming the path, on
+`read_file`, on `edit_file` and on `read_git` alike. Where a person answered, it says the user agreed
+to the planner being given the file. Where the bypassing mode answered in their place
+([MODE-4](permission-modes.md#MODE-4)), it names the mode and says nobody was asked, so a trail
+reader does not take a flag for a person's agreement ([TRACE-7](trace.md#TRACE-7)). A delegate's
+read is answered and recorded the same way ([MODE-9](permission-modes.md#MODE-9)). The entry holds
+the path and the mode's name and no finding.
+
+`verified-by: bravebot_agent::turn::a_flagged_read_bypass_mode_let_through_is_recorded_as_the_modes_answer`
+`verified-by: bravebot_agent::turn::a_flagged_read_a_person_agrees_to_is_recorded_as_the_user_agreeing`
+`verified-by: bravebot_agent::turn::a_flagged_file_bypass_mode_let_through_is_recorded_once_per_session`
+`verified-by: bravebot_agent::turn::a_flagged_read_in_a_delegate_under_bypass_is_recorded_as_the_modes_answer`
+`verified-by: bravebot_core::policy::the_trail_says_who_answered_for_a_flagged_read`
+
+**Why the person is asked rather than the read refused.** The rarity layer is a guess, and a tree
+holds development passwords, test fixtures and inline manifests as readily as it holds keys. A gate
+that refused every such read with no way to say otherwise would make an ordinary `.env` unreadable
+to a planner working on one, and a scan people have to fight is a scan they turn off. The person
+owns the tree and is the one who can say which it is.
+
+`verified-by: bravebot_agent::turn::a_read_that_would_expose_a_credential_is_held_back_until_the_person_agrees`
+`verified-by: bravebot_agent::turn::an_edit_does_not_show_the_planner_a_credential_beside_the_change_unless_the_person_agrees`
+`verified-by: bravebot_agent::turn::an_agreement_to_show_a_file_covers_the_lines_an_edit_shows`
+`verified-by: bravebot_agent::turn::what_a_read_would_expose_is_told_to_the_person_and_never_to_the_planner`
+`verified-by: bravebot_agent::turn::the_read_prompt_says_which_value_it_is_asking_about`
+`verified-by: bravebot_agent::turn::a_file_agreed_to_once_is_not_asked_about_again_this_session`
+`verified-by: bravebot_agent::turn::a_file_agreed_to_in_an_earlier_turn_is_not_asked_about_again`
+`verified-by: bravebot_tui::app::an_answer_to_show_a_file_does_not_cover_the_file_by_that_name_after_moving`
+`verified-by: bravebot_agent::turn::a_read_of_a_file_nobody_vouched_for_is_not_scanned`
+`verified-by: bravebot_agent::turn::a_read_of_a_file_holding_no_credential_is_not_asked_about`
+`verified-by: bravebot_agent::turn::a_credential_in_history_is_held_back_until_the_person_agrees`
+`verified-by: bravebot_agent::turn::agreeing_to_one_files_key_in_history_is_not_agreeing_to_anothers`
+`verified-by: bravebot_agent::turn::a_key_that_is_the_whole_of_a_file_is_caught_in_the_commit_that_added_it`
+`verified-by: bravebot_agent::git::each_file_an_answer_shows_is_kept_with_the_line_it_starts_at`
+
+<a id="CRED-16"></a>
+### CRED-16: what a turn writes to the tree is scanned before the change is recorded as complete
+
+The tree diff a turn produces is scanned with the same layers and the same finding shape as the
+read scan, under CRED-18 and CRED-19. A finding in that diff is attributed to the turn, is a
+violation of CRED-11 or CRED-13, and the value does not remain in the tree.
+
+**Why.** CRED-15 scans what leaves the tree for a model, so without this the one thing this system
+causes is the only thing never checked. The two are the two directions a credential travels: that
+one is about disclosure of what was already there, and this one is the difference between a
+credential the person left and a credential a turn wrote.
+
+**Why attribution is better here than before.** An untracked `.env` found at the start has no blame
+and no turn record, so `unknown` is a real answer. A diff names the turn that produced it, which is
+why this scan can refuse where the other can only inform. It is not authorship: a turn that
+reformats or moves a file already holding a key produces a diff carrying it without having written
+it, and that case is reported rather than refused. A whole-file write uses that attribution only
+when the pre-image was trusted at capture, whether the write came from a turn or from a manifest.
+Untrusted prior bytes cannot excuse a finding in a proposed trusted body.
+
+**What is refused and what is asked about.** A value that declared itself a credential (a
+provider's prefix over its own alphabet at its own length, or the password field of a URL) is
+refused, and nobody is asked: there is no judgement to put to anybody, and a prompt that can be
+answered "write it anyway" is a prompt a turn eventually gets past. A value inferred from a name
+that sounds like a secret beside one that looks rare is raised on the approval the write already
+needs, and the person decides. That inference catches a generated framework key, and it also
+catches an inline Kubernetes `Secret`, a local development password and a test fixture; refusing on
+all four with no override would stop ordinary work over a guess, and a scan people have to fight is
+a scan they turn off. The prompt names the finding, so the question can be answered. Asking and
+accepting edits both raise it, bypassing answers it, and no rule, vouch or plan clears it
+([CRED-13](#CRED-13) says who may answer and for how long).
+
+**The providers whose keys declare themselves** are AWS, GitHub, Slack, Google, Stripe, Anthropic and OpenAI. OpenAI
+states no key format in its documentation, so the shapes come from the `openai-api-key` rule of the gitleaks
+scanner, which matches `sk-proj-`, `sk-svcacct-` or `sk-admin-` followed by the text `T3BlbkFJ` between two runs of
+58 or 74 characters, and `sk-` followed by that text between two runs of 20 letters and digits. A key is reported
+for one of the first three prefixes followed by at least 124 letters, digits, `-` and `_`, and for `sk-` followed by
+at least 48 letters and digits that hold `T3BlbkFJ` at any position, so a key a little off the published shape is
+still found. The marker is required for the `sk-` form only, because 48 letters and digits after `sk-` are also
+what other services' keys look like. On 2026-10-26 a project key was 164 characters: `sk-proj-` and 156 characters
+holding the marker. An Anthropic key is tried first, and the `sk-` form ends at a `-` or an `_`, so an Anthropic key
+is never reported as OpenAI's.
+
+A body that arrived as quarantined content is not scanned, so it raises no finding, and a mode that
+answers writes answers that one as it would any other. The driver reading those bytes to decide
+whether to ask would be a decision taken from untrusted content, and the Known costs record it.
+
+The name is the word the value is assigned to, not the rest of the line before it. A link whose
+words mention a password ends at the colon of its URL's scheme, and reading the whole link as a name
+would make every page linking to a password manager a page of passwords.
+
+A value standing as the whole of a file, with no name beside it and no provider prefix on it, is
+inferred the same way and raised the same way. The file being nothing else is what stands in for
+the name, which is weaker than a name: a commit id, a machine identifier and a digest are written
+in that shape too.
+
+A finding raised this way goes to the person and never to the planner, which is what CRED-19
+requires of a finding however it is answered.
+
+`verified-by: bravebot_agent::turn::a_credential_a_turn_writes_never_reaches_the_tree`
+`verified-by: bravebot_agent::turn::a_credential_pasted_by_an_edit_leaves_the_file_as_it_was`
+`verified-by: bravebot_agent::turn::a_credential_the_file_already_held_does_not_refuse_the_change_carrying_it`
+`verified-by: bravebot_agent::turn::what_the_scan_found_is_told_to_the_person_and_not_to_the_planner`
+`verified-by: bravebot_agent::turn::a_value_that_only_looks_like_a_secret_is_put_to_the_person`
+`verified-by: bravebot_agent::turn::the_prompt_says_which_value_it_is_asking_about`
+`verified-by: bravebot_agent::turn::only_bypassing_answers_a_credential_write`
+`verified-by: bravebot_agent::turn::a_body_nobody_vouched_for_is_not_scanned_and_the_mode_decides`
+`verified-by: bravebot_core::credentials::a_generated_key_is_recognised_from_its_name_and_its_rarity`
+`verified-by: bravebot_core::credentials::a_name_is_the_word_before_its_separator_however_the_line_opens`
+`verified-by: bravebot_core::credentials::a_link_whose_words_sound_like_a_secret_is_not_an_assignment`
+`verified-by: bravebot_core::credentials::a_provider_key_is_recognised_with_nothing_around_it_saying_so`
+`verified-by: bravebot_core::credentials::a_provider_key_is_recognised_when_it_is_assigned_to_a_name`
+`verified-by: bravebot_core::credentials::a_password_in_a_connection_string_is_a_finding`
+`verified-by: bravebot_core::credentials::each_shape_matches_at_its_minimum_and_not_below_it`
+`verified-by: bravebot_core::credentials::an_openai_key_is_recognised_in_each_of_its_forms`
+`verified-by: bravebot_core::credentials::an_anthropic_key_is_not_read_as_an_openai_one`
+`verified-by: bravebot_core::credentials::the_bare_sk_form_ends_at_a_hyphen_or_an_underscore`
+`verified-by: bravebot_core::credentials::a_short_sk_word_and_an_unmarked_run_are_not_an_openai_key`
+`verified-by: bravebot_core::credentials::one_key_in_a_json_field_is_one_finding`
+`verified-by: bravebot_core::credentials::a_provider_key_standing_alone_is_one_finding_and_not_two`
+`verified-by: bravebot_core::credentials::a_rare_token_with_a_document_around_it_is_not_a_whole_file`
+`verified-by: bravebot_core::credentials::a_value_standing_as_a_whole_file_is_a_question_and_not_a_rule`
+`verified-by: bravebot_core::credentials::an_armoured_private_key_is_one_finding_over_its_whole_body`
+`verified-by: bravebot_core::credentials::nothing_a_finding_says_repeats_the_value`
+
+<a id="CRED-17"></a>
+### CRED-17: no gate passes because the scan ran
+
+A finding informs and decides nothing. It grants nothing, refuses nothing by itself, and moves no
+credential between tiers.
+
+**Why.** A program running as the person presents itself as any other, so a scanner running here can
+be lied to about what the tree holds. The scan defends against the person not knowing what is in
+their own repository, which is worth doing and is not a control.
+
+`verified-by: bravebot_config::lib::no_tier_is_computed_from_a_scan_result`
+`verified-by: bravebot_config::lib::removing_denying_or_accepting_changes_no_tier`
+
+<a id="CRED-18"></a>
+### CRED-18: no part of the scan discloses the tree off this machine
+
+Any classifier over tree content runs locally. Nothing is sent to a hosted model to ask whether it
+is a credential, and no credential is exercised against its provider to find out whether it still
+works.
+
+**Why.** A scan that ships content to a model discloses the credential to that model and becomes the
+leak it was checking for. Testing a key is a use of that key, from this machine, at this time.
+
+`verified-by: bravebot_core::credentials::the_classifier_can_reach_nothing_outside_this_process`
+`verified-by: bravebot_agent::turn::scanning_a_write_sends_no_model_a_question_about_it`
+
+<a id="CRED-19"></a>
+### CRED-19: a finding carries no credential value, and is written where the planner does not read
+
+A finding records the kind, the location, a salted fingerprint and a masked preview that is not a
+prefix or a suffix of the real value. It is written outside the tree, kept out of the prompt, and
+shown to the person by a path the planner does not read.
+
+**Why.** A finding that quotes the value has moved a Held credential into a second Held location and
+called it a feature. Writing the findings into the tree hands a map of every credential in the
+repository to the next thing that reads it.
+
+**Where it is written.** One file per workspace under the state directory, beside the record of
+granted rules and keyed the same way, holding one entry per finding: the kind, the path, the line,
+the fingerprint and the preview. A finding is written whatever was done about it, because what was
+refused, what was approved and what the person declined are equally things in their tree. The
+screen alone is not enough: a line drawn while nobody was looking is gone when the turn ends, and
+the scan exists to tell a person what their own repository holds.
+
+A file nothing has written for the retention period is removed when a session starts, and the
+acceptances beside it are not ([state-directory.md](state-directory.md#STATE-4)).
+
+The record is best effort and fails toward silence. No state directory, a full disk, a read-only
+home: each means the findings do not outlive the session, which is where they were before the
+record existed, and none of them refuses a write the person approved. An
+[incognito](incognito.md#INCOG-5) session writes none, and reads the ones an earlier ordinary
+session left.
+
+`verified-by: bravebot_agent::findings::a_finding_one_session_recorded_is_read_back_by_another`
+`verified-by: bravebot_agent::findings::nothing_in_the_record_repeats_the_value`
+`verified-by: bravebot_agent::findings::a_finding_made_in_one_workspace_is_not_read_back_in_another`
+`verified-by: bravebot_agent::findings::a_workspace_sharing_a_key_with_another_does_not_read_its_findings`
+`verified-by: bravebot_agent::findings::a_second_finding_is_added_rather_than_replacing_the_first`
+`verified-by: bravebot_agent::findings::a_record_that_cannot_be_read_holds_nothing`
+`verified-by: bravebot_agent::findings::a_line_nothing_can_read_leaves_the_rest_of_the_record_readable`
+`verified-by: bravebot_agent::findings::an_entry_this_build_does_not_fully_understand_is_not_read`
+`verified-by: bravebot_agent::findings::a_scan_that_found_nothing_leaves_no_record`
+`verified-by: bravebot_agent::findings::a_turn_with_no_session_to_name_still_records_what_it_found`
+`verified-by: bravebot_agent::turn::a_finding_is_written_outside_the_tree_and_outlives_the_turn`
+`verified-by: bravebot_agent::turn::a_credential_a_line_left_at_a_destination_is_written_to_the_record`
+`verified-by: bravebot_agent::turn::a_credential_in_the_line_itself_is_written_to_the_record`
+`verified-by: bravebot_agent::turn::what_the_scan_found_is_told_to_the_person_and_not_to_the_planner`
+`verified-by: bravebot_agent::incognito::no_credential_finding_is_written_down`
+`verified-by: bravebot_agent::incognito::a_finding_an_earlier_session_recorded_is_still_read`
+`verified-by: bravebot_core::credentials::nothing_a_finding_says_repeats_the_value`
+`verified-by: bravebot_core::credentials::a_preview_is_no_part_of_the_value_it_describes`
+
+<a id="CRED-20"></a>
+### CRED-20: a disposition moves a tier only by passing the gate it attempts
+
+Removing or denying a path changes no tier. Enrolling reaches Delegated only where a performer
+exists for the operation. Accepting changes nothing and owes what Held owes.
+
+**Why.** Denying a path keeps a value out of the context while work proceeds, which is the right
+trade and is not custody. A credential enrolled with no performer to use it is a Held credential in
+a better cupboard.
+
+`verified-by: bravebot_config::lib::removing_denying_or_accepting_changes_no_tier`
+`verified-by: bravebot_config::lib::enrolling_reaches_delegated_only_where_a_performer_exists`
+`verified-by: bravebot_config::lib::only_enrolling_attempts_a_gate`
+
+<a id="CRED-21"></a>
+### CRED-21: accepting a finding expires
+
+An acceptance carries an expiry, and lapses into a finding again when it passes.
+
+**Why.** An acceptance with no end is a finding that was deleted slowly.
+
+**What exists.** `Store::accept` in `crates/agent/src/findings.rs` takes the expiry as a required
+argument and writes the acceptance beside the record of findings, and `Store::open_at` reads the
+findings back without the ones a current acceptance covers. No command calls `accept` yet, and
+because a fingerprint is salted per run an acceptance applies only to findings made by the run
+it was made in.
+
+`verified-by: bravebot_agent::findings::an_acceptance_lapses_into_a_finding_when_its_expiry_passes`
+`verified-by: bravebot_agent::findings::an_acceptance_covers_only_the_finding_it_names`
+`verified-by: bravebot_agent::findings::an_acceptance_repeats_no_part_of_the_value`
+`verified-by: bravebot_agent::findings::an_acceptance_this_build_does_not_fully_understand_leaves_its_finding_open`
+`verified-by: bravebot_agent::incognito::no_acceptance_is_written_down`
+
+<a id="CRED-22"></a>
+### CRED-22: the baseline is not writable by a turn
+
+Entries are added by a person, carry a fingerprint and a reason and an expiry rather than a value,
+and stop applying when the fingerprint stops matching. They live where CRED-19 puts a finding,
+outside the tree, because an allowlist in the tree is the same map CRED-19 refuses to write. That
+record exists; what an entry cannot yet be matched on is a fingerprint, which is salted per run.
+
+**Why.** An allowlist is necessary or the scan becomes noise everybody clicks through, and it is the
+obvious target: a turn that can add to the baseline can clear its own leak. A fingerprint that no
+longer matches is a new finding rather than a renewed acceptance.
+
+`verified-by: bravebot_agent::findings::recording_a_finding_accepts_nothing`
+`verified-by: bravebot_agent::findings::no_shipped_code_that_handles_findings_accepts_one`
+`verified-by: bravebot_agent::turn::a_turn_that_finds_a_credential_leaves_it_unaccepted`
+`verified-by: bravebot_agent::turn::a_turn_cannot_write_an_acceptance_with_the_file_tool`
+`verified-by: bravebot_agent::findings::an_acceptance_lapses_into_a_finding_when_its_expiry_passes`
+`verified-by: bravebot_agent::findings::an_acceptance_covers_only_the_finding_it_names`
+
+<a id="CRED-23"></a>
+### CRED-23: credential buffers are cleared, and kept out of crash artifacts
+
+A buffer this program owns a credential in is cleared when it is dropped rather than returned to the
+allocator intact, and the process excludes credentials from the artifacts a crash leaves behind:
+core dumps disabled or the pages excluded from them, and the pages `bravebot-config`'s `Secret`
+holds a credential in kept off swap by a Unix kernel that grants the lock.
+
+**Why.** The inventory lists core dumps, the swap and hibernation files, and crash reports as places
+credentials end up, and every one of them is written by the operating system rather than by anything
+here. A rule about which files this program writes does not reach them. Without this the strongest
+tier is still recoverable from a machine that panicked once, and the panic is not an attack.
+
+**What this is not.** It is not a claim that no copy of the value exists anywhere in the process.
+An allocator, a TLS library, an HTTP header buffer and the compiler itself all make copies this
+program does not own and cannot clear, so what is promised is the buffers it does own. Nor does it
+defend against a debugger attached to a live process, which is the same account and is answered by
+the authority holding the value instead.
+
+**What holds today.** The core dumps, the pages a `Secret` is held in, the buffers reading a
+settings file makes on the way to one, the buffers a stored gateway key passes through, and the buffers
+the stored premium key passes through.
+The process lowers its core dump limit to nothing before it reads the first credential, and every
+credential the backend configuration resolves is kept in a `Secret`, the gateway token in a settings
+file included. Reading that file fills buffers of its own: the text it was read into, the document
+the parse made of it, and whatever a stronger layer displaced by restating a gateway a weaker one
+had stated. The text is cleared as the parse answers, whatever it answered, and the document clears
+itself and what it displaced when it goes. Every reader of a settings file holds the document rather
+than a bare parse, the front end's check of a file somebody chose included, so none of them has a
+clearing to remember. `bravebot-skus` has its own `Secret`, because
+[LAYER-1](layering.md#LAYER-1) gives that crate no dependency on another crate here; what has to
+hold across the two is that the bytes are overwritten where they lie and that reading them is
+visible at the call site. The premium key is read out of `brave-key.json` as a `Secret`: the text the
+file was read into and the document the parse made are overwritten before the read answers, whatever
+it answered. The configuration and each credential handed to the client hold it in a `Secret`, so a
+print of one is a redaction, and the header it is written into is an ordinary string. What a settings file's `env` block set is cleared too: the settings keep
+what each layer said so the configuration can be built out of it and `doctor` can report which file
+won a name, and a signing key written there is a credential in that map, so the map is overwritten
+when the settings go. Every value in it rather than the names a credential is known to arrive under,
+which is the reading a parsed document already gets and is here for the same reason: the same block
+carries a region and a model name, and what a person may put in it is anything. Nothing holds a
+`Settings` for the length of the run, which would be a map that never goes: the one place that used
+to, the list of variables a subprocess is not handed, keeps the names it read out of one rather than
+the settings themselves, and a name is not a credential.
+
+A gateway key stored with `bravebot auth login gateway` is in a `Secret` from the Enter that ends
+it until it is written, and every buffer it passes through on either side is overwritten. The
+reader that takes it at the terminal holds what is typed in an allocation of four kilobytes, so
+typing a key does not move it; a longer one moves to an allocation twice the size, and the one it
+leaves is overwritten first. Ctrl-U and the end of the read overwrite the
+whole allocation rather than the part in use, since a character Backspace took off is still in the
+bytes past the end. Reading `gateway-keys.json` clears the text it was read into and the document
+the parse made, whatever the parse answered, and writing it clears the document it serialised and
+holds the text in a `Secret`, written into a buffer sized so it is never moved. The copy of a
+variable read to say which one is sent in place of a stored key is overwritten once it has been
+checked for a value. Printing the stored keys names the ids and none of the values.
+
+A `Secret` holds its value in pages of its own, locked out of swap. `bravebot-config` forbids
+`unsafe`, so the mapping and the lock are `bravebot-sandbox`'s: the value is copied into an
+anonymous mapping nothing else is placed in, locked before the copy is written, overwritten where it
+lies when it goes, and unmapped, which releases the lock with the pages. A mapping per value rather
+than a lock on the heap, because a lock is on a page and a heap page is shared: locking a value in
+place would lock its neighbours, and unlocking it would unlock a second credential that happened to
+share the page. The string a `Secret` is made from is overwritten once the value is copied out of
+it, so the credential does not stay on the heap it was moved off, and a clone is a second mapping
+locked the same way.
+
+The AWS credential the CLI resolves is held the same way, and so is every buffer it passes through.
+The bytes the CLI wrote are cleared as the read is answered for, whatever it answered, because a
+reply that could not be parsed holds the credential just as a good one does. The document that read
+parsed holds a copy of its own and clears itself when it goes. A reply stating a secret key and no
+access key is refused, and the secret it did state is in a `Secret` by then rather than in a string
+the refusal drops intact. Signing makes one more: the SigV4 derivation starts from the secret access
+key with four bytes in front of it, which is the key rather than something derived from it, so that
+buffer is overwritten where it lies once the first step has read it. `bravebot-signing` spells the
+overwriting out itself, for the reason `bravebot-skus` does, since
+[LAYER-1](layering.md#LAYER-1) gives it no dependency on another crate here.
+
+**What does not, and why.** Three things.
+
+Only a `Secret`'s pages are kept off swap. What holds a credential on its way into one is on the
+ordinary heap: the text of a settings file and the document parsed from it, the bytes the AWS CLI
+replied with, the SigV4 seed, and a gateway key as it is typed and as the file of them is read and
+written. Each is overwritten once it has been read, and locking it would take an allocator for
+everything the parse allocates, which this program does not own. A
+credential exported into the environment stays in the process's environment block, which the C
+library owns and nothing here overwrites. The process-wide form, `mlockall` with `MCL_FUTURE`, is
+worse than the thing it prevents: where the memory lock limit allows it at all, every later
+allocation becomes unswappable, so an agent asked to read a large file fails to allocate rather than
+being paged out. `bravebot-skus` keeps its own `Secret` on the heap as well:
+[LAYER-1](layering.md#LAYER-1) gives that crate no dependency to take a lock through.
+
+Where no lock is granted the value is held anyway, and nothing reports it. `RLIMIT_MEMLOCK` is one
+limit for every `Secret` the process holds at once, each rounded up to whole pages, and an import
+holds the settings file it rewrites twice: as read, at most sixteen pages of four kilobytes, and as
+rewritten, whose size is checked only once it is held. A value held once the limit is spent is held
+in an unlocked mapping. A Windows build holds it on the heap, since `VirtualLock` is not
+among the bindings this build compiles and no suite runs there to check one.
+Refusing to hold a credential would protect it by making the product unusable. A hibernation image
+is written from resident memory and includes locked pages, so what the lock keeps out of swap it
+does not keep out of that file.
+
+What the cryptography turns a credential into is not cleared. A SigV4 signing key is the case: the
+chain authorises one service in one region on one day, so what each step hands back is not the
+access key it started from.
+
+`verified-by: bravebot_config::lib::scrubbing_overwrites_the_bytes_where_they_lie`
+`verified-by: bravebot_config::lib::scrubbing_counts_the_bytes_rather_than_the_characters`
+`verified-by: bravebot_config::lib::scrubbing_a_document_reaches_a_token_inside_the_blocks_it_was_written_in`
+`verified-by: bravebot_config::lib::the_string_a_secret_is_made_from_is_overwritten_once_it_is_held`
+`verified-by: bravebot_sandbox::swap::held_text_is_in_pages_the_kernel_keeps_resident`
+`verified-by: bravebot_sandbox::swap::a_copy_is_held_in_locked_pages_of_its_own`
+`verified-by: bravebot_sandbox::swap::a_value_that_goes_gives_its_locked_pages_back`
+`verified-by: bravebot_sandbox::swap::a_refused_lock_still_holds_the_value_and_says_so`
+`verified-by: bravebot_sandbox::swap::clearing_overwrites_the_bytes_where_they_lie`
+`verified-by: bravebot_config::settings::the_text_a_layer_was_parsed_from_is_cleared`
+`verified-by: bravebot_config::settings::a_merge_keeps_the_entry_a_stronger_layer_displaced`
+`verified-by: bravebot_config::settings::what_the_env_block_was_set_to_is_overwritten_where_it_lies`
+`verified-by: bravebot_config::scrub::the_names_a_settings_file_added_are_what_is_kept_rather_than_the_settings`
+`verified-by: bravebot_skus::secret::scrubbing_overwrites_the_bytes_where_they_lie`
+`verified-by: bravebot_skus::secret::scrubbing_counts_the_bytes_rather_than_the_characters`
+`verified-by: bravebot_skus::secret::scrubbing_a_document_reaches_a_token_inside_the_blocks_it_was_written_in`
+`verified-by: bravebot_skus::secret::a_secret_prints_as_redacted_rather_than_as_its_value`
+`verified-by: bravebot_bedrock::credentials::the_bytes_a_reply_was_read_from_are_cleared_whatever_the_read_answered`
+`verified-by: bravebot_bedrock::credentials::scrubbing_a_parsed_reply_overwrites_the_credential_rather_than_dropping_it`
+`verified-by: bravebot_signing::sigv4::scrubbing_the_signing_seed_overwrites_the_key_where_it_lies`
+`verified-by: bravebot_config::keys::printing_the_keys_names_the_ids_alone`
+`verified-by: bravebot_tui::hidden::control_u_starts_the_key_again`
+`verified-by: bravebot_tui::hidden::a_key_longer_than_the_room_made_for_it_is_kept_whole`
+`verified-by: bravebot_sandbox::crash::disabling_core_dumps_leaves_the_kernel_unable_to_write_one`
+`verified-by: bravebot_sandbox::crash::disabling_core_dumps_does_not_lower_the_hard_limit`
+`verified-by: by-construction (the pages a Secret holds its value in are unmapped once it is gone, so what a test can run is the clearing rather than the drop; the drop body is one call to the clearing the test above pins and then the unmapping, after which the test above finds the lock gone, and does nothing else)`
+`verified-by: by-construction (a Secret is one field, the held text, made only by the hold the test above pins, so its value is reachable only in that text's pages, which the tests above find locked where the kernel grants the lock, and its clone is that text's clone)`
+`verified-by: by-construction (both entry points that hold a credential, the terminal binary and the graphical front end's transport, call the core dump limit down as their first statement, before the argument vector is read and so before the signing key is unmasked)`
+`verified-by: by-construction (a parsed settings document clears itself when it goes, its drop being one call to each of the two scrubs the tests above pin and nothing else; the four readers of a settings file, the layered read, the single-file parse, the managed layer and the front end's check of a chosen file, each hold one of these and so clear what they parsed by going out of scope)`
+`verified-by: by-construction (the env block a Settings holds is unreachable once the Settings is gone, so what a test can run is the overwriting rather than the drop; the drop body is one call to the method the test above pins and does nothing else)`
+`verified-by: by-construction (the document a credential reply was parsed into and the buffer a SigV4 signing key is seeded from are each unreachable once the value owning them is gone, so what a test can run is the overwriting rather than the drop; each drop body is one call to a scrub the tests above pin and does nothing else)`
+`verified-by: by-construction (the terminal reader's buffer is unreachable once the read ends, so what a test can run is the Ctrl-U wipe rather than the drop; the drop body is one call to that wipe, which resizes the buffer to its whole allocation and calls the byte scrub the tests above pin, and a move to a larger allocation hands the one it leaves to the same overwrite before it is dropped; reading and writing the file of gateway keys each call the text or document scrub the tests above pin on every way out of the call)`
+
+<a id="CRED-24"></a>
+### CRED-24: a credential never travels as a command-line argument
+
+No credential, and nothing derived from one that would authenticate in its place, is passed to a
+program as an argument. Where a program must receive one, it arrives by environment, on a file
+descriptor, or in a file the program is told to read; where the authority can perform the action,
+none of those is needed. A key typed in the desktop window's key window goes from its main process
+to the bridge on the bridge's standard input, in a request no client of the bridge but the main
+process may send, and is never an argument of the bridge or of anything it starts.
+
+**Why.** A command line is world-readable while the process lives: `/proc/<pid>/cmdline` on Linux,
+and `ps` on every platform. The environment is covered by [RUN-12](tools/run.md#RUN-12) because a
+person never sees it, and this is the opposite case: an argument is shown at the prompt, and
+approving it prevents nothing, because the disclosure is to every other account on the machine
+rather than to the program. It needs no attacker and no mistake by the model.
+
+`verified-by: bravebot_cli::credential_arguments::no_file_that_starts_a_process_reads_a_credential`
+`verified-by: bravebot_ui_bridge::accounts::the_window_stores_a_typed_key_and_says_nothing_of_it`
+`verified-by: bravebot_ui_bridge::accounts::no_client_of_the_host_is_offered_the_accounts_methods`
+`verified-by: by-construction (the main process is not a crate this workspace compiles, so ui/scripts/key-entry.test.mjs drives its own key gate with a stand-in bridge and key window: an ask is dropped for a way that takes no key, a foreign sender, an unfocused window, a row the bridge does not mark as taking a key, a second ask while a key window is open and in the seconds after a cancel; the bridge is asked before anything is typed; whether to replace comes from the bridge and not the page; the key goes to the bridge alone and the page is told only how the key window ended; a refusal keeps the key window open; and closing it, the main window closing or quitting stores nothing; make check-ui runs the test)`
+
+<a id="CRED-25"></a>
+### CRED-25: every held credential names what would end it
+
+A credential at Held or Held briefly records its issuer, the surface that revokes it, and anything
+minted from it that revocation would not reach. Where a credential leaks, that record is what the
+person is given.
+
+**Why.** Held is where most of the inventory sits, and its whole obligation is detection. Detection
+that cannot be acted on is a notification. Removing a file, which is the disposition people reach
+for, ends this run's custody and nothing else: the credential is still live at the issuer, still in
+the history, and still in whatever copied it. The difference between an incident somebody can close
+and one they can only observe is whether this was written down before it was needed, and it can only
+be written down while the arrangement is still understood.
+
+**What it does not claim.** Recording the surface does not revoke anything, and nothing here reaches
+an issuer on a person's behalf.
+
+**Where the person is given it.** Not yet from a leak. CRED-16's scan of what a turn writes
+exists and refuses, but it reports the finding and reaches no part of this record: somebody told a
+credential would have landed in a file is not thereby told what would end the one they already
+hold. CRED-15's scan of what a turn reads reports the same way and reaches this record no more
+than the other one does. What exists is the record and one surface that reads it, `doctor`, which
+reports
+what would end each credential this configuration holds, a gateway's bearer token and the premium key
+included, and the ChatGPT sign-in and the xAI sign-in of a machine that made
+one ([CHATGPT-6](chatgpt-sign-in.md#CHATGPT-6), [XAI-12](xai-sign-in.md#XAI-12)), each reported from its file
+rather than from the configuration, since the file is held on every machine that made a sign-in. A gateway key stored with `bravebot auth login gateway`
+is named as stored, since neither the environment nor a settings file shows where it came from, and
+the account of ending it names `bravebot auth logout gateway` beside revoking it at the gateway. A
+file of those keys it cannot read is named, and the report ends on the failure status, since every
+key in the file has stopped being sent. A scan reaching it later reads that record rather than
+writing a second one.
+
+`verified-by: bravebot_config::lib::a_build_that_cannot_sign_for_itself_holds_no_signing_key_to_account_for`
+`verified-by: bravebot_config::lib::an_aws_account_holds_both_arrangements_and_they_end_differently`
+`verified-by: bravebot_config::lib::a_gateway_token_is_a_credential_this_configuration_holds`
+`verified-by: bravebot_config::provider::the_host_a_token_would_be_ended_at_carries_no_other_part_of_the_endpoint`
+`verified-by: bravebot_bedrock::credentials::a_session_token_is_what_says_what_would_end_a_credential`
+`verified-by: bravebot_cli::doctor::every_held_credential_has_its_own_account_of_what_would_end_it`
+`verified-by: bravebot_cli::doctor::a_gateway_token_is_accounted_for_at_the_gateway_that_would_end_it`
+`verified-by: bravebot_cli::doctor::what_survives_revoking_is_reported_for_exactly_the_credentials_that_have_one`
+`verified-by: bravebot_config::lib::a_chatgpt_sign_in_is_held_renewed_unaided_and_possibly_outlives_revocation`
+`verified-by: bravebot_cli::doctor::a_stored_gateway_key_is_named_as_stored_and_never_printed`
+`verified-by: bravebot_cli::running::doctor_names_a_chatgpt_sign_in_by_its_expiry_and_prints_none_of_it`
+`verified-by: bravebot_config::lib::an_xai_sign_in_is_held_renewed_unaided_and_possibly_outlives_revocation`
+`verified-by: bravebot_cli::xai_sign_in::doctor_names_an_xai_sign_in_by_its_expiry_and_prints_none_of_it`
+`verified-by: bravebot_cli::running::doctor_names_a_stored_gateway_key_without_printing_it`
+`verified-by: bravebot_cli::running::doctor_fails_on_a_file_of_gateway_keys_it_cannot_read`
+
+## Why the gate safehouse builds is not available here
+
+[safehouse](https://github.com/brave-experiments/safehouse) keeps credentials out of the labelled
+world entirely, and it does so through several properties rather than one rule. Some of them hold
+here too. The ones that do not are what this file exists for.
+
+| what safehouse relies on | in bravebot |
+| --- | --- |
+| a label is a frozen pair of enums with no string field, so it cannot carry a secret | **holds, structurally.** `Label` here is the same shape, two enums and no string field ([LABEL-1](labels.md#LABEL-1)), and [CRED-1](#CRED-1) adds that a secret never becomes a labelled value at all |
+| call parameters are decided from trusted data, with no dirty context | **holds.** Untrusted content never enters the planner ([LABEL-3](labels.md#LABEL-3)), and a decision may be taken only from trusted content ([LABEL-5](labels.md#LABEL-5)) |
+| both model calls are SDK calls, and the key travels in a header the model never sees | **holds.** A request carries the key in an `authorization` header, and the body is the conversation |
+| the environment is read in one place, so it is not an exposure surface | **fails.** The signing key is read in one place and withheld from a subprocess, with the exception [CRED-14](#CRED-14) records, but the rest of the person's environment is handed to every program a turn runs, on purpose: [RUN-12](tools/run.md#RUN-12) keeps it because `run aws s3 ls` is an ordinary request |
+| data slots hold fetched API responses, so no slot holds a credential | **fails.** The content here is the working tree, which the inventory below shows is itself where `.env`, `*.pem` and `*.tfvars` live |
+| every component holding a credential is deterministic operator code, with no model in the loop | **fails for all but one.** This agent's own backend credential is spent by deterministic code, as there; every other credential in the inventory is spent by `run`, executing programs [RUN-10](tools/run.md#RUN-10) says are "not enumerated and not confined" |
+| a fetcher takes exactly one credential by name, so the wrong one is a `TypeError` rather than a policy violation | **fails.** `run`'s parameter is a command line, so there is no signature to leave a credential out of, and the programs "cannot be listed in advance" |
+| a processor receives an instruction and one slot, and the outgoing request is pinned by test to a fixed set of fields | **fails.** The request is a conversation that accumulates file content and command output, is kept by [sessions.md](sessions.md), and is rewritten by [compaction.md](compaction.md) |
+
+**The failures are one fact stated twice.** safehouse fetches structured data from remote services
+and acts on it through typed functions. bravebot reads a local working tree and acts on it by
+running arbitrary programs. Where the data is fetched, a slot can be arranged to exclude
+credentials; where the data is the person's own tree, the credentials are already inside it. Where
+the effect is a typed call, a signature bounds what that call may spend; where the effect is a
+program the person's shell would run, [RUN-10](tools/run.md#RUN-10)'s own reason applies, which is
+that `git push` needs `~/.ssh`.
+
+**So the gate is not missing here, it is unavailable.** Nothing in this file is a weaker version of
+those checks. The preconditions they rest on are absent, and no gate placed inside this process
+restores them. What remains is to put the credential outside the process, which is what the tiers
+below walk through, strongest first.
+
+<a id="CRED-26"></a>
+### CRED-26: where a credential can be bound to its presenter, that is the form asked for
+
+A derived credential is asked for in a sender-constrained form wherever the issuer offers one:
+mutual TLS, a proof-of-possession scheme such as DPoP, or a workload identity the issuer checks for
+itself. Where no such form is offered, what is held is a bearer secret and the record says so.
+
+**Why.** Scope says what a credential may do and expiry says for how long. Neither says where it may
+be done from, so a five-minute bearer token that leaves this machine is five minutes of its entire
+authority in the hands of whoever took it. Of the four properties a derivative can carry, this is
+the only one that makes a stolen value useless rather than merely short-lived.
+
+**Where it sits.** It moves no tier by itself. An unbound derivative that passes gate 2 is Granted,
+and so is a bound one; this is the difference between two credentials standing at the same tier, and
+it is recorded like everything else the walk decides.
+
+`verified-by: bravebot_config::lib::a_derived_credential_records_whether_it_is_bound_to_its_presenter`
+`verified-by: bravebot_config::lib::a_credentials_binding_does_not_move_its_tier`
+`verified-by: bravebot_cli::doctor::a_derived_credential_is_reported_as_a_bearer_secret_in_words_that_keep_the_answers_apart`
+
+**What exists.** The record carries `Held::binding`, which says `Bearer` with the answer the gate
+walk uses (`Refused` for an AWS session, whose issuer offers no bound form, and `NotAttempted` for
+the ChatGPT sign-in and the xAI sign-in, which nobody has asked) for the three
+derived credentials, and nothing for the credentials issued once and held as issued. `doctor` reports it on a `binding` line. No
+credential is yet held in a sender-constrained form, and nothing here requests one: `Binding::SenderConstrained`
+is the value a credential takes when a form is asked for and granted.
+
+## Known costs
+
+We accept these deliberately. Do not "fix" one without changing this spec first.
+
+- **The gateway variables are read when a program starts.** The set is built from the provider
+  blocks in force at that moment, so a block added mid-session withholds its variable from the next
+  program and not from one already running. `BRAVEBOT_SUBPROCESS_ENV_SCRUB=0` returns every variable
+  to every program, a gateway's token included, and is the only way to switch the rule off.
+
+- **Most of what is already on the machine is out of reach.** An OS keychain, a cloud cache, a
+  browser profile, a shell history: nothing here touches them. Reading one is ordinary file access,
+  and stopping a program the agent started from reading one is confinement.
+
+- **The off-scale case is visible, not bounded.** CRED-5 makes ambient authority declared. There is
+  no credential to withhold and no environment to scrub, and confinement is the only fix.
+
+- **What names an ambient authority is a list, and a list has an end.** A container daemon, a
+  logged-in tool, the agent socket and a metadata address are recognised by the words a line
+  writes, so a client nobody listed is granted with only the blanket line about confinement said
+  of it. Nothing is refused on the list, so what a gap costs is a sentence rather than a boundary,
+  and the direction to be wrong in is naming something a line was not going to spend.
+
+- **The scan misses things, and silence proves nothing.** The rarity layer is advisory, history
+  beyond the working tree is off by default, and a credential nobody has a pattern for is a
+  credential the scan does not find. A clean result means nothing was matched.
+
+- **The diff scan inherits those blind spots.** CRED-16 catches what a pattern matches. A credential
+  no layer recognises is written, not found, and recorded as complete. It fails toward silence in
+  the one place this system is accountable for.
+
+- **A turn cannot finish a setup step that needs a literal secret in a config file.** CRED-11 and
+  CRED-13 together mean a generated framework key goes to the authority and the tree gets a
+  reference. Where a framework cannot read a reference, the turn produces the reference, says what
+  it could not do, and the person completes it. This breaks scaffolding written on the assumption
+  that generated secrets land in a file.
+
+- **There is nothing to create a credential into, so creation is refused rather than performed.**
+  CRED-13 asks for the value to reach an authority in the same step and its tier to be recorded
+  then. No authority exists, so what runs is the clause's other half: the creation does not happen
+  and the turn says so. Nothing records a tier for a credential a turn created, because there is no
+  such credential to record one for.
+
+- **A credential created as a file is inferred, so the refusal can be overridden.** The shape is a
+  file whose whole contents is one rare value, which is what says it is a value rather than a
+  document. A commit id, a machine identifier and a digest are written that way too, so the finding
+  goes to the person on the approval the write already needs rather than refusing outright, and a
+  person who says yes gets the write. Where the value also declares itself under CRED-16, it is
+  refused with nobody asked, as any declared value is. What would close the gap is an authority to
+  create into, which is the entry above.
+
+  Only a person or bypassing can override it. A run with nobody to ask that is not bypassing, such
+  as `-p` without `--dangerously-skip-permissions` under a rule allowing the write, refuses a file
+  that is only a commit id, a UUID or a digest, and nothing in that run can say otherwise. Neither
+  the rule nor accepting edits was made to answer it, because either would be approving a value
+  nobody was shown in a session that never said it would not look.
+
+- **`a` and `r` answer for a file, not for a value.** The person is shown one value and the answer
+  covers every later one the planner writes to that file: for the rest of the session with `a`, and
+  with `r` for every session in the directory until the line is deleted from the record. That is
+  what the keys say they do, and it is why they are keyed by the resolved file and offered only on a
+  question about a credential. Keying on the value instead would ask again at every rotation, which
+  is the question the person pressed the key to stop. A directory removed and made again at the same
+  path is covered by the entries recorded for the one before it: the record names a directory by its
+  path and holds nothing that identifies the directory standing there, where the startup answer holds
+  its identity ([TRUST-23](trust-map.md#TRUST-23)).
+
+- **A value a command generates gets less than one a write tool creates.** CRED-16 reads what a
+  turn wrote in its own words, and a redirection is a file a program the turn started opened for
+  itself: `openssl rand -hex 32 > config/master.key` puts the value in the tree without a byte of
+  it passing through a layer on the way. What the line left at that destination is read back
+  afterwards, under the two bounds the entries below record: nothing is read where the line's own
+  output is content nobody vouched for, and a value only the third layer recognises has no prompt
+  to go to at this tool. So a generated key written this way is reported to the person where it is
+  seen at all, and a person deciding about it is what is missing.
+
+- **Gate 2 is usually failed by the counterparty.** Most SaaS keys, most package registries and most
+  webhook secrets have no derived form to ask for. The tier is honest about it and cannot fix it.
+
+- **Held is where most credentials live today**, and its obligations are the cost of that being
+  true rather than a promise that it is rare.
+
+- **A credential written through a reference is not scanned.** The scan reads what a turn wrote in
+  its own words. A body that arrived as quarantined content is carried to the file without the
+  driver reading a byte of it, and examining one to decide whether to refuse would be a decision
+  taken from untrusted content, which [labels.md](labels.md) admits nowhere. So a value copied out
+  of a file nobody vouched for reaches the tree through a reference, and under a mode that answers
+  writes nobody is asked about it at all. What would close it is a scan whose finding nothing here
+  has to branch on.
+
+- **What a line left is scanned only where somebody vouched for the line.** The same cost as the
+  entry above, reached by the other route. A program may print anything, so what a line prints is
+  content nobody vouched for unless every step of it was vouched for in this tree or is an audited
+  call over paths the person opened; below that, the destination is carried to the filesystem and
+  not read. So a turn copying `.env` to `.env.bak` before editing it is refused in a tree where
+  the person has vouched for the line and not in one where they have not. Closing it needs the
+  same thing the entry above does.
+
+- **A path a program writes without the line naming it is not scanned at all.** The destinations
+  a line opens are the ones a redirection names, which is the set the driver reserves as file
+  effects before anything runs. `cp .env .env.bak`, `tee`, `git commit` and an installer writing
+  its own config are outside it: the path is the program's business and the driver never learns
+  it. What would close this is a scan of the whole tree diff a turn produced, which needs a record
+  of what the tree held before it, which is CRED-22's baseline.
+
+- **A destination past the scan's budget is passed over.** What a line left is read back for the
+  scan, and what it held beforehand is kept so a refused destination can be put back; both are
+  bounded, and past the bound neither is done. A finding that could not be acted on would stop a
+  line and leave the value where it landed, which is worse than saying nothing, so nothing is
+  said. A turn that wanted to get past this would arrange for the destination to be large first.
+  The read-back's boundary and its other arms are pinned under [CRED-11](#CRED-11).
+
+- **A line gets the refusal and not the question.** A value that declared itself is refused at the
+  run tool as it is at a write tool, but the inferred layer's finding has nowhere to be put to
+  anybody: the run approval carries no finding, and by the time the destination can be read the
+  line has already run. So a name that sounds like a secret beside a value that looks rare is
+  reported to the person afterwards rather than decided by them beforehand, which is a notice and
+  not a judgement. Building the other half means the run prompt carrying what a write prompt
+  already carries, and it can only cover a value the line itself holds.
+
+- **A file a turn creates is attributed to it whole.** A carried value is told from an authored one
+  by what the file at that path already held, and a file that did not exist held nothing. So a turn
+  that moves a file already holding a key is refused, where the clause above says that case is
+  reported. What would tell the two apart is a record of what the tree held before the run, which
+  is CRED-22's baseline.
+
+- **A fingerprint is salted per run and kept nowhere.** It tells two findings in one run apart and
+  says nothing between runs, so an acceptance cannot be carried forward and the baseline has
+  nothing to match against. A salt that outlives the run is a file somebody has to keep. The store
+  CRED-19 writes to now exists and holds the fingerprint each run made, so what a durable salt is
+  still waiting on is the decision to keep one rather than somewhere to keep it.
+
+  One consequence is worth naming: an inferred finding is re-raised every run, because nothing
+  remembers that somebody already said a development password was a development password. A person
+  working in a tree that holds one answers for it again each session. The allowlist that would fix
+  it needs the durable salt and the store above, so this is the cost of not having them yet rather
+  than a separate gap.
+
+- **`read_file`, `read_git`, `repo_map` and the lines `edit_file` returns are the only reads that
+  are scanned.** CRED-15 runs at the tools whose whole purpose is putting a file's text in front of
+  the planner, now or as it stood in a commit, at the map, which drops a file with a finding without
+  asking, since it shows declaration lines and not one path a person could answer for, and at the
+  lines an edit comes back with, which are the one place a tool for changing a file also hands back
+  its text. Three other results carry a vouched file's
+  bytes there and are not scanned: `search` quotes the lines it matched, `load_skill` carries the
+  body of a skill, and `read_output` hands over what a program printed. Each needs its own answer
+  rather than the same one. A search walks many files at once and mixes vouched ones with
+  quarantined ones, so a question about it is a question about a set rather than a path, and the
+  finding's location is the thing a person would act on. A skill is a file the person installed
+  under their own state directory rather than something the tree proposed. What a program printed
+  is quarantined unless the line was vouched for, and where it was not there is a prompt in front
+  of it already. Until those are settled a credential in a file reaches the planner through any of
+  the three, and the disclosure is the same one CRED-15 is about.
+
+- **An answer lasts the session and no longer.** Agreeing that a file may be read is remembered per
+  path while the session lives and is written nowhere, so the next session asks about the same
+  `.env` again. Carrying it forward needs a name an answer can be filed under across runs, which is
+  the durable salt and the store the entry above describes: a path alone is not one, since the file
+  at that path is not the file that was answered about. A move of the working directory drops them
+  all, including an answer about a file the new directory still reaches, which is asked about
+  again: telling those apart would mean renaming each answer for the new directory, to save one
+  question per file.
+
+- **An answer to read a file is filed under its name, so what the name leads to later is covered.**
+  Agreeing that a file may be read is kept under the name it has from the root. After a link on that
+  path is pointed somewhere else, the same name reaches another file without a question, and a file
+  whose bytes are replaced at the same path is covered in the same way for the rest of the session.
+  A write is kept under the file it lands in, so a retargeted link asks again there, and replaced
+  bytes are covered as they are for a read. Keying a read on where it lands, as a write is, would
+  close the link case. Only keying on the bytes closes the other, and it asks again after every edit
+  the agent makes itself.
+
+- **Half of CRED-14 is pinned and half is argued.** The tests on it are the environment of a program
+  this agent starts. That what it holds reaches no session record rests on
+  [TRACE-2](trace.md#TRACE-2) admitting no field one could sit in, and that it is shown only as a
+  redaction rests on the type it is held in; neither is pinned by a test that scans a record or a
+  screen for every secret the process holds, which is what the clause says is owed. The ChatGPT
+  sign-in and the xAI sign-in are the credentials a test does scan for, each in the outputs of a run of its
+  own.
+
+- **Most of this is not implemented.** What runs is the scan of what a turn writes, at the three
+  write tools and at the two places a `run` line writes, and one performer: a credential a vault
+  obtained itself, and a mail send carried out against it so that the asking agent never holds the
+  token, and the record CRED-19 writes each finding to. The scan of what a turn reads runs at
+  `read_file`, `read_git`, `repo_map` and the lines `edit_file` returns, and nowhere else. There is
+  no baseline over that record, and no authority at the tier these clauses describe. The rest of
+  every clause here is a target.

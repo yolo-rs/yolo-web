@@ -1,0 +1,216 @@
+[workspace]
+resolver = "2"
+members = [
+    # Unified Browser Engine & CLI App
+    "crates/yolo-browser",
+    "apps/yolo-browser-cli",
+
+    # Consolidated Obscura Crates (AI Agent, V8, DOM, CDP, MCP, Stealth, Render, SSRF)
+    "crates/obscura-dom",
+    "crates/obscura-ssrf",
+    "crates/obscura-net",
+    "crates/obscura-browser",
+    "crates/obscura-cdp",
+    "crates/obscura-js",
+    "crates/obscura-mcp",
+    "crates/obscura-render",
+    "crates/obscura-cli",
+    "crates/obscura",
+
+    # Consolidated Servo Crates (HTML5/XML5, CSS3, Geometry, IPC, Fonts, GPU, SVG, XPath, WebVTT)
+    "crates/servo-euclid",
+    "crates/servo-tendril",
+    "crates/servo-uluru",
+    "crates/servo-fnv",
+    "crates/servo-ipc-channel",
+    "crates/servo-string-cache",
+    "crates/servo-string-cache/string-cache-codegen",
+    "crates/servo-web-atoms",
+    "crates/servo-markup5ever",
+    "crates/servo-html5ever",
+    "crates/servo-xml5ever",
+    "crates/servo-cssparser",
+    "crates/servo-cssparser/macros",
+    "crates/servo-cssparser/color",
+    "crates/servo-stylo/servo_arc",
+    "crates/servo-stylo/selectors",
+    "crates/servo-stylo/to_shmem",
+    "crates/servo-stylo/to_shmem_derive",
+    "crates/servo-stylo/malloc_size_of",
+    "crates/servo-svg",
+    "crates/servo-xpath",
+    "crates/servo-webvtt",
+    "crates/servo-timers",
+    "crates/servo-allocator",
+    "crates/servo-tracing",
+    "crates/servo-dom-struct",
+    "crates/servo-deny-public-fields",
+    "crates/servo-hyper-serde",
+    "crates/servo-url",
+    "crates/servo-pathfinder/simd",
+    "crates/servo-pathfinder/geometry",
+    "crates/servo-pathfinder/color",
+    "crates/servo-font-kit",
+    "crates/servo-surfman",
+    "crates/servo-gaol",
+
+    # Consolidated Brave Crates (Adblock Shields, Kuchikiki DOM, Brave Search CLI, STAR Privacy, Bravebot Security)
+    "crates/brave-adblock",
+    "crates/brave-kuchikiki",
+    "crates/brave-search-cli",
+    "crates/brave-star",
+    "crates/brave-star/adss",
+    "crates/brave-star/ppoprf",
+    "crates/brave-star/sharks",
+    "crates/brave-bot",
+]
+default-members = [
+    "crates/yolo-browser",
+    "apps/yolo-browser-cli",
+    "crates/obscura-cli",
+    "crates/obscura",
+]
+exclude = [
+    "vendor/taffy",
+    "vendor/cosmic-text",
+    "vendor/wreq-util",
+    "crates/servo-rcdom",
+    "crates/servo-smallvec",
+    "crates/servo-rust-url",
+    "crates/servo-stylo/style",
+    "crates/servo-stylo/style_derive",
+    "crates/servo-stylo/style_traits",
+    "crates/servo-stylo/stylo_atoms",
+    "crates/servo-stylo/stylo_dom",
+    "crates/servo-stylo/stylo_static_prefs",
+    "crates/servo-webrender",
+    "crates/servo-pathfinder",
+    "crates/servo-engine",
+    "crates/servo-html5ever/fuzz",
+    "crates/servo-xml5ever/fuzz",
+    "crates/servo-cssparser/fuzz",
+    "crates/servo-string-cache/integration-tests",
+    "crates/servo-font-kit/c",
+    "crates/servo-surfman/android-example/rust",
+    "crates/brave-star/star",
+    "crates/brave-star/star-wasm",
+    "crates/brave-bot/crates",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["The YOLO-RS, Servo, Obscura & Brave Project Developers"]
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/yolo-rs/yolo-web"
+homepage = "https://github.com/yolo-rs/yolo-web"
+description = "Unified Chromium-compatible browser monorepo in full Rust + Bun for AI agents and humans (Servo + Obscura + Brave)"
+publish = true
+rust-version = "1.85.0"
+
+[workspace.lints.rust]
+unexpected_cfgs = "allow"
+
+[workspace.dependencies]
+# Obscura workspace crates
+yolo-browser = { path = "crates/yolo-browser" }
+obscura = { path = "crates/obscura" }
+obscura-dom = { path = "crates/obscura-dom" }
+obscura-ssrf = { path = "crates/obscura-ssrf" }
+obscura-net = { path = "crates/obscura-net" }
+obscura-browser = { path = "crates/obscura-browser" }
+obscura-cdp = { path = "crates/obscura-cdp" }
+obscura-js = { path = "crates/obscura-js" }
+obscura-mcp = { path = "crates/obscura-mcp" }
+obscura-render = { path = "crates/obscura-render" }
+
+# Consolidated Servo & Web Engine dependencies
+html5ever = "0.39"
+markup5ever = "0.39"
+xml5ever = { path = "crates/servo-xml5ever" }
+web_atoms = { path = "crates/servo-web-atoms" }
+selectors = "0.26"
+servo_arc = "0.4"
+cssparser = "0.34"
+euclid = { path = "crates/servo-euclid" }
+smallvec = { version = "1.15", features = ["serde", "union"] }
+tendril = { path = "crates/servo-tendril", features = ["encoding_rs"] }
+uluru = { path = "crates/servo-uluru" }
+fnv = { path = "crates/servo-fnv" }
+ipc-channel = { path = "crates/servo-ipc-channel" }
+string_cache = { path = "crates/servo-string-cache" }
+string_cache_codegen = { path = "crates/servo-string-cache/string-cache-codegen" }
+
+# Consolidated Brave dependencies
+adblock = { path = "crates/brave-adblock" }
+kuchikiki = { path = "crates/brave-kuchikiki" }
+sta-rs = { path = "crates/brave-star" }
+bravebot-core = { path = "crates/brave-bot" }
+
+# Layout & Rasterization
+taffy = { version = "0.12", path = "vendor/taffy" }
+tiny-skia = "0.12"
+ab_glyph = "0.2"
+
+# Async, HTTP, Crypto & Utilities
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_core = "1.0"
+serde_bytes = "0.11"
+serde_json = "1"
+serde_test = "1.0"
+url = { version = "2", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+thiserror = "2"
+anyhow = "1"
+base64 = "0.22"
+log = "0.4"
+memchr = "2.7"
+phf = { version = "0.14", features = ["macros"] }
+phf_codegen = "0.14"
+phf_shared = "0.14"
+criterion = "0.5"
+typed-arena = "2.0"
+svgtypes = "0.16"
+malloc_size_of = { path = "crates/servo-stylo/malloc_size_of", package = "stylo_malloc_size_of" }
+malloc_size_of_derive = "0.1"
+regex = "1.11"
+crossbeam-channel = "0.5"
+backtrace = "0.3"
+rustc-hash = "2.1"
+libc = "0.2"
+windows-sys = "0.61"
+tikv-jemalloc-sys = "0.6"
+tikv-jemallocator = "0.6"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits", "parsing", "printing", "proc-macro", "clone-impls", "derive"] }
+synstructure = "0.13"
+prettyplease = "0.2"
+cookie = "0.18"
+headers = "0.4"
+http = "1.2"
+hyper = "1.6"
+mime = "0.3"
+encoding_rs = { version = "0.8", features = ["serde"] }
+
+[profile.release]
+panic = "unwind"
+
+[profile.release-dist]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[patch.crates-io]
+euclid = { path = "crates/servo-euclid" }
+fnv = { path = "crates/servo-fnv" }
+uluru = { path = "crates/servo-uluru" }
+

@@ -1,0 +1,990 @@
+//! The hooks file, `hooks.json` in the user's own state directory.
+//!
+//! A hook is a command a person asked to have run when something happens: format after an edit,
+//! notify when a turn is over. This module reads the declarations and nothing else. Running one is
+//! the turn loop's, because starting a process is not this crate's business.
+//!
+//! # Why not a settings layer
+//!
+//! `settings.json` is read from three places and two of them sit in a checkout, so a command named
+//! in one would be a command that arrived with a clone. The settings reader also merges the three
+//! a name at a time, which means "the user's own layer only" would be a rule about a merge table
+//! rather than a property of the file: an edit to that table could hand the name back to a project
+//! layer with nothing to notice. A separate file in the state directory cannot be carried by a
+//! checkout at all, which is the same claim made without depending on anybody reading a merge rule
+//! correctly.
+//!
+//! # An argument vector, not a line
+//!
+//! `run` names a program and its arguments, as a list. Nothing concatenates them into a string and
+//! nothing re-parses one, so there is no shell between the file and the process and no quoting
+//! question to get wrong. That is a deliberate difference from how Claude Code spells a hook, whose
+//! `command` is a line a shell runs.
+//!
+//! # Every failure is per entry
+//!
+//! A missing file, an oversized one, a syntax error, an entry naming a moment nothing fires or
+//! carrying no program: each is that much of the file not applying, and never a reason to refuse to
+//! start. A mistake in a hook must not be a session that will not open.
+//!
+//! # One reading, shown as well as fired
+//!
+//! An editor showing somebody their hooks needs the same answers a turn needs, plus one more:
+//! whether what it was handed accounts for the whole file. It gets them from here
+//! ([`Declarations`]) rather than reading the text itself, because leniency is the point of the
+//! rules above and a second reader written to be strict would refuse files this one runs, while one
+//! written to be lenient would quietly drop what it did not recognise the next time this changed.
+
+use std::path::{Path, PathBuf};
+
+/// The file, inside the state directory.
+const HOOKS_FILE: &str = "hooks.json";
+
+/// The most of it worth reading.
+///
+/// A hooks file is a handful of short argument vectors. Bounded so a file that grew by accident, or
+/// was replaced by something else entirely, is passed over rather than parsed.
+const MAX_BYTES: u64 = 64 * 1024;
+
+/// The least a hook may declare for `timeout`, in seconds.
+pub const MIN_TIMEOUT_SECONDS: u64 = 1;
+
+/// The most a hook may declare for `timeout`, in seconds.
+///
+/// Every hook holds the turn open while it runs, so there is a ceiling: a typo of an extra zero
+/// declares no hook, and does not hold a turn open for hours.
+pub const MAX_TIMEOUT_SECONDS: u64 = 600;
+
+/// Where a person's hooks are declared, for telling them so.
+pub fn hooks_file(directory: &Path) -> PathBuf {
+    directory.join(HOOKS_FILE)
+}
+
+/// A moment a hook can be attached to, in a person's terms.
+///
+/// Deliberately short. Each is something somebody can point at in a session that has happened:
+/// the session opened, the turn began, a call finished, the turn is over, a question is waiting on
+/// them, a checkout was made for a delegate, the conversation was shortened, the session closed. The
+/// audit trail's events are a different vocabulary answering a different question, and a person
+/// writing a hook should not have to learn what a gate or a slot is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moment {
+    /// The turn a person asked for has begun, before anything is sent.
+    TurnStarted,
+    /// One tool call has finished, whatever came of it.
+    ToolFinished,
+    /// The turn a person asked for is over, however it ended.
+    TurnFinished,
+    /// A prompt or a question is about to be put to a person who can answer it.
+    PromptShown,
+    /// The driver has written a checkout for a delegate, which has not yet made its first request.
+    CheckoutMade,
+    /// A summary has replaced the older part of the conversation in the request, whether the budget
+    /// forced it or the person asked for it.
+    Compacted,
+    /// An interface a person opened has begun a session, before any turn is sent.
+    SessionStarted,
+    /// The interface a person opened is being left, however that came about.
+    SessionEnded,
+    /// A file the entry names has changed on disk, seen by a look the session takes itself.
+    FileChanged,
+}
+
+impl Moment {
+    /// Every moment a hook can be written for, in the order the specification lists them.
+    pub const ALL: [Self; 9] = [
+        Self::TurnStarted,
+        Self::ToolFinished,
+        Self::TurnFinished,
+        Self::PromptShown,
+        Self::CheckoutMade,
+        Self::Compacted,
+        Self::SessionStarted,
+        Self::SessionEnded,
+        Self::FileChanged,
+    ];
+
+    /// The word a file spells it with, or `None` for a word this build does not fire.
+    ///
+    /// An unrecognised moment is an entry that never runs rather than an error: a file written for
+    /// a later build should leave the hooks this one understands in force.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "turn-started" => Some(Self::TurnStarted),
+            "tool-finished" => Some(Self::ToolFinished),
+            "turn-finished" => Some(Self::TurnFinished),
+            "prompt-shown" => Some(Self::PromptShown),
+            "checkout-made" => Some(Self::CheckoutMade),
+            "compacted" => Some(Self::Compacted),
+            "session-started" => Some(Self::SessionStarted),
+            "session-ended" => Some(Self::SessionEnded),
+            "file-changed" => Some(Self::FileChanged),
+            _ => None,
+        }
+    }
+
+    /// The word, as a file spells it and as a hook is told it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnStarted => "turn-started",
+            Self::ToolFinished => "tool-finished",
+            Self::TurnFinished => "turn-finished",
+            Self::PromptShown => "prompt-shown",
+            Self::CheckoutMade => "checkout-made",
+            Self::Compacted => "compacted",
+            Self::SessionStarted => "session-started",
+            Self::SessionEnded => "session-ended",
+            Self::FileChanged => "file-changed",
+        }
+    }
+}
+
+/// One declaration: when to run, and what to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hook {
+    moment: Moment,
+    /// Which tool this is about, where the entry named one. `None` fires for every call.
+    ///
+    /// Read for every moment and consulted only by [`Moment::ToolFinished`], because a name is
+    /// what the writer said and dropping it at read time would leave nothing able to report that
+    /// it says nothing here.
+    tool: Option<String>,
+    /// The one file a `file-changed` entry watches, as the person wrote it.
+    ///
+    /// Read for every moment and consulted only by [`Moment::FileChanged`], for the reason `tool`
+    /// is. An entry for that moment with no usable path is not kept: there is nothing to look at.
+    path: Option<String>,
+    /// The program and its arguments. Never empty: an entry with nothing to run is not kept.
+    run: Vec<String>,
+    /// How long this hook may run, in whole seconds, where the entry stated one. `None` is the
+    /// bound its moment has for every hook that states none.
+    timeout: Option<u64>,
+}
+
+impl Hook {
+    /// The moment this fires at.
+    pub fn moment(&self) -> Moment {
+        self.moment
+    }
+
+    /// The tool this is about, where it named one.
+    pub fn tool(&self) -> Option<&str> {
+        self.tool.as_deref()
+    }
+
+    /// The file a `file-changed` entry watches, where it named one.
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// The program and its arguments.
+    pub fn run(&self) -> &[String] {
+        &self.run
+    }
+
+    /// How long this hook may run, where it stated one.
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout.map(std::time::Duration::from_secs)
+    }
+
+    /// Whether this entry names a call that does not happen at its moment, so nothing fires it.
+    ///
+    /// Answered here because an editor showing somebody this entry has to say so, and working it
+    /// out from the moment and the name again would be a second answer to which entries are about
+    /// a call.
+    pub fn fires_for_nothing(&self) -> bool {
+        (self.tool.is_some() && self.moment != Moment::ToolFinished)
+            || (self.path.is_some() && self.moment != Moment::FileChanged)
+    }
+
+    /// Whether this entry fires for `moment`, for a call on `tool` where there was one.
+    fn fires(&self, moment: Moment, tool: Option<&str>) -> bool {
+        if self.moment != moment {
+            return false;
+        }
+        match (&self.tool, tool) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(wanted), Some(called)) => wanted == called,
+        }
+    }
+}
+
+/// Every hook in force for this user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hooks {
+    hooks: Vec<Hook>,
+}
+
+impl Hooks {
+    /// Read the file in a state directory, or nothing where there is no directory or no file.
+    pub fn load(home: Option<&Path>) -> Self {
+        match home {
+            Some(home) => Declarations::read(home).into_hooks(),
+            None => Self::default(),
+        }
+    }
+
+    /// Read the declarations out of hooks JSON.
+    ///
+    /// The root is an object with a `hooks` array, so that the file has somewhere to grow a second
+    /// key without every reader of the first having to be taught that the root changed shape.
+    pub fn parse(text: &str) -> Self {
+        read(text).0
+    }
+
+    /// Whether anything is declared at all, so a turn that has no hooks can say so without
+    /// looking at a moment.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    /// Every entry, in the order the file declared them, whatever moment each names.
+    ///
+    /// For showing somebody their file. A turn asks [`Self::firing`] instead, because what fires
+    /// at a moment is a question about a moment.
+    pub fn declared(&self) -> &[Hook] {
+        &self.hooks
+    }
+
+    /// The hooks that fire for `moment`, in the order the file declared them.
+    ///
+    /// `tool` is the name of the call that just finished, where the moment is about one. Two
+    /// entries matching the same call both fire: a file naming the same moment twice asked for
+    /// two commands, not for the later one to replace the earlier.
+    pub fn firing(&self, moment: Moment, tool: Option<&str>) -> impl Iterator<Item = &Hook> {
+        self.hooks
+            .iter()
+            .filter(move |hook| hook.fires(moment, tool))
+    }
+}
+
+/// A hooks file as something showing it has to see it: what it declares, the text it was written
+/// as, and whether the first accounts for all of the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declarations {
+    hooks: Hooks,
+    text: Option<String>,
+    entire: bool,
+}
+
+impl Declarations {
+    /// Read the hooks file in a state directory.
+    pub fn read(home: &Path) -> Self {
+        let path = hooks_file(home);
+        let unread = Self {
+            hooks: Hooks::default(),
+            text: None,
+            entire: false,
+        };
+        match std::fs::metadata(&path) {
+            Ok(found) if found.len() > MAX_BYTES => return unread,
+            Ok(_) => {}
+            // No file yet is a file wholly accounted for: there is nothing in it left unread, and
+            // somebody may write their first hook into it. A file that is there and could not be
+            // opened is not that, and says so.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self {
+                    entire: true,
+                    ..unread
+                };
+            }
+            Err(_) => return unread,
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let (hooks, entire) = read(&text);
+                Self {
+                    hooks,
+                    text: Some(text),
+                    entire,
+                }
+            }
+            Err(_) => unread,
+        }
+    }
+
+    #[cfg(test)]
+    fn read_text(text: &str) -> Self {
+        let (hooks, entire) = read(text);
+        Self {
+            hooks,
+            text: Some(text.to_string()),
+            entire,
+        }
+    }
+
+    /// What the file declares, which is what a turn would fire.
+    pub fn hooks(&self) -> &Hooks {
+        &self.hooks
+    }
+
+    /// The file as it is written, where there was a file this could read.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// Whether [`Self::hooks`] accounts for every word of [`Self::text`]: no key beyond the ones
+    /// read, no entry passed over, and nothing trimmed on the way in.
+    ///
+    /// An editor composing the file back from the entries alone would drop whatever this does not
+    /// cover, so where this is false the file is somebody's to edit and not a form's to rewrite.
+    pub fn entire(&self) -> bool {
+        self.entire
+    }
+
+    /// What a turn wants out of this, once nothing needs to know how the file read.
+    pub fn into_hooks(self) -> Hooks {
+        self.hooks
+    }
+}
+
+/// The declarations in hooks JSON, and whether they account for all of it.
+///
+/// The root is an object with a `hooks` array, so that the file has somewhere to grow a second key
+/// without every reader of the first having to be taught that the root changed shape. A key this
+/// does not read is therefore expected one day, and is reported as something it did not read rather
+/// than refused.
+fn read(text: &str) -> (Hooks, bool) {
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return (Hooks::default(), false);
+    };
+    let Some(serde_json::Value::Array(entries)) = root.get("hooks") else {
+        return (Hooks::default(), false);
+    };
+    let mut hooks = Vec::with_capacity(entries.len());
+    let mut entire = root.len() == 1;
+    for value in entries {
+        match entry(value) {
+            Some(hook) => {
+                entire &= accounted(value, &hook);
+                hooks.push(hook);
+            }
+            None => entire = false,
+        }
+    }
+    (Hooks { hooks }, entire)
+}
+
+/// Whether writing this entry back out of what was read would put the same words there.
+fn accounted(value: &serde_json::Value, hook: &Hook) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "on" | "tool" | "path" | "run" | "timeout"))
+    {
+        return false;
+    }
+    // An editor composing the file back from the entries has no field for a path, so an entry with
+    // one is a file it must leave to be edited by hand, whatever it says.
+    if hook.path.is_some() {
+        return false;
+    }
+    // A name read as `None` because it was blank, because it was not a string at all, or trimmed
+    // on the way in, is a name that would not survive the round trip.
+    let tool_kept = match (object.get("tool"), hook.tool.as_deref()) {
+        (None, None) => true,
+        (Some(written), Some(read)) => written.as_str() == Some(read),
+        _ => false,
+    };
+    // An entry with an unusable `timeout` is dropped, so a value that was read is one that is
+    // written back as it was.
+    tool_kept && object.get("timeout").and_then(serde_json::Value::as_u64) == hook.timeout
+}
+
+/// One entry, or `None` where it says nothing this build can run.
+///
+/// Dropped rather than refused, and dropped one at a time: a typo in the third entry leaves the
+/// other two firing.
+///
+/// A key added here is a key [`accounted`] has to know about, or every file using it is reported as
+/// holding something unread and no editor will offer to write it.
+fn entry(value: &serde_json::Value) -> Option<Hook> {
+    let object = value.as_object()?;
+    let moment = Moment::parse(object.get("on")?.as_str()?)?;
+    let tool = match object.get("tool") {
+        Some(serde_json::Value::String(name)) if !name.trim().is_empty() => {
+            Some(name.trim().to_string())
+        }
+        _ => None,
+    };
+    let path = match object.get("path") {
+        Some(serde_json::Value::String(path)) if !path.trim().is_empty() => Some(path.clone()),
+        _ => None,
+    };
+    // Nothing to look at is nothing to fire for, so this moment's entry is dropped, as one with no
+    // program is.
+    if moment == Moment::FileChanged && path.is_none() {
+        return None;
+    }
+    let serde_json::Value::Array(words) = object.get("run")? else {
+        return None;
+    };
+    let mut run = Vec::with_capacity(words.len());
+    for word in words {
+        // Strings only. A number or a boolean where an argument belongs would have to be given a
+        // spelling nobody chose, and an argument vector is the one place in this file where
+        // guessing at what somebody meant decides what gets executed.
+        run.push(word.as_str()?.to_string());
+    }
+    if run.first().map(|program| program.trim().is_empty()) != Some(false) {
+        return None;
+    }
+    // Whole seconds from 1 to the ceiling. Anything else drops the entry, as an argument that is not
+    // a string does: a bound somebody typed wrongly is not one to guess at, and the default would
+    // be a bound they did not ask for.
+    let timeout = match object.get("timeout") {
+        None => None,
+        Some(value) => match value.as_u64() {
+            Some(seconds) if (MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&seconds) => {
+                Some(seconds)
+            }
+            _ => return None,
+        },
+    };
+    Some(Hook {
+        moment,
+        tool,
+        path,
+        run,
+        timeout,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::scratch_dir;
+
+    fn programs(hooks: &Hooks, moment: Moment, tool: Option<&str>) -> Vec<Vec<String>> {
+        hooks
+            .firing(moment, tool)
+            .map(|hook| hook.run().to_vec())
+            .collect()
+    }
+
+    /// HOOK-2: the list of moments names each of them once, in a spelling a file accepts, which is
+    /// what a front end that reports a bound for each of them reads. The regression it rejects is a
+    /// moment listed twice in the place of another, which a front end then reports twice and the
+    /// other never. A moment left out of the list altogether is not something a test can see; the
+    /// list sits beside the enum and its two matches for that reason.
+    #[test]
+    fn the_list_of_moments_names_each_once_in_a_spelling_a_file_accepts() {
+        let words: std::collections::BTreeSet<&str> =
+            Moment::ALL.iter().map(|moment| moment.as_str()).collect();
+        assert_eq!(words.len(), Moment::ALL.len(), "{:?}", Moment::ALL);
+        for moment in Moment::ALL {
+            assert_eq!(Moment::parse(moment.as_str()), Some(moment));
+        }
+    }
+
+    /// HOOK-2: the nine moments are the vocabulary, and each is spelled the way the file spells it.
+    #[test]
+    fn each_moment_is_named_by_the_word_a_file_spells_it_with() {
+        for (moment, word) in [
+            (Moment::TurnStarted, "turn-started"),
+            (Moment::ToolFinished, "tool-finished"),
+            (Moment::TurnFinished, "turn-finished"),
+            (Moment::PromptShown, "prompt-shown"),
+            (Moment::CheckoutMade, "checkout-made"),
+            (Moment::Compacted, "compacted"),
+            (Moment::SessionStarted, "session-started"),
+            (Moment::SessionEnded, "session-ended"),
+            (Moment::FileChanged, "file-changed"),
+        ] {
+            assert_eq!(Moment::parse(word), Some(moment));
+            assert_eq!(moment.as_str(), word);
+        }
+    }
+
+    /// HOOK-2: a file written for a build that fires more moments than this one leaves the hooks
+    /// this build does understand in force.
+    #[test]
+    fn a_moment_this_build_does_not_fire_is_not_a_hook() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "file-opened", "run": ["notify"]},
+                {"on": "turn-finished", "run": ["say", "done"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnFinished, None),
+            vec![vec!["say".to_string(), "done".to_string()]]
+        );
+    }
+
+    /// HOOK-3: a hook is a program and its arguments, kept as written.
+    #[test]
+    fn a_hook_is_the_argument_vector_the_file_listed() {
+        let hooks =
+            Hooks::parse(r#"{"hooks": [{"on": "turn-started", "run": ["echo", "a b; c"]}]}"#);
+        assert_eq!(
+            programs(&hooks, Moment::TurnStarted, None),
+            vec![vec!["echo".to_string(), "a b; c".to_string()]]
+        );
+    }
+
+    /// HOOK-3: a line for a shell to parse is not an argument vector, and is not run as one.
+    #[test]
+    fn a_command_written_as_one_string_is_not_a_hook() {
+        let hooks = Hooks::parse(r#"{"hooks": [{"on": "turn-started", "run": "echo hi"}]}"#);
+        assert!(hooks.is_empty());
+    }
+
+    /// HOOK-3: nothing is coerced into an argument, because an argument vector is where guessing
+    /// at what somebody meant decides what runs.
+    #[test]
+    fn an_argument_that_is_not_a_string_drops_the_entry() {
+        let hooks = Hooks::parse(r#"{"hooks": [{"on": "turn-started", "run": ["sleep", 3]}]}"#);
+        assert!(hooks.is_empty());
+    }
+
+    /// HOOK-3: an entry with no program names nothing to run.
+    #[test]
+    fn an_entry_with_no_program_is_not_a_hook() {
+        for text in [
+            r#"{"hooks": [{"on": "turn-started", "run": []}]}"#,
+            r#"{"hooks": [{"on": "turn-started", "run": ["   "]}]}"#,
+            r#"{"hooks": [{"on": "turn-started"}]}"#,
+        ] {
+            assert!(Hooks::parse(text).is_empty(), "{text}");
+        }
+    }
+
+    /// HOOK-2: a tool moment with a name fires for that call and no other.
+    #[test]
+    fn a_hook_naming_a_tool_fires_for_that_tool_alone() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [{"on": "tool-finished", "tool": "write_file", "run": ["fmt"]}]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::ToolFinished, Some("write_file")),
+            vec![vec!["fmt".to_string()]]
+        );
+        assert!(programs(&hooks, Moment::ToolFinished, Some("read_file")).is_empty());
+    }
+
+    /// HOOK-2: a tool moment that names none fires for every call.
+    #[test]
+    fn a_hook_naming_no_tool_fires_for_every_call() {
+        let hooks = Hooks::parse(r#"{"hooks": [{"on": "tool-finished", "run": ["log"]}]}"#);
+        assert_eq!(
+            programs(&hooks, Moment::ToolFinished, Some("search")).len(),
+            1
+        );
+        assert_eq!(programs(&hooks, Moment::ToolFinished, Some("run")).len(), 1);
+    }
+
+    /// HOOK-2: naming a tool says which calls an entry is about, so an entry naming one on a
+    /// moment that is not about a call is about no call there is.
+    #[test]
+    fn a_tool_named_on_a_turn_moment_fires_for_nothing() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [{"on": "turn-started", "tool": "write_file", "run": ["fmt"]}]}"#,
+        );
+        assert!(programs(&hooks, Moment::TurnStarted, None).is_empty());
+    }
+
+    /// HOOK-2: a checkout is made by the driver and not by a call, so an entry naming a tool on
+    /// `checkout-made` is about a call that does not happen there, as it is on a turn moment.
+    #[test]
+    fn a_tool_named_on_the_checkout_moment_fires_for_nothing() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [{"on": "checkout-made", "tool": "spawn_agent", "run": ["setup"]}]}"#,
+        );
+        assert!(programs(&hooks, Moment::CheckoutMade, None).is_empty());
+        assert!(hooks.declared()[0].fires_for_nothing());
+    }
+
+    /// HOOK-2: a setup command for a new checkout is not run at the end of a turn or after a call,
+    /// and a command written for those is not run when a checkout is made.
+    #[test]
+    fn a_checkout_hook_fires_at_that_moment_alone() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "checkout-made", "run": ["setup"]},
+                {"on": "tool-finished", "run": ["log"]},
+                {"on": "turn-finished", "run": ["end"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::CheckoutMade, None),
+            vec![vec!["setup".to_string()]]
+        );
+        for moment in [
+            Moment::TurnStarted,
+            Moment::TurnFinished,
+            Moment::PromptShown,
+        ] {
+            assert!(
+                !programs(&hooks, moment, None).contains(&vec!["setup".to_string()]),
+                "{moment:?}"
+            );
+        }
+        assert!(
+            !programs(&hooks, Moment::ToolFinished, Some("run"))
+                .contains(&vec!["setup".to_string()])
+        );
+    }
+
+    /// HOOK-2: a moment fires the hooks written for it and nothing written for another.
+    #[test]
+    fn a_moment_fires_only_the_hooks_written_for_it() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "turn-started", "run": ["begin"]},
+                {"on": "turn-finished", "run": ["end"]},
+                {"on": "compacted", "run": ["shrunk"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnStarted, None),
+            vec![vec!["begin".to_string()]]
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnFinished, None),
+            vec![vec!["end".to_string()]]
+        );
+        assert_eq!(
+            programs(&hooks, Moment::Compacted, None),
+            vec![vec!["shrunk".to_string()]]
+        );
+    }
+
+    /// HOOK-2, HOOK-10: the two ends of a session are moments of their own. An entry written for one
+    /// fires at that one, and not at the other or at any moment of a turn.
+    #[test]
+    fn a_session_moment_fires_only_the_hooks_written_for_it() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "session-started", "run": ["open"]},
+                {"on": "session-ended", "run": ["close"]},
+                {"on": "turn-started", "run": ["begin"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::SessionStarted, None),
+            vec![vec!["open".to_string()]]
+        );
+        assert_eq!(
+            programs(&hooks, Moment::SessionEnded, None),
+            vec![vec!["close".to_string()]]
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnStarted, None),
+            vec![vec!["begin".to_string()]]
+        );
+    }
+
+    /// HOOK-2: a session is not a call, so a tool named on either end of one is about a call that
+    /// does not happen there, and the entry is shown as firing for nothing.
+    #[test]
+    fn a_tool_named_on_a_session_moment_fires_for_nothing() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "session-started", "tool": "write_file", "run": ["open"]},
+                {"on": "session-ended", "tool": "write_file", "run": ["close"]}
+            ]}"#,
+        );
+        assert!(programs(&hooks, Moment::SessionStarted, None).is_empty());
+        assert!(programs(&hooks, Moment::SessionEnded, None).is_empty());
+        assert!(hooks.declared().iter().all(Hook::fires_for_nothing));
+    }
+
+    /// HOOK-2: two entries for one moment are two commands, in the order the file listed them.
+    #[test]
+    fn two_entries_for_one_moment_both_fire_in_order() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "turn-finished", "run": ["first"]},
+                {"on": "turn-finished", "run": ["second"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnFinished, None),
+            vec![vec!["first".to_string()], vec!["second".to_string()]]
+        );
+    }
+
+    /// HOOK-7: one unusable entry is that much of the file not applying, not a file that is
+    /// refused.
+    #[test]
+    fn an_unusable_entry_leaves_the_others_firing() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "turn-started", "run": 7},
+                {"on": "turn-started", "run": ["still-here"]}
+            ]}"#,
+        );
+        assert_eq!(
+            programs(&hooks, Moment::TurnStarted, None),
+            vec![vec!["still-here".to_string()]]
+        );
+    }
+
+    /// HOOK-7: a file nobody can parse leaves a session that starts with no hooks, rather than one
+    /// that will not start.
+    #[test]
+    fn an_unparseable_file_declares_no_hooks() {
+        for text in ["", "not json", "[]", r#"{"hooks": {}}"#] {
+            assert!(Hooks::parse(text).is_empty(), "{text}");
+        }
+    }
+
+    /// HOOK-1: the declarations are read from the state directory, under its own name.
+    #[test]
+    fn the_declarations_are_read_from_the_state_directory() {
+        let home = scratch_dir("hooks-from-the-file");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch state directory");
+        std::fs::write(
+            hooks_file(&home),
+            r#"{"hooks": [{"on": "turn-started", "run": ["from-the-file"]}]}"#,
+        )
+        .expect("write a hooks file");
+
+        let hooks = Hooks::load(Some(&home));
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(
+            programs(&hooks, Moment::TurnStarted, None),
+            vec![vec!["from-the-file".to_string()]]
+        );
+    }
+
+    /// HOOK-1: a machine whose platform names no state directory has no hooks rather than hooks
+    /// read from somewhere nobody chose.
+    #[test]
+    fn no_state_directory_means_no_hooks() {
+        assert!(Hooks::load(None).is_empty());
+    }
+
+    /// HOOK-8: what is shown is what was read: the entries, and the text they were read out of.
+    #[test]
+    fn a_file_read_for_showing_reports_the_text_it_was_read_from() {
+        let home = scratch_dir("hooks-shown");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch state directory");
+        let text = r#"{"hooks": [{"on": "tool-finished", "tool": "write_file", "run": ["fmt"]}]}"#;
+        std::fs::write(hooks_file(&home), text).expect("write a hooks file");
+
+        let read = Declarations::read(&home);
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(read.text(), Some(text));
+        assert!(read.entire(), "everything in it was read");
+        assert_eq!(read.hooks().declared().len(), 1);
+        assert_eq!(read.hooks().declared()[0].tool(), Some("write_file"));
+    }
+
+    /// HOOK-8: anything in the file this reader passed over is reported as passed over, so an
+    /// editor composing the file back from the entries alone knows it would drop something.
+    #[test]
+    fn whatever_went_unread_leaves_the_file_not_wholly_read() {
+        for text in [
+            r#"{"hooks": [{"on": "turn-started", "run": ["x"]}], "later": true}"#,
+            r#"{"hooks": [{"on": "turn-started", "run": ["x"], "unless": "weekends"}]}"#,
+            r#"{"hooks": [{"on": "file-opened", "run": ["x"]}]}"#,
+            r#"{"hooks": [{"on": "turn-started", "run": []}]}"#,
+            r#"{"hooks": [{"on": "tool-finished", "tool": " write_file ", "run": ["x"]}]}"#,
+            r#"{"hooks": [{"on": "tool-finished", "tool": "", "run": ["x"]}]}"#,
+            r#"{"hooks": [{"on": "turn-started", "tool": null, "run": ["x"]}]}"#,
+            r#"{"hooks": [{"on": "turn-started", "tool": 7, "run": ["x"]}]}"#,
+            "not json",
+            r#"{"hooks": {}}"#,
+        ] {
+            assert!(!read(text).1, "{text}");
+        }
+        assert!(
+            read(r#"{"hooks": [{"on": "turn-started", "run": ["x"]}]}"#).1,
+            "a file holding only what this reads is wholly read"
+        );
+    }
+
+    /// HOOK-8: a file nobody has written yet is one an editor may write, and a file that is there
+    /// but was not read is not.
+    #[test]
+    fn a_file_that_is_not_there_is_wholly_read_and_one_too_large_is_not() {
+        let home = scratch_dir("hooks-unread");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch state directory");
+
+        let missing = Declarations::read(&home);
+        let padding = " ".repeat(MAX_BYTES as usize + 1);
+        std::fs::write(
+            hooks_file(&home),
+            format!(r#"{{"hooks": [{{"on": "turn-started", "run": ["x"]}}]{padding}}}"#),
+        )
+        .expect("write a hooks file");
+        let oversized = Declarations::read(&home);
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(missing.text(), None);
+        assert!(missing.entire(), "nothing in a file that is not there");
+        assert_eq!(oversized.text(), None);
+        assert!(!oversized.entire(), "a file this passed over unread");
+        assert!(oversized.hooks().is_empty());
+    }
+
+    /// HOOK-8: which entries are about a call is answered here, so nothing showing one works it
+    /// out from the moment and the name a second time.
+    #[test]
+    fn an_entry_says_whether_it_fires_for_nothing() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "turn-started", "tool": "write_file", "run": ["a"]},
+                {"on": "tool-finished", "tool": "write_file", "run": ["b"]},
+                {"on": "turn-finished", "run": ["c"]},
+                {"on": "compacted", "tool": "write_file", "run": ["d"]}
+            ]}"#,
+        );
+        let fires_for_nothing: Vec<bool> = hooks
+            .declared()
+            .iter()
+            .map(Hook::fires_for_nothing)
+            .collect();
+        assert_eq!(fires_for_nothing, vec![true, false, false, true]);
+        assert!(programs(&hooks, Moment::Compacted, None).is_empty());
+    }
+
+    /// HOOK-7: an entry may state its own bound, in whole seconds, and one that states none has
+    /// none of its own.
+    #[test]
+    fn an_entry_may_state_its_own_timeout() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "turn-finished", "run": ["a"], "timeout": 1},
+                {"on": "turn-finished", "run": ["b"], "timeout": 600},
+                {"on": "turn-finished", "run": ["c"]}
+            ]}"#,
+        );
+        let bounds: Vec<Option<u64>> = hooks
+            .declared()
+            .iter()
+            .map(|hook| hook.timeout().map(|bound| bound.as_secs()))
+            .collect();
+        assert_eq!(bounds, vec![Some(1), Some(600), None]);
+        assert!(
+            read(r#"{"hooks": [{"on": "turn-finished", "run": ["a"], "timeout": 5}]}"#).1,
+            "a timeout is a key this reads, so the file is wholly read"
+        );
+    }
+
+    /// HOOK-7: a timeout that is not a whole number of seconds from 1 to the ceiling declares no
+    /// hook, and the entries beside it stay in force.
+    #[test]
+    fn an_unusable_timeout_drops_the_entry() {
+        for value in [
+            "0",
+            "-1",
+            "601",
+            "1.5",
+            "1.0",
+            "\"30\"",
+            "null",
+            "true",
+            "[30]",
+            "99999999999999999999",
+        ] {
+            let text = format!(
+                r#"{{"hooks": [
+                    {{"on": "turn-finished", "run": ["bad"], "timeout": {value}}},
+                    {{"on": "turn-finished", "run": ["good"]}}
+                ]}}"#
+            );
+            let hooks = Hooks::parse(&text);
+            assert_eq!(
+                programs(&hooks, Moment::TurnFinished, None),
+                vec![vec!["good".to_string()]],
+                "timeout {value}"
+            );
+            assert!(!read(&text).1, "timeout {value}");
+        }
+    }
+
+    /// HOOK-7: a file too large to be the handful of short vectors this reads is passed over.
+    #[test]
+    fn an_oversized_file_declares_no_hooks() {
+        let home = scratch_dir("hooks-oversized");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch state directory");
+        let padding = " ".repeat(MAX_BYTES as usize + 1);
+        std::fs::write(
+            hooks_file(&home),
+            format!(r#"{{"hooks": [{{"on": "turn-started", "run": ["x"]}}]{padding}}}"#),
+        )
+        .expect("write a hooks file");
+
+        let hooks = Hooks::load(Some(&home));
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(hooks.is_empty());
+    }
+
+    /// HOOK-7: the limit is 64 KB to the byte, written here as the number the clause states so a
+    /// limit moved in either direction is caught. A file of exactly 65536 bytes still applies and
+    /// one byte more does not.
+    #[test]
+    fn a_hooks_file_is_read_up_to_64_kb_and_not_a_byte_past_it() {
+        let entry = r#"{"hooks": [{"on": "turn-started", "run": ["x"]}]}"#;
+        let loaded = |size: usize| {
+            let home = scratch_dir("hooks-limit");
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).expect("a scratch state directory");
+            let text = format!("{entry}{}", " ".repeat(size - entry.len()));
+            assert_eq!(text.len(), size);
+            std::fs::write(hooks_file(&home), text).expect("write a hooks file");
+            let hooks = Hooks::load(Some(&home));
+            std::fs::remove_dir_all(&home).ok();
+            hooks.is_empty()
+        };
+
+        assert!(!loaded(65536), "a file of exactly 64 KB was passed over");
+        assert!(loaded(65537), "a file a byte past 64 KB was read");
+    }
+
+    /// HOOK-2: a `file-changed` entry names the one file it watches, and an entry that names none
+    /// has nothing to look at and is not kept. The regression it rejects is keeping it, which
+    /// leaves a hook that can never fire and says nothing about why.
+    #[test]
+    fn a_file_changed_entry_names_the_file_it_watches() {
+        let hooks = Hooks::parse(
+            r#"{"hooks": [
+                {"on": "file-changed", "path": ".envrc", "run": ["notify"]},
+                {"on": "file-changed", "run": ["no-path"]},
+                {"on": "file-changed", "path": "  ", "run": ["blank"]}
+            ]}"#,
+        );
+
+        let kept: Vec<_> = hooks.firing(Moment::FileChanged, None).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path(), Some(".envrc"));
+        assert!(!kept[0].fires_for_nothing());
+    }
+
+    /// HOOK-2: a path on any other moment fires for nothing, as a tool does on a moment that has
+    /// no call. The regression it rejects is a form showing that entry as one that fires.
+    #[test]
+    fn a_path_on_another_moment_fires_for_nothing() {
+        let hooks =
+            Hooks::parse(r#"{"hooks": [{"on": "turn-finished", "path": "x", "run": ["notify"]}]}"#);
+
+        assert!(hooks.declared()[0].fires_for_nothing());
+    }
+
+    /// HOOK-8: a file holding a path is not one an editor may compose back from its entries, which
+    /// have no field for it. The regression it rejects is reporting it wholly read, which lets a
+    /// form rewrite the file without the path.
+    #[test]
+    fn an_entry_with_a_path_leaves_the_file_not_wholly_read() {
+        let kept = Declarations::read_text(
+            r#"{"hooks": [{"on": "file-changed", "path": "x", "run": ["notify"]}]}"#,
+        );
+
+        assert!(!kept.entire());
+        assert_eq!(kept.hooks().declared().len(), 1);
+    }
+}

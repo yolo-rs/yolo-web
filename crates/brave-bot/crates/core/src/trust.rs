@@ -1,0 +1,1921 @@
+//! Which paths a user vouches for.
+//!
+//! The kernel decides *whether* a write needs a person's approval by asking two questions:
+//! is the destination somewhere the user vouched for, and is the data trusted? A write of
+//! trusted data to a trusted path is ordinary work and needs no interruption. Anything else
+//! is shown to a person, because that is where a mistake cannot be undone by a later step.
+//!
+//! # Most specific rule wins
+//!
+//! Trust is recorded per path prefix, and the *longest* matching prefix decides. Both
+//! polarities are expressible, so a trusted project may contain an untrusted subtree, and
+//! that subtree may in turn contain a trusted path again:
+//!
+//! ```text
+//!   .            (unset)
+//!   src          trusted     → src/main.rs is trusted
+//!   src/vendor   untrusted   → src/vendor/lib.js is untrusted
+//!   src/vendor/ours.js trusted → trusted again, being more specific
+//! ```
+//!
+//! # Why writing untrusted data marks the destination untrusted
+//!
+//! Without that rule the trust store would launder data. A turn could fetch a page, write
+//! it into a trusted directory, read it back (now labelled trusted, because the path says
+//! so) and use it for routing. Recording the destination as untrusted when untrusted bytes
+//! land there closes the loop: what comes out of a file is never more trusted than what
+//! went in.
+//!
+//! This crate performs no I/O; paths here are strings, compared by segment. The caller is
+//! responsible for having resolved and confined them first.
+//!
+//! # One namespace of full paths
+//!
+//! Every rule is keyed under a full path. A caller may name a path relatively, which is how a
+//! file in the project is named, and the store reads that under the working directory it was
+//! given when it was made: `src/main.rs` in a session working in `/work` is the rule
+//! `/work/src/main.rs`, and the working directory's own rule is `/work`. A name that is already
+//! a full path is a key as it stands, which is how a directory opened by name is named.
+//!
+//! So there is no empty prefix to cover everything, and `/Users/x/notes` simply does not prefix
+//! `/Users/x/proj`. One file has one rule whichever way it was spelled, and the longest matching
+//! prefix decides among them all.
+
+use crate::label::Integrity;
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// A user's decisions about which paths are trustworthy.
+///
+/// Empty of rules when it is made, which means nothing is trusted and every write is shown to a
+/// person. That is the right default: trust has to be granted, never assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustStore {
+    /// The working directory a relative name is read under, as a key.
+    ///
+    /// An absolute path, which is what [`TrustStore::new`] is given and what the workspace
+    /// resolves once. A name that is not one keys this store's relative rules under itself
+    /// consistently, and a rule about a directory opened by name does not reach them: wrong in
+    /// the direction that trusts nothing.
+    root: String,
+    /// Full path → decision for that subtree. `None` overrides broader decisions.
+    ///
+    /// A `BTreeMap` rather than a hash map so iteration order is deterministic, which keeps
+    /// the audit trail reproducible.
+    rules: BTreeMap<String, Option<Integrity>>,
+    /// Whether two spellings differing only in case are one path, because the volume the working
+    /// directory is on answers to either. Told by the caller, which has probed the volume, since
+    /// this crate performs no I/O. `false` unless the caller says otherwise, so a map made without
+    /// the answer compares bytes and never extends a rule to a spelling it was not written about.
+    folds_case: bool,
+    /// The working directory the person's yes said confined `run` lines may start in without being
+    /// asked ([RUN-5]), or `None` where no yes did.
+    ///
+    /// Not a rule and not a decision about any file: a rule says what a path is read as, and this
+    /// says what a person agreed to when they trusted the directory. Held beside the rules so that
+    /// every caller that carries the map carries the answer with it, and keyed on the directory so
+    /// the map moving to another one ([`TrustStore::rebased`]) leaves the answer behind, since it
+    /// was about the first. A map made from a kept answer written before the question said this has
+    /// none, which is what makes such a directory ask until the person answers again.
+    ///
+    /// [RUN-5]: ../../../docs/specs/tools/run.md
+    confined_lines_in: Option<String>,
+}
+
+impl TrustStore {
+    /// A map with no rules, whose relative names mean paths under `root`.
+    ///
+    /// `root` is the working directory, absolute: the one `Workspace::new` resolves, keyed the way
+    /// the workspace keys every other name. It is not a rule and grants nothing, which is what keeps
+    /// an empty map an empty map.
+    ///
+    /// Names are compared byte for byte until [`TrustStore::folding_case`] says the volume does not.
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: normalise(&root.as_ref().to_string_lossy()),
+            rules: BTreeMap::new(),
+            folds_case: false,
+            confined_lines_in: None,
+        }
+    }
+
+    /// This map, comparing names with case folded where `folds` is true.
+    ///
+    /// For a caller that has asked the volume whether it holds `Docs` and `docs` as one file. Where
+    /// it does, a rule about one spelling has to decide the other, in both polarities, or a
+    /// distrusted file read under a second spelling is read as trusted. Where it does not, they are
+    /// two files, and folding would let a rule about one cover the other.
+    #[must_use]
+    pub fn folding_case(mut self, folds: bool) -> Self {
+        self.folds_case = folds;
+        self
+    }
+
+    /// Whether names are compared with case folded.
+    pub fn folds_case(&self) -> bool {
+        self.folds_case
+    }
+
+    /// The key `path` is held under: the full path it names.
+    ///
+    /// A name that is already absolute is one as it stands. A relative one is the working
+    /// directory with the name beneath it, and the empty name is the working directory itself,
+    /// which is the rule covering the whole project.
+    pub(crate) fn key(&self, path: &str) -> String {
+        let named = normalise(path);
+        if is_absolute_key(&named) {
+            return named;
+        }
+        match (self.root.as_str(), named.as_str()) {
+            (_, "") => self.root.clone(),
+            ("/", below) => format!("/{below}"),
+            // A working directory that is not a path is not one a key can be built on, so the
+            // names read under it stay as they were: they reach each other and nothing reaches
+            // them, which is the direction that trusts nothing.
+            ("", below) => below.to_string(),
+            (root, below) => format!("{root}/{below}"),
+        }
+    }
+
+    /// How a key is spelled back to a caller: relative where it is under the working directory,
+    /// and the key itself where it is not.
+    ///
+    /// The inverse of [`TrustStore::key`], so a name this hands out reaches the rule it came
+    /// from. That is what lets a rule be written down and read back (a session record keeps the
+    /// relative form, which survives the project being moved) and shown to a person under the
+    /// name they would type.
+    fn named<'a>(&self, key: &'a str) -> &'a str {
+        if key == self.root {
+            return "";
+        }
+        // Nothing is under a working directory that is not a path, so every other key stands as
+        // it is: stripping the empty string off one would turn a full path into a relative name
+        // that no longer reaches it.
+        if self.root.is_empty() {
+            return key;
+        }
+        key.strip_prefix(self.root.as_str())
+            .and_then(|below| below.strip_prefix('/'))
+            .unwrap_or(key)
+    }
+
+    /// Record that `path` and everything beneath it is trusted.
+    pub fn trust(&mut self, path: &str) {
+        let key = self.key(path);
+        self.rules.insert(key, Some(Integrity::Trusted));
+    }
+
+    /// Record that `path` and everything beneath it is untrusted.
+    ///
+    /// Used both for an explicit user decision and for the automatic marking that happens
+    /// when untrusted bytes are written somewhere.
+    pub fn distrust(&mut self, path: &str) {
+        let key = self.key(path);
+        self.rules.insert(key, Some(Integrity::Untrusted));
+    }
+
+    /// Leave this subtree undecided, overriding any broader decision.
+    pub fn undecide(&mut self, path: &str) {
+        let key = self.key(path);
+        self.rules.insert(key, None);
+    }
+
+    /// Say about `to`, and everything beneath it, what this map says about `from` and everything
+    /// beneath it (CHECKOUT-8).
+    ///
+    /// Each rule under `from` is copied to the same relative path under `to`, and `to` itself is
+    /// given the decision in force at `from`, or an undecided boundary where no rule covers `from`,
+    /// so a broader rule over `to` does not answer for a path nobody has said anything about. A
+    /// rule already under `to` is replaced by its copy.
+    pub fn copy_beneath(&mut self, from: &str, to: &str) {
+        let from = self.key(from);
+        let to = self.key(to);
+        let at_root = self.decision_at_key(&from).flatten();
+        let copies: Vec<(String, Option<Integrity>)> = self
+            .rules
+            .iter()
+            .filter(|(key, _)| **key != from && covers(&from, key, self.folds_case))
+            .map(|(key, decision)| {
+                let tail = key[from.len()..].trim_start_matches('/');
+                (format!("{to}/{tail}"), *decision)
+            })
+            .collect();
+        self.rules.insert(to, at_root);
+        self.rules.extend(copies);
+    }
+
+    /// Drop every rule at or beneath `under` except those that distrust a path (CHECKOUT-8).
+    ///
+    /// Whether any rule was kept.
+    pub fn withdraw_beneath(&mut self, under: &str) -> bool {
+        let under = self.key(under);
+        let folds = self.folds_case;
+        self.rules.retain(|key, decision| {
+            !covers(&under, key, folds) || *decision == Some(Integrity::Untrusted)
+        });
+        self.rules.keys().any(|key| covers(&under, key, folds))
+    }
+
+    /// Drop the rule at `path` if it trusts that path, and nothing else (TRUST-9).
+    ///
+    /// Whether a rule was dropped. A distrust or an undecided boundary at `path` stays, and so
+    /// does every rule beneath it: a directory beneath may be open in its own right, and a path
+    /// held out of a trusted rule above it would answer to that rule once its own rule went.
+    ///
+    /// Every spelling [`TrustStore::folding_case`] reads as `path` is one rule, since any of them
+    /// may be the one deciding it, and so is every canonically equivalent spelling whatever the
+    /// volume does with them: dropping a trust only narrows, so reaching a name the volume holds
+    /// apart costs a question and never a grant. Where a broader rule would still trust `path`
+    /// once its own went, an undecided boundary takes its place: the rule dropped may have been
+    /// written over a distrust, and the broader one never spoke for what is here. Either way
+    /// `path` answers as trusted by no rule afterwards.
+    pub fn withdraw_trust(&mut self, path: &str) -> bool {
+        let key = self.key(path);
+        let name = Name::new(&key, self.folds_case);
+        let before = self.rules.len();
+        self.rules.retain(|rule, decision| {
+            let here = name.is(rule) || name.is_equivalent(rule);
+            !here || *decision != Some(Integrity::Trusted)
+        });
+        if self.rules.len() == before {
+            return false;
+        }
+        if self.integrity_at_key(&key) == Some(Integrity::Trusted) {
+            self.rules.insert(key, None);
+        }
+        true
+    }
+
+    /// The lower effective decision at every path. Explicit distrust survives either map;
+    /// an absent decision stays absent unless the other map explicitly distrusts it.
+    /// Evaluate inherited rules at every boundary, including nested exceptions.
+    /// Each boundary needs at most one ordered-map lookup per path ancestor in each map.
+    pub fn meet(&self, other: &Self) -> Self {
+        let rules = self
+            .rules
+            .keys()
+            .chain(other.rules.keys())
+            .map(|path| {
+                let integrity = match (self.integrity_at_key(path), other.integrity_at_key(path)) {
+                    (Some(Integrity::Untrusted), _) | (_, Some(Integrity::Untrusted)) => {
+                        Some(Integrity::Untrusted)
+                    }
+                    (Some(Integrity::Trusted), Some(Integrity::Trusted)) => {
+                        Some(Integrity::Trusted)
+                    }
+                    _ => None,
+                };
+                (path.clone(), integrity)
+            })
+            .collect();
+        // Both maps have to hold the answer for the same directory, since it widens what asks and
+        // the lower of two decisions is the one kept.
+        let confined_lines_in = match (&self.confined_lines_in, &other.confined_lines_in) {
+            (Some(ours), Some(theirs)) if ours == theirs => Some(ours.clone()),
+            _ => None,
+        };
+        Self {
+            root: self.root.clone(),
+            rules,
+            folds_case: self.folds_case,
+            confined_lines_in,
+        }
+    }
+
+    /// The integrity of `path`, by the longest matching rule.
+    ///
+    /// `None` when the path is undecided, which the caller should treat as untrusted. This
+    /// returns an option rather than defaulting so a caller cannot silently confuse "the
+    /// user vouched for this" with "nobody has said".
+    pub fn integrity_of(&self, path: &str) -> Option<Integrity> {
+        let path = self.key(path);
+        self.integrity_at_key(&path)
+    }
+
+    fn integrity_at_key(&self, path: &str) -> Option<Integrity> {
+        self.decision_at_key(path).flatten()
+    }
+
+    /// Use `assumed` only where no rule exists, never over an undecided boundary.
+    pub fn integrity_of_or(&self, path: &str, assumed: Option<Integrity>) -> Option<Integrity> {
+        self.decision_at_key(&self.key(path)).unwrap_or(assumed)
+    }
+
+    fn decision_at_key(&self, path: &str) -> Option<Option<Integrity>> {
+        // Probe only whole-segment ancestors, from the most specific to the least.
+        // Each probe scans every rule, since a rule written about another spelling of the name may
+        // be the one deciding it. Comparing two ASCII names costs a byte comparison.
+        let mut prefix = path;
+        while !prefix.is_empty() && prefix != "/" {
+            if let Some(decision) = self.rule_at(prefix) {
+                return Some(*decision);
+            }
+            prefix = prefix.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+        // As in covers(), "/" covers even relative keys in a store with no root.
+        // It wins the equal-specificity tie with the empty key.
+        self.rule_at("/")
+            .or_else(|| {
+                if is_absolute_key(path) {
+                    None
+                } else {
+                    self.rule_at("")
+                }
+            })
+            .copied()
+    }
+
+    /// The decision recorded under `key`, reached however the key was spelled.
+    ///
+    /// Where the volume answers to either spelling of a name ([`TrustStore::folding_case`]), every
+    /// key spelling the same name is a rule about `key`: a rule written about `src/fetched.json`
+    /// decides the very same bytes read as `SRC/fetched.json`, and a probe that could not see it
+    /// would answer from the trusted rule above the file instead, the laundering
+    /// spelled-past-a-rule closes elsewhere. Two rules that differ only in case can coexist, and
+    /// the weakest of them decides every spelling, a distrust before an undecided boundary before
+    /// a trust: letting a spelling or a sort order win would let a trust answer for bytes a
+    /// distrust was recorded about. A trust under one spelling does not replace a lower rule under
+    /// another, because a name that folds the same is not always the same file: NTFS holds
+    /// `cla\u{df}.md` and `class.md` apart, and so does a directory added from a case-sensitive
+    /// volume for `Docs` and `docs`.
+    ///
+    /// A rule that withholds trust, a distrust or an undecided boundary, is also about every
+    /// canonically equivalent spelling of its name, and is weighed with the rest. The map is not
+    /// told whether the volume opens a file under them, because that cannot be asked without
+    /// creating one, and a refusal that reaches a name the volume holds apart only asks a question
+    /// the person could have been spared. The refusal reaches it because TRUST-4 requires that
+    /// bytes marked untrusted under one spelling are not read back as trusted under another. A
+    /// trust never crosses: it decides the spelling it was written about, and a volume that holds
+    /// another apart has been asked nothing about it.
+    ///
+    /// The scan costs one pass over the rules a person's decisions have written.
+    fn rule_at(&self, key: &str) -> Option<&Option<Integrity>> {
+        let name = Name::new(key, self.folds_case);
+        self.rules
+            .iter()
+            .filter(|(rule, decision)| {
+                name.is(rule)
+                    || (**decision != Some(Integrity::Trusted) && name.is_equivalent(rule))
+            })
+            .map(|(_, decision)| decision)
+            .min_by_key(|decision| match decision {
+                Some(Integrity::Untrusted) => 0,
+                None => 1,
+                Some(Integrity::Trusted) => 2,
+            })
+    }
+
+    /// The integrity of everything at or beneath `path`, by the meet of every rule that bears on
+    /// it.
+    ///
+    /// `integrity_of` answers about one file, by the longest rule covering it. A caller reading a
+    /// whole subtree needs the weakest answer inside that subtree instead, because a trusted
+    /// project may hold an untrusted directory and a result derived from both is only as good as
+    /// the worse of them.
+    ///
+    /// `None` when no rule covers `path` at all, which the caller should treat as untrusted, for
+    /// the same reason `integrity_of` returns an option: nobody has said.
+    pub fn integrity_beneath(&self, path: &str) -> Option<Integrity> {
+        let covered = self.integrity_of(path)?;
+        Some(self.integrity_beneath_or(path, covered))
+    }
+
+    /// [`TrustStore::integrity_beneath`], answering `assumed` where no rule covers `path`.
+    ///
+    /// For a directory something else made reachable without a rule being written about it: the
+    /// caller says what an uncovered path there answers as. The rules recorded inside it still
+    /// weaken the answer, so a file a write marked untrusted is not laundered by a read of the tree
+    /// around it.
+    pub fn integrity_beneath_or(&self, path: &str, assumed: Integrity) -> Integrity {
+        let mut answer = self
+            .integrity_of_or(path, Some(assumed))
+            .unwrap_or(Integrity::Untrusted);
+        let path = self.key(path);
+        let beneath = canonical_form(&path, self.folds_case);
+        for (prefix, integrity) in self.keyed() {
+            // A trust under an equivalent spelling is counted as well, which changes nothing since
+            // it is the top of the meet. The case this exists for is a refusal beneath the
+            // directory that was recorded under another form of its name.
+            if covers(&path, prefix, self.folds_case)
+                || covers_spelled(&beneath, &canonical_form(prefix, self.folds_case))
+            {
+                answer = answer.meet(integrity.unwrap_or(Integrity::Untrusted));
+            }
+        }
+        answer
+    }
+
+    /// Whether `path` is trusted. Anything not covered by a rule is not.
+    pub fn is_trusted(&self, path: &str) -> bool {
+        self.integrity_of(path) == Some(Integrity::Trusted)
+    }
+
+    /// Whether any path has been vouched for at all.
+    ///
+    /// Distinguishes "the user declined" from "the user trusted nothing yet", which callers
+    /// report differently.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// The rules, most general first, for display and for the audit trail.
+    /// `None` is an undecided boundary, not a rule that may be omitted.
+    ///
+    /// Each spelled the way a caller names that path: relative to the working directory for a
+    /// rule inside it, and the full path for one outside. That is the name a person would type
+    /// and the name a session record keeps, which is what lets a record survive the project
+    /// being moved or renamed.
+    pub fn rules(&self) -> impl Iterator<Item = (&str, Option<Integrity>)> {
+        self.rules
+            .iter()
+            .map(|(key, integrity)| (self.named(key), *integrity))
+    }
+
+    /// The same rules under the keys the map holds them by: full paths, most general first.
+    ///
+    /// What [`TrustStore::rules`] hands out depends on the working directory, so it is the wrong
+    /// thing to copy a rule between two maps with: a relative name re-read under a different
+    /// working directory is a rule about a different file. A key means the same file everywhere,
+    /// and [`TrustStore::trust`] takes one as readily as a relative name.
+    pub fn keyed(&self) -> impl Iterator<Item = (&str, Option<Integrity>)> {
+        self.rules
+            .iter()
+            .map(|(key, integrity)| (key.as_str(), *integrity))
+    }
+
+    /// The same decisions, said about the same files, once the working directory has moved.
+    ///
+    /// A rule is keyed on the full path it is about, so a working directory that moves takes
+    /// nothing with it: every rule still names the file it always named, and what changes is only
+    /// which of them a relative name reaches and how each is spelled back. Nothing is granted and
+    /// nothing is withdrawn, which is what makes this a re-spelling rather than a decision.
+    ///
+    /// `to` is an absolute path, and the caller is responsible for having canonicalised it: a
+    /// second spelling of one directory would read the rules written under the first as though
+    /// they were about somewhere else. `folds_case` is the answer for the volume `to` is on, which
+    /// may not be the one the map came from.
+    pub fn rebased(&self, to: &Path, folds_case: bool) -> Self {
+        Self {
+            root: normalise(&to.to_string_lossy()),
+            rules: self.rules.clone(),
+            folds_case,
+            confined_lines_in: self.confined_lines_in.clone(),
+        }
+    }
+
+    /// Record that the person's yes to the startup question said confined lines in the working
+    /// directory run without asking ([RUN-5]).
+    ///
+    /// Called where a yes is turned into a map, by a caller whose question said so, and nowhere else:
+    /// a map made from an answer that did not say so does not call it, so a directory trusted
+    /// before the question said it, or without being asked, keeps asking about every line.
+    ///
+    /// [RUN-5]: ../../../docs/specs/tools/run.md
+    pub fn allow_confined_lines(&mut self) {
+        self.confined_lines_in = Some(self.root.clone());
+    }
+
+    /// Whether the person said confined lines run without asking in the directory this map works
+    /// in now.
+    ///
+    /// False once the map has moved to another directory ([`TrustStore::rebased`]): the answer was
+    /// about the first one, and a person who trusted `~/a` has said nothing about `~/b`. A map
+    /// that says so still decides nothing by itself. [`Policy`](crate::policy::Policy) asks it only
+    /// of a line that starts in the root, and only with the other conditions of RUN-5 met, one of
+    /// which is that the root it works in is the one [`TrustStore::confined_lines_root`] names: a
+    /// delegate in a checkout shares this map and works in the checkout, which the answer is not
+    /// about.
+    pub fn allows_confined_lines(&self) -> bool {
+        self.confined_lines_in.as_deref() == Some(self.root.as_str())
+    }
+
+    /// The directory the person's yes said confined lines run without asking in, as the map names
+    /// it, for a record that keeps the answer beside the rules ([RUN-5]). `None` where no yes said
+    /// so, or where the map has moved to another directory, which says nothing about this one.
+    ///
+    /// [RUN-5]: ../../../docs/specs/tools/run.md
+    pub fn confined_lines_root(&self) -> Option<&str> {
+        self.allows_confined_lines().then_some(self.root.as_str())
+    }
+
+    /// Take back the answer a record kept ([`TrustStore::confined_lines_root`]), where it was given
+    /// for the directory this map works in and for no other.
+    ///
+    /// Compared byte for byte with the root this map was made for: a record resumed in a directory
+    /// renamed or moved since, or in another spelling of it, gets no answer and asks, since the
+    /// person said it about the first. The rules do not behave so, and that is the safe direction
+    /// for this one. A record that kept none, or one written before the question said so, restores
+    /// nothing.
+    pub fn restore_confined_lines(&mut self, kept: Option<&str>) {
+        if kept == Some(self.root.as_str()) {
+            self.allow_confined_lines();
+        }
+    }
+}
+
+/// Whether a name is a full path rather than one read under a working directory.
+///
+/// A leading `/` is the whole of the test, and a name spelled any other way is relative. A drive
+/// letter is not a root here and a backslash is not a separator: a key arrives spelled from `/`,
+/// and a backslash is a legal filename byte where paths are, so a file called `C:\notes` is a file
+/// in the project and reading its name as a root would take it out of the project's rules.
+/// Resolving a platform's path into a key therefore takes the host's answer about what separates,
+/// which this map does not ask: given it, [`crate::spelling::to_key`] keys a name rooted at a drive
+/// letter from `/`, `C:\work` as `/C:/work`, and the workspace refuses to open a directory whose
+/// name has no such spelling rather than handing over a name that would be read under the working
+/// directory (TRUST-18).
+///
+/// A permission rule keys the path it is asked about the same way before matching it, and its
+/// patterns keep the two apart as namespaces of their own, which is a rule about what a person
+/// wrote rather than about what this map holds (PERM-3).
+pub fn is_absolute_key(key: &str) -> bool {
+    key.starts_with('/')
+}
+
+/// Normalise a path for comparison.
+///
+/// Every `.` segment and every empty one goes, so `./src/`, `src`, `src/`, `./src/./` and
+/// `src//` are one rule rather than five that shadow each other. Anything less is a bypass, not
+/// an inconvenience: `Workspace::resolve` accepts a `.` component and opens the same file, so a
+/// key that kept one would leave a per-file untrusted rule the planner could spell past, and the
+/// page a turn fetched into that file would be read back as trusted.
+///
+/// A `..` segment is kept as written rather than resolved. Resolving one lexically would be a
+/// guess: nothing here has a filesystem, and `a/../b` names `b` only if `a` is a directory and
+/// not a symlink somewhere else. A confined path never reaches here with one, since confinement
+/// takes the `..` out of the path it admits and refuses the rest (TRUST-10), so what this leaves
+/// unmerged is the spelling a dropped file arrives under.
+///
+/// An absolute path **keeps** its leading slash, which is what makes it a key already rather than
+/// a name to be read under the working directory.
+///
+/// Whitespace is kept wherever it is. At either end of a segment it is part of the name wherever a
+/// path is bytes, so `note.md ` is a file of its own, apart from `note.md`, and so is a name made
+/// only of whitespace, apart from the directory it is in.
+pub(crate) fn normalise(path: &str) -> String {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    match is_absolute_key(path) {
+        true => format!("/{segments}"),
+        false => segments,
+    }
+}
+
+/// `key` with its letter case folded out, the way a map that folds case compares names.
+///
+/// Upper case first, so a letter whose lower case is itself still meets the letter a volume folds
+/// it to: APFS opens `src` as `\u{17f}rc`, and `\u{17f}` lowercases to itself.
+pub fn fold_case(key: &str) -> String {
+    key.chars()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// `key` in the one form every canonically equivalent spelling of it shares, with case folded out
+/// as well where `folds_case` says the volume folds it.
+///
+/// Canonical equivalence is Unicode's: `cafe` followed by a combining acute accent is `caf` and the
+/// precomposed letter, the Angstrom sign is the letter Å, and two combining marks on one letter are
+/// the same in either order. APFS stores a name as it was created and opens it under any of them.
+/// It is not compatibility equivalence: a full-width `\u{ff53}` is not `s`. The form is the
+/// decomposed one, decomposed again after case is folded, since a case mapping can leave a string
+/// undecomposed. `/` is a starter that composes with nothing, so the segments of a key are the
+/// segments of its form.
+///
+/// An ASCII key is its own form unless case is folded, which is nearly every key and costs no
+/// allocation.
+pub(crate) fn canonical_form(key: &str, folds_case: bool) -> Cow<'_, str> {
+    if key.is_ascii() {
+        return match folds_case {
+            true => Cow::Owned(fold_case(key)),
+            false => Cow::Borrowed(key),
+        };
+    }
+    let decomposed = crate::canonical::decompose(key);
+    match folds_case {
+        true => Cow::Owned(crate::canonical::decompose(&fold_case(&decomposed))),
+        false => Cow::Owned(decomposed),
+    }
+}
+
+/// A name, held in the forms it is compared in, for a lookup that tests it against many rules.
+struct Name<'a> {
+    key: &'a str,
+    /// The key with case folded, where the volume folds it.
+    folded: Option<String>,
+    canonical: Cow<'a, str>,
+    folds_case: bool,
+}
+
+impl<'a> Name<'a> {
+    fn new(key: &'a str, folds_case: bool) -> Self {
+        Self {
+            key,
+            folded: folds_case.then(|| fold_case(key)),
+            canonical: canonical_form(key, folds_case),
+            folds_case,
+        }
+    }
+
+    /// Whether `rule` is this name as the volume reads it: the same bytes, or the same bytes with
+    /// case folded where the volume folds it. A rule of either polarity about such a name decides
+    /// it.
+    fn is(&self, rule: &str) -> bool {
+        match &self.folded {
+            Some(folded) => fold_case(rule) == *folded,
+            None => rule == self.key,
+        }
+    }
+
+    /// Whether `rule` is a canonically equivalent spelling of this name, which only a rule that
+    /// withholds trust may decide it by.
+    ///
+    /// Asked after [`Name::is`], and two ASCII names are one in the two senses or neither, so that
+    /// pair is not compared again: on a volume that folds case it would fold the rule a second time
+    /// for every rule at every level of a lookup.
+    fn is_equivalent(&self, rule: &str) -> bool {
+        if self.key.is_ascii() && rule.is_ascii() {
+            return false;
+        }
+        canonical_form(rule, self.folds_case) == self.canonical
+    }
+}
+
+/// Whether `prefix` covers `path`, matching whole segments only.
+///
+/// Segment-wise so `src` does not cover `srcfoo`, which a plain string prefix test would
+/// wrongly accept, and that mistake would hand trust to a path the user never named.
+///
+/// With `folds_case`, two spellings differing only in case are compared as one: a distrust rule
+/// written about `src/fetched.json` must also reach the file opened as `SRC/fetched.json`, which
+/// names the same bytes on a volume that answers to either case and would otherwise launder
+/// untrusted content past the rule, the same class of spelling bypass as git CVE-2014-9390. The
+/// caller says so only of a volume it has probed, and elsewhere the comparison stays byte-exact so
+/// that a rule about `Docs` never covers a different file called `docs`.
+pub(crate) fn covers(prefix: &str, path: &str, folds_case: bool) -> bool {
+    let (prefix, path) = if folds_case {
+        (
+            std::borrow::Cow::Owned(fold_case(prefix)),
+            std::borrow::Cow::Owned(fold_case(path)),
+        )
+    } else {
+        (
+            std::borrow::Cow::Borrowed(prefix),
+            std::borrow::Cow::Borrowed(path),
+        )
+    };
+    covers_spelled(&prefix, &path)
+}
+
+/// [`covers`] for two keys already in the form they are compared in.
+fn covers_spelled(prefix: &str, path: &str) -> bool {
+    // The filesystem root covers everything, and is the one key with no segment of its own.
+    if prefix == "/" {
+        return true;
+    }
+    // The empty key is not a second one of those. It is what a map made against something that is
+    // not a path keys its own root under, and a full path is never under such a root.
+    if prefix.is_empty() {
+        return !is_absolute_key(path);
+    }
+    if path == prefix {
+        return true;
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ancestor lookups must preserve root handling and explicit undecided boundaries.
+    #[test]
+    fn ancestor_lookups_match_whole_segment_rule_selection() {
+        let keys = ["", "/", "src", "src/nested", "/src"];
+        for mut choices in 0..4usize.pow(keys.len() as u32) {
+            let mut store = TrustStore::new("");
+            for key in keys {
+                let decision = match choices % 4 {
+                    0 => None,
+                    1 => Some(None),
+                    2 => Some(Some(Integrity::Trusted)),
+                    _ => Some(Some(Integrity::Untrusted)),
+                };
+                choices /= 4;
+                if let Some(decision) = decision {
+                    store.rules.insert(key.into(), decision);
+                }
+            }
+            for path in [
+                "",
+                "/",
+                "src",
+                "src/file",
+                "src/nested",
+                "src/nested/file",
+                "src/nested-other/file",
+                "src-other/file",
+                "/src",
+                "/src/file",
+                "/src-other/file",
+                "other",
+                "/other",
+            ] {
+                let expected = store
+                    .rules
+                    .iter()
+                    .filter(|(prefix, _)| covers(prefix, path, store.folds_case))
+                    .max_by_key(|(prefix, _)| {
+                        if prefix.is_empty() || *prefix == "/" {
+                            0
+                        } else {
+                            prefix.trim_start_matches('/').split('/').count()
+                        }
+                    })
+                    .map(|(_, decision)| *decision);
+                assert_eq!(
+                    store.decision_at_key(path),
+                    expected,
+                    "{path:?}: {:?}",
+                    store.rules
+                );
+            }
+        }
+    }
+
+    /// Withdrawing a nested grant must not turn an undecided path into inherited distrust.
+    #[test]
+    fn meeting_maps_keeps_an_undecided_child_beneath_a_refusal() {
+        let mut current = TrustStore::new("/work");
+        current.distrust("vendor");
+        current.trust("vendor/ours");
+        let target = TrustStore::new("/work");
+        for met in [current.meet(&target), target.meet(&current)] {
+            assert_eq!(met.integrity_of("vendor/ours/file"), None);
+            assert_eq!(met.integrity_of("vendor/other"), Some(Integrity::Untrusted));
+        }
+    }
+
+    /// An undo meets inherited decisions, including independent nested exceptions and added roots.
+    #[test]
+    fn meeting_maps_preserves_effective_refusals_and_absent_decisions() {
+        let mut current = TrustStore::new("/work");
+        current.trust(".");
+        current.distrust("src");
+        current.trust("src/ours");
+        current.trust("/added");
+        current.distrust("/added/refused");
+        current.trust("/new-grant");
+        let mut target = TrustStore::new("/work");
+        target.trust(".");
+        target.distrust("src/ours/secret");
+        target.distrust("only-before");
+        target.trust("/added/file");
+        target.distrust("/never-granted");
+        let met = current.meet(&target);
+        for (path, expected) in [
+            ("sibling", Some(Integrity::Trusted)),
+            ("./src/other", Some(Integrity::Untrusted)),
+            ("/work/src/ours/file", Some(Integrity::Trusted)),
+            ("src/ours/secret/file", Some(Integrity::Untrusted)),
+            ("only-before", Some(Integrity::Untrusted)),
+            ("/added/file", Some(Integrity::Trusted)),
+            ("/added/sibling", None),
+            ("/added/refused", Some(Integrity::Untrusted)),
+            ("/new-grant", None),
+            ("/never-granted", Some(Integrity::Untrusted)),
+            ("/unknown", None),
+        ] {
+            assert_eq!(met.integrity_of(path), expected, "{path}");
+            assert_eq!(
+                target.meet(&current).integrity_of(path),
+                expected,
+                "reverse {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_store_trusts_nothing() {
+        let store = TrustStore::new("/work");
+        assert!(store.is_empty());
+        assert_eq!(store.integrity_of("src/main.rs"), None);
+        assert!(!store.is_trusted("src/main.rs"));
+    }
+
+    /// BROWSER-32: the browser saves a file the Brave extension downloads in the person's Downloads
+    /// folder, which is outside the workspace and has no rule. A path there is undecided, and not
+    /// trusted, whether or not the workspace is trusted and whatever a rule for a folder of a
+    /// similar name says, `/home/person/Down` being the one a matcher that ignores the end of a
+    /// name would take for it. It is trusted only where a rule the person recorded for the folder,
+    /// as `/add-dir` does (TRUST-9), or a trusted workspace that holds the folder covers it, and
+    /// then every file in the folder is, the downloaded ones included (TRUST-2). A rule for one
+    /// platform's spelling of the folder covers that spelling alone.
+    #[test]
+    fn a_downloads_folder_outside_the_workspace_is_untrusted_until_a_person_vouches_for_it() {
+        let windows = crate::spelling::to_key(r"C:\Users\person\Downloads\report.pdf", true);
+        let downloaded = [
+            "/Users/person/Downloads/report.pdf",
+            "/home/person/Downloads/archive/report.pdf",
+            windows.as_ref(),
+        ];
+        let mut store = TrustStore::new("/home/person/work");
+        store.trust(".");
+        store.trust("/home/person/Down");
+        store.trust("/home/person/Downloads-old");
+        store.trust("/home/person/work/Downloads");
+        for path in downloaded {
+            assert_eq!(store.integrity_of(path), None, "{path}");
+            assert!(!store.is_trusted(path), "{path}");
+        }
+
+        store.trust("/home/person/Downloads");
+        assert!(store.is_trusted("/home/person/Downloads/archive/report.pdf"));
+        assert!(!store.is_trusted("/Users/person/Downloads/report.pdf"));
+        assert!(!store.is_trusted(windows.as_ref()));
+
+        let mut home = TrustStore::new("/home/person");
+        home.trust(".");
+        assert!(
+            home.is_trusted("/home/person/Downloads/archive/report.pdf"),
+            "a workspace that holds the folder trusts what is in it"
+        );
+
+        let mut on_windows = TrustStore::new("/home/person/work");
+        on_windows.trust(&crate::spelling::to_key(r"C:\Users\person\Downloads", true));
+        assert!(on_windows.is_trusted(windows.as_ref()));
+        assert!(!on_windows.is_trusted("/home/person/Downloads/archive/report.pdf"));
+    }
+
+    /// RUN-5: a map says confined lines run without asking only where a yes said so, in the
+    /// directory the yes was about. A map that never heard the question says nothing, which is what
+    /// a directory trusted before the question said it keeps asking on.
+    #[test]
+    fn a_map_allows_confined_lines_only_after_a_yes_that_said_so() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        assert!(
+            !store.allows_confined_lines(),
+            "trusting alone allowed them"
+        );
+        store.allow_confined_lines();
+        assert!(store.allows_confined_lines());
+    }
+
+    /// RUN-5: the answer is about one directory. Rebased onto another it is not carried, and the
+    /// weaker of two maps is the one that holds.
+    #[test]
+    fn the_answer_about_confined_lines_stays_with_its_directory_and_the_weaker_map_wins() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.allow_confined_lines();
+        assert!(
+            !store
+                .rebased(Path::new("/other"), false)
+                .allows_confined_lines()
+        );
+        assert!(
+            store
+                .rebased(Path::new("/other"), false)
+                .rebased(Path::new("/work"), false)
+                .allows_confined_lines(),
+            "going back to the directory the answer was about lost it"
+        );
+        let mut without = TrustStore::new("/work");
+        without.trust(".");
+        assert!(!store.meet(&without).allows_confined_lines());
+        assert!(!without.meet(&store).allows_confined_lines());
+        assert!(store.meet(&store.clone()).allows_confined_lines());
+    }
+
+    #[test]
+    fn trusting_a_directory_covers_what_is_beneath_it() {
+        let mut store = TrustStore::new("/work");
+        store.trust("src");
+        assert!(store.is_trusted("src"));
+        assert!(store.is_trusted("src/main.rs"));
+        assert!(store.is_trusted("src/deep/nested.rs"));
+        assert!(!store.is_trusted("other/main.rs"));
+    }
+
+    /// A search that walks a whole tree is only as trustworthy as the weakest thing in it, so an
+    /// untrusted directory inside a trusted project has to show up in the answer about the project.
+    #[test]
+    fn a_subtree_is_trusted_only_when_nothing_beneath_it_is_not() {
+        let mut store = TrustStore::new("/work");
+        store.trust("src");
+        store.distrust("src/vendor");
+
+        assert_eq!(store.integrity_beneath("src"), Some(Integrity::Untrusted));
+        assert_eq!(
+            store.integrity_beneath("src/handlers"),
+            Some(Integrity::Trusted)
+        );
+        assert_eq!(
+            store.integrity_beneath("src/vendor"),
+            Some(Integrity::Untrusted)
+        );
+        assert_eq!(store.integrity_beneath("elsewhere"), None);
+    }
+
+    /// One file's own answer must not be weakened by a rule about a sibling, or vouching for a
+    /// project would be undone by any one directory inside it.
+    #[test]
+    fn a_rule_about_a_sibling_does_not_reach_a_file() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("vendor");
+
+        assert_eq!(
+            store.integrity_beneath("src/main.rs"),
+            Some(Integrity::Trusted)
+        );
+        assert_eq!(store.integrity_beneath("."), Some(Integrity::Untrusted));
+    }
+
+    /// Trusting the workspace root is the startup case, so it must cover everything.
+    #[test]
+    fn trusting_the_root_covers_the_whole_tree() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        assert!(store.is_trusted("anything/at/all.rs"));
+        assert!(store.is_trusted("top.rs"));
+    }
+
+    /// The rule the design turns on: a more specific decision overrides a broader one.
+    #[test]
+    fn an_untrusted_subpath_overrides_a_trusted_parent() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("vendor");
+
+        assert!(store.is_trusted("src/main.rs"));
+        assert!(!store.is_trusted("vendor/lib.js"));
+        assert!(!store.is_trusted("vendor"));
+    }
+
+    /// And the reverse, which the user asked for explicitly: a trusted path inside an
+    /// untrusted directory.
+    #[test]
+    fn a_trusted_subpath_overrides_an_untrusted_parent() {
+        let mut store = TrustStore::new("/work");
+        store.distrust("vendor");
+        store.trust("vendor/ours");
+
+        assert!(!store.is_trusted("vendor/lib.js"));
+        assert!(store.is_trusted("vendor/ours/code.js"));
+        assert!(store.is_trusted("vendor/ours"));
+    }
+
+    /// Specificity must keep working to arbitrary depth, alternating polarity.
+    #[test]
+    fn the_deepest_rule_wins_at_any_depth() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("a");
+        store.trust("a/b");
+        store.distrust("a/b/c");
+        store.trust("a/b/c/d");
+
+        assert!(store.is_trusted("z.rs"));
+        assert!(!store.is_trusted("a/x.rs"));
+        assert!(store.is_trusted("a/b/x.rs"));
+        assert!(!store.is_trusted("a/b/c/x.rs"));
+        assert!(store.is_trusted("a/b/c/d/x.rs"));
+    }
+
+    /// A prefix must match whole segments: treating `src` as covering `srcfoo` would grant
+    /// trust to a path the user never named.
+    #[test]
+    fn a_rule_matches_whole_segments_only() {
+        let mut store = TrustStore::new("/work");
+        store.trust("src");
+        assert!(!store.is_trusted("srcfoo/main.rs"));
+        assert!(!store.is_trusted("srcfoo"));
+        assert!(store.is_trusted("src/foo"));
+    }
+
+    /// Equivalent spellings of a path must be one rule, or a user could trust `./src` and
+    /// be surprised that `src` is still untrusted.
+    #[test]
+    fn equivalent_path_spellings_are_the_same_rule() {
+        let mut store = TrustStore::new("/work");
+        store.trust("./src/");
+        assert!(store.is_trusted("src/main.rs"));
+
+        store.distrust("src");
+        assert!(
+            !store.is_trusted("src/main.rs"),
+            "a differently spelled path became a second rule"
+        );
+    }
+
+    /// The laundering round trip this closes: a per-file untrusted rule the planner can spell
+    /// past is no rule at all, since `Workspace::resolve` accepts a `.` component and a repeated
+    /// separator and opens the very same file. Every spelling of that file has to reach the rule
+    /// the write recorded, not the workspace root rule above it.
+    #[test]
+    fn every_equivalent_spelling_of_a_path_reaches_the_same_rule() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("src/fetched.json");
+
+        for spelling in [
+            "src/fetched.json",
+            "./src/fetched.json",
+            "src/./fetched.json",
+            "src//fetched.json",
+            "./src/./fetched.json",
+            "src/.//fetched.json",
+        ] {
+            assert_eq!(
+                store.integrity_of(spelling),
+                Some(Integrity::Untrusted),
+                "{spelling} missed the rule, so the workspace root rule decided instead"
+            );
+        }
+    }
+
+    /// Whitespace at either end of a name is part of the name where a path is bytes, so a name
+    /// carrying it is a file of its own, and a name made only of it is not the directory it is in.
+    ///
+    /// Each row is a name and the neighbouring name it differs from by that whitespace. A rule about
+    /// one leaves the other as it was, in both polarities, and a sibling of either stays undecided,
+    /// whether or not the volume folds case.
+    #[test]
+    fn a_name_with_whitespace_at_an_end_is_not_the_name_without_it() {
+        let ends = [
+            " ", "\t", "\n", "\u{a0}", "\u{2000}", "\u{2001}", "\u{3000}",
+        ];
+        let mut rows = vec![
+            ("./ ".to_string(), ".".to_string()),
+            ("x/ ".to_string(), "x".to_string()),
+            (" a.md".to_string(), "a.md".to_string()),
+            ("a.md ".to_string(), "a.md".to_string()),
+            (" /abs".to_string(), "/abs".to_string()),
+            ("/tmp/added ".to_string(), "/tmp/added".to_string()),
+            ("x /y.md".to_string(), "x/y.md".to_string()),
+            ("x/ /y.md".to_string(), "x/y.md".to_string()),
+        ];
+        for end in ends {
+            rows.push((end.to_string(), ".".to_string()));
+            rows.push((format!("x/{end}"), "x".to_string()));
+            rows.push((format!("a.md{end}"), "a.md".to_string()));
+            rows.push((format!("{end}a.md"), "a.md".to_string()));
+        }
+
+        for folds in [false, true] {
+            let store = || TrustStore::new("/work").folding_case(folds);
+            for (name, neighbour) in &rows {
+                let mut trusted = store();
+                trusted.trust(name);
+                assert!(
+                    trusted.is_trusted(name),
+                    "{name:?} (folds case {folds}): trusting the name did not record a rule about it"
+                );
+                assert_eq!(
+                    trusted.integrity_of(neighbour),
+                    None,
+                    "{name:?} (folds case {folds}): trusting the name decided {neighbour:?}"
+                );
+                assert!(
+                    !trusted.is_trusted("sibling.md"),
+                    "{name:?} (folds case {folds}): a rule about the name decided a sibling file"
+                );
+
+                let mut over_a_distrust = store();
+                over_a_distrust.distrust(neighbour);
+                over_a_distrust.trust(name);
+                assert_eq!(
+                    over_a_distrust.integrity_of(neighbour),
+                    Some(Integrity::Untrusted),
+                    "{name:?} (folds case {folds}): trusting the name lifted the distrust of {neighbour:?}"
+                );
+
+                let mut under_a_trust = store();
+                under_a_trust.trust(neighbour);
+                under_a_trust.distrust(name);
+                assert_eq!(
+                    under_a_trust.integrity_of(neighbour),
+                    Some(Integrity::Trusted),
+                    "{name:?} (folds case {folds}): distrusting the name withdrew the trust of {neighbour:?}"
+                );
+            }
+        }
+    }
+
+    /// U+2000 and U+2002 are canonically equivalent spaces, so a distrust of a name ending in one is a
+    /// distrust of the same name ending in the other, and still none of the name without either. A
+    /// trust reaches the spelling it was written about and no other (TRUST-2).
+    #[test]
+    fn a_name_ending_in_a_space_follows_the_rules_for_canonically_equivalent_names() {
+        let mut distrusted = TrustStore::new("/work");
+        distrusted.trust(".");
+        distrusted.distrust("a.md\u{2000}");
+        assert_eq!(
+            distrusted.integrity_of("a.md\u{2002}"),
+            Some(Integrity::Untrusted),
+            "an equivalent spelling of a distrusted name was read as trusted"
+        );
+        assert_eq!(
+            distrusted.integrity_of("a.md"),
+            Some(Integrity::Trusted),
+            "a distrust of a name ending in a space reached the name without it"
+        );
+
+        let mut trusted = TrustStore::new("/work");
+        trusted.trust("a.md\u{2000}");
+        assert!(
+            !trusted.is_trusted("a.md\u{2002}"),
+            "a trust reached an equivalent spelling it was not written about"
+        );
+    }
+
+    /// A working directory is a name like any other, so one that ends in whitespace is a directory
+    /// of its own, apart from the one without it.
+    #[test]
+    fn a_working_directory_with_whitespace_at_an_end_is_not_the_one_without_it() {
+        let mut store = TrustStore::new("/work ");
+        store.trust(".");
+
+        assert!(store.is_trusted("a.md"));
+        assert!(
+            !store.is_trusted("/work/a.md"),
+            "a rule about a directory decided the directory named without the whitespace"
+        );
+
+        let moved = store.rebased(Path::new("/work"), false);
+        assert!(
+            !moved.is_trusted("a.md"),
+            "a map moved to `/work` read the rule about `/work ` as its own"
+        );
+        assert!(moved.is_trusted("/work /a.md"));
+
+        let elsewhere = store.rebased(Path::new("/other "), false);
+        assert_eq!(
+            elsewhere.key("a.md"),
+            "/other /a.md",
+            "a map moved to a directory ending in whitespace read it as the one without"
+        );
+        assert_eq!(elsewhere.key(""), "/other ");
+    }
+
+    /// On a volume that answers to either spelling of a name, two spellings differing only in case
+    /// name one file, so a rule written about one spelling has to reach the other: the same bytes
+    /// read under another spelling must not slip past the rule written about them. Names that
+    /// differ beyond case stay distinct.
+    #[test]
+    fn a_rule_covers_a_case_variant_spelling_of_the_same_file() {
+        assert!(covers("src/fetched.json", "SRC/fetched.json", true));
+        assert!(covers("src/fetched.json", "src/FETCHED.JSON", true));
+        assert!(covers("SRC/fetched.json", "src/fetched.json", true));
+
+        assert!(!covers("src/fetched.json", "SRC/other.json", true));
+        assert!(!covers("src/fetched.json", "src/FETCHED.json.bak", true));
+        assert!(!covers("src", "SRCFOO", true));
+    }
+
+    /// APFS and NTFS open `\u{17f}rc` as `src`, and `\u{17f}` is its own lower case, so folding by
+    /// lower case alone leaves that spelling past every rule written about the file.
+    #[test]
+    fn a_folding_volume_reads_a_long_s_as_the_letter_it_opens_as() {
+        assert!(covers("src/fetched.json", "\u{17f}rc/fetched.json", true));
+        assert!(!covers("src/fetched.json", "\u{17f}rc/fetched.json", false));
+
+        let mut store = TrustStore::new("/work").folding_case(true);
+        store.trust("src");
+        store.distrust("src/Fetched.json");
+        assert_eq!(
+            store.integrity_of("\u{17f}rc/fetched.json"),
+            Some(Integrity::Untrusted),
+            "a distrusted file named with a long s was read as trusted"
+        );
+        assert_eq!(
+            store.integrity_beneath("\u{17f}rc"),
+            Some(Integrity::Untrusted)
+        );
+    }
+
+    /// Both polarities carry across the spellings of a folding volume, since a distrust that missed
+    /// would launder the file and a trust that missed would only ask again.
+    #[test]
+    fn a_folding_volume_applies_a_rule_in_both_polarities_to_the_other_spelling() {
+        let mut store = TrustStore::new("/work").folding_case(true);
+        store.trust("src");
+        store.distrust("src/Fetched.json");
+
+        assert_eq!(
+            store.integrity_of("src/fetched.json"),
+            Some(Integrity::Untrusted)
+        );
+        assert_eq!(
+            store.integrity_of("SRC/other.json"),
+            Some(Integrity::Trusted)
+        );
+        assert_eq!(
+            store.integrity_beneath("SRC"),
+            Some(Integrity::Untrusted),
+            "a distrusted file beneath a directory was not seen under another spelling of it"
+        );
+    }
+
+    /// Two rules differing only in case decide every spelling on a folding volume by the weaker of
+    /// them, whichever sorts first and whichever was written last. A trusted write and then an
+    /// untrusted one through two spellings of one file leaves the distrust answering for the bytes
+    /// the second write put there. A trust written after a distrust under another spelling leaves
+    /// the path untrusted too, since the two names may be two files (`cla\u{df}.md` and `class.md`
+    /// on NTFS), and a trust about one is no yes for the other.
+    #[test]
+    fn a_folding_volume_lets_the_weakest_case_variant_decide_every_spelling() {
+        let (trusted, untrusted) = (Some(Integrity::Trusted), Some(Integrity::Untrusted));
+        // Every ordered pair of decisions, each written in both orders of spelling, so neither the
+        // rule that sorts first, nor the one that sorts last, nor the later one is what decides. The
+        // trust over the working directory makes an undecided answer differ from a missing rule.
+        for (first, second, weakest) in [
+            (trusted, untrusted, untrusted),
+            (untrusted, trusted, untrusted),
+            (trusted, None, None),
+            (None, trusted, None),
+            (None, untrusted, untrusted),
+            (untrusted, None, untrusted),
+        ] {
+            for (earlier, later) in [("Docs/a.md", "docs/a.md"), ("docs/a.md", "Docs/a.md")] {
+                let mut store = TrustStore::new("/work").folding_case(true);
+                store.trust(".");
+                for (path, decision) in [(earlier, first), (later, second)] {
+                    match decision {
+                        Some(Integrity::Trusted) => store.trust(path),
+                        Some(Integrity::Untrusted) => store.distrust(path),
+                        None => store.undecide(path),
+                    }
+                }
+                for spelling in ["Docs/a.md", "docs/a.md", "DOCS/A.MD"] {
+                    assert_eq!(
+                        store.integrity_of(spelling),
+                        weakest,
+                        "{spelling}: {first:?} as {earlier}, then {second:?} as {later}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// On a volume that holds `Docs` and `docs` apart they are two files, so a rule about one
+    /// decides nothing about the other, and trust does not widen to a sibling.
+    #[test]
+    fn a_case_sensitive_volume_keeps_spellings_apart() {
+        let mut store = TrustStore::new("/work");
+        assert!(!store.folds_case());
+        store.trust("Docs");
+        store.distrust("Notes/Secret.txt");
+
+        assert_eq!(store.integrity_of("Docs/a.md"), Some(Integrity::Trusted));
+        assert_eq!(
+            store.integrity_of("docs/a.md"),
+            None,
+            "a trust rule about Docs covered a different file called docs"
+        );
+        assert_eq!(
+            store.integrity_of("Notes/secret.txt"),
+            None,
+            "a distrust rule reached a different file that differs only in case"
+        );
+        assert!(!covers("Docs", "docs/a.md", false));
+    }
+
+    /// Pairs of spellings that Unicode makes one name: an accent as a mark or as part of the
+    /// letter, a sign that decomposes to a letter, two marks in either order, a Hangul syllable
+    /// whole or as its jamo, and a sign whose canonical form is an ASCII character.
+    const EQUIVALENT_SPELLINGS: [(&str, &str); 6] = [
+        ("cafe\u{301}", "caf\u{e9}"),
+        ("\u{212b}ngstrom", "\u{c5}ngstrom"),
+        ("a\u{323}\u{301}", "a\u{301}\u{323}"),
+        ("\u{d55c}", "\u{1112}\u{1161}\u{11ab}"),
+        ("a\u{37e}b", "a;b"),
+        ("note\u{301}s", "not\u{e9}s"),
+    ];
+
+    /// A refusal recorded about one form of a name is about the file the other form opens, on a
+    /// volume that opens it under either (APFS) and on one that holds them apart, which the map is
+    /// not told the difference of. Left to compare bytes, naming the file in the other form falls
+    /// through to the trusted rule above it and reads a fetched page as trusted. Each refusal
+    /// reaches the file, a name beneath a directory, and the tree read as a whole.
+    #[test]
+    fn a_refusal_recorded_about_one_form_of_a_name_decides_the_other() {
+        for folds in [false, true] {
+            for (one, other) in EQUIVALENT_SPELLINGS {
+                for (refused, named) in [(one, other), (other, one)] {
+                    for decision in [Some(Integrity::Untrusted), None] {
+                        let mut store = TrustStore::new("/work").folding_case(folds);
+                        store.trust(".");
+                        match decision {
+                            Some(_) => store.distrust(&format!("{refused}/fetched.md")),
+                            None => store.undecide(&format!("{refused}/fetched.md")),
+                        }
+                        assert_eq!(
+                            store.integrity_of(&format!("{named}/fetched.md")),
+                            decision,
+                            "folds case {folds}: a rule about {refused:?}/fetched.md missed {named:?}"
+                        );
+                        assert_eq!(
+                            store.integrity_beneath(named),
+                            Some(Integrity::Untrusted),
+                            "folds case {folds}: the tree {named:?} was read as trusted past a rule beneath {refused:?}"
+                        );
+
+                        let mut directory = TrustStore::new("/work").folding_case(folds);
+                        directory.trust(".");
+                        match decision {
+                            Some(_) => directory.distrust(refused),
+                            None => directory.undecide(refused),
+                        }
+                        assert_eq!(
+                            directory.integrity_of(&format!("{named}/deeper/fetched.md")),
+                            decision,
+                            "folds case {folds}: a rule about the directory {refused:?} missed {named:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A trust is a grant, and a grant reaches the spelling it was written about. The map is not
+    /// told whether the volume opens the other form as the same file, so a trust that crossed
+    /// would vouch for a file the person was never asked about wherever the two are two.
+    #[test]
+    fn a_trust_does_not_reach_a_canonically_equivalent_spelling() {
+        for folds in [false, true] {
+            for (one, other) in EQUIVALENT_SPELLINGS {
+                // On a volume that folds case, a trust already reaches a pair that case folding
+                // makes one name: the Angstrom sign lowers to å, as Å does.
+                if folds && fold_case(one) == fold_case(other) {
+                    continue;
+                }
+                for (trusted, named) in [(one, other), (other, one)] {
+                    let mut store = TrustStore::new("/work").folding_case(folds);
+                    store.trust(trusted);
+                    assert_eq!(
+                        store.integrity_of(&format!("{trusted}/a.md")),
+                        Some(Integrity::Trusted)
+                    );
+                    assert_eq!(
+                        store.integrity_of(&format!("{named}/a.md")),
+                        None,
+                        "folds case {folds}: a trust about {trusted:?} vouched for {named:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where two rules are about equivalent spellings the weaker decides every one of them, as it
+    /// does for two case variants: the later decision does not win, and neither does the spelling
+    /// that sorts first. A trust written about one form leaves a refusal about the other in force,
+    /// since the two may be two files and a yes about one is no yes for the other.
+    #[test]
+    fn the_weakest_of_two_equivalent_spellings_decides_every_form() {
+        let (trusted, untrusted) = (Some(Integrity::Trusted), Some(Integrity::Untrusted));
+        for (first, second, weakest) in [
+            (trusted, untrusted, untrusted),
+            (untrusted, trusted, untrusted),
+            (trusted, None, None),
+            (None, trusted, None),
+            (None, untrusted, untrusted),
+            (untrusted, None, untrusted),
+        ] {
+            for (earlier, later) in [
+                ("docs/cafe\u{301}.md", "docs/caf\u{e9}.md"),
+                ("docs/caf\u{e9}.md", "docs/cafe\u{301}.md"),
+            ] {
+                let mut store = TrustStore::new("/work");
+                store.trust(".");
+                for (path, decision) in [(earlier, first), (later, second)] {
+                    match decision {
+                        Some(Integrity::Trusted) => store.trust(path),
+                        Some(Integrity::Untrusted) => store.distrust(path),
+                        None => store.undecide(path),
+                    }
+                }
+                for spelling in [earlier, later] {
+                    assert_eq!(
+                        store.integrity_of(spelling),
+                        weakest,
+                        "{spelling}: {first:?} as {earlier}, then {second:?} as {later}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Names that differ by more than their form stay different: another accent, no accent, and a
+    /// compatibility form such as a full-width letter, which no volume opens as the letter it
+    /// looks like. Matching those would let one refused file refuse its neighbours.
+    #[test]
+    fn canonical_equivalence_does_not_merge_names_that_only_look_alike() {
+        for folds in [false, true] {
+            let mut store = TrustStore::new("/work").folding_case(folds);
+            store.trust(".");
+            store.distrust("cafe\u{301}.md");
+            store.distrust("\u{ff53}rc");
+            for unrelated in [
+                "cafe.md",
+                "cafe\u{300}.md",
+                "caf\u{e8}.md",
+                "src/a.md",
+                "cafe\u{301}.md.bak",
+            ] {
+                assert_eq!(
+                    store.integrity_of(unrelated),
+                    Some(Integrity::Trusted),
+                    "folds case {folds}: a rule about a different name refused {unrelated:?}"
+                );
+            }
+        }
+    }
+
+    /// A trust withdrawn is withdrawn from every form of the name, whatever the volume does with
+    /// them: it only narrows, and a form left trusted would be the way back in.
+    #[test]
+    fn withdrawing_trust_reaches_every_canonically_equivalent_spelling() {
+        for folds in [false, true] {
+            let mut map = TrustStore::new("/work").folding_case(folds);
+            map.trust("/Users/x/cafe\u{301}");
+            map.distrust("/Users/x/caf\u{e9}/fetched.md");
+
+            assert!(map.withdraw_trust("/Users/x/caf\u{e9}"));
+            for form in ["cafe\u{301}", "caf\u{e9}"] {
+                assert_eq!(
+                    map.integrity_of(&format!("/Users/x/{form}/a.md")),
+                    None,
+                    "folds case {folds}: {form:?} stayed trusted"
+                );
+                assert_eq!(
+                    map.integrity_of(&format!("/Users/x/{form}/fetched.md")),
+                    Some(Integrity::Untrusted)
+                );
+            }
+        }
+    }
+
+    /// The answer belongs to the volume, so a map moved to another directory takes the answer for
+    /// that one, and a meet keeps the one it was made with.
+    #[test]
+    fn a_map_moved_takes_the_new_volumes_answer() {
+        let mut store = TrustStore::new("/work").folding_case(true);
+        store.trust("src");
+
+        let moved = store.rebased(Path::new("/other"), false);
+        assert!(!moved.folds_case());
+        let back = moved.rebased(Path::new("/work"), true);
+        assert!(back.folds_case());
+        assert!(store.meet(&TrustStore::new("/work")).folds_case());
+    }
+
+    /// Re-deciding must replace the earlier decision rather than accumulating rules whose
+    /// resolution depends on insertion order.
+    #[test]
+    fn a_later_decision_replaces_an_earlier_one() {
+        let mut store = TrustStore::new("/work");
+        store.trust("src");
+        assert!(store.is_trusted("src/main.rs"));
+        store.distrust("src");
+        assert!(!store.is_trusted("src/main.rs"));
+        store.trust("src");
+        assert!(store.is_trusted("src/main.rs"));
+    }
+
+    #[test]
+    fn integrity_of_reports_which_decision_applied() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("vendor");
+
+        assert_eq!(store.integrity_of("src/a.rs"), Some(Integrity::Trusted));
+        assert_eq!(
+            store.integrity_of("vendor/a.js"),
+            Some(Integrity::Untrusted)
+        );
+    }
+
+    /// With no root rule, an unmentioned path stays unknown rather than inheriting from an
+    /// unrelated sibling rule.
+    #[test]
+    fn an_unrelated_path_is_unaffected_by_other_rules() {
+        let mut store = TrustStore::new("/work");
+        store.trust("src");
+        assert_eq!(store.integrity_of("docs/readme.md"), None);
+    }
+
+    /// A rule about a directory opened by name decides nothing inside the project. Two files may
+    /// be called `src/main.rs`, and the full path each rule is keyed under is what says which one
+    /// it means: `Users/me/notes/todo.md` in the project is `/work/Users/me/notes/todo.md`, which
+    /// the rule about `/Users/me/notes` does not prefix.
+    #[test]
+    fn a_rule_outside_the_working_directory_decides_nothing_inside_it() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes");
+
+        assert!(store.is_trusted("/Users/me/notes/todo.md"));
+        assert_eq!(
+            store.integrity_of("Users/me/notes/todo.md"),
+            None,
+            "a rule outside the project leaked into it"
+        );
+        assert_eq!(store.integrity_of("src/main.rs"), None);
+    }
+
+    /// And the reverse: vouching for the workspace must not vouch for a directory outside it. The
+    /// working directory's own rule is its full path, not an empty prefix, so there is nothing for
+    /// a path elsewhere to fall under.
+    #[test]
+    fn trusting_the_workspace_says_nothing_about_an_added_directory() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+
+        assert!(store.is_trusted("src/main.rs"));
+        assert_eq!(
+            store.integrity_of("/Users/me/notes/todo.md"),
+            None,
+            "the workspace rule reached outside it"
+        );
+    }
+
+    /// One file has one rule however it was named. A project file spelled in full reaches the rule
+    /// its relative name wrote, which is what keeps content written as untrusted under one
+    /// spelling from being read back as trusted under the other.
+    #[test]
+    fn a_path_named_in_full_reaches_the_rule_its_relative_name_wrote() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("src/fetched.json");
+
+        assert!(store.is_trusted("/work/src/main.rs"));
+        assert_eq!(
+            store.integrity_of("/work/src/fetched.json"),
+            Some(Integrity::Untrusted),
+            "the full name missed the rule its relative spelling wrote"
+        );
+        assert_eq!(store.integrity_of("/work"), Some(Integrity::Trusted));
+    }
+
+    /// A person who vouches for a directory holding the project has vouched for the project's
+    /// files too, since the rule is about the tree and the project is in it. The project's own
+    /// rules are more specific and still decide where they exist.
+    #[test]
+    fn a_directory_vouched_for_above_the_project_covers_the_project() {
+        let mut store = TrustStore::new("/Users/me/proj");
+        store.trust("/Users/me");
+        store.distrust("vendor");
+
+        assert!(store.is_trusted("src/main.rs"));
+        assert!(store.is_trusted("/Users/me/notes/todo.md"));
+        assert_eq!(
+            store.integrity_of("vendor/lib.js"),
+            Some(Integrity::Untrusted),
+            "a broader answer overrode the project's own rule"
+        );
+    }
+
+    /// Whether a name is a key already is decided by a leading slash and by nothing else. A key
+    /// arrives spelled from `/`, and a backslash is a legal filename byte where paths are, so a
+    /// name carrying a drive letter is a path under the project and the project's own rules are
+    /// the ones that decide it. Reading such a name as a full path instead would take a file the
+    /// project holds out of the rules written about it.
+    #[test]
+    fn a_name_that_is_a_root_on_another_platform_is_read_under_the_working_directory() {
+        let mut store = TrustStore::new("/work");
+        store.distrust("C:\\notes");
+
+        assert!(!is_absolute_key("C:\\notes"));
+        assert_eq!(normalise("C:\\notes"), "C:\\notes");
+        assert_eq!(
+            store.integrity_of("C:\\notes"),
+            Some(Integrity::Untrusted),
+            "a file in the project stopped being decided by a rule about it"
+        );
+        assert_eq!(
+            store.integrity_of("/C:\\notes"),
+            None,
+            "a name read under the working directory reached a rule keyed in full"
+        );
+    }
+
+    /// `/` is the one key with no segment of its own, and it covers every path there is,
+    /// including the working directory's. Somebody who vouches for the filesystem root has
+    /// vouched for everything in it, and the project is in it.
+    #[test]
+    fn trusting_the_filesystem_root_covers_the_working_directory_too() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/");
+
+        assert!(store.is_trusted("/etc/hosts"));
+        assert!(store.is_trusted("src/main.rs"));
+        // Still the least specific rule there is, so anything written about a path wins over it.
+        store.distrust("src/vendor");
+        assert!(!store.is_trusted("src/vendor/lib.js"));
+    }
+
+    /// Most specific still wins outside the project, so an added directory can hold an untrusted
+    /// subtree exactly as the workspace can.
+    #[test]
+    fn the_deepest_absolute_rule_wins() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes");
+        store.distrust("/Users/me/notes/clipped");
+
+        assert!(store.is_trusted("/Users/me/notes/todo.md"));
+        assert!(!store.is_trusted("/Users/me/notes/clipped/from-the-web.md"));
+    }
+
+    /// Two added directories are separate rules, so one does not answer for the other.
+    #[test]
+    fn one_added_directory_does_not_cover_a_sibling() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes");
+
+        assert!(store.is_trusted("/Users/me/notes/todo.md"));
+        assert_eq!(store.integrity_of("/Users/me/other/todo.md"), None);
+        // Whole segments only, here too: `notes` must not cover `notes-backup`.
+        assert_eq!(store.integrity_of("/Users/me/notes-backup/todo.md"), None);
+    }
+
+    /// A trailing slash is the same rule, as it is for a relative path.
+    #[test]
+    fn equivalent_absolute_spellings_are_the_same_rule() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes/");
+        assert!(store.is_trusted("/Users/me/notes/todo.md"));
+
+        store.distrust("/Users/me/notes");
+        assert!(
+            !store.is_trusted("/Users/me/notes/todo.md"),
+            "a differently spelled path became a second rule"
+        );
+    }
+
+    /// The interior spellings too, outside the project as inside it. An added directory holds
+    /// files worth distrusting one at a time (TRUST-9), so a spelling that misses a per-file rule
+    /// launders content here exactly as it does in the workspace.
+    #[test]
+    fn every_equivalent_absolute_spelling_reaches_the_same_rule() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes");
+        store.distrust("/Users/me/notes/clipped.md");
+
+        for spelling in [
+            "/Users/me/notes/clipped.md",
+            "/Users/me/./notes/clipped.md",
+            "/Users/me/notes//clipped.md",
+            "/Users/me/notes/./clipped.md",
+        ] {
+            assert_eq!(
+                store.integrity_of(spelling),
+                Some(Integrity::Untrusted),
+                "{spelling} missed the rule, so the added directory's own rule decided instead"
+            );
+        }
+    }
+
+    /// A map is made against the working directory, which the workspace resolves to an absolute
+    /// path before anything reaches here. A record hand-edited to name something else must not
+    /// widen what the map covers: the names read under it reach each other and nothing else
+    /// reaches them, so a yes given under such a map vouches for nothing a path can name.
+    #[test]
+    fn a_map_made_against_something_that_is_not_a_path_reaches_nothing() {
+        let mut store = TrustStore::new("");
+        store.trust(".");
+
+        assert!(
+            store.is_trusted("src/main.rs"),
+            "the map lost its own names"
+        );
+        assert_eq!(store.integrity_of("/etc/hosts"), None);
+        assert_eq!(store.integrity_of("/"), None);
+    }
+
+    /// Moving the working directory must not carry the yes given for one project into another. The
+    /// rule is still about the project it was given for, which is now somewhere else, so that is
+    /// where it is written down.
+    #[test]
+    fn a_yes_for_one_project_does_not_follow_a_move_to_another() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+
+        let moved = store.rebased(Path::new("/other"), false);
+        assert_eq!(
+            moved.integrity_of("src/main.rs"),
+            None,
+            "the answer given for /work vouched for /other"
+        );
+        assert!(moved.is_trusted("/work/src/main.rs"));
+    }
+
+    /// And a no given inside the project is not forgotten by moving into it. `vendor` was
+    /// untrusted before the move and names the same files after it, so it stays untrusted.
+    #[test]
+    fn a_no_inside_the_new_directory_survives_the_move() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("src/vendor");
+
+        let moved = store.rebased(Path::new("/work/src"), false);
+        assert_eq!(
+            moved.integrity_of("vendor/lib.js"),
+            Some(Integrity::Untrusted),
+            "an untrusted subtree became trusted by moving into its parent"
+        );
+    }
+
+    /// The other direction: a rule about a directory the user added by name becomes an ordinary
+    /// relative rule once that directory is the working directory.
+    #[test]
+    fn a_rule_in_an_added_directory_becomes_relative_when_it_is_moved_into() {
+        let mut store = TrustStore::new("/work");
+        store.trust("/Users/me/notes");
+        store.distrust("/Users/me/notes/private");
+
+        let moved = store.rebased(Path::new("/Users/me/notes"), false);
+        assert!(moved.is_trusted("todo.md"));
+        assert_eq!(
+            moved.integrity_of("private/diary.md"),
+            Some(Integrity::Untrusted)
+        );
+    }
+
+    /// Whole segments decide what is inside the new directory, exactly as they decide what a rule
+    /// covers. A prefix test on the characters would move `srcfoo` in as though it were `src`.
+    #[test]
+    fn a_sibling_with_a_longer_name_is_not_taken_to_be_inside() {
+        let mut store = TrustStore::new("/work");
+        store.distrust("srcfoo");
+
+        let moved = store.rebased(Path::new("/work/src"), false);
+        assert_eq!(
+            moved.integrity_of("foo"),
+            None,
+            "a sibling directory was rebased as though it were inside the new one"
+        );
+        assert_eq!(
+            moved.integrity_of("/work/srcfoo"),
+            Some(Integrity::Untrusted)
+        );
+    }
+
+    /// Rebasing decides nothing. Every rule that went in comes out, saying the same thing about
+    /// the same files, which is what makes it safe to do without asking anybody.
+    #[test]
+    fn rebasing_neither_grants_nor_withdraws_anything() {
+        let mut store = TrustStore::new("/work");
+        store.trust(".");
+        store.distrust("vendor");
+        store.trust("/Users/me/notes");
+
+        let moved = store.rebased(Path::new("/other"), false);
+        assert_eq!(moved.rules().count(), 3);
+        assert!(moved.is_trusted("/work/src/main.rs"));
+        assert_eq!(
+            moved.integrity_of("/work/vendor/lib.js"),
+            Some(Integrity::Untrusted)
+        );
+        assert!(moved.is_trusted("/Users/me/notes/todo.md"));
+    }
+
+    /// A checkout answers for a path as the working directory does, rule by rule (CHECKOUT-8).
+    #[test]
+    fn a_copied_subtree_answers_as_the_original_does() {
+        let mut map = TrustStore::new("/work");
+        map.trust("");
+        map.distrust("vendor");
+        map.trust("vendor/ours");
+        map.copy_beneath("", "/state/c1");
+
+        for (path, expected) in [
+            ("/state/c1", Some(Integrity::Trusted)),
+            ("/state/c1/src/a.rs", Some(Integrity::Trusted)),
+            ("/state/c1/vendor/x.rs", Some(Integrity::Untrusted)),
+            ("/state/c1/vendor/ours/x.rs", Some(Integrity::Trusted)),
+            ("src/a.rs", Some(Integrity::Trusted)),
+            ("vendor/x.rs", Some(Integrity::Untrusted)),
+        ] {
+            assert_eq!(map.integrity_of(path), expected, "{path}");
+        }
+    }
+
+    /// A path the working directory has no rule for is not vouched for by a rule over the place the
+    /// checkout happens to be made.
+    #[test]
+    fn a_copy_of_an_undecided_root_is_not_answered_by_a_broader_rule() {
+        let mut map = TrustStore::new("/work");
+        map.trust("/state");
+        map.copy_beneath("", "/state/c1");
+
+        assert_eq!(map.integrity_of("/state/c1/a.rs"), None);
+        assert_eq!(
+            map.integrity_of("/state/other/a.rs"),
+            Some(Integrity::Trusted)
+        );
+    }
+
+    /// Only a rule that distrusts a path outlives the checkout it was made for (CHECKOUT-8).
+    #[test]
+    fn withdrawing_a_subtree_keeps_what_distrusts_a_path() {
+        let mut map = TrustStore::new("/work");
+        map.trust("");
+        map.copy_beneath("", "/state/c1");
+        map.copy_beneath("", "/state/c10");
+        map.distrust("/state/c1/built.rs");
+        map.trust("/state/c1/src");
+
+        assert!(map.withdraw_beneath("/state/c1"));
+        assert_eq!(
+            map.keyed()
+                .filter(|(key, _)| key.starts_with("/state/c1/") || *key == "/state/c1")
+                .collect::<Vec<_>>(),
+            vec![("/state/c1/built.rs", Some(Integrity::Untrusted))]
+        );
+        assert_eq!(
+            map.integrity_of("/state/c10/a.rs"),
+            Some(Integrity::Trusted),
+            "a sibling whose name starts the same was withdrawn with it"
+        );
+
+        map.copy_beneath("", "/state/c2");
+        assert!(!map.withdraw_beneath("/state/c2"));
+        assert_eq!(map.integrity_of("/state/c2/a.rs"), None);
+    }
+
+    /// Closing a directory takes its own trusted rule and leaves every rule that lowers a path.
+    #[test]
+    fn withdrawing_trust_keeps_every_rule_that_lowers_a_path() {
+        let mut map = TrustStore::new("/work");
+        map.trust("/notes");
+        map.undecide("/notes/inbox");
+        map.distrust("/notes/fetched.md");
+        map.trust("/shared");
+        map.distrust("/mail");
+
+        assert!(map.withdraw_trust("/notes"));
+        assert_eq!(
+            map.keyed().collect::<Vec<_>>(),
+            vec![
+                ("/mail", Some(Integrity::Untrusted)),
+                ("/notes/fetched.md", Some(Integrity::Untrusted)),
+                ("/notes/inbox", None),
+                ("/shared", Some(Integrity::Trusted)),
+            ]
+        );
+        assert!(!map.withdraw_trust("/mail"), "a distrust was withdrawn");
+        assert!(!map.withdraw_trust("/notes/inbox"));
+        assert_eq!(map.integrity_of("/mail/a.md"), Some(Integrity::Untrusted));
+    }
+
+    /// A trusted rule above the closed directory does not take over from the rule withdrawn.
+    #[test]
+    fn withdrawing_trust_beneath_a_trusted_rule_leaves_the_path_undecided() {
+        let mut map = TrustStore::new("/work");
+        map.trust("/home");
+        map.trust("/home/downloads");
+        map.trust("/home/notes");
+        map.trust("/home/notes/inbox");
+
+        assert!(map.withdraw_trust("/home/downloads"));
+        assert_eq!(map.integrity_of("/home/downloads/a.md"), None);
+        assert!(map.withdraw_trust("/home/notes"));
+        assert_eq!(map.integrity_of("/home/notes/a.md"), None);
+        assert_eq!(
+            map.integrity_of("/home/notes/inbox/a.md"),
+            Some(Integrity::Trusted)
+        );
+        assert_eq!(map.integrity_of("/home/a.md"), Some(Integrity::Trusted));
+    }
+
+    /// On a volume that folds case, the rule under another spelling of the name is the same rule.
+    #[test]
+    fn withdrawing_trust_reaches_every_spelling_a_folding_volume_reads_as_one() {
+        let mut map = TrustStore::new("/work").folding_case(true);
+        map.trust("/Users/x/Notes");
+        map.distrust("/Users/x/NOTES/fetched.md");
+
+        assert!(map.withdraw_trust("/Users/x/notes"));
+        assert_eq!(map.integrity_of("/Users/x/notes/a.md"), None);
+        assert_eq!(
+            map.integrity_of("/Users/x/notes/fetched.md"),
+            Some(Integrity::Untrusted)
+        );
+
+        let mut exact = TrustStore::new("/work");
+        exact.trust("/Users/x/Notes");
+        assert!(!exact.withdraw_trust("/Users/x/notes"));
+        assert_eq!(
+            exact.integrity_of("/Users/x/Notes/a.md"),
+            Some(Integrity::Trusted)
+        );
+    }
+}

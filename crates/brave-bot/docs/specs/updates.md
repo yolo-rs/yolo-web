@@ -1,0 +1,407 @@
+---
+id: UPDATE
+title: Telling somebody their bravebot is out of date
+status: normative
+governs:
+  - crates/update/src/lib.rs
+  - crates/tui/src/app.rs
+  - crates/tui/src/app/opening.rs
+  - crates/config/src/install.rs
+  - npm/bin/bravebot.js
+  - install.sh
+  - install.ps1
+  - crates/ui-bridge/src/update_status.rs
+  - ui/src/shared/update.ts
+  - ui/src/renderer/components/UpdateBanner.tsx
+  - ui/src/renderer/components/About.tsx
+documented-by:
+  - docs/website/docs/quickstart.md
+  - docs/website/docs/install.md
+---
+
+## Scope
+
+One line on the startup screen: a newer version exists, and here is what installs it. What names
+a version and what publishes one is [releases.md](releases.md), which also governs what an
+installer checks before it writes an executable. This file governs learning, afterwards and from
+a running copy, that a newer one is out.
+
+No model is involved and no turn has begun. The request is this program's own, made on its own
+behalf outside any session, and what comes back is a version number.
+
+## Clauses
+
+<a id="UPDATE-1"></a>
+### UPDATE-1: the startup screen says what is already on disk, and waits for nothing
+
+The line is said once, after the trust question has been answered, from an answer an earlier
+launch wrote down. Asking a registry happens behind the running session, on a thread nothing
+waits on, and what it learns is for a later launch.
+
+**Why.** A network round trip before the first frame makes every session on a slow, captive or
+absent connection start slowly, in exchange for an aside. Placing the line after the trust
+question keeps the first thing on the screen the question that grants standing permission.
+
+`verified-by: by-construction (the startup path reads one file, and the request is handed to a spawned thread whose handle is dropped, so nothing can wait on it)`
+
+<a id="UPDATE-2"></a>
+### UPDATE-2: only an installation there is a command for is told anything
+
+Seven are: the npm package, which its launcher names when it starts the binary, an install made
+by the install script, which is the binary that script recorded, an install made by the PowerShell
+install script, which is the binary that script recorded in a file of its own, the Homebrew
+cask and the WinGet package, which are a binary that resolves into a directory only that package
+manager makes (`Caskroom/bravebot/` for the cask, `WinGet/Packages/Brave.Bravebot_*/` for WinGet),
+and the apt and dnf packages, which are the binary at `/usr/bin/bravebot` when the package
+manager's own files on that machine say it owns it. For apt that is a dpkg file list for the
+`bravebot` package that names the path. For dnf it is an rpm database and the `bravebot.repo`
+repository file the install page has a dnf user fetch, and a machine with both managers' files is
+an apt install. A copy at `/usr/bin/bravebot` that those files do not account for is told nothing.
+Any other copy, one built from source above all, is told nothing and asks nothing. The desktop
+app is none of the seven: no shell command updates it, and it is told through a link instead
+([UPDATE-12](#UPDATE-12)).
+
+**Why.** The line exists for the command in it. Telling somebody a release is out without a line
+that would install it is noise, and a build from source is updated by the tree it was built from.
+The recorded path has to be the binary that is running, since a checkout on a machine that also
+has a script install is not a script install: the command would replace the other copy rather
+than theirs. Each script's record counts for that script alone, so a copy only `install.sh` recorded
+is never offered the PowerShell line and the other way round. A package manager's directory wins over a script record naming the same path: the record can
+only be stale there, and so it is for `install.sh` run with `INSTALL_DIR=/usr/bin` over a copy a
+package owns. Another cask's directory, or one that only resembles the name, is not this
+package's. The path `/usr/bin/bravebot` alone says nothing, because a person can copy a binary
+there, so the package manager's files have to account for it. They are files on the machine and
+never a response, and what they decide is which of two literals is named, or neither.
+
+`verified-by: bravebot_config::install::the_launcher_saying_npm_is_what_makes_it_an_npm_install`
+`verified-by: bravebot_config::install::the_binary_the_script_recorded_is_a_script_install`
+`verified-by: bravebot_config::install::the_binary_the_powershell_script_recorded_is_a_powershell_install`
+`verified-by: bravebot_config::install::each_script_is_recognised_by_its_own_record`
+`verified-by: bravebot_config::install::a_binary_other_than_the_recorded_one_is_not_a_script_install`
+`verified-by: bravebot_config::install::an_installation_nothing_recorded_is_left_alone`
+`verified-by: bravebot_config::install::a_binary_under_a_package_managers_directory_is_that_managers_install`
+`verified-by: bravebot_config::install::a_package_manager_directory_wins_over_a_script_record`
+`verified-by: bravebot_config::install::a_binary_dpkg_lists_as_the_bravebot_package_s_is_an_apt_install`
+`verified-by: bravebot_config::install::a_binary_on_a_machine_with_an_rpm_database_and_the_repository_is_a_dnf_install`
+`verified-by: bravebot_config::install::a_binary_at_the_packaged_path_that_no_package_owns_is_left_alone`
+`verified-by: bravebot_config::install::a_binary_elsewhere_is_not_the_package_on_a_machine_that_has_the_package`
+`verified-by: bravebot_config::install::a_dpkg_listing_decides_before_the_rpm_database`
+`verified-by: bravebot_config::install::a_system_package_wins_over_a_script_record_naming_the_same_path`
+
+<a id="UPDATE-3"></a>
+### UPDATE-3: the command offered updates the copy that is running
+
+One fixed line per installation, composed from nothing: not from the answer, not from a file, and
+not from the environment.
+
+**Why.** This is a line somebody pastes into a shell, so no part of it may come from anywhere a
+value arrives from. Offering the wrong one of the seven is its own harm and not a smaller one: the
+npm command against a script install puts a second copy on the machine and updates neither, and the
+shell script's line is one a Windows shell cannot run. A package manager's own line is the same:
+`brew upgrade --cask bravebot` and `winget upgrade Brave.Bravebot`, which update only what that
+manager installed. The apt line is `sudo apt update && sudo apt upgrade bravebot`, since
+`apt upgrade bravebot` alone works from the index as it was last fetched and can find nothing newer,
+and the dnf line is `sudo dnf upgrade bravebot`. Each is one constant, so the `&&` is part of the
+literal and not something composed.
+
+The same seven literals answer `bravebot update` ([CLI-29](cli.md#CLI-29)), which is why they and
+the installation they are chosen by sit in the configuration surface rather than beside the
+startup line: a presentation crate may not reach another one
+([LAYER-1](layering.md#LAYER-1)), and two copies of the seven would be seven commands to keep in step.
+
+`verified-by: bravebot_update::lib::a_newer_version_is_announced_along_with_the_command_that_installs_it`
+`verified-by: bravebot_update::lib::a_script_install_is_given_the_script_again`
+`verified-by: bravebot_update::lib::a_powershell_install_is_given_the_powershell_script_again`
+`verified-by: bravebot_update::lib::a_package_manager_install_is_given_its_managers_upgrade_command`
+`verified-by: bravebot_config::install::each_installation_is_updated_the_way_it_was_installed`
+`verified-by: bravebot_cli::update::a_copy_apt_or_dnf_installed_is_told_that_managers_upgrade_line`
+`verified-by: by-construction (each command is one of seven literals chosen by matching on the installation, so no value composes one)`
+
+<a id="UPDATE-4"></a>
+### UPDATE-4: a version is three numbers, compared as numbers
+
+Anything else is no answer, the `v` a tag is published under included and disregarded. Only a
+version strictly greater than the one compiled in is announced.
+
+**Why.** Compared as text, 10 sorts before 9 and a release goes unannounced for as long as the
+numbering stays in that decade. A prerelease is not three numbers, so a startup line never sends
+anybody to a release candidate, and a registry answering with something older, which is what a
+withdrawn release looks like, does not send them backwards.
+
+`verified-by: bravebot_update::lib::a_tag_is_read_with_or_without_the_v_it_is_published_under`
+`verified-by: bravebot_update::lib::a_version_that_is_not_three_numbers_is_no_answer`
+`verified-by: bravebot_update::lib::a_prerelease_is_not_a_version_to_offer`
+`verified-by: bravebot_update::lib::versions_are_ordered_by_number_rather_than_by_spelling`
+`verified-by: bravebot_update::lib::the_version_in_hand_is_not_an_update`
+`verified-by: bravebot_update::lib::an_older_published_version_says_nothing`
+`verified-by: bravebot_update::lib::the_version_this_was_built_as_is_three_numbers`
+
+<a id="UPDATE-5"></a>
+### UPDATE-5: what comes back decides one line and is not part of it
+
+The answer is read for three numbers, and what they decide is whether the line is said. The line
+names the version that is running and not the one read, so no byte of the response reaches the
+screen, as text or as those numbers, and none of it reaches a conversation, a request field, or a
+tool result.
+
+**Why.** The bytes are somebody else's, and the rule that untrusted content never steers this
+program applies to the one request it makes for itself. What they decide here is whether a line is
+printed, which is the same standing the model listing has: fetched before any session, read for
+the shape the endpoint documents, and reaching a person rather than a planner. Keeping them out of
+the line keeps the response out of the system's own voice, which is drawn without the margin that
+marks quarantined content.
+
+The number read is also not one the line could stand behind. It is what was newest when a launch
+last asked, and by UPDATE-1 that can be as long ago as the last session, which can be weeks, while
+the command installs whatever is newest when it runs. Naming it told somebody on 0.9.0 that 0.10.0
+was out, and the update they ran installed 0.11.0.
+
+`verified-by: bravebot_update::lib::the_line_names_the_running_version_and_not_the_recorded_one`
+`verified-by: bravebot_update::lib::nothing_a_registry_answered_reaches_the_line`
+`verified-by: bravebot_update::lib::the_registry_states_a_version_and_the_release_listing_states_a_tag`
+`verified-by: by-construction (the request is made outside any turn, and the only value returned from it is a version of three numbers)`
+
+<a id="UPDATE-6"></a>
+### UPDATE-6: a registry is asked at most once an hour
+
+An ask stands for an hour whether or not it learned a version, so a registry that refuses, that
+cannot be reached, or that answers with something this program will not offer is left alone until
+the hour is up. Each registry has a stamp of its own. A stamp in the future is asked again rather
+than waited out. A launch that cannot write the stamp does not ask.
+
+**Why.** A published version changes on the order of days, so asking on every launch is a request
+to somebody else's registry per session for a number that has rarely moved. An hour is short
+enough that restarting to pick up a release does not mean waiting a day for the notice, and long
+enough that a burst of launches makes one request. Standing the hour on an
+answer instead of on the ask exempts every launch that learned nothing, which makes a registry in
+trouble the one asked every session and the launches it refuses the ones that keep coming back. A
+machine that has both installations on it would double that again if one stamp overwrote the
+other. A clock that went backwards, or a record somebody else wrote, must not leave this silent
+until the date catches up with the file. An ask with no stamp holds no later launch back, so a
+state directory this user cannot write to would make every launch a request, and its answer would
+be thrown away too.
+
+`verified-by: bravebot_update::lib::a_fresh_answer_is_not_asked_for_again`
+`verified-by: bravebot_update::lib::a_registry_is_asked_again_once_an_hour_has_passed`
+`verified-by: bravebot_update::lib::an_answer_stamped_in_the_future_is_asked_again`
+`verified-by: bravebot_update::lib::an_ask_that_learned_nothing_still_holds_the_next_one_off_for_the_day`
+`verified-by: bravebot_update::lib::recording_one_registrys_ask_keeps_the_others`
+`verified-by: bravebot_update::lib::a_registry_has_one_record_however_often_it_is_asked`
+`verified-by: bravebot_tui::persist::a_launch_whose_stamp_cannot_be_written_does_not_ask`
+`verified-by: by-construction (the stamp is written before the request is made, and the request is made only once it has landed, so an ask that is refused, that answers with nothing usable, or that is still out when the session ends is recorded as readily as one that answers)`
+
+<a id="UPDATE-7"></a>
+### UPDATE-7: a recorded answer belongs to the registry that gave it
+
+The record says which registry answered, and it is read back only for an installation that would
+ask that one.
+
+**Why.** The two registries answer for different things, and npm has a version only once it has
+been published there. On a machine where both installations have existed, reading one as the other
+offers a command for a version that registry does not serve.
+
+`verified-by: bravebot_update::lib::a_stored_answer_is_read_back_as_it_was_written`
+`verified-by: bravebot_update::lib::an_answer_from_the_other_registry_is_not_read`
+
+<a id="UPDATE-8"></a>
+### UPDATE-8: a session that keeps nothing records no answer and asks for none
+
+An [incognito](incognito.md) session still reads the answer an ordinary session left and still
+says the line. It writes no answer, and it makes no request that would produce one.
+
+**Why.** Reading is what makes that mode private rather than crippled, and a session that stopped
+saying a copy was superseded would be the second. Asking without recording is a request whose
+answer is thrown away on arrival.
+
+`verified-by: bravebot_update::lib::a_session_that_records_nothing_asks_nothing`
+`verified-by: bravebot_tui::incognito::the_answer_about_updating_is_still_read`
+`verified-by: bravebot_tui::incognito::a_session_that_records_nothing_makes_no_request_for_a_newer_version`
+`verified-by: bravebot_tui::persist::a_session_that_records_asks_for_a_newer_version_when_the_record_is_old`
+`verified-by: by-construction (the write resolves the directory through the writing answer, which is what that mode answers nothing to)`
+
+<a id="UPDATE-9"></a>
+### UPDATE-9: everything that can go wrong here is silence
+
+No home directory, no network, a refused or unreachable registry, an answer of an unexpected
+shape, a record that is not the shape written: each of them says nothing, reports nothing, and
+withdraws no version an earlier ask learned.
+
+**Why.** This is an aside on a startup screen. An error from a third party's registry, printed
+where somebody is about to start work, reads as this program being broken, and none of it stops a
+session from doing anything. A registry being unreachable today does not make what it said
+yesterday untrue either, so the line a person was shown this morning is still shown this evening.
+
+`verified-by: bravebot_update::lib::a_version_stands_until_an_ask_learns_another`
+`verified-by: bravebot_update::lib::an_answer_that_is_not_the_shape_expected_is_no_version`
+`verified-by: bravebot_update::lib::a_file_that_is_not_the_shape_written_here_is_no_answer`
+`verified-by: bravebot_update::lib::a_version_that_is_not_three_numbers_is_no_answer`
+
+<a id="UPDATE-10"></a>
+### UPDATE-10: the install script's record names the install and is where the next one goes
+
+Each install script writes down the path it installed, in a file of its own, `installed-by` for
+`install.sh` and `installed-by-powershell` for `install.ps1`, and a later run of that script with no
+directory named installs over that binary. A directory named wins, and is what the record names
+afterwards. The PowerShell script's record is the path and a newline in UTF-8 with no byte order
+mark, since the program reads the first line as the path and a mark would be part of it.
+
+**Why.** One record answers both questions, and it has to: an update that landed in a different
+directory would leave two copies on the machine and update whichever the PATH does not reach,
+while a copy the record does not name is one this program will not offer a command for. The two
+scripts keep separate records because each names the line that replaces what it wrote, and a
+record both could write would offer one script's line for the other's copy.
+
+`verified-by: bravebot_cli::installer_powershell::a_later_run_installs_where_the_record_names_unless_a_directory_is_given`
+`verified-by: bravebot_cli::installer_powershell::the_record_is_the_path_of_the_executable_and_a_newline`
+`verified-by: by-construction (install.sh writes the destination path into the record after moving the binary, and takes the directory from that record when none is given)`
+
+<a id="UPDATE-11"></a>
+### UPDATE-11: a person can turn the check off, and then nothing about it happens
+
+The `updateCheck` setting set to `false`, or `BRAVEBOT_UPDATE_CHECK` set to `0`, stops the startup
+check. Either one is enough. With the check off no record is read, no request is made, no record is
+written and no line is said.
+
+**Why.** On a managed, offline or policy-restricted machine the request is unwanted and the line
+points at a command the person may not run, and incognito (UPDATE-8) stops the request only by also
+keeping nothing, which is more than a person who wants no check asked for. The value comes from the person's own configuration and never from a response, so it does
+not touch UPDATE-5. It governs only this check: the installer's checksum and signature checks
+([releases.md](releases.md)) are separate and unchanged. Only a boolean `false` and the exact value
+`0` turn it off, so a misspelled value leaves the check on, as `terminalTitle` does for the title.
+
+`verified-by: bravebot_update::lib::either_switch_turns_the_check_off`
+`verified-by: bravebot_tui::incognito::a_check_turned_off_says_nothing_though_a_newer_version_is_recorded`
+`verified-by: bravebot_tui::persist::a_check_turned_off_leaves_the_record_as_it_was`
+`verified-by: bravebot_config::settings::only_a_boolean_turns_the_update_check_off`
+
+<a id="UPDATE-12"></a>
+### UPDATE-12: the desktop app is told through a link, as a yes or no
+
+The packaged desktop app starts its agent with `BRAVEBOT_INSTALLED_VIA` set to `desktop`, and that
+agent asks the GitHub release listing at startup, under the hour of UPDATE-6, the refusal of
+UPDATE-8 and the switches of UPDATE-11. It shares the install script's record, since its installers
+are assets of the same release. An agent the packaged app did not start, one a developer or a test
+ran, asks nothing. The record keeps, beside the stamp of each ask, this machine's clock at the
+last ask that learned a version, and nothing from the answer's body. That time is a line of its
+own naming the version it was learned for, so each registry's line stays the shape every released
+version writes and reads, and a writer keeps the other registry's line and its time as they stood.
+The window learns through
+`update.status` whether the check is on, the version running, whether the recorded version is
+newer than it, and when the last check that learned it was, as a UTC timestamp the bridge builds
+from that number. Newer is `true`, `false`, or null where nothing is recorded, where the record
+does not say when its version was learned or says a time later than now, and where that time is
+more than seven days ago; the record is then stale, and the timestamp is still sent. The recorded
+version is not in the answer. Where it is newer in a record that is not stale the sidebar shows a
+notice naming the running version, with a Download link to the latest release page, a literal in
+the main process, and About says the same. About says "Up to date as of" the day of the last check
+where the record is not stale and not newer, and "Couldn't check recently (last checked" that day
+")" where it is stale, with no notice in the sidebar; the day is written as the window writes its
+other dates. Dismissing the notice keeps it hidden for as long as the version running then is the
+one running, and a release recorded as newer than a later version shows it again. About still says
+it after a dismissal. Help, Update Status… opens About and asks nobody.
+
+**Why.** No shell command updates a copy inside an app bundle, so UPDATE-3's line has nothing to
+offer it, and the release page is where its installer is. A yes or no is all the window needs, and
+keeping the number out of the answer keeps UPDATE-5's rule at the bridge rather than trusting the
+renderer to leave it unshown. The release page as a literal means no answer can choose where the
+link goes. An ask on demand would put a round trip in front of the window that UPDATE-1 keeps
+behind it. A notice that came back on every launch after being dismissed would be one a person
+learns to ignore, and one that never came back would hide the next release too. The stamp of an ask
+is written before the ask is made, so it cannot say an answer came; the time a version was learned
+can, and an ask that fails leaves it where it was. A record read back for as long as it stands
+would let a machine offline for a month say it is up to date, or go on offering a release since
+withdrawn, so after a week the window says when it last heard instead of what it heard then. The
+bridge decides that, as it decides the rest of the answer, so the renderer formats a day and
+judges nothing. The menu item says Update Status because it shows one, and a name that promised a
+check would promise a request it does not make. A terminal copy of a released version on the same
+machine shares the file, and a time written into its registry's line would make that line one it
+cannot read: it would find no record, ask on every launch, and rewrite the file without the time.
+
+**Known costs.** The notice names the version running, not the one the page offers, for UPDATE-5's
+reason. The window cannot tell one recorded release from the next, since it is told no version, so
+a dismissal is kept by the version running: a second release published while the same version
+runs does not bring the notice back, and About is where it is still said. A window started in
+development is never told anything, since its agent asks nobody. A record an earlier version
+wrote, or rewrote, says no time a version was learned, since such a version keeps no line it does
+not read: the version and the stamp still stand and still hold the next ask off, but the window
+is told nothing of freshness until the desktop app's next ask that learns a version writes the
+time again, which is its first launch an hour or more after the last ask either made. A clock set far enough wrong makes a fresh record look stale, or a record from its own
+future no answer. The check itself is the person's setting: a project's settings file in the
+directory the window was started from turns off neither the ask nor what `update.status` says.
+
+`verified-by: bravebot_update::lib::the_desktop_app_asks_the_release_listing_and_shares_the_scripts_record`
+`verified-by: bravebot_update::lib::the_desktop_app_is_told_only_whether_a_newer_version_is_recorded`
+`verified-by: bravebot_update::lib::a_fresh_desktop_answer_is_compared_and_dated`
+`verified-by: bravebot_update::lib::a_desktop_answer_older_than_a_week_is_stale_and_keeps_its_date`
+`verified-by: bravebot_update::lib::a_failed_ask_does_not_freshen_a_desktop_answer`
+`verified-by: bravebot_update::lib::a_desktop_record_without_a_usable_time_is_no_answer`
+`verified-by: bravebot_update::lib::only_an_ask_that_learns_a_version_moves_the_time_it_was_learned`
+`verified-by: bravebot_update::lib::a_record_without_the_time_it_was_learned_is_read_without_one`
+`verified-by: bravebot_update::lib::a_released_version_reads_the_stamp_and_version_this_one_writes`
+`verified-by: bravebot_update::lib::a_record_a_released_version_rewrote_keeps_its_version_and_is_no_answer_until_asked_again`
+`verified-by: bravebot_update::lib::recording_one_registrys_ask_keeps_the_others`
+`verified-by: bravebot_update::lib::a_desktop_check_turned_off_says_nothing_of_a_record`
+`verified-by: bravebot_update::lib::a_desktop_record_that_is_not_the_shape_written_is_no_answer`
+`verified-by: bravebot_update::lib::only_the_packaged_desktop_app_asks_and_not_with_the_check_off`
+`verified-by: bravebot_ui_bridge::update_status::a_running_version_of_a_versions_shape_is_sent`
+`verified-by: bravebot_ui_bridge::update_status::a_running_version_of_another_shape_is_null`
+`verified-by: bravebot_ui_bridge::update_status::the_last_check_is_sent_as_a_utc_timestamp`
+`verified-by: bravebot_ui_bridge::update_status::a_newer_release_recorded_is_a_yes_without_its_version`
+`verified-by: bravebot_ui_bridge::update_status::a_release_this_build_is_not_behind_is_a_no_and_npm_s_record_is_none`
+`verified-by: bravebot_ui_bridge::update_status::a_record_older_than_a_week_is_no_comparison_and_keeps_its_date`
+`verified-by: bravebot_ui_bridge::update_status::a_record_without_the_time_it_was_learned_is_no_answer`
+`verified-by: bravebot_ui_bridge::update_status::nothing_recorded_is_no_answer`
+`verified-by: bravebot_ui_bridge::update_status::the_check_turned_off_in_settings_says_off_and_nothing_of_the_record`
+`verified-by: bravebot_ui_bridge::update_status::the_check_is_read_from_the_persons_settings_and_not_a_projects`
+`verified-by: by-construction (the main process and the renderer are not crates this workspace compiles, so ui/scripts/update-banner.test.mjs pins the window's half: an update.status answer is translated with no version rule of its own and a check that is off says nothing of a release or a time, About says one of five lines, dated by the renderer's own date format where a check was and stale where the bridge says so, and names no release, the banner shows only for a newer release in a record that is not stale and hides for the running version once dismissed and shows again for another, the Help item is Update Status… and opens About, and the dismissal is kept in the experience file with mode 0600; ui/scripts/bug-report.test.mjs pins that the Download link opens the literal release page by name; make check-ui runs both, and the governs list above holds the files to existing)`
+
+## Known costs
+
+- **A first run says nothing.** With no answer on disk yet, the earliest a fresh install can be
+  told about a release is its second launch. The alternative is a round trip in front of the first
+  frame, which UPDATE-1 exists to refuse.
+
+- **An answer is as old as the last launch that asked.** The first launch after the hour is up
+  asks, and the launch after that says so. Somebody whose last session was a week ago is told a
+  week late.
+
+- **The line does not say which version the update installs.** By UPDATE-5 it names only the
+  running version, so somebody who wants the number has to update and ask the binary for it.
+
+- **A version outlives the ask that learned it.** A registry unreachable for a week leaves the
+  line said on the strength of what it answered before that, since nothing here withdraws a
+  version that was once published. A release taken down is therefore offered until that registry
+  answers again. The desktop app is told nothing of a version learned more than a week ago
+  ([UPDATE-12](#UPDATE-12)); the terminal's line has no such limit.
+
+- **What names the installation is a word and a path, not proof.** A binary moved out from under
+  the record is told nothing, and a process started with the launcher's variable set is offered
+  the npm command whoever set it. The cost is the wrong line of the two, never a wrong
+  destination: both commands and both registries are literals in this program.
+
+- **A dnf install is recognised more weakly than an apt one.** dpkg keeps a text list of the
+  files each package installed, so an apt copy is recognised by a list that names the path. The
+  rpm database is not text, so a dnf copy is recognised by an rpm database and the `bravebot.repo`
+  file being on the machine, which does not prove that the binary at `/usr/bin/bravebot` is the
+  package's: a binary copied there by hand on a machine with the repository file is told the dnf
+  line. A copy installed from a downloaded `.rpm` with no repository file is told nothing. The
+  cost is the same wrong line and never a wrong destination.
+
+- **Recognition is reasoned from the package layouts and not observed on a package install.** The
+  dpkg list name, the rpm database paths and the path of the binary come from the packaging in
+  this repository and from how dpkg and rpm lay out their files. No `.deb` or `.rpm` has been
+  installed and run against them.
+
+- **A version that is not three numbers is invisible.** A release published as `1.0`, or as a
+  release candidate, is never announced, and neither is a tag with anything after the patch
+  number.
+
+- **The two registries are announced at different moments.** The npm package is published after
+  the GitHub release exists, so in the window between them a script install is told about a
+  version npm does not serve yet. Each installation asks the registry it came from, so neither is
+  offered a command that cannot work.
+
+- **Nothing runs `install.sh`.** For `install.sh`, UPDATE-10 is by-construction, for the reason every clause in
+  [releases.md](releases.md) is: it is shell a person fetches over the network, and a test that
+  ran it would install something. `install.ps1` is run, with the network and the signature check
+  replaced by stand-ins, by `crates/cli/tests/installer_powershell.rs`.

@@ -1,0 +1,115 @@
+//! Represents a connection to a display server.
+
+use super::device::{NativeDevice, SurfacelessMesaDevice};
+use crate::base::egl::device::EGL_FUNCTIONS;
+use crate::base::egl::ffi::EGL_PLATFORM_SURFACELESS_MESA;
+use crate::egl::types::{EGLAttrib, EGLDisplay};
+use crate::free_unix::adapter::FreeUnixAdapter;
+use crate::info::GLApi;
+use crate::{egl, Adapter, AdapterPreferences};
+use crate::{Device, Error};
+
+use std::os::raw::c_void;
+use std::sync::Arc;
+
+/// A no-op connection.
+#[derive(Clone)]
+pub struct SurfacelessMesaConnection {
+    pub(crate) native_connection: Arc<NativeConnectionWrapper>,
+}
+
+/// Native connections.
+#[derive(Clone)]
+pub struct NativeConnection(Arc<NativeConnectionWrapper>);
+
+/// Native connections.
+pub struct NativeConnectionWrapper {
+    pub(crate) egl_display: EGLDisplay,
+}
+
+unsafe impl Send for NativeConnectionWrapper {}
+unsafe impl Sync for NativeConnectionWrapper {}
+
+impl SurfacelessMesaConnection {
+    /// Opens a surfaceless Mesa display.
+    #[inline]
+    pub fn new() -> Result<SurfacelessMesaConnection, Error> {
+        unsafe {
+            EGL_FUNCTIONS.with(|egl| {
+                let egl_display_attributes = [egl::NONE as EGLAttrib];
+                let egl_display = egl.GetPlatformDisplay(
+                    EGL_PLATFORM_SURFACELESS_MESA,
+                    egl::DEFAULT_DISPLAY as *mut c_void,
+                    egl_display_attributes.as_ptr(),
+                );
+                if egl_display == egl::NO_DISPLAY {
+                    return Err(Error::ConnectionFailed);
+                }
+
+                let (mut egl_major_version, mut egl_minor_version) = (0, 0);
+                let ok =
+                    egl.Initialize(egl_display, &mut egl_major_version, &mut egl_minor_version);
+                if ok == egl::FALSE {
+                    return Err(Error::ConnectionFailed);
+                }
+
+                let native_connection =
+                    NativeConnection(Arc::new(NativeConnectionWrapper { egl_display }));
+
+                SurfacelessMesaConnection::from_native_connection(native_connection)
+            })
+        }
+    }
+
+    /// An alias for `Connection::new()`, present for consistency with other backends.
+    #[inline]
+    pub unsafe fn from_native_connection(
+        native_connection: NativeConnection,
+    ) -> Result<SurfacelessMesaConnection, Error> {
+        Ok(SurfacelessMesaConnection {
+            native_connection: native_connection.0,
+        })
+    }
+
+    /// Returns the underlying native connection.
+    #[inline]
+    pub fn native_connection(&self) -> NativeConnection {
+        NativeConnection(self.native_connection.clone())
+    }
+
+    /// Returns the OpenGL API flavor that this connection supports (OpenGL or OpenGL ES).
+    #[inline]
+    pub fn gl_api(&self) -> GLApi {
+        GLApi::GL
+    }
+
+    /// Returns an adapter on this system according to the provided preferences.
+    #[inline]
+    pub fn create_adapter(&self, preferences: AdapterPreferences) -> Result<Adapter, Error> {
+        Ok(FreeUnixAdapter::new(preferences).into())
+    }
+
+    /// Opens the hardware device corresponding to the given adapter.
+    ///
+    /// Device handles are local to a single thread.
+    #[inline]
+    pub fn create_device(&self, adapter: &Adapter) -> Result<Device, Error> {
+        SurfacelessMesaDevice::new(self, adapter).map(Device::from)
+    }
+
+    /// An alias for `connection.create_device()` with the default adapter.
+    #[inline]
+    pub unsafe fn create_device_from_native_device(
+        &self,
+        _: NativeDevice,
+    ) -> Result<SurfacelessMesaDevice, Error> {
+        SurfacelessMesaDevice::new(self, &self.create_adapter(Default::default())?)
+    }
+
+    /// Opens the display connection corresponding to the given `DisplayHandle`.
+    pub fn from_display_handle(
+        _: raw_window_handle::DisplayHandle,
+    ) -> Result<SurfacelessMesaConnection, Error> {
+        Err(Error::IncompatibleRawDisplayHandle)
+    }
+}

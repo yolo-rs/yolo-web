@@ -1,0 +1,1707 @@
+//! Where the AWS credentials that sign a request come from.
+//!
+//! The `aws` CLI is asked, rather than the credential files being read here. `~/.aws/config` is an
+//! INI file describing SSO sessions, assumed roles, credential processes and chains between them,
+//! and the tool that already resolves all of that correctly is installed on any machine configured
+//! to reach Bedrock. Reimplementing it would mean an INI parser, the OIDC device-authorization flow,
+//! and a cache format that is AWS's to change.
+//!
+//! # The first-use flow
+//!
+//! An SSO session expires, and the first request after that fails. The remedy is a browser: `aws sso
+//! login` opens one, the person approves the session, and it closes. So a failure to resolve
+//! credentials is not final here. The login is run once, and the export retried once, which turns
+//! an expired session into a pause rather than an error.
+//!
+//! # What is trusted, and what is not
+//!
+//! The subprocess is fixed argv: the program is `aws`, the subcommands are constants in this file,
+//! and the only value that varies is the profile name, which comes from the user's own settings and
+//! arrives as a separate argument rather than inside a string a shell would split. No model output
+//! and no workspace content reaches any of it, and there is no shell. Which file `aws` is can be
+//! workspace content, since an activated virtualenv puts a directory a stage may write on `PATH`,
+//! so the lookup leaves those directories out (see `installed`).
+//!
+//! What comes back is a credential, and it is treated as one: [`Secret`] keeps it out of a `Debug`
+//! render, and nothing logs it. It is not workspace content, so it carries no label; it never enters
+//! a turn, and the only thing it is ever used for is computing a signature.
+
+use bravebot_config::{Held, Secret};
+use std::ffi::OsStr;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+
+/// The program asked for credentials.
+///
+/// A bare name, looked for on `PATH` like any other command a person runs. An absolute path would
+/// be wrong on the several platforms that install it somewhere different.
+const AWS: &str = "aws";
+
+/// Where that program is, or nowhere.
+///
+/// Not left to the operating system's own search of `PATH`: this is a program bravebot starts on its
+/// own account, unconfined and with the person's access to `~/.aws`, and an activated virtualenv
+/// puts a directory a confined stage may write at the front of `PATH`. A stage given every path the
+/// account can write may also replace the `aws` in a Homebrew prefix the account owns. An `aws`
+/// written in either place would be the one run. [`bravebot_sandbox::programs::find_on`] leaves
+/// those directories out, so a person whose only `aws` is in one has none, as far as this is
+/// concerned.
+///
+/// The empty path when there is none, which [`absent`] recognises before anything is started, since
+/// what a platform says on being asked to start it is not the same everywhere.
+fn installed() -> PathBuf {
+    installed_in(&std::env::var_os("PATH").unwrap_or_default())
+}
+
+fn installed_in(path: &OsStr) -> PathBuf {
+    bravebot_sandbox::programs::find_on(OsStr::new(AWS), path).unwrap_or_default()
+}
+
+/// A command for that program, with this agent's own credentials taken off it.
+///
+/// Every `aws` this crate starts is built here, because the CLI is a program the agent started and
+/// [CRED-14](../../../docs/specs/credential-protection.md#CRED-14) puts what this agent
+/// authenticates with out of reach of one. What a person approving a session read was a model
+/// request, not a handover of the signing key, and `aws sso login` goes on to open a browser, so
+/// the reach of an inherited environment does not stop at the CLI.
+///
+/// Which names those are is the configuration surface's rather than this file's: a second list
+/// written down here would be a list one name out of date the first time the real one changed.
+/// This agent's own and no more, rather than the wider set a program somebody asked for is held
+/// to: nobody asked for this program, so there is no answer of theirs to apply, and what the
+/// machine holds for AWS is what the CLI is being run to resolve. `AWS_PROFILE`, `AWS_REGION` and
+/// the rest of the user's environment are exactly what the clause leaves in place.
+fn aws() -> Command {
+    command_for(&installed())
+}
+
+fn absent(command: &Command) -> bool {
+    command.get_program().is_empty()
+}
+
+fn command_for(program: &Path) -> Command {
+    // The names the CLI starts itself (an `env` shebang, a `credential_process` command) search
+    // only the entries the lookup above searches (SANDBOX-30).
+    bravebot_sandbox::programs::start(
+        &bravebot_sandbox::programs::Resolved::found_earlier(program),
+        bravebot_sandbox::programs::Inherits::Without(&bravebot_config::scrub::own_credentials()),
+        bravebot_sandbox::programs::SearchPath::Reduced,
+    )
+}
+
+/// The export, as a command, so what it is handed can be read without running it.
+fn export_command(profile: Option<&str>) -> Command {
+    // `--format process` is the documented, stable shape for exactly this: a program asking another
+    // program for credentials. The alternative, `--format env`, returns shell assignments that would
+    // have to be parsed as such.
+    let mut command = aws();
+    command.args(["configure", "export-credentials", "--format", "process"]);
+    if let Some(profile) = profile {
+        command.args(["--profile", profile]);
+    }
+    command
+}
+
+/// The profile listing, as a command, for the same reason.
+fn profiles_command() -> Command {
+    let mut command = aws();
+    command.args(["configure", "list-profiles"]);
+    command
+}
+
+/// The sign-in, as a command, for the same reason.
+fn login_command(profile: Option<&str>) -> Command {
+    let mut command = aws();
+    command.args(["sso", "login"]);
+    if let Some(profile) = profile {
+        command.args(["--profile", profile]);
+    }
+    command
+}
+
+/// Credentials for signing, as the CLI reported them.
+pub struct Credentials {
+    pub access_key_id: String,
+    pub secret_access_key: Secret,
+    /// Present for temporary credentials, which is what an SSO or assumed-role session gives.
+    pub session_token: Option<Secret>,
+    /// Seconds since the epoch at which these stop working, where the CLI said.
+    ///
+    /// Absent for a long-lived access key, which does not expire, and absent when the field is
+    /// there but unreadable: both mean "nothing here says when to ask again".
+    pub expires_at: Option<u64>,
+}
+
+impl Credentials {
+    /// What would end these, which is what CRED-25 asks a held credential to record.
+    ///
+    /// The session token decides, not the expiry. `expires_at` is absent for a long-lived key and
+    /// absent again where the CLI stated a date this could not read, so a rule written over it
+    /// would report an unreadable session credential as a key in a file and answer a leak of one
+    /// with `aws iam delete-access-key`, for a key that does not exist. A session token is present
+    /// only for a credential STS issued, which is exactly the distinction being drawn.
+    ///
+    /// Which arrangement, and not which tier. Both stand at Held, and
+    /// [`Held::tier`](bravebot_config::Held::tier) is what says so: the export
+    /// above renews a session without asking anybody, and nothing here reads the profile chain
+    /// that would say how long it can keep doing that, so a tier read off the session token
+    /// would report a value this agent renews unaided as a bounded one. CRED-9.
+    ///
+    /// `'static` because neither arm names a host: the lifetime on [`Held`] is for the gateway
+    /// arrangement, whose record borrows the endpoint the block stated.
+    pub fn held(&self) -> Held<'static> {
+        match self.session_token {
+            Some(_) => Held::AwsSession,
+            None => Held::AwsAccessKey,
+        }
+    }
+}
+
+/// Redacting rather than derived: two of these three fields are live credentials, and printing a
+/// request while working out why a signature was rejected is the obvious first move.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &self.secret_access_key)
+            .field("session_token", &self.session_token)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum CredentialError {
+    /// The `aws` CLI is not installed, or not on `PATH`.
+    ///
+    /// Separate from a failed run because the remedy is different and the message has to say so:
+    /// no amount of signing in fixes a missing program.
+    NotInstalled,
+    /// The CLI ran and refused, after a login attempt if one was possible.
+    Refused { detail: String },
+    /// The settings name a profile the CLI does not have.
+    ///
+    /// Separate from a refusal because no sign-in fixes it: `aws sso login` against a profile that
+    /// is not configured fails for the same reason the export did, so attempting one spends a
+    /// browser on a certainty and replaces the diagnosis with "the sign-in did not complete".
+    NoSuchProfile {
+        profile: String,
+        /// What the CLI does list, so the message can name the alternatives rather than leave
+        /// somebody to go and look.
+        available: Vec<String>,
+    },
+    /// The CLI answered with something that was not a set of credentials.
+    Undecodable { detail: String },
+}
+
+impl std::fmt::Display for CredentialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInstalled => f.write_str(
+                "the AWS CLI is not installed, and Bedrock credentials come from it. Install it, or \
+                 unset BRAVEBOT_USE_BEDROCK to use the Brave backend",
+            ),
+            Self::Refused { detail } => write!(
+                f,
+                "AWS credentials could not be resolved: {detail}. Run `aws sso login` and try again"
+            ),
+            Self::NoSuchProfile { profile, available } if available.is_empty() => write!(
+                f,
+                "there is no AWS profile named {profile}, and this machine has none configured at \
+                 all. Run `aws configure sso` to add one, or unset BRAVEBOT_USE_BEDROCK to use the \
+                 Brave backend"
+            ),
+            Self::NoSuchProfile { profile, available } => write!(
+                f,
+                "there is no AWS profile named {profile}. This machine has {}. Name one of those, \
+                 or unset BRAVEBOT_USE_BEDROCK to use the Brave backend",
+                available.join(", ")
+            ),
+            Self::Undecodable { detail } => write!(f, "unexpected credentials from the AWS CLI: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for CredentialError {}
+
+/// Resolve credentials for a profile, signing in first if the session has expired.
+///
+/// The fallback is a last resort rather than the way a person is meant to sign in: what the sign-in
+/// prints goes nowhere, because by the time this runs the caller is usually a worker thread with
+/// nothing to draw on. Callers that can ask beforehand call [`sign_in_if_needed`], which reports
+/// those lines to somebody, and reach here with nothing left to fix.
+pub fn resolve(profile: Option<&str>) -> Result<Credentials, CredentialError> {
+    resolve_with(known_good(), profile, export, |profile| {
+        login(profile, |_| {})
+    })
+}
+
+/// [`resolve`] with the kept answers and the two commands passed in, so the order of what it does
+/// can be tested without an AWS CLI.
+fn resolve_with(
+    known: &KnownGood,
+    profile: Option<&str>,
+    export: impl Fn(Option<&str>) -> Result<Credentials, CredentialError>,
+    login: impl FnOnce(Option<&str>) -> Result<(), CredentialError>,
+) -> Result<Credentials, CredentialError> {
+    match export(profile) {
+        Ok(credentials) => Ok(credentials),
+        // The common cause of a failed export is a session that has expired, and the remedy is a
+        // browser. Attempted once: a second login would open a second window for whatever the first
+        // one failed to fix.
+        Err(CredentialError::Refused { detail }) => {
+            // Whatever a cached answer said about this session, an export has just proved it wrong.
+            // Forgotten here so the next check before a turn asks the CLI rather than repeating the
+            // stale yes, which is what puts the sign-in back in front of the person: the login
+            // below reports to nobody.
+            known.forget(profile);
+            login(profile).map_err(|failure| match failure {
+                // The whole diagnosis, and it must not be replaced by the export's account of the
+                // same thing or by a sign-in that never had a chance.
+                absent @ CredentialError::NoSuchProfile { .. } => absent,
+                _ => CredentialError::Refused { detail },
+            })?;
+            export(profile)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Whether a session is already good, without touching a browser or a terminal.
+///
+/// For a caller deciding whether it is about to need one. Any failure reads as "a sign-in would
+/// help", because the alternative is inspecting the CLI's wording to tell an expired session from a
+/// misconfigured profile, and being wrong that way costs a sign-in that explains itself while being
+/// wrong the other way leaves somebody staring at a stalled turn.
+///
+/// Answered from the last successful export while that credential is still good for long enough to
+/// sign what follows, because the CLI takes most of a second to run and a caller asks this before
+/// every turn: paid on each one it is a visible pause between pressing Enter and seeing the line
+/// land. Only a good answer is kept, so a session needing a sign-in is never told it has one.
+pub fn is_signed_in(profile: Option<&str>) -> bool {
+    checked(profile).is_ok()
+}
+
+/// [`is_signed_in`] with the reason a session is not good, for a report rather than a turn.
+///
+/// A report has to tell the cases apart, because signing in fixes only one of them: a missing CLI
+/// or a profile the CLI does not have fails the sign-in the same way the export failed. The profile
+/// list is asked only after a refusal, so a good session still costs one export or none.
+pub fn session(profile: Option<&str>) -> Result<(), CredentialError> {
+    checked(profile).map_err(|failure| match failure {
+        CredentialError::Refused { .. } => absent_from(profile, profiles()).unwrap_or(failure),
+        other => other,
+    })
+}
+
+/// One export, or none while a kept answer holds, and the good answer kept.
+fn checked(profile: Option<&str>) -> Result<(), CredentialError> {
+    if known_good().holds(profile, now()) {
+        return Ok(());
+    }
+    let credentials = export(profile)?;
+    known_good().keep(profile, credentials.expires_at);
+    Ok(())
+}
+
+/// The sessions an export has already shown to be good, and until when.
+///
+/// Per profile, because a session is signed in to one and not another, and a single slot would have
+/// one profile's answer stand for the next one asked about.
+#[derive(Default)]
+struct KnownGood(std::sync::Mutex<std::collections::HashMap<Option<String>, u64>>);
+
+impl KnownGood {
+    /// Whether this profile was shown to be good and has not run out.
+    ///
+    /// A poisoned lock reads as "nothing is known", which costs a CLI run rather than trusting a
+    /// map another thread was part way through.
+    fn holds(&self, profile: Option<&str>, now: u64) -> bool {
+        let Ok(known) = self.0.lock() else {
+            return false;
+        };
+        known
+            .get(&profile.map(str::to_string))
+            .is_some_and(|&until| now < until)
+    }
+
+    /// Keep a good export, so the next caller need not run the CLI to hear the same thing.
+    ///
+    /// An export that did not say when it expires is not kept at all, and is re-asked every time.
+    /// That is the long-lived-key case, where the CLI answers from a file rather than a network, so
+    /// it is the cheap one, and a lifetime invented for it would be a guess with nothing behind it.
+    fn keep(&self, profile: Option<&str>, expires_at: Option<u64>) {
+        let Some(expires_at) = expires_at else { return };
+        if let Ok(mut known) = self.0.lock() {
+            // Held back from the stated expiry, because this decides whether to sign in before a
+            // turn that then has to run: told yes in the credential's last second, the request that
+            // follows is signed with one that has expired by the time it arrives.
+            known.insert(
+                profile.map(str::to_string),
+                expires_at.saturating_sub(MARGIN),
+            );
+        }
+    }
+
+    /// Drop what was kept for a profile, because it has since been shown to be wrong.
+    ///
+    /// A credential can stop working before the expiry it stated: revoked, a session ended
+    /// elsewhere, a role that no longer grants what it did. Without this the kept answer goes on
+    /// saying the session is good until that expiry passes, so the check before each turn never
+    /// asks again and the sign-in a person can see never runs.
+    fn forget(&self, profile: Option<&str>) {
+        if let Ok(mut known) = self.0.lock() {
+            known.remove(&profile.map(str::to_string));
+        }
+    }
+}
+
+/// How long before a stated expiry a credential stops counting as usable.
+///
+/// Long enough for the turn that follows the check to be signed and sent.
+const MARGIN: u64 = 300;
+
+fn known_good() -> &'static KnownGood {
+    static KNOWN: std::sync::OnceLock<KnownGood> = std::sync::OnceLock::new();
+    KNOWN.get_or_init(KnownGood::default)
+}
+
+/// Seconds since the Unix epoch.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// Sign in for a profile, if that is what is missing, reporting what the sign-in says.
+///
+/// Separated from [`resolve`] so an interface can do the interactive part at a moment of its own
+/// choosing, and put the URL and the code where a person is already looking. `say` is called per
+/// line as the CLI writes it, while the command is still waiting: that is the whole of the flow, so
+/// a caller that discards them leaves somebody with a browser open and no code to type into it.
+///
+/// Quiet when the session is already good: `say` is never called and no browser opens, so this is
+/// safe to call before every turn.
+pub fn sign_in_if_needed(
+    profile: Option<&str>,
+    say: impl FnMut(String),
+) -> Result<(), CredentialError> {
+    if is_signed_in(profile) {
+        return Ok(());
+    }
+    login(profile, say)
+}
+
+/// A way to end a sign-in started by [`sign_in_if_needed_until`] from another thread.
+///
+/// Holds the CLI's process while it runs, so [`Stop::stop`] ends it at once and nothing is
+/// signalled by number once it has been waited for, when the number may belong to another program.
+#[derive(Default)]
+pub struct Stop {
+    state: std::sync::Mutex<Stopping>,
+}
+
+#[derive(Default)]
+struct Stopping {
+    stopped: bool,
+    child: Option<std::process::Child>,
+}
+
+impl Stop {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// End the sign-in. The CLI is killed now, and one not started yet never starts.
+    pub fn stop(&self) {
+        let mut state = self.lock();
+        state.stopped = true;
+        if let Some(child) = state.child.as_mut() {
+            kill(child);
+        }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.lock().stopped
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Stopping> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The CLI and every program in the group it leads. A browser the CLI opens is started in a session
+/// of its own by Python's `webbrowser`, so it is not in the group and stays open.
+fn kill(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(group) = rustix::process::Pid::from_raw(child.id().cast_signed()) {
+        rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
+            .unwrap_or_default();
+    }
+    child.kill().unwrap_or_default();
+}
+
+/// How a sign-in [`sign_in_if_needed_until`] ran did not end signed in.
+#[derive(Debug)]
+pub enum Stopped {
+    /// [`Stop::stop`] was called before the CLI finished.
+    Cancelled,
+    Failed(CredentialError),
+}
+
+/// [`sign_in_if_needed`], for a caller that may end it before the person has finished in the
+/// browser: a window, which has no Ctrl-C for the program it started.
+///
+/// The CLI leads a process group of its own, so the worker the installed CLI forks goes with it on
+/// a stop. A CLI that finished signed in before the stop reached it is reported signed in, since it
+/// is.
+pub fn sign_in_if_needed_until(
+    profile: Option<&str>,
+    say: impl FnMut(String),
+    stop: &Stop,
+) -> Result<(), Stopped> {
+    if is_signed_in(profile) {
+        return Ok(());
+    }
+    if let Some(absent) = absent_from(profile, profiles()) {
+        return Err(Stopped::Failed(absent));
+    }
+    let command = login_command(profile);
+    if absent(&command) {
+        return Err(Stopped::Failed(CredentialError::NotInstalled));
+    }
+    login_until(command, say, stop)
+}
+
+fn login_until(
+    mut command: Command,
+    mut say: impl FnMut(String),
+    stop: &Stop,
+) -> Result<(), Stopped> {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+
+    let mut state = stop.lock();
+    if state.stopped {
+        return Err(Stopped::Cancelled);
+    }
+    let mut child = start_piped(&mut command)
+        .map_err(|e| started_badly(&e))
+        .map_err(Stopped::Failed)?;
+    let arriving = read_lines_of(&mut child);
+    state.child = Some(child);
+    drop(state);
+
+    // Not until the streams close, as `login` waits: a program the CLI started may hold them open
+    // after it has gone, and a stop has to end the wait without them.
+    let status = loop {
+        match arriving.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(line) => {
+                say(line);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+        let mut state = stop.lock();
+        let Some(child) = state.child.as_mut() else {
+            return Err(Stopped::Cancelled);
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                state.child = None;
+                break status;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                kill(child);
+                child.wait().ok();
+                state.child = None;
+                return Err(Stopped::Failed(CredentialError::Refused {
+                    detail: e.to_string(),
+                }));
+            }
+        }
+    };
+    // The readers may not have passed on the last lines yet; a program still holding the streams
+    // open is waited for no longer than this.
+    let drained = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while let Ok(line) =
+        arriving.recv_timeout(drained.saturating_duration_since(std::time::Instant::now()))
+    {
+        say(line);
+    }
+
+    if status.success() {
+        Ok(())
+    } else if stop.stopped() {
+        Err(Stopped::Cancelled)
+    } else {
+        Err(Stopped::Failed(CredentialError::Refused {
+            detail: "the sign-in did not complete".to_string(),
+        }))
+    }
+}
+
+fn started_badly(e: &std::io::Error) -> CredentialError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => CredentialError::NotInstalled,
+        _ => CredentialError::Refused {
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// Both of the child's output streams, drained on a thread apiece and merged over one channel, so
+/// neither blocks against a pipe nobody is reading and the lines arrive in the order they were
+/// written. The channel closes once both streams have.
+fn read_lines_of(child: &mut std::process::Child) -> mpsc::Receiver<String> {
+    let (lines, arriving) = mpsc::channel::<String>();
+    for stream in [
+        child.stdout.take().map(Reading::Out),
+        child.stderr.take().map(Reading::Err),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let lines = lines.clone();
+        std::thread::spawn(move || stream.read_lines_into(&lines));
+    }
+    arriving
+}
+
+/// Start `command` with no input and both output streams piped, under the spawn gate. The wait for
+/// the program to finish belongs to the caller and is taken outside the gate, so a slow CLI holds up
+/// no other start.
+fn start_piped(command: &mut Command) -> std::io::Result<std::process::Child> {
+    bravebot_sandbox::process::starting_a_program(|| {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+}
+
+/// Run `command` to its end and collect what it printed, as `Command::output` does. It sets the
+/// standard streams the way `output` does by default and replaces any set before, which is harmless
+/// while `export_command` and `profiles_command` set none.
+fn output_of(command: &mut Command) -> std::io::Result<std::process::Output> {
+    start_piped(command)?.wait_with_output()
+}
+
+/// Ask the CLI for credentials, without trying to fix anything.
+fn export(profile: Option<&str>) -> Result<Credentials, CredentialError> {
+    let mut command = export_command(profile);
+    if absent(&command) {
+        return Err(CredentialError::NotInstalled);
+    }
+    let mut output = output_of(&mut command).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => CredentialError::NotInstalled,
+        _ => CredentialError::Refused {
+            detail: e.to_string(),
+        },
+    })?;
+
+    if !output.status.success() {
+        // A CLI that printed a credential and then failed printed it all the same, and `decode`,
+        // which is where the clearing otherwise happens, is not reached on this path.
+        bravebot_config::scrub_bytes(&mut output.stdout);
+        return Err(CredentialError::Refused {
+            detail: first_line(&output.stderr),
+        });
+    }
+
+    decode(&mut output.stdout)
+}
+
+/// The profiles the CLI is configured with, or `None` where it could not say.
+///
+/// A list rather than a reading of the error text an export failed with. The wording of that text
+/// is the CLI's to change and telling a missing profile from an expired session by it would be
+/// guessing; this asks the question directly and gets a name per line.
+///
+/// Run only after something has already failed, so the check before every turn still costs one
+/// export and no more.
+fn profiles() -> Option<Vec<String>> {
+    let output = output_of(&mut profiles_command()).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+    )
+}
+
+/// The error for a profile the CLI does not list, or `None` where there is nothing to say.
+///
+/// Nothing to say covers three cases, and all of them mean the sign-in should go ahead: no profile
+/// was named, so the default chain applies and no list describes it; the CLI could not be asked,
+/// which is not the same as an answer; and the profile is there, which is the ordinary case of an
+/// expired session.
+///
+/// Separated from the two subprocesses so the rule is testable without either.
+fn absent_from(profile: Option<&str>, known: Option<Vec<String>>) -> Option<CredentialError> {
+    let named = profile?;
+    let known = known?;
+    if known.iter().any(|it| it == named) {
+        return None;
+    }
+    Some(CredentialError::NoSuchProfile {
+        profile: named.to_string(),
+        available: known,
+    })
+}
+
+/// Open a browser and wait for the person to approve the session, reporting what the CLI says.
+///
+/// `say` is called once per line as it arrives, because those lines are the sign-in: a URL and a
+/// confirmation code, printed while the command waits for them to be used. Output is piped rather
+/// than inherited so a caller drawing its own display can put them where a person is already
+/// looking, instead of underneath it. The CLI flushes them immediately when piped, which is what
+/// makes that safe: buffered until exit, a code would arrive after it had stopped being useful.
+///
+/// The browser is still opened. `--no-browser` would suppress the one step that needs no typing at
+/// all, and the URL is printed either way for a machine that cannot open one.
+///
+/// Nothing here is labelled. The lines are a program's own prompt to the person at the keyboard, not
+/// workspace content and not model output, and they reach a screen rather than a planner.
+fn login(profile: Option<&str>, mut say: impl FnMut(String)) -> Result<(), CredentialError> {
+    if let Some(absent) = absent_from(profile, profiles()) {
+        return Err(absent);
+    }
+
+    let mut command = login_command(profile);
+    if absent(&command) {
+        return Err(CredentialError::NotInstalled);
+    }
+    // Both output streams are piped, because which one carries the code is the CLI's business and a
+    // person who cannot see it is stuck either way. Nothing is typed at this: the code goes into a
+    // browser, and the terminal belongs to whoever called, so a program left able to read stdin
+    // would fight for the keys.
+    let mut child = start_piped(&mut command).map_err(|e| started_badly(&e))?;
+
+    // Every line is passed on as it arrives. The loop ends when both readers have finished, which
+    // is when the command has closed its streams.
+    for line in read_lines_of(&mut child) {
+        say(line);
+    }
+
+    let status = child.wait().map_err(|e| CredentialError::Refused {
+        detail: e.to_string(),
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CredentialError::Refused {
+            detail: "the sign-in did not complete".to_string(),
+        })
+    }
+}
+
+/// One of the child's two streams, so both can be read by the same code.
+enum Reading {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
+}
+
+impl Reading {
+    /// Send every line this stream produces, dropping a trailing newline.
+    ///
+    /// Lines rather than chunks, because a caller is putting them into a transcript one entry at a
+    /// time and a chunk boundary is not a place a person would break a sentence.
+    fn read_lines_into(self, lines: &mpsc::Sender<String>) {
+        let reader: Box<dyn std::io::Read> = match self {
+            Self::Out(stream) => Box::new(stream),
+            Self::Err(stream) => Box::new(stream),
+        };
+        for line in std::io::BufReader::new(reader).lines() {
+            // A stream that stopped mid-line is a command that has finished or died, and either way
+            // there is nothing further to report from it.
+            let Ok(line) = line else { return };
+            if lines.send(line).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// The reply, parsed, holding the copy of the credential the parse made.
+///
+/// The parse puts the secret access key and the session token into `String`s of its own, which
+/// the caller never sees and so cannot clear. Held behind this so that every way out of a read
+/// clears them, which is what [CRED-23](../../../docs/specs/credential-protection.md#CRED-23)
+/// asks of a buffer this program owns a credential in.
+struct Parsed(serde_json::Value);
+
+impl Parsed {
+    /// What the CLI stated for a name, or `None` where it stated nothing usable.
+    ///
+    /// An empty string counts as nothing said, which is what makes half an answer a refusal here
+    /// rather than a signature the service rejects a long way from the cause.
+    fn field(&self, name: &str) -> Option<String> {
+        self.0
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .filter(|found| !found.is_empty())
+    }
+
+    /// Overwrite every value the parse made, in place.
+    ///
+    /// Assigning `Value::Null` over the credential is the mistake available here: it drops the
+    /// string, which is the thing that leaves the bytes where the allocator can hand them on.
+    fn scrub(&mut self) {
+        bravebot_config::scrub_value(&mut self.0);
+    }
+}
+
+impl Drop for Parsed {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
+/// Read the credential JSON the CLI's process format emits.
+///
+/// The bytes are cleared as this is answered for, whatever it answered. They are the CLI's reply
+/// and hold a live session credential in plain text, and a reply this could not read holds it
+/// just as a good one does, so the clearing cannot sit on the success path.
+pub fn decode(bytes: &mut [u8]) -> Result<Credentials, CredentialError> {
+    let parsed = serde_json::from_slice(&*bytes).map(Parsed);
+    bravebot_config::scrub_bytes(bytes);
+    let parsed = parsed.map_err(|e| CredentialError::Undecodable {
+        detail: e.to_string(),
+    })?;
+
+    // Into a `Secret` as it is read rather than at the end: the refusal below drops whatever was
+    // read before it, and a plain `String` dropped there is the credential handed back intact.
+    let (Some(access_key_id), Some(secret_access_key)) = (
+        parsed.field("AccessKeyId"),
+        parsed.field("SecretAccessKey").map(Secret::new),
+    ) else {
+        // Deliberately does not quote the body: on the success path it holds a live secret, and an
+        // error message is the most likely thing to be pasted somewhere public.
+        return Err(CredentialError::Undecodable {
+            detail: "no access key in the response".to_string(),
+        });
+    };
+
+    Ok(Credentials {
+        access_key_id,
+        secret_access_key,
+        session_token: parsed.field("SessionToken").map(Secret::new),
+        expires_at: parsed
+            .field("Expiration")
+            .as_deref()
+            .and_then(expiry_seconds),
+    })
+}
+
+/// The epoch seconds in an `Expiration`, or `None` if it is not an RFC 3339 time.
+///
+/// The CLI emits RFC 3339 in UTC, read by [`bravebot_config::time::rfc3339`], which applies a zone
+/// offset where one is written and refuses a value with no zone or with text after it. An
+/// unparsable value is not an error anywhere: it means a caller re-asks the CLI rather than
+/// trusting a date it could not read.
+fn expiry_seconds(text: &str) -> Option<u64> {
+    bravebot_config::time::rfc3339(text).and_then(|(seconds, _)| u64::try_from(seconds).ok())
+}
+
+/// The first line of a program's stderr, bounded.
+///
+/// One line because the CLI's failures start with the useful sentence and continue with a stack of
+/// context, and bounded because this ends up in a message on someone's screen.
+fn first_line(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("the AWS CLI gave no reason");
+    line.chars().take(200).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reply in a buffer of its own, since reading one clears the bytes it was read from.
+    fn reply(body: &[u8]) -> Vec<u8> {
+        body.to_vec()
+    }
+
+    /// What a command was told to unset, which is how `env_remove` reads back: a name a child will
+    /// not be handed is present here with no value, and one left alone is absent altogether.
+    fn withheld_from(command: &Command) -> Vec<String> {
+        command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Every `aws` this crate starts, not only the export. The weakness this closes is that a
+    /// person approving a model request approved a request, and a credential travelling in the
+    /// environment of the CLI that signs it was handed over without having been seen; `aws sso
+    /// login` then opens a browser, so the environment does not stop at a program AWS wrote.
+    ///
+    /// Against what the configuration surface says rather than against a list spelled again here:
+    /// a copy is what stops agreeing with the original the first time either is edited, and the
+    /// comparison holds on a machine that has switched the withholding off, where handing the
+    /// credential over is what was asked for.
+    #[test]
+    fn this_agents_own_credentials_reach_none_of_the_aws_cli_this_crate_starts() {
+        let mut expected = bravebot_config::scrub::own_credentials();
+        expected.sort();
+        for (what, command) in [
+            ("the export", export_command(None)),
+            ("the export for a profile", export_command(Some("work"))),
+            ("the profile listing", profiles_command()),
+            ("the sign-in", login_command(None)),
+            ("the sign-in for a profile", login_command(Some("work"))),
+        ] {
+            let mut withheld = withheld_from(&command);
+            withheld.sort();
+            assert_eq!(
+                withheld, expected,
+                "{what} was handed a different set from the one the configuration names"
+            );
+        }
+    }
+
+    /// Every start of the CLI, whether its output is collected or its lines are streamed as they
+    /// arrive, is taken under the spawn gate, so it cannot overlap the creation of a control channel.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_of_the_cli_waits_for_a_channel_being_created() {
+        bravebot_sandbox::process::start_waits_at_the_gate(|| {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "true"]);
+            let output = output_of(&mut command).expect("the program runs");
+            assert!(output.status.success());
+        });
+    }
+
+    /// A directory outside the temp directory that starts empty, because one under it is a
+    /// directory a stage may write and the lookup would leave it out for that reason alone.
+    fn fresh_directory(name: &str) -> PathBuf {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.canonicalize().unwrap()
+    }
+
+    fn executable_aws(directory: &Path) -> PathBuf {
+        let file = directory.join(if cfg!(windows) { "aws.exe" } else { "aws" });
+        std::fs::write(&file, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        file
+    }
+
+    /// A confined stage can write `.venv/bin/aws`, and an activated environment puts that
+    /// directory first on `PATH`. The CLI is started unconfined with the person's access to
+    /// `~/.aws`, so the one behind it is the one that has to run.
+    #[test]
+    fn an_aws_a_confined_stage_wrote_at_the_front_of_path_is_not_the_one_run() {
+        let session = fresh_directory("credentials-planted-session");
+        let planted = session.join(".venv").join("bin");
+        std::fs::create_dir_all(&planted).unwrap();
+        executable_aws(&planted);
+        let system = fresh_directory("credentials-planted-system");
+        let real = executable_aws(&system);
+        bravebot_sandbox::programs::keep_out(&session);
+        let path = std::env::join_paths([&planted, &system]).unwrap();
+
+        let command = command_for(&installed_in(&path));
+
+        assert_eq!(command.get_program(), real.as_os_str());
+    }
+
+    /// A person whose only `aws` is in the environment a stage can write has none, as far as
+    /// bravebot is concerned, and is told it is not installed rather than run something else.
+    #[test]
+    fn an_aws_only_in_a_directory_a_stage_may_write_is_reported_as_not_installed() {
+        let session = fresh_directory("credentials-only-session");
+        let planted = session.join(".venv").join("bin");
+        std::fs::create_dir_all(&planted).unwrap();
+        executable_aws(&planted);
+        bravebot_sandbox::programs::keep_out(&session);
+        let path = std::env::join_paths([&planted]).unwrap();
+
+        let command = command_for(&installed_in(&path));
+
+        assert!(absent(&command));
+    }
+
+    /// A stage given every path the account can write may replace the `aws` in a Homebrew prefix
+    /// the account owns, which is the usual install on Apple Silicon. The CLI is started
+    /// unconfined with the person's access to `~/.aws`, so the one behind it is the one that has
+    /// to run.
+    #[test]
+    fn an_aws_where_a_stage_given_the_whole_machine_may_write_is_not_the_one_run() {
+        let prefix = fresh_directory("credentials-held-prefix");
+        let planted = prefix.join("bin");
+        std::fs::create_dir_all(&planted).unwrap();
+        executable_aws(&planted);
+        let system = fresh_directory("credentials-held-system");
+        let real = executable_aws(&system);
+        bravebot_sandbox::programs::keep_out_where_writable(&prefix);
+        let path = std::env::join_paths([&planted, &system]).unwrap();
+
+        let command = command_for(&installed_in(&path));
+
+        assert_eq!(command.get_program(), real.as_os_str());
+    }
+
+    /// The same file on a path nothing writes is the program, so the refusal above is the
+    /// directory's doing and not a lookup that never finds anything.
+    #[test]
+    fn an_aws_in_a_directory_no_stage_may_write_is_the_one_run() {
+        let system = fresh_directory("credentials-clean-system");
+        let real = executable_aws(&system);
+        let path = std::env::join_paths([&system]).unwrap();
+
+        assert_eq!(installed_in(&path), real);
+    }
+
+    /// SANDBOX-30: an `aws` that is a script with an `env` shebang looks its interpreter up on the
+    /// `PATH` it was started with, as does a `credential_process` command named bare. An
+    /// interpreter a confined stage wrote into a directory the session keeps out, first on that
+    /// `PATH`, must not be the one that runs: the CLI is started unconfined, with the person's
+    /// access to `~/.aws`, `~/.ssh` and `~/.bravebot`. The test binary runs again with `PATH`
+    /// holding the session's `.venv/bin`, an installed directory and the system directories, in
+    /// that order. `aws` is `#!/usr/bin/env interp` and sits in the installed directory, where each
+    /// `interp` records that it ran. An `aws` started with bravebot's whole `PATH` runs the planted
+    /// `interp`.
+    #[cfg(unix)]
+    #[test]
+    fn an_aws_that_starts_another_program_by_name_never_runs_one_a_stage_may_have_written() {
+        use std::os::unix::fs::PermissionsExt;
+        const TEST: &str = "credentials::tests::an_aws_that_starts_another_program_by_name_never_runs_one_a_stage_may_have_written";
+        const SESSION: &str = "BRAVEBOT_TEST_AWS_INTERPRETER_SESSION";
+
+        if let Some(session) = std::env::var_os(SESSION) {
+            let session = PathBuf::from(session);
+            bravebot_sandbox::programs::keep_out(&session);
+            std::fs::write(session.join("ran"), "").unwrap();
+
+            // The interpreter produces no credentials, so the export is refused; what matters is
+            // which interpreter ran.
+            let _ = export(None);
+
+            assert!(
+                !session.join("planted-ran").exists(),
+                "the CLI looked its interpreter up in a directory a stage may write"
+            );
+            assert!(
+                session.join("installed-ran").exists(),
+                "the CLI did not run the installed interpreter"
+            );
+            return;
+        }
+
+        let session = fresh_directory("credentials-interpreter-session");
+        let installed = fresh_directory("credentials-interpreter-installed");
+        let planted = session.join(".venv").join("bin");
+        std::fs::create_dir_all(&planted).unwrap();
+        let write = |directory: &Path, name: &str, body: String| {
+            let file = directory.join(name);
+            std::fs::write(&file, body).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let records =
+            |marker: &str| format!("#!/bin/sh\n: > '{}'\n", session.join(marker).display());
+        write(&planted, "interp", records("planted-ran"));
+        write(&installed, "interp", records("installed-ran"));
+        write(&installed, "aws", "#!/usr/bin/env interp\n".to_string());
+        let path = std::env::join_paths([
+            planted,
+            installed.clone(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .unwrap();
+
+        // nosemgrep: rust.lang.security.current-exe.current-exe
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--test-threads=1", "--nocapture"])
+            .env(SESSION, &session)
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+
+        let ran = session.join("ran").exists();
+        let report = String::from_utf8_lossy(&child.stderr).into_owned();
+        assert!(ran, "the child did not run the test: {report}");
+        assert!(child.status.success(), "{report}");
+    }
+
+    /// The machine's own AWS configuration is the credential the CLI is being asked to resolve, so
+    /// withholding it would leave the CLI resolving nothing. CRED-14 covers what this agent
+    /// authenticates with and deliberately leaves what the person already has.
+    #[test]
+    fn the_machines_own_aws_configuration_still_reaches_the_cli() {
+        let withheld = withheld_from(&export_command(Some("work")));
+        for kept in [
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SESSION_TOKEN",
+            "HOME",
+            "PATH",
+        ] {
+            assert!(
+                !withheld.iter().any(|it| it == kept),
+                "{kept} was withheld, so the CLI cannot resolve the credential it is asked for"
+            );
+        }
+    }
+
+    /// The scrubbing is added to the command, not substituted for what the command is: an
+    /// implementation that dropped the profile while removing a variable would be a sign-in
+    /// against the wrong account.
+    #[test]
+    fn the_cli_is_still_asked_what_it_was_asked_before() {
+        let args = |command: &Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(&export_command(Some("work"))),
+            [
+                "configure",
+                "export-credentials",
+                "--format",
+                "process",
+                "--profile",
+                "work"
+            ]
+        );
+        assert_eq!(args(&profiles_command()), ["configure", "list-profiles"]);
+        assert_eq!(
+            args(&login_command(Some("work"))),
+            ["sso", "login", "--profile", "work"]
+        );
+    }
+
+    /// No sign-in fixes a profile that is not configured: `aws sso login` fails against it for the
+    /// same reason the export did, so attempting one spends a browser on a certainty and replaces
+    /// the diagnosis with "the sign-in did not complete".
+    #[test]
+    fn a_profile_the_cli_does_not_have_is_not_signed_in_to() {
+        let known = Some(vec!["work".to_string(), "personal".to_string()]);
+        let absent = absent_from(Some("claude-code-bedrock-sso"), known).expect("an error");
+
+        assert!(matches!(absent, CredentialError::NoSuchProfile { .. }));
+        let said = absent.to_string();
+        assert!(said.contains("claude-code-bedrock-sso"), "{said}");
+        // The alternatives, so nobody has to go and look them up to act on this.
+        assert!(said.contains("work") && said.contains("personal"), "{said}");
+    }
+
+    /// The ordinary expired-session case, which is what a sign-in is for.
+    #[test]
+    fn a_profile_the_cli_does_have_still_gets_a_sign_in() {
+        let known = Some(vec!["work".to_string()]);
+        assert!(absent_from(Some("work"), known).is_none());
+    }
+
+    /// A CLI that could not be asked has not said the profile is missing, and a guess either way
+    /// would be worse than the sign-in that explains itself.
+    #[test]
+    fn a_listing_that_could_not_be_read_does_not_withhold_a_sign_in() {
+        assert!(absent_from(Some("work"), None).is_none());
+    }
+
+    /// With no profile named the default chain applies, and no list of profiles describes it.
+    #[test]
+    fn naming_no_profile_is_not_naming_a_missing_one() {
+        assert!(absent_from(None, Some(vec!["work".to_string()])).is_none());
+    }
+
+    /// A machine with nothing configured needs different advice: there is no profile to name.
+    #[test]
+    fn a_machine_with_no_profiles_at_all_says_so() {
+        let absent = absent_from(Some("work"), Some(Vec::new())).expect("an error");
+        let said = absent.to_string();
+        assert!(said.contains("none configured"), "{said}");
+        assert!(said.contains("aws configure sso"), "{said}");
+    }
+
+    /// A credential can stop working before the expiry it stated. Kept anyway, the check before
+    /// every turn goes on answering yes from that stale note, so the sign-in a person can see never
+    /// runs and each turn fails to a login reporting to nobody.
+    #[test]
+    fn a_session_shown_to_be_bad_is_no_longer_remembered_as_good() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(now() + 3_600));
+        assert!(
+            known.holds(Some("work"), now()),
+            "a good export was not kept"
+        );
+
+        known.forget(Some("work"));
+        assert!(
+            !known.holds(Some("work"), now()),
+            "a session proved bad was still remembered as good"
+        );
+    }
+
+    fn a_credential() -> Credentials {
+        Credentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: Secret::new("example-secret".to_string()),
+            session_token: None,
+            expires_at: None,
+        }
+    }
+
+    /// A request that proves a kept answer wrong has to drop it on the production path, not only
+    /// through `KnownGood::forget`: without the call in `resolve_with` the next check repeats the
+    /// stale yes and the sign-in never runs.
+    #[test]
+    fn a_refused_export_drops_the_kept_answer_before_the_sign_in() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(now() + 3_600));
+        let held_at_sign_in = std::cell::Cell::new(true);
+
+        let result = resolve_with(
+            &known,
+            Some("work"),
+            |_| {
+                Err(CredentialError::Refused {
+                    detail: "expired".to_string(),
+                })
+            },
+            |_| {
+                held_at_sign_in.set(known.holds(Some("work"), now()));
+                Err(CredentialError::Refused {
+                    detail: "no browser".to_string(),
+                })
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!held_at_sign_in.get(), "the answer outlived the refusal");
+        assert!(!known.holds(Some("work"), now()));
+    }
+
+    /// Only the profile the request used is dropped, and a good export leaves the kept answer be.
+    #[test]
+    fn a_good_export_and_another_profiles_refusal_leave_a_kept_answer_alone() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(now() + 3_600));
+        known.keep(Some("personal"), Some(now() + 3_600));
+
+        let refused = resolve_with(
+            &known,
+            Some("work"),
+            |_| {
+                Err(CredentialError::Refused {
+                    detail: "expired".to_string(),
+                })
+            },
+            |_| {
+                Err(CredentialError::Refused {
+                    detail: String::new(),
+                })
+            },
+        );
+        assert!(refused.is_err());
+        assert!(known.holds(Some("personal"), now()));
+
+        let good = resolve_with(
+            &known,
+            Some("personal"),
+            |_| Ok(a_credential()),
+            |_| panic!("signed in though the export worked"),
+        );
+        assert!(good.is_ok());
+        assert!(known.holds(Some("personal"), now()));
+    }
+
+    /// Forgetting one profile must not forget another: a session is signed in to one and not the
+    /// next, and they are asked about separately.
+    #[test]
+    fn forgetting_one_profile_leaves_the_others_alone() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(now() + 3_600));
+        known.keep(Some("personal"), Some(now() + 3_600));
+
+        known.forget(Some("work"));
+        assert!(known.holds(Some("personal"), now()));
+    }
+
+    /// The shape the CLI's `--format process` actually emits, which is what this has to read.
+    #[test]
+    fn credentials_are_read_from_the_process_format() {
+        let credentials = decode(&mut reply(
+            br#"{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"secret","SessionToken":"token"}"#,
+        ))
+        .expect("decoded");
+        assert_eq!(credentials.access_key_id, "AKIA");
+        assert_eq!(credentials.secret_access_key.expose(), "secret");
+        assert_eq!(
+            credentials.session_token.as_ref().map(Secret::expose),
+            Some("token")
+        );
+    }
+
+    /// Long-lived keys have no session token, and that is not a failure: it is what a plain access
+    /// key in a credentials file looks like.
+    #[test]
+    fn long_lived_credentials_have_no_session_token() {
+        let credentials = decode(&mut reply(
+            br#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#,
+        ))
+        .expect("decoded");
+        assert!(credentials.session_token.is_none());
+    }
+
+    /// CRED-25: what would end a resolved credential, which the expiry does not say. The session
+    /// token is what separates the two arrangements, and an expiry cannot stand in for it: the
+    /// field is absent both for a long-lived key and for a session credential whose stated date
+    /// this could not read, so a rule written over the expiry answers a leaked SSO credential with
+    /// `aws iam delete-access-key`, for a key that does not exist, and leaves the live session
+    /// running at its issuer.
+    #[test]
+    fn a_session_token_is_what_says_what_would_end_a_credential() {
+        let session = decode(&mut reply(
+            br#"{"AccessKeyId":"ASIA","SecretAccessKey":"secret","SessionToken":"token","Expiration":"not a date"}"#,
+        ))
+        .expect("decoded");
+        assert!(
+            session.expires_at.is_none(),
+            "the fixture needs an expiry the decode could not read"
+        );
+        assert_eq!(session.held(), Held::AwsSession);
+
+        let long_lived = decode(&mut reply(
+            br#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#,
+        ))
+        .expect("decoded");
+        assert_eq!(long_lived.held(), Held::AwsAccessKey);
+
+        // Deleting the key is the move somebody makes after a leak, and it is the one that leaves
+        // a credential behind: STS has already handed out sessions under it that run to their own
+        // expiry. The session credential has nothing under it in turn.
+        assert!(long_lived.held().outlives_revocation());
+        assert!(!session.held().outlives_revocation());
+    }
+
+    /// CRED-9: a session credential the CLI resolved is recorded at Held, because the export
+    /// that renews it asks nobody. A session token and a stated expiry are what a record reading
+    /// the value takes for a bounded credential, so the fixture carries both: what the clause
+    /// asks is whether renewing needs authority this agent lacks, and the expiry does not answer
+    /// it. Read at the site that decides the tier, so a record that turned on the session token
+    /// fails here rather than at the line a person reads.
+    #[test]
+    fn a_session_this_program_re_mints_unaided_is_recorded_at_held() {
+        let session = decode(&mut reply(
+            br#"{"AccessKeyId":"ASIA","SecretAccessKey":"secret","SessionToken":"token","Expiration":"2026-09-05T03:04:02+00:00"}"#,
+        ))
+        .expect("decoded");
+        assert!(
+            session.expires_at.is_some(),
+            "the fixture needs the stated lifetime the clause says does not decide the tier"
+        );
+        assert_eq!(
+            session.held().tier(),
+            bravebot_config::Tier::Held,
+            "a session this program re-mints for itself is recorded above Held"
+        );
+    }
+
+    /// The expiry is what lets a caller answer "is this still good" without running the CLI again,
+    /// so it has to survive the decode rather than being dropped with the rest of the envelope.
+    #[test]
+    fn the_expiry_the_cli_reports_is_read_from_the_process_format() {
+        let credentials = decode(&mut reply(
+            br#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret","Expiration":"2026-09-05T03:04:02+00:00"}"#,
+        ))
+        .expect("decoded");
+        assert_eq!(credentials.expires_at, Some(1_788_577_442));
+    }
+
+    /// A credential with no stated expiry is the long-lived case, and saying so is not the same as
+    /// saying it expired at the epoch: a caller reads `None` as "nothing here says when to re-ask".
+    #[test]
+    fn credentials_with_no_stated_expiry_report_none() {
+        let credentials = decode(&mut reply(
+            br#"{"AccessKeyId":"AKIA","SecretAccessKey":"secret"}"#,
+        ))
+        .expect("decoded");
+        assert!(credentials.expires_at.is_none());
+    }
+
+    /// Checked against the dates the arithmetic gets wrong: the epoch itself, a leap day in a century
+    /// year that is one, a leap day in an ordinary leap year, a year end, and the day after February
+    /// in a century year that is not a leap year. A conversion error here hands back a credential
+    /// after it stopped working, or re-runs the CLI every turn, and neither surfaces near this code.
+    #[test]
+    fn an_expiry_is_converted_to_the_instant_it_names() {
+        for (text, seconds) in [
+            ("1970-01-01T00:00:00Z", 0),
+            ("2000-02-29T12:00:00Z", 951_825_600),
+            ("2024-02-29T00:00:00Z", 1_709_164_800),
+            ("2026-09-05T03:04:02+00:00", 1_788_577_442),
+            ("2026-09-05T12:04:02+09:00", 1_788_577_442),
+            ("2026-09-04T22:04:02-05:00", 1_788_577_442),
+            ("2026-12-31T23:59:59Z", 1_798_761_599),
+            ("2100-03-01T23:59:59Z", 4_107_628_799),
+        ] {
+            assert_eq!(expiry_seconds(text), Some(seconds), "{text}");
+        }
+    }
+
+    /// The point of keeping the answer: a caller asking before every turn pays for the CLI once,
+    /// rather than waiting most of a second between pressing Enter and seeing the line land.
+    #[test]
+    fn a_session_already_shown_to_be_good_is_not_asked_about_again() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(10_000));
+        assert!(known.holds(Some("work"), 5_000));
+    }
+
+    /// The whole risk of keeping it. A session that has run out must send the next caller back to the
+    /// CLI, or a turn is signed with a credential that expired and fails at the far end.
+    #[test]
+    fn a_session_that_has_run_out_is_asked_about_again() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(10_000));
+        assert!(!known.holds(Some("work"), 10_000));
+        assert!(!known.holds(Some("work"), 20_000));
+    }
+
+    /// Credentials handed over in their last moment are signed with after this returns, so the answer
+    /// has to stop being yes before the expiry rather than at it.
+    #[test]
+    fn a_session_about_to_run_out_is_treated_as_already_gone() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(10_000));
+        assert!(!known.holds(Some("work"), 10_000 - MARGIN));
+        assert!(known.holds(Some("work"), 10_000 - MARGIN - 1));
+    }
+
+    /// One profile's session says nothing about another's. Answered from a single slot, signing in to
+    /// one account would report every other one as good and skip the sign-in they need.
+    #[test]
+    fn one_profile_being_good_says_nothing_about_another() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), Some(10_000));
+        assert!(!known.holds(Some("personal"), 5_000));
+        assert!(!known.holds(None, 5_000));
+    }
+
+    /// A default profile is a profile, and gets its own answer rather than sharing a named one's.
+    #[test]
+    fn the_default_profile_is_remembered_like_any_other() {
+        let known = KnownGood::default();
+        known.keep(None, Some(10_000));
+        assert!(known.holds(None, 5_000));
+        assert!(!known.holds(Some("work"), 5_000));
+    }
+
+    /// Nothing is kept for an export that did not say when it expires, so those callers re-ask. A
+    /// stand-in lifetime here would be a guess reported as the credential's own word.
+    #[test]
+    fn a_session_with_no_stated_expiry_is_not_kept() {
+        let known = KnownGood::default();
+        known.keep(Some("work"), None);
+        assert!(!known.holds(Some("work"), 0));
+    }
+
+    /// The CLI states UTC, but a value in another zone names a different instant. Read as UTC, a
+    /// `+09:00` expiry is nine hours late and keeps a session marked good after it ran out. A value
+    /// that states no zone is not read, so the CLI is asked again.
+    #[test]
+    fn an_expiry_in_another_zone_is_read_as_the_instant_it_names() {
+        assert_eq!(
+            expiry_seconds("2026-09-05T12:04:02+09:00"),
+            Some(1_788_577_442)
+        );
+        assert_eq!(expiry_seconds("2026-09-05T03:04:02"), None);
+    }
+
+    /// An unreadable expiry must not become a confident date. Read as one, a garbled value either
+    /// pins a session as good long after it expired or forces the CLI on every turn.
+    #[test]
+    fn an_expiry_that_is_not_the_expected_shape_is_not_guessed_at() {
+        for text in [
+            "",
+            "not a date",
+            "2026-09-05",
+            "2026/09/05T03:04:02Z",
+            "2026-09-05 03:04:02Z",
+            "2026-13-05T03:04:02Z",
+            "2026-09-32T03:04:02Z",
+            "2026-09-05T24:04:02Z",
+            "2026-09-05T03:60:02Z",
+            "xxxx-09-05T03:04:02Z",
+            "2026-09-05T03:04:02",
+        ] {
+            assert_eq!(expiry_seconds(text), None, "{text} was read as a date");
+        }
+    }
+
+    /// Signing with half a credential produces a signature that is rejected far from the cause, so
+    /// an incomplete answer has to fail here instead.
+    #[test]
+    fn an_incomplete_answer_is_refused() {
+        for body in [
+            &br#"{}"#[..],
+            &br#"{"AccessKeyId":"AKIA"}"#[..],
+            &br#"{"SecretAccessKey":"secret"}"#[..],
+            &br#"{"AccessKeyId":"","SecretAccessKey":"secret"}"#[..],
+            &br#"{"AccessKeyId":"AKIA","SecretAccessKey":""}"#[..],
+        ] {
+            assert!(
+                matches!(
+                    decode(&mut reply(body)),
+                    Err(CredentialError::Undecodable { .. })
+                ),
+                "{} was read as credentials",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn output_that_is_not_json_is_refused() {
+        assert!(matches!(
+            decode(&mut reply(b"could not connect to the endpoint")),
+            Err(CredentialError::Undecodable { .. })
+        ));
+    }
+
+    /// The decode error is the one most likely to be pasted into an issue, and on the success path
+    /// the same bytes hold a live secret. It must not quote what it was given.
+    #[test]
+    fn a_decode_failure_does_not_quote_the_credentials_it_was_given() {
+        let body = br#"{"AccessKeyId":"AKIA","SecretAccessKey":"a-live-secret","Oops":}"#;
+        let message = match decode(&mut reply(body)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("should not have decoded"),
+        };
+        assert!(!message.contains("a-live-secret"), "leaked: {message}");
+    }
+
+    /// Printing a resolved credential is the reflex when a signature is rejected, and these are
+    /// live keys.
+    #[test]
+    fn debugging_resolved_credentials_does_not_leak_them() {
+        let credentials = decode(&mut reply(
+            br#"{"AccessKeyId":"AKIAREAL","SecretAccessKey":"a-live-secret","SessionToken":"a-live-token"}"#,
+        ))
+        .expect("decoded");
+        let shown = format!("{credentials:?}");
+        assert!(!shown.contains("a-live-secret"), "leaked: {shown}");
+        assert!(!shown.contains("a-live-token"), "leaked: {shown}");
+        assert!(!shown.contains("AKIAREAL"), "leaked: {shown}");
+    }
+
+    /// The reply is the credential in plain text, in a buffer this program owns for as long as it
+    /// holds it, and a reply that could not be read holds the credential just as a good one does.
+    ///
+    /// Both directions, because clearing on the way out of a successful read is the arrangement
+    /// that looks finished and is not: the CLI answers with the key whether or not what follows
+    /// it parses, and a truncated answer is the ordinary case for a pipe that closed early.
+    #[test]
+    fn the_bytes_a_reply_was_read_from_are_cleared_whatever_the_read_answered() {
+        let mut good = reply(br#"{"AccessKeyId":"AKIA","SecretAccessKey":"a-live-secret"}"#);
+        let length = good.len();
+        decode(&mut good).expect("decoded");
+        assert_eq!(
+            good,
+            vec![0u8; length],
+            "the reply is still in the buffer it was read from"
+        );
+
+        let mut truncated = reply(br#"{"AccessKeyId":"AKIA","SecretAccessKey":"a-live-secret"#);
+        let length = truncated.len();
+        decode(&mut truncated).expect_err("should not have decoded");
+        assert_eq!(
+            truncated,
+            vec![0u8; length],
+            "a reply the read refused is still in the buffer it was read from"
+        );
+    }
+
+    /// The parse makes a second copy of the credential, in a string the caller never sees.
+    ///
+    /// The value has to stay a string of the same length for the bytes to have been written over:
+    /// assigning null over it drops the string instead, and dropping it is what leaves the
+    /// credential where the allocator can hand it on.
+    #[test]
+    fn scrubbing_a_parsed_reply_overwrites_the_credential_rather_than_dropping_it() {
+        let secret = "a-live-secret";
+        let mut parsed = Parsed(serde_json::json!({
+            "AccessKeyId": "AKIA",
+            "SecretAccessKey": secret,
+        }));
+
+        parsed.scrub();
+
+        assert_eq!(
+            parsed.0["SecretAccessKey"].as_str().expect("a string"),
+            "\0".repeat(secret.len()),
+            "the credential is still in the buffer the parse put it in"
+        );
+    }
+
+    /// A missing CLI cannot be fixed by signing in, so it says something different. Reporting it as
+    /// an expired session would send someone to a browser that cannot help.
+    #[test]
+    fn a_missing_cli_is_reported_as_a_missing_cli() {
+        let message = CredentialError::NotInstalled.to_string();
+        assert!(message.contains("not installed"), "{message}");
+        assert!(!message.contains("sso login"), "{message}");
+    }
+
+    /// The remedy for an expired session is a browser, and the message is where someone finds that
+    /// out.
+    #[test]
+    fn a_refusal_names_the_command_that_fixes_it() {
+        let message = CredentialError::Refused {
+            detail: "the SSO session has expired".to_string(),
+        }
+        .to_string();
+        assert!(message.contains("aws sso login"), "{message}");
+    }
+
+    /// Failures arrive with the useful sentence first and a stack of context after it, and this
+    /// ends up on someone's screen.
+    #[test]
+    fn only_the_first_line_of_a_failure_is_reported() {
+        let reported = first_line(b"the session has expired\nplus a long trace\nand more");
+        assert_eq!(reported, "the session has expired");
+    }
+
+    #[test]
+    fn a_silent_failure_still_says_something() {
+        assert!(!first_line(b"").is_empty());
+        assert!(!first_line(b"   \n  \n").is_empty());
+    }
+
+    /// A single line of runaway output must not become the whole message.
+    #[test]
+    fn a_very_long_failure_is_bounded() {
+        assert!(first_line("x".repeat(10_000).as_bytes()).chars().count() <= 200);
+    }
+
+    /// A shell standing in for the CLI: it prints what the CLI prints, then waits, with a worker of
+    /// its own holding the same output open, as the installed CLI's forked worker does.
+    #[cfg(unix)]
+    fn a_waiting_cli(pid_file: &Path) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "echo 'https://device.sso.us-east-1.amazonaws.com/'; echo 'ABCD-EFGH'; sleep 60 & echo $! > \"$0\"; wait",
+        ]);
+        command.arg(pid_file);
+        command
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        rustix::process::Pid::from_raw(pid)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    }
+
+    /// A stop while the CLI waits for the browser ends the sign-in cancelled, and ends the CLI and
+    /// what it started along with it, without waiting for either to close its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_while_the_cli_waits_kills_it_and_its_worker() {
+        let directory = fresh_directory("credentials-stop-waiting");
+        let pid_file = directory.join("worker");
+        let stop = std::sync::Arc::new(Stop::new());
+        let (said, heard) = mpsc::channel();
+        let running = {
+            let stop = std::sync::Arc::clone(&stop);
+            let command = a_waiting_cli(&pid_file);
+            std::thread::spawn(move || login_until(command, |line| drop(said.send(line)), &stop))
+        };
+        let lines: Vec<String> = heard.iter().take(2).collect();
+        assert_eq!(
+            lines,
+            ["https://device.sso.us-east-1.amazonaws.com/", "ABCD-EFGH"]
+        );
+        let worker = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(alive(worker));
+
+        let asked = std::time::Instant::now();
+        stop.stop();
+        let ended = running.join().unwrap();
+
+        assert!(matches!(ended, Err(Stopped::Cancelled)), "{ended:?}");
+        assert!(asked.elapsed() < std::time::Duration::from_secs(5));
+        let gone = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !alive(worker)
+        });
+        assert!(gone, "the worker outlived the stop");
+        assert!(stop.lock().child.is_none(), "the CLI was not waited for");
+    }
+
+    /// A stop that came first starts nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_before_the_cli_starts_starts_nothing() {
+        let directory = fresh_directory("credentials-stop-first");
+        let pid_file = directory.join("worker");
+        let stop = Stop::new();
+        stop.stop();
+        let ended = login_until(a_waiting_cli(&pid_file), |_| {}, &stop);
+        assert!(matches!(ended, Err(Stopped::Cancelled)), "{ended:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!pid_file.exists());
+    }
+
+    /// A CLI that finishes is the sign-in's answer, every line it wrote is passed on, and a stop
+    /// after that changes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_finishes_is_the_answer_whether_or_not_it_succeeded() {
+        let mut lines = Vec::new();
+        let stop = Stop::new();
+        let mut finishing = Command::new("/bin/sh");
+        finishing.args(["-c", "echo one; echo two >&2"]);
+        assert!(login_until(finishing, |line| lines.push(line), &stop).is_ok());
+        lines.sort();
+        assert_eq!(lines, ["one", "two"]);
+        stop.stop();
+
+        let mut failing = Command::new("/bin/sh");
+        failing.args(["-c", "exit 3"]);
+        let ended = login_until(failing, |_| {}, &Stop::new());
+        assert!(
+            matches!(ended, Err(Stopped::Failed(CredentialError::Refused { .. }))),
+            "{ended:?}"
+        );
+    }
+}

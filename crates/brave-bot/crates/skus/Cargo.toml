@@ -1,0 +1,26 @@
+[package]
+name = "bravebot-skus"
+description = "Signs in to the model services that sign in with an account, and keeps the sign-ins in a file only the account can read"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+# A test points the ChatGPT sign-in at a server of its own through this, and nothing else does. Only
+# the [dev-dependencies] of a crate whose tests need it enable it, and a release build refuses it.
+[features]
+test-hosts = []
+
+[dependencies]
+hmac = { workspace = true }
+rand = { workspace = true }
+ring = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+
+# Windows has no file mode, so the access-control list that stands in for one is set through these.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

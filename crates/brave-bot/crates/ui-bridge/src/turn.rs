@@ -1,0 +1,1121 @@
+//! Running a turn, and telling a front-end what it is doing.
+//!
+//! Three implementations of the seams the turn engine takes its interface as. Two of them
+//! only talk, and one of them asks — and the asymmetry between those decides how each
+//! behaves when something goes wrong.
+//!
+//! [`BridgeReporter`] and [`BridgeSink`] **announce**. There is no reply to wait for and
+//! nothing to refuse, so every failure is a dropped line.
+//!
+//! [`BridgeConfirmer`] **asks**, and blocks until it is answered. Every failure resolves
+//! to refusal: a channel that cannot carry the question cannot carry consent either. That
+//! is the single most important property in this file, and the tests in `tests/refusal.rs`
+//! exist to keep it true.
+
+use crate::emit::Emitter;
+use crate::protocol::Event;
+use crate::wire;
+use bravebot_agent::confirm::{
+    CallDecision, Confirmer, Decision, ExposureRequest, FetchRequest, HostRequest, ManifestRequest,
+    McpCallRequest, MoveRequest, OutputRequest, RunDecision, RunRequest, ServerRequest,
+    ToolListRequest, VetRequest, VouchRequest, WriteDecision, WriteRequest,
+};
+use bravebot_agent::report::{self, Activity, CallId, Landing, Phase, Reporter, Shown, Why};
+use bravebot_core::ask::{Answer, AnswerMemo, Asking};
+use bravebot_core::delegate::DelegateId;
+use bravebot_core::event::Sink;
+use bravebot_core::todo::Row;
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
+
+/// Which kind of approval or question this is.
+///
+/// Recorded alongside the id so an answer has to be an answer to the question that was
+/// actually asked. Without it, a front-end that replied to a write while a run was
+/// outstanding would have its approval applied to the run — the ids match, and nothing
+/// else would notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Write,
+    Run,
+    Output,
+    Vouch,
+    Vet,
+    /// Whether to fetch one URL, which is consent to talk to its host and to nothing it sends back.
+    Fetch,
+    /// Whether to start a language server for the session.
+    Server,
+    /// Whether to run a frozen plan. Asked once per manifest run, before its first step.
+    Manifest,
+    /// Whether the planner may be given a vouched file the scan found a credential in.
+    Exposure,
+    /// Whether to use an MCP server a project requests, asked before it is started (SERVERS-4).
+    McpServer,
+    /// Whether to offer an MCP server's tools to the model (SERVERS-8).
+    McpTools,
+    /// Whether to make one call to an MCP server's tool (SERVERS-7).
+    McpCall,
+    /// Whether a remote MCP server moved where its reply pointed (SERVERS-11).
+    McpMove,
+    /// Whether programs may reach more hosts through the session proxy for this session (SANDBOX-24).
+    Host,
+    Ask,
+}
+
+/// The question waiting on a person right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Question {
+    pub id: u64,
+    pub kind: Kind,
+}
+
+/// What is waiting, if anything.
+///
+/// Shared between the worker that asked and the dispatch thread that will be told the
+/// answer. `None` means nothing is outstanding, so a reply that names a request cannot be
+/// applied — which is what makes an approval single-use rather than replayable.
+pub type Pending = Arc<Mutex<Option<Question>>>;
+
+/// What a front-end answered.
+///
+/// One variant per question rather than a bare [`Decision`] for every kind, so a reply
+/// carries which question it is answering and the kernel's own types come back intact —
+/// [`RunDecision`] in particular, whose `remember` is a second answer that a `Decision`
+/// has nowhere to put.
+///
+/// Not `Copy`, because [`Reply::Ask`] carries one answer per question.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    Write(Decision),
+    Run(RunDecision),
+    Output(Decision),
+    Vouch(Decision),
+    Vet(Decision),
+    Fetch(Decision),
+    Server(Decision),
+    Manifest(Decision),
+    Exposure(Decision),
+    /// Three answers: no, yes, and yes for every server this project requests from now on.
+    McpServer(bravebot_agent::servers::Answer),
+    McpTools(Decision),
+    /// Three answers: no, yes, and yes without asking again about this tool in this project.
+    McpCall(CallDecision),
+    McpMove(Decision),
+    Host(Decision),
+    /// One answer per question, in the order they were asked. Empty means nobody could be
+    /// asked — see [`Confirmer::ask_user`].
+    Ask(Vec<Answer>),
+}
+
+impl Reply {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Reply::Write(_) => Kind::Write,
+            Reply::Run(_) => Kind::Run,
+            Reply::Output(_) => Kind::Output,
+            Reply::Vouch(_) => Kind::Vouch,
+            Reply::Vet(_) => Kind::Vet,
+            Reply::Fetch(_) => Kind::Fetch,
+            Reply::Server(_) => Kind::Server,
+            Reply::Manifest(_) => Kind::Manifest,
+            Reply::Exposure(_) => Kind::Exposure,
+            Reply::McpServer(_) => Kind::McpServer,
+            Reply::McpTools(_) => Kind::McpTools,
+            Reply::McpCall(_) => Kind::McpCall,
+            Reply::McpMove(_) => Kind::McpMove,
+            Reply::Host(_) => Kind::Host,
+            Reply::Ask(_) => Kind::Ask,
+        }
+    }
+
+    /// The yes or no this reply carries, where a yes or a no is all it is.
+    ///
+    /// `None` for the ones that carry more: a run's answer is a decision and whether to remember
+    /// it, an MCP server's and an MCP call's are each one of three, and a series of questions has
+    /// an answer per question. Reading any of them as a bare decision would drop the part that
+    /// makes it the answer it is, so none has one here.
+    pub fn decision(&self) -> Option<Decision> {
+        match self {
+            Reply::Write(decision)
+            | Reply::Output(decision)
+            | Reply::Vouch(decision)
+            | Reply::Vet(decision)
+            | Reply::Fetch(decision)
+            | Reply::Server(decision)
+            | Reply::Manifest(decision)
+            | Reply::Exposure(decision)
+            | Reply::McpTools(decision)
+            | Reply::McpMove(decision)
+            | Reply::Host(decision) => Some(*decision),
+            Reply::Run(_) | Reply::McpServer(_) | Reply::McpCall(_) | Reply::Ask(_) => None,
+        }
+    }
+}
+
+impl Kind {
+    /// The refusal of a question of this kind, in the shape its own answer takes.
+    ///
+    /// What is sent when nobody is going to answer: a session closing, or the process ending. It
+    /// is the kind's own variant because the worker discards a reply of any other kind as an
+    /// answer to a different question, and would then wait on a channel nothing else writes to.
+    ///
+    /// Written as a match with no wildcard, so a kind added above does not build until somebody
+    /// has said what refusing it looks like.
+    pub fn refusal(self) -> Reply {
+        match self {
+            Kind::Write => Reply::Write(Decision::Reject),
+            Kind::Run => Reply::Run(RunDecision::reject()),
+            Kind::Output => Reply::Output(Decision::Reject),
+            Kind::Vouch => Reply::Vouch(Decision::Reject),
+            Kind::Vet => Reply::Vet(Decision::Reject),
+            Kind::Fetch => Reply::Fetch(Decision::Reject),
+            Kind::Server => Reply::Server(Decision::Reject),
+            Kind::Manifest => Reply::Manifest(Decision::Reject),
+            Kind::Exposure => Reply::Exposure(Decision::Reject),
+            Kind::McpServer => Reply::McpServer(bravebot_agent::servers::Answer::No),
+            Kind::McpTools => Reply::McpTools(Decision::Reject),
+            Kind::McpCall => Reply::McpCall(CallDecision::reject()),
+            Kind::McpMove => Reply::McpMove(Decision::Reject),
+            Kind::Host => Reply::Host(Decision::Reject),
+            // No answers at all, which is how this question says nobody was asked.
+            Kind::Ask => Reply::Ask(Vec::new()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- announcing
+
+/// Tells a front-end what a turn is doing.
+pub struct BridgeReporter {
+    spent: Option<bravebot_agent::Spent>,
+    emitter: Emitter,
+    session: String,
+    /// The last token count actually sent. See [`Reporter::output_tokens`].
+    last_tokens: Option<u64>,
+    /// What the turn said about itself as it ran. See [`BridgeReporter::notices`].
+    notices: Vec<String>,
+    /// The delegate the next report belongs to, or `None` for the turn's own.
+    reporting_for: Option<DelegateId>,
+    /// Where the submitted prompt entered the recounted conversation (SESSION-23).
+    prompt_at: Option<usize>,
+    /// The task list as the turn last wrote it, kept for the record (SESSION-23).
+    task_list: Vec<Row>,
+    /// The agents the conversation has started, which the rules for are
+    /// [`bravebot_agent::roster::Roster`]'s and the terminal uses as well. Shared with the session
+    /// so the list lasts across turns (VIEW-35).
+    roster: Arc<Mutex<bravebot_agent::roster::Roster>>,
+}
+
+impl BridgeReporter {
+    pub fn new(emitter: Emitter, session: impl Into<String>) -> Self {
+        Self {
+            emitter,
+            spent: None,
+            session: session.into(),
+            last_tokens: None,
+            notices: Vec::new(),
+            reporting_for: None,
+            prompt_at: None,
+            task_list: Vec::new(),
+            roster: Arc::default(),
+        }
+    }
+
+    /// Report into the session's own list of agents and not a fresh one.
+    pub fn sharing(mut self, roster: Arc<Mutex<bravebot_agent::roster::Roster>>) -> Self {
+        self.roster = roster;
+        self
+    }
+
+    /// The turn or run is over, so an agent still working is marked as not finished
+    /// (DELEGATE-17) and the list is sent again if that changed one.
+    ///
+    /// Called before the event that ends the turn or the run, whichever way it ended, so a window
+    /// has the list it is to draw when it hears the end (VIEW-35).
+    pub fn turn_ended(&mut self) {
+        let mut roster = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !roster.turn_ended().is_empty() {
+            self.announce_agents(&roster);
+        }
+    }
+
+    /// The whole list and its counts, for a window to store and draw. The kind and the task are
+    /// carried as the driver was given them and nothing here reads them (VIEW-35).
+    fn announce_agents(&self, roster: &bravebot_agent::roster::Roster) {
+        use bravebot_agent::roster::AgentState;
+        let listed: Vec<Value> = roster
+            .agents()
+            .iter()
+            .map(|agent| {
+                json!({
+                    "id": agent.id.to_string(),
+                    "kind": agent.kind,
+                    "task": agent.task,
+                    "state": match agent.state {
+                        AgentState::Working => "working",
+                        AgentState::Finished => "finished",
+                        AgentState::Failed => "failed",
+                    },
+                })
+            })
+            .collect();
+        let counts = roster.counts();
+        self.say(
+            "agents",
+            json!({ "agents": listed, "started": counts.started, "working": counts.working }),
+        );
+    }
+
+    /// The latest cumulative measurements, retained for manifest storage on failure.
+    pub fn spent(&self) -> Option<bravebot_agent::Spent> {
+        self.spent
+    }
+
+    /// The task list the turn last wrote, whichever way it ended. Empty where it wrote none.
+    pub fn task_list(&self) -> &[Row] {
+        &self.task_list
+    }
+
+    /// Where the turn's prompt landed in the recounted conversation, if it got that far.
+    pub fn prompt_at(&self) -> Option<usize> {
+        self.prompt_at
+    }
+
+    /// What the turn said as it ran, in the order it said it.
+    ///
+    /// What a turn that failed has instead of an outcome. A hook that could not be started is said
+    /// here as it happens (HOOK-7), and a turn that then fails for its own reasons produces nothing
+    /// to carry it, so the event reporting the failure carries these instead.
+    pub fn notices(&self) -> &[String] {
+        &self.notices
+    }
+
+    fn say(&self, name: &'static str, data: serde_json::Value) {
+        self.emitter.send(Event::new(name, &self.session, data));
+    }
+
+    /// A narration the bridge words itself: the sentence, and the words of it that are a command,
+    /// or `null`, so the window draws them as code without reading the sentence for them.
+    fn narrate_said(&self, said: &crate::account_words::Said) {
+        self.say(
+            "narration",
+            json!({ "text": said.sentence, "command": said.command }),
+        );
+    }
+}
+
+impl Reporter for BridgeReporter {
+    fn spent(&mut self, spent: bravebot_agent::Spent) {
+        self.spent = Some(spent);
+    }
+
+    fn prompt_recorded(&mut self, at: usize) {
+        self.prompt_at = Some(at);
+    }
+
+    /// The planner has read a line the person typed while the turn ran, so a front end moves it
+    /// from waiting to said. Emitted at the moment it is taken, and always before the turn's end,
+    /// so a line still waiting when the turn ends was not read.
+    fn interjected(&mut self, said: String) {
+        self.say("turn.interjected", json!({ "prompt": said }));
+    }
+
+    fn todos(&mut self, rows: Vec<Row>) {
+        let wired: Vec<_> = rows.iter().map(wire::row).collect();
+        self.task_list = rows;
+        self.say("todos", json!({ "rows": wired }));
+    }
+
+    /// How much the model has written, when it changes and not before.
+    ///
+    /// The engine reports this on a timer rather than on a change, so a slow round
+    /// repeats one figure many times. A terminal redrawing a counter does not care; a
+    /// front-end across a pipe is woken for every one of them. In the first live turn
+    /// this was 130 of 168 events, and 63 of those said nothing new.
+    ///
+    /// Coalescing loses nothing: the figure is cumulative, so the newest supersedes every
+    /// earlier one, and a front-end that never saw the repeats shows the same number.
+    fn output_tokens(&mut self, written: u64) {
+        if self.last_tokens == Some(written) {
+            return;
+        }
+        self.last_tokens = Some(written);
+        self.say("tokens", json!({ "written": written }));
+    }
+
+    fn phase(&mut self, phase: Phase) {
+        self.say("phase", json!({ "phase": wire::phase(phase) }));
+    }
+
+    fn reporting_for(&mut self, delegate: Option<DelegateId>) {
+        self.reporting_for = delegate;
+    }
+
+    /// The call the model is writing, as the word its row will start with, or `null` once
+    /// there is none.
+    ///
+    /// A delegate's is dropped: one model writes at a time, and a call named beside the turn's
+    /// working line would read as the planner's.
+    fn composing(&mut self, call: Option<&'static str>) {
+        if self.reporting_for.is_some() {
+            return;
+        }
+        self.say("composing", json!({ "call": call }));
+    }
+
+    /// What the model said between tool calls.
+    ///
+    /// Empty where it went straight from one call to the next, which the engine still
+    /// reports. There is nothing to draw for it, and an interface that made a bubble per
+    /// empty narration would show a row of blank messages.
+    fn narration(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.say("narration", json!({ "text": text }));
+    }
+
+    /// A summary could not be made and the turn goes on without it. Where it was the ChatGPT
+    /// account that failed the window is told in its own sentences, with the command the second
+    /// names beside it to draw as code. Any other failure is said in the terminal's words, as it
+    /// was.
+    fn summary_failed(&mut self, why: Why) {
+        match why {
+            Why::Account(failure) => {
+                for said in crate::account_words::of_summary_failure(failure) {
+                    self.narrate_said(&said);
+                }
+            }
+            Why::Category(_) => self.narration(report::summary_failed_in_the_terminals_words(why)),
+        }
+    }
+
+    /// The turn moved to the person's fallback model. Said in the window's own words where the
+    /// ChatGPT account was what failed, and in the terminal's otherwise.
+    fn fell_back(&mut self, from: &str, to: &str, why: Why) {
+        match why {
+            Why::Account(failure) => {
+                self.narrate_said(&crate::account_words::of_fall_back(failure, from, to));
+            }
+            Why::Category(_) => {
+                self.narration(report::fell_back_in_the_terminals_words(from, to, why));
+            }
+        }
+    }
+
+    /// What the model has thought since the last event, for the window to draw on request
+    /// (VIEW-34).
+    ///
+    /// The engine reports it with every frame of a streamed reply, empty for most of them, and an
+    /// event is a wake-up across a pipe, so an empty one is not sent. A delegate's is dropped for
+    /// the reason its call is: one model thinks at a time, and a delegate's thought drawn beside the
+    /// turn's working line would read as the planner's. Nothing is kept here, since the window holds
+    /// the end of it and the turn's record never has it.
+    fn thinking(&mut self, text: String) {
+        if text.is_empty() || self.reporting_for.is_some() {
+            return;
+        }
+        self.say("thinking", json!({ "text": text }));
+    }
+
+    /// Kept for whichever event ends the turn to carry, rather than sent as its own.
+    ///
+    /// An event of this reporter's names the session and not the turn, and a notice belongs to the
+    /// turn it was said in: the window files these under a turn number, so one arriving loose would
+    /// have nowhere to go. `turn.done` and `turn.error` both have that number.
+    fn notice(&mut self, text: String) {
+        self.notices.push(text);
+    }
+
+    /// A check running, which is news here for the same reason a phase is: a whole model call
+    /// inside the tool call already reported, and no front-end can time it from the outside.
+    ///
+    /// The count, or which kind of file, and nothing else. What the check reads and what it
+    /// decides go to a person on the prompt, and this event crosses a pipe to a program.
+    fn check_started(&mut self, checking: bravebot_core::vetting::Checking) {
+        use bravebot_core::vetting::Checking;
+        let shape = match checking {
+            Checking::Lines(lines) => json!({ "lines": lines }),
+            Checking::Picture => json!({ "file": "picture" }),
+            Checking::Pdf => json!({ "file": "pdf" }),
+        };
+        self.say("check.started", shape);
+    }
+
+    /// Sent however the check ended, including the failure nobody could read a verdict out of: a
+    /// front-end told only that one began has no way back to a screen that is not checking.
+    fn check_finished(&mut self) {
+        self.say("check.finished", json!({}));
+    }
+
+    /// A hook running, news here for the reason a check is: it holds the turn open and no
+    /// front-end can see it from the outside. The moment's word and the program as the person's
+    /// own file spells it, and nothing the hook printed.
+    fn hook_started(&mut self, moment: &'static str, program: String) {
+        self.say(
+            "hook.started",
+            json!({ "moment": moment, "program": program }),
+        );
+    }
+
+    /// Sent however the hook ended, a stopped one included.
+    fn hook_finished(&mut self) {
+        self.say("hook.finished", json!({}));
+    }
+
+    /// A delegate has begun, which the window counts and lists (VIEW-35).
+    ///
+    /// The driver's own spelling of its number, its kind, and the task the planner wrote, which the
+    /// window draws and never reads. None of what the delegate prints crosses, and neither does
+    /// the stop token: a window has no way to stop one.
+    fn delegate_started(&mut self, delegation: bravebot_agent::report::Delegation) {
+        let mut roster = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        roster.start(delegation.id, delegation.kind, delegation.task);
+        self.announce_agents(&roster);
+    }
+
+    /// A delegate has finished, named by its number because several run at once.
+    ///
+    /// Whether it failed is the driver's own word. The note and what the delegate reported are not
+    /// sent: they are the delegate's findings, and the window has no screen for them (VIEW-35).
+    fn delegate_finished(
+        &mut self,
+        delegate: DelegateId,
+        _note: String,
+        failed: bool,
+        _reported: Option<bravebot_agent::report::Reported>,
+    ) {
+        let mut roster = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if roster.finish(delegate, failed).is_some() {
+            self.announce_agents(&roster);
+        }
+    }
+
+    fn quarantined(&mut self, shown: Shown) {
+        self.say("quarantined", wire::shown(&shown));
+    }
+
+    fn landed(&mut self, call: Option<CallId>, landing: Landing) {
+        self.say(
+            "landed",
+            json!({ "call": call.map(CallId::get), "landing": wire::landing(landing) }),
+        );
+    }
+
+    fn tool_started(&mut self, activity: Activity) {
+        self.say("tool.started", wire::activity(&activity));
+    }
+
+    fn tool_finished(&mut self, activity: Activity) {
+        self.say("tool.finished", wire::activity(&activity));
+    }
+}
+
+/// Collects the audit trail, and streams it as it arrives.
+///
+/// Both, deliberately. The collected copy is what gets written beside the record at the
+/// end of the turn, in the agent's own format, so `bravebot --resume` reads a complete trail.
+/// The stream is for the interface, which should not have to wait for a turn to end
+/// before it can show what the gates decided.
+///
+/// The two can disagree if a turn dies before its trail is written. The interface reloads
+/// on `turn.done` for that reason; until then what it holds is provisional.
+pub struct BridgeSink {
+    emitter: Emitter,
+    session: String,
+    /// The key the number below is sent under: `turn`, or `run` for a manifest run.
+    counted: &'static str,
+    turn: usize,
+    trail: bravebot_session::audit::Trail,
+}
+
+impl BridgeSink {
+    pub fn new(emitter: Emitter, session: impl Into<String>, turn: usize) -> Self {
+        Self {
+            emitter,
+            session: session.into(),
+            counted: "turn",
+            turn,
+            trail: bravebot_session::audit::Trail::new(),
+        }
+    }
+
+    /// A sink for a manifest run, whose events carry `run` and no `turn`.
+    ///
+    /// A run is not one of the session's turns, so its events must not be filed under a turn
+    /// number. A front end that groups audit events by turn leaves these out.
+    pub fn for_run(emitter: Emitter, session: impl Into<String>, run: usize) -> Self {
+        Self {
+            counted: "run",
+            ..Self::new(emitter, session, run)
+        }
+    }
+
+    /// The trail as the agent writes it down.
+    pub fn trail(&self) -> &bravebot_session::audit::Trail {
+        &self.trail
+    }
+}
+
+/// Each top-level string field of a recorded event, drawn by `bravebot_approval::printable`, keyed
+/// by the field's name (TRACE-11).
+///
+/// Sent beside the event, which stays as the audit file holds it. The window draws these words
+/// instead of the field, so the terminal and the window picture a control character with one
+/// definition ([LAYER-3]), and a field added to an event is covered without being named. Every
+/// string field is drawn and none is chosen by its text.
+///
+/// [LAYER-3]: ../../../docs/specs/layering.md
+fn pictured_fields(event: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    event
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(field, value)| {
+            let text = value.as_str()?;
+            Some((
+                field.clone(),
+                serde_json::Value::String(bravebot_approval::printable(text)),
+            ))
+        })
+        .collect()
+}
+
+impl Sink for BridgeSink {
+    fn emit(&mut self, event: bravebot_core::event::Event) {
+        // Projected with the agent's own function rather than a second spelling of it:
+        // two renderings of one trail would drift the moment either changed.
+        let written = bravebot_session::audit::as_json(&event, self.trail.recording());
+        let data = json!({
+            self.counted: self.turn,
+            "pictured": pictured_fields(&written),
+            "event": written,
+        });
+        self.emitter.send(Event::new("audit", &self.session, data));
+        self.trail.emit(event);
+    }
+
+    /// Passed to the trail, which both readers above take the answer from: the record written at
+    /// the end of the turn and the event sent out as it happens name the same run (TRACE-4).
+    fn recording_for(&mut self, delegate: Option<DelegateId>) {
+        self.trail.recording_for(delegate);
+    }
+}
+
+// ---------------------------------------------------------------- asking
+
+/// The next number in a session's sequence of question numbers, or nothing once it is used up.
+// A compare-and-swap loop: `fetch_update` is deprecated for `try_update` in current Rust, which
+// the minimum supported version does not have.
+fn next_question(ids: &AtomicU64) -> Option<u64> {
+    let mut last = ids.load(Ordering::SeqCst);
+    loop {
+        let next = last.checked_add(1)?;
+        match ids.compare_exchange_weak(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(next),
+            Err(seen) => last = seen,
+        }
+    }
+}
+
+/// Carries a write to whoever is watching, and waits.
+///
+/// Everything about this type is arranged so that the answer is either an explicit
+/// approval from a person or a refusal. There is no third outcome and no timeout: a write
+/// waits for a human for as long as that takes, which is what it should do.
+pub struct BridgeConfirmer {
+    emitter: Emitter,
+    session: String,
+    pending: Pending,
+    answers: Receiver<Reply>,
+    ids: Arc<AtomicU64>,
+    cancel: bravebot_core::cancel::Cancel,
+    /// Whether a plan was put to the person and not approved. See [`Self::declined_a_plan`].
+    declined_a_plan: bool,
+    /// Which kinds somebody can answer now. Every kind, until a host says otherwise.
+    answerers: crate::answerers::Answerers,
+    /// What the person typed while this turn ran. Empty for a confirmer nobody can type into.
+    interjections: crate::running::Interjections,
+    /// What the person answered to the planner's questions, for the rest of the session (ASK-8).
+    /// Shared by every turn of it; [`Self::remembering`] gives a confirmer the session's own.
+    answered: Arc<Mutex<AnswerMemo>>,
+    /// A line for each question this turn did not put because the person had answered it already.
+    reused: Vec<String>,
+}
+
+impl BridgeConfirmer {
+    pub fn new(
+        emitter: Emitter,
+        session: impl Into<String>,
+        pending: Pending,
+        answers: Receiver<Reply>,
+        ids: Arc<AtomicU64>,
+        cancel: bravebot_core::cancel::Cancel,
+    ) -> Self {
+        Self {
+            emitter,
+            session: session.into(),
+            pending,
+            answers,
+            ids,
+            cancel,
+            declined_a_plan: false,
+            answerers: crate::answerers::Answerers::default(),
+            interjections: crate::running::Interjections::default(),
+            answered: Arc::default(),
+            reused: Vec::new(),
+        }
+    }
+
+    /// Answer a question the person already answered in this session from `answered`, and keep
+    /// what they answer from now on there.
+    ///
+    /// A confirmer without it remembers for itself alone, which is a turn: the session's memo is
+    /// what lets a later turn's repeat of a question go unasked.
+    pub(crate) fn remembering(mut self, answered: Arc<Mutex<AnswerMemo>>) -> Self {
+        self.answered = answered;
+        self
+    }
+
+    /// What this turn answered from memory instead of asking, one line for each question, in the
+    /// words the terminal says it in.
+    pub fn reused(&self) -> &[String] {
+        &self.reused
+    }
+
+    /// The session's answers. A turn that panicked holding the lock left nothing half written,
+    /// since the memo only ever gains or replaces a whole entry, so it is read as it stands.
+    fn memo(&self) -> std::sync::MutexGuard<'_, AnswerMemo> {
+        self.answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Read what the person types into this turn from `interjections` at each round boundary.
+    pub(crate) fn taking_interjections(
+        mut self,
+        interjections: crate::running::Interjections,
+    ) -> Self {
+        self.interjections = interjections;
+        self
+    }
+
+    /// Ask only what `answerers` says somebody can answer, and refuse the rest without showing it.
+    pub(crate) fn answerable_by(mut self, answerers: crate::answerers::Answerers) -> Self {
+        self.answerers = answerers;
+        self
+    }
+
+    /// Whether a plan was put to the person and came back without a yes.
+    ///
+    /// A run that ends this way fails with the agent's sentence about an unapproved plan. A
+    /// front end is sent this flag so that it does not have to read that sentence to tell a
+    /// declined plan from a failed one.
+    pub fn declined_a_plan(&self) -> bool {
+        self.declined_a_plan
+    }
+
+    /// Put one question to whoever is watching, and block until it is answered.
+    ///
+    /// The whole of the asking is here, once, because every question has
+    /// the same failure modes and each of them must resolve to refusal. Writing that several
+    /// times would be four chances to get it wrong in a way no test distinguishes.
+    ///
+    /// `None` means nobody answered — a poisoned lock, a departed front-end, a closed
+    /// session, a shutting-down process, or a reply to a different question. Every caller
+    /// turns that into its own flavour of no.
+    fn ask(
+        &mut self,
+        kind: Kind,
+        event: &'static str,
+        data: impl FnOnce(u64) -> Value,
+    ) -> Option<Reply> {
+        if self.cancel.is_cancelled() {
+            return None;
+        }
+        // Registered before the question goes out, so an answer that arrives immediately
+        // has something to match against. The other order has a race the front-end wins.
+        let Ok(mut pending) = self.pending.lock() else {
+            // Another thread panicked while holding this. Nothing can be registered, so
+            // nothing can be answered, so nothing is approved.
+            return None;
+        };
+        // Checked under the lock that registers the question. A controller lost after this point
+        // finds the question registered and refuses it; one lost before it is seen here. Checked
+        // anywhere else, a question could be registered between the two and wait for nobody.
+        if !self.answerers.can_answer(kind) {
+            return None;
+        }
+        // From the session's own counter, so a later turn does not reuse a number. A counter with
+        // nothing left refuses the question, like every other way of not asking.
+        let id = next_question(&self.ids)?;
+        *pending = Some(Question { id, kind });
+        self.emitter
+            .send(Event::new(event, &self.session, data(id)));
+        // Answering cannot consume a question before its display is published.
+        drop(pending);
+
+        // Blocks until the dispatch thread sends an answer, or until the sending end is
+        // dropped — which is what a departed front-end, a closed session, or a shutting
+        // down process looks like from here. All of them are refusals.
+        let reply = loop {
+            if self.cancel.is_cancelled() {
+                break None;
+            }
+            match self
+                .answers
+                .recv_timeout(std::time::Duration::from_millis(50))
+            {
+                Ok(reply) => break (!self.cancel.is_cancelled()).then_some(reply),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+            }
+        };
+
+        // Consumed either way. An id that is no longer pending cannot be answered again,
+        // so an approval cannot be replayed against a second question.
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
+
+        self.emitter.view_answered(&self.session, id);
+
+        // Belt and braces. `Running::answer` already refuses a reply whose kind does not
+        // match the outstanding question, so this should be unreachable — and it is
+        // checked anyway, because the cost of being wrong is an approval landing on a
+        // question nobody was shown.
+        reply.filter(|reply| reply.kind() == kind)
+    }
+
+    /// Put a question whose answer is a yes or a no, and read anything but a yes as a no.
+    ///
+    /// The whole of what a new approval of that shape needs from this type. Nobody answering, an
+    /// answer to a different question and an answer that carries no decision all arrive at the
+    /// refusal, so a kind added through here cannot be approved by a reply that was not about it.
+    ///
+    /// The kind is compared here as well as in [`Self::ask`], for the reason every other question
+    /// in this file matches on its own variant: [`Reply::decision`] reads a yes out of any reply
+    /// that is one, so without this the check in `ask` would be the only thing between a yes
+    /// about a write and a request leaving the machine.
+    fn yes_or_no(
+        &mut self,
+        kind: Kind,
+        event: &'static str,
+        data: impl FnOnce(u64) -> Value,
+    ) -> Decision {
+        self.ask(kind, event, data)
+            .filter(|reply| reply.kind() == kind)
+            .and_then(|reply| reply.decision())
+            .unwrap_or(Decision::Reject)
+    }
+}
+
+impl Confirmer for BridgeConfirmer {
+    /// Ask whether to fetch one URL.
+    ///
+    /// The host goes out beside the URL, taken from it by the agent's parser, because the host is
+    /// what a yes agrees to talk to and a URL can be written to read as another one. A yes is
+    /// consent to that one request: what comes back stays quarantined whatever is answered, and
+    /// nothing is remembered, so the next fetch asks again (FETCH-1, FETCH-3).
+    fn confirm_fetch(&mut self, request: &FetchRequest) -> Decision {
+        self.yes_or_no(Kind::Fetch, "fetch.request", |id| {
+            wire::fetch_request(id, request)
+        })
+    }
+
+    /// Ask whether the planner may read a vouched file the scan found a credential in (CRED-15).
+    ///
+    /// The request names the file and each finding: a kind, a location and a masked preview. It
+    /// carries no part of a value and no text of the file (CRED-19).
+    ///
+    /// An approval discloses the file to the model. It covers this file for the session and
+    /// writes no rule. A refusal keeps the file's text from the planner, which is told why.
+    fn confirm_exposing_read(&mut self, request: &ExposureRequest) -> Decision {
+        self.yes_or_no(Kind::Exposure, "exposure.request", |id| {
+            wire::exposure_request(id, request)
+        })
+    }
+
+    /// Ask whether to offer an MCP server's tools to the model (SERVERS-8).
+    ///
+    /// The request carries each tool as the client drew it, the server's descriptions among them.
+    /// A yes offers the list for this session and records nothing. A no offers none of its tools for the rest of this one.
+    fn confirm_tool_list(&mut self, request: &ToolListRequest) -> Decision {
+        self.yes_or_no(Kind::McpTools, "mcp-tools.request", |id| {
+            wire::mcp_tools_request(id, request)
+        })
+    }
+
+    /// Ask whether to make one call to an MCP server's tool (SERVERS-7).
+    ///
+    /// Answer 2, stop asking about this tool in this project, is kept only where the request says
+    /// it can be recorded. A front end that sent it anyway gets answer 1, which is the narrower.
+    ///
+    /// A call to a server declared to ask every call is refused with no card, since the window
+    /// draws none that says no answer to it lasts (SERVERS-21). The refusal says nobody was asked,
+    /// so the planner and the person are not told that the person declined it.
+    fn confirm_mcp_call(&mut self, request: &McpCallRequest) -> CallDecision {
+        if request.asked_every_call {
+            return CallDecision::unasked();
+        }
+        match self.ask(Kind::McpCall, "mcp-call.request", |id| {
+            wire::mcp_call_request(id, request)
+        }) {
+            Some(Reply::McpCall(decision)) if decision.stand && !request.may_stand => {
+                CallDecision::approve()
+            }
+            Some(Reply::McpCall(decision)) => decision,
+            _ => CallDecision::reject(),
+        }
+    }
+
+    /// Refuses (SANDBOX-28). The desktop app has no card for a request for a path, so the planner
+    /// is told nobody was there to ask, the same as for a run with no one to answer.
+    fn confirm_path(&mut self, _request: &bravebot_agent::confirm::PathRequest) -> Decision {
+        Decision::Reject
+    }
+
+    /// Ask whether programs may reach more hosts through the session proxy (SANDBOX-24).
+    ///
+    /// The request names each host the program tried to reach and the list did not allow. A yes
+    /// allows them for the rest of this session and writes no rule. A no leaves the connection
+    /// refused.
+    fn confirm_host(&mut self, request: &HostRequest) -> Decision {
+        self.yes_or_no(Kind::Host, "host.request", |id| {
+            wire::host_request(id, request)
+        })
+    }
+
+    /// Declined without asking: the desktop hosts no background session, and a session offered no
+    /// way to send is never asked (MSG-3).
+    fn confirm_message(
+        &mut self,
+        _request: &bravebot_agent::confirm::MessageRequest,
+    ) -> bravebot_agent::confirm::MessageDecision {
+        bravebot_agent::confirm::MessageDecision::Decline
+    }
+
+    /// Ask whether a remote MCP server moved where its reply pointed (SERVERS-11).
+    ///
+    /// Nothing was sent there. A yes declares the server at the new address, and every later
+    /// request to it goes there.
+    fn confirm_move(&mut self, request: &MoveRequest) -> Decision {
+        self.yes_or_no(Kind::McpMove, "mcp-move.request", |id| {
+            wire::mcp_move_request(id, request)
+        })
+    }
+
+    /// Ask whether to start a language server.
+    ///
+    /// The request names the language, the resolved binary, the tree it would index, and whether
+    /// starting it runs build tooling. Build tooling runs code from the dependency tree with the
+    /// person's own access (LSP-5).
+    ///
+    /// An approval starts one process for the session and is not remembered after it. It does
+    /// not change how the server's answers are labelled.
+    fn confirm_server(&mut self, request: &ServerRequest) -> Decision {
+        self.yes_or_no(Kind::Server, "server.request", |id| {
+            wire::server_request(id, request)
+        })
+    }
+
+    /// Ask whether to run a frozen plan (MANIFEST-10).
+    ///
+    /// The request carries the task and every step. An approval covers this plan only and is not
+    /// remembered. It does not approve the plan's writes: each write is still asked about when
+    /// its step is reached.
+    fn confirm_manifest(&mut self, request: &ManifestRequest) -> Decision {
+        let decision = self.yes_or_no(Kind::Manifest, "manifest.request", |id| {
+            wire::manifest_request(id, request)
+        });
+        self.declined_a_plan = decision == Decision::Reject;
+        decision
+    }
+
+    fn confirm_vetted_read(&mut self, request: &VetRequest) -> Decision {
+        match self.ask(Kind::Vet, "vet.request", |id| {
+            wire::vet_request(id, request)
+        }) {
+            Some(Reply::Vet(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    // Whatever `turn.interject` left since the last boundary. Polling must neither block nor
+    // consume an approval reply, and this reads a queue of its own, never the answers.
+    fn interjection(&mut self) -> Option<String> {
+        self.interjections.take()
+    }
+
+    // Read while the turn waits on a reply, so a line `turn.interject` adds then is seen as it
+    // arrives (INPUT-46).
+    fn arrival(&self) -> bravebot_agent::interjections::Arrival {
+        self.interjections.arrival()
+    }
+
+    fn confirm_write(&mut self, request: &WriteRequest) -> WriteDecision {
+        match self.ask(Kind::Write, "confirm.request", |id| {
+            wire::write_request(id, request)
+        }) {
+            Some(Reply::Write(decision)) => decision.into(),
+            _ => WriteDecision::reject(),
+        }
+    }
+
+    /// Ask whether to run a pipeline.
+    ///
+    /// The refusal is the interesting path, and it refuses **without** remembering:
+    /// a single unanswered "no" costs one command, where a remembered one would vouch for
+    /// a program on the strength of a question nobody saw. `RunDecision::reject()` is that
+    /// pair, and it is what every failure here resolves to.
+    fn confirm_run(&mut self, request: &RunRequest) -> RunDecision {
+        // A window has no line that shows a program is unconfined, and reads the mode `off` as
+        // `workspace-write` for that reason (SANDBOX-22), so it draws no card for the request and refuses.
+        if request.unconfined {
+            return RunDecision::reject();
+        }
+        match self.ask(Kind::Run, "run.request", |id| {
+            wire::run_request(id, request)
+        }) {
+            Some(Reply::Run(decision)) => decision,
+            _ => RunDecision::reject(),
+        }
+    }
+
+    /// Ask whether the planner may read what a command printed.
+    ///
+    /// The one question here whose answer rests on bytes rather than on a prediction, so
+    /// the bytes go on the wire — see [`wire::output_request`] for why that is the point of
+    /// the question rather than a leak, and what it means for a front-end.
+    fn confirm_read_output(&mut self, request: &OutputRequest) -> Decision {
+        match self.ask(Kind::Output, "output.request", |id| {
+            wire::output_request(id, request)
+        }) {
+            Some(Reply::Output(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// Ask whether to vouch for a quarantined file the model wants to read.
+    ///
+    /// A yes writes a standing rule into the trust map, so it outlives the turn that asked
+    /// — which is exactly why an unanswered one must not be read as one.
+    fn confirm_vouch(&mut self, request: &VouchRequest) -> Decision {
+        match self.ask(Kind::Vouch, "vouch.request", |id| {
+            wire::vouch_request(id, request)
+        }) {
+            Some(Reply::Vouch(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// Put a series of questions to the person.
+    ///
+    /// The only one of the five that is not a yes or a no, and the only one where the empty
+    /// reply is the right way to say nothing: the contract asks for **no answers at all**
+    /// when nobody could be asked, rather than a decline for each question. The kernel reads
+    /// a missing answer as a decline anyway, and saying nothing is the one reply that cannot
+    /// be wrong about how many questions there were.
+    ///
+    /// So a decline the person actually made and a question that never reached them arrive
+    /// at the same place by different routes, and only one of them claims a person chose it.
+    ///
+    /// Answers are read against the prompts they answer, which is what stops a front-end
+    /// returning an index for a choice that does not exist.
+    ///
+    /// A question the person answered earlier in the session is not put again. What is put is the
+    /// rest of the series, and the remembered answers are woven back in at their own places. What
+    /// a front end's reply carries is remembered, a decline among it, since [`wire::answers`] reads
+    /// an entry it cannot use as one and that is what the planner is told. A question nobody could
+    /// be asked, or that the reply has no entry for, stays unsettled.
+    fn ask_user(&mut self, asking: &Asking) -> Vec<Answer> {
+        // A planner that loops back over a decision does not make the person restate it, and a
+        // series where some are settled puts only the rest (ASK-8).
+        let settled = self.memo().read(asking);
+        for prompt in settled.reused() {
+            let said = bravebot_i18n::t!(session_answered_already, question = &prompt.question)
+                .to_string();
+            // Once for each question, however many times the turn asked it.
+            if !self.reused.contains(&said) {
+                self.reused.push(said);
+            }
+        }
+        if settled.is_settled() {
+            return settled.finish(&mut self.memo(), Vec::new());
+        }
+
+        match self.ask(Kind::Ask, "ask.request", |id| {
+            wire::ask_request(id, settled.outstanding())
+        }) {
+            Some(Reply::Ask(answers)) => {
+                let fresh = wire::fitted(answers, settled.outstanding());
+                // Said to the window as data, from the values it was asked for and gave back, once
+                // for the questions put (ASK-13). It is for the screen: the planner is told the
+                // answers by the call's result, and a front end that answered nothing is not drawn
+                // as having skipped.
+                if !fresh.is_empty() {
+                    self.emitter.send(Event::new(
+                        "ask.settled",
+                        &self.session,
+                        wire::ask_settled(settled.outstanding(), &fresh),
+                    ));
+                }
+                settled.finish(&mut self.memo(), fresh)
+            }
+            // Nobody could be asked. What the person answered before still stands, and the rest
+            // is not remembered as declined.
+            _ if settled.reuses_any() => settled.finish(&mut self.memo(), Vec::new()),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The questions put while a session's MCP servers start, through the same channel a turn's
+/// questions take.
+///
+/// A window is always there to answer, so nobody being present is never the reason a server is
+/// left out. A turn stopped while one of these is waiting answers it no, as every other question
+/// here is answered.
+impl bravebot_agent::servers::Asker for BridgeConfirmer {
+    fn anybody_there(&self) -> bool {
+        true
+    }
+
+    /// Ask whether to use a server a project requests (SERVERS-4).
+    fn ask_to_start(
+        &mut self,
+        question: &bravebot_agent::servers::Question<'_>,
+    ) -> bravebot_agent::servers::Answer {
+        match self.ask(Kind::McpServer, "mcp-server.request", |id| {
+            wire::mcp_server_request(id, question)
+        }) {
+            Some(Reply::McpServer(answer)) => answer,
+            _ => bravebot_agent::servers::Answer::No,
+        }
+    }
+
+    /// Ask whether a server whose handshake was redirected moved there (SERVERS-11). The same
+    /// question, and the same card, as [`Confirmer::confirm_move`].
+    fn ask_to_move(&mut self, request: &MoveRequest) -> bool {
+        self.confirm_move(request) == Decision::Approve
+    }
+}
+
+#[cfg(test)]
+#[path = "answering_tests.rs"]
+mod answering_tests;
+
+#[cfg(test)]
+#[path = "notice_tests.rs"]
+mod notice_tests;

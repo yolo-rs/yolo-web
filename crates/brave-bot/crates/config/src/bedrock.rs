@@ -1,0 +1,843 @@
+//! Configuration for reaching a model through AWS Bedrock.
+//!
+//! Present or absent, never half configured. [`Bedrock::from_lookup`] answers `None` unless the
+//! switch is on and a region is named, so a caller holding one of these knows where to send a
+//! request without checking anything further.
+//!
+//! What this does not hold is a credential. Bedrock authenticates with a SigV4 signature over
+//! short-lived keys, and those expire during a session, so they are fetched when a request needs
+//! them rather than read once at startup.
+
+use crate::env_var;
+use crate::provider::Patience;
+
+/// Which tier a model name is for.
+///
+/// Three because that is what the settings block names. A tier is not a capability claim: it is
+/// which of the three variables supplied the name, and the picker shows the ones that were set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl Tier {
+    /// Every tier, strongest first, which is the order a picker offers them in.
+    pub const ALL: [Tier; 3] = [Tier::Opus, Tier::Sonnet, Tier::Haiku];
+
+    /// The variable naming this tier's model.
+    pub fn env_var(self) -> &'static str {
+        match self {
+            Tier::Opus => env_var::BEDROCK_OPUS_MODEL,
+            Tier::Sonnet => env_var::BEDROCK_SONNET_MODEL,
+            Tier::Haiku => env_var::BEDROCK_HAIKU_MODEL,
+        }
+    }
+
+    /// What to show a person choosing.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Tier::Opus => "Opus",
+            Tier::Sonnet => "Sonnet",
+            Tier::Haiku => "Haiku",
+        }
+    }
+
+    /// The tier a settings file's `model` key names, if it names one at all.
+    ///
+    /// These three words are what Claude Code and opencode put in that key, and there they mean a
+    /// tier rather than a model: the concrete model each one stands for comes from the same
+    /// `ANTHROPIC_DEFAULT_*_MODEL` variables read here. Matched case-insensitively because a
+    /// hand-written file says `Opus` as readily as `opus`.
+    ///
+    /// Anything else is `None` and is used as written, which is what carries a model id, an
+    /// inference-profile ARN, and a name from the Brave roster.
+    pub fn from_alias(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Tier::ALL
+            .into_iter()
+            .find(|tier| tier.alias().eq_ignore_ascii_case(name))
+    }
+
+    /// The word [`Tier::from_alias`] reads as this tier.
+    pub fn alias(self) -> &'static str {
+        match self {
+            Tier::Opus => "opus",
+            Tier::Sonnet => "sonnet",
+            Tier::Haiku => "haiku",
+        }
+    }
+
+    /// What this tier is called on the Brave roster.
+    ///
+    /// Where no AWS account is configured a tier word still has to name something, or it reaches an
+    /// endpoint that has never heard of it and is silently reset: the key would appear to work and
+    /// do nothing. Every build can reach Brave, so this is the roster a tier word resolves against
+    /// when nothing else can serve it.
+    ///
+    /// Compiled in rather than matched against `GET /v1/models`, because a [`crate::Config`] is
+    /// built without touching the network and a one-shot run never asks for that listing at all:
+    /// only the interactive picker does. Resolving a word against it would put an HTTP round trip in
+    /// front of every `bravebot "prompt"` to expand one word, and would fail with no network where
+    /// this succeeds.
+    ///
+    /// The cost is that the service owns these names and can rename one, and nothing here notices: a
+    /// snapshot of the live roster does not belong in a public repository either. Checked by hand
+    /// against `GET /v1/models`, where all three were present when this was written. A name the
+    /// endpoint has stopped serving is reset by it to `automatic`, which is where somebody with no
+    /// `model` key already starts.
+    pub fn brave_model(self) -> &'static str {
+        match self {
+            Tier::Opus => "claude-opus",
+            Tier::Sonnet => "claude-3-sonnet",
+            Tier::Haiku => "claude-3-haiku",
+        }
+    }
+}
+
+/// One model this account can be asked for.
+///
+/// A tier is one way a model gets here and not the only one, so the tier is optional: a `provider`
+/// block names models directly, as many as the file lists, and those have no tier to be. What every
+/// entry has is the name a request sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// The tier that named this model, where a tier variable did.
+    pub tier: Option<Tier>,
+    /// What a request names, which is a model id or an inference-profile ARN.
+    pub id: String,
+    /// What to show a person choosing, where the configuration said something friendlier.
+    ///
+    /// A tier has its own word for this and needs no other. A model named in a `provider` block has
+    /// only its id, which for an inference profile is an ARN nobody reads.
+    pub name: Option<String>,
+    /// The context window, where the configuration stated one.
+    ///
+    /// `None` reads as [`CONTEXT_WINDOW`]. A tier never states one, an opaque ARN having nothing to
+    /// state it from, and a `provider` block may.
+    pub context_window: Option<u64>,
+    /// How long a reply this model may write, where the configuration stated it.
+    ///
+    /// `None` reads as [`OUTPUT_LIMIT`], the same way an unstated window reads as
+    /// [`CONTEXT_WINDOW`]. A tier never states one and a `provider` block may, out of the same
+    /// `limit` block the window comes from.
+    pub output_limit: Option<u64>,
+}
+
+impl Entry {
+    /// The model a tier names.
+    fn for_tier(tier: Tier, id: String) -> Self {
+        Self {
+            tier: Some(tier),
+            id,
+            name: None,
+            context_window: None,
+            output_limit: None,
+        }
+    }
+
+    /// What to show a person choosing this model.
+    ///
+    /// The tier word where a tier named it, since that is what the person wrote in their settings
+    /// file, and otherwise whatever the block called it, falling back to the id.
+    pub fn display_name(&self) -> &str {
+        match (&self.name, self.tier) {
+            (Some(name), _) => name,
+            (None, Some(tier)) => tier.display_name(),
+            (None, None) => &self.id,
+        }
+    }
+
+    /// The window to budget against, stated or assumed.
+    pub fn window(&self) -> u64 {
+        self.context_window.unwrap_or(CONTEXT_WINDOW)
+    }
+
+    /// The ceiling a reply from this model is capped at, stated or assumed.
+    pub fn output(&self) -> u64 {
+        self.output_limit.unwrap_or(OUTPUT_LIMIT)
+    }
+}
+
+/// Everything needed to talk to Bedrock, when a build is pointed at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bedrock {
+    /// Which region to sign for and send to.
+    pub region: String,
+    /// Which AWS profile to resolve credentials from, when one was named.
+    pub profile: Option<String>,
+    /// The models this account is configured to reach, strongest tier first.
+    ///
+    /// Possibly empty: a block that turns Bedrock on without naming a model is still Bedrock, and
+    /// the resulting "no models configured" is a better thing to report than a guessed ARN.
+    models: Vec<Entry>,
+    /// A ceiling somebody exported, which outranks whatever the models state.
+    ///
+    /// Set by [`crate::Config`] rather than here, because a `provider` block is parsed with no
+    /// environment to consult and both routes to an account have to answer the same.
+    output_budget: Option<u64>,
+    /// The cache lifetime the settings chose, set by [`crate::Config`] for the reason
+    /// `output_budget` is.
+    cache_ttl: Option<crate::CacheTtl>,
+    /// What the `provider` block stated about repeating a request and a reply gone quiet.
+    ///
+    /// Nothing stated for an account reached through the tier variables, which have no block to
+    /// state it in.
+    patience: Patience,
+}
+
+/// The context window a Bedrock model is assumed to have, in prompt tokens.
+///
+/// Bedrock has no endpoint that reports a window, and an inference-profile ARN does not say which
+/// model it resolves to, so unlike the aichat backend there is nothing to ask. This figure is what
+/// an opaque profile ARN actually gets: the larger windows require the served model to be
+/// recognised by name, and an ARN that cannot be resolved to one does not qualify.
+///
+/// Deliberately not the advertised window of any particular model. Being wrong upward does not make
+/// compaction late, it removes it, so a figure that holds for the unrecognised case is the safer of
+/// the two errors. [`env_var::CONTEXT_BUDGET`] overrides it for anyone who knows better.
+pub const CONTEXT_WINDOW: u64 = 131_072;
+
+// Compaction depends on the budget sitting under the window: above it, compaction is not delayed but
+// removed, silently. A compile is a better place to find that out than a transcript.
+const _: () = assert!(CONTEXT_WINDOW > crate::DEFAULT_CONTEXT_BUDGET);
+
+/// How many tokens a Bedrock reply may run to, where nothing states another figure.
+///
+/// Within what every model on Anthropic's current lineup allows, 64,000 for the smallest. A model
+/// allowing less refuses the request carrying it, and is then sent [`OUTPUT_LIMIT_FALLBACK`]
+/// instead, once per model per process, so a figure above some models' costs one refused request
+/// rather than every answer. The figure is also reserved against the account's tokens-per-minute
+/// quota when each request starts and refunded when it ends, so it is kept well below the largest
+/// any model allows: a larger one lets fewer requests share an inference profile at once.
+///
+/// A `provider` block states a figure per model beside the window, and [`env_var::OUTPUT_BUDGET`]
+/// states one for a tier, which has no block to state anything in. A stated figure is never
+/// stepped down: it is somebody's statement about the model, and a refusal of it is theirs to see.
+pub const OUTPUT_LIMIT: u64 = 32_000;
+
+/// The ceiling sent to a model that refused [`OUTPUT_LIMIT`].
+///
+/// Low, because nothing names the model that refused and this has to hold for one that allows
+/// little: the models Bedrock fronts differ in what they allow by an order of magnitude.
+pub const OUTPUT_LIMIT_FALLBACK: u64 = 8_192;
+
+const _: () = assert!(OUTPUT_LIMIT_FALLBACK < OUTPUT_LIMIT);
+
+/// A region value refused because it is not spelled as one (`is_region`).
+///
+/// What a report names so the person can find the line: the value as it was written, trimmed the
+/// way it was read. Never anything else the entry holds ([BACKEND-33](../../../docs/specs/backends.md#BACKEND-33)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionFault {
+    /// The text written where the region belongs.
+    pub region: String,
+}
+
+/// Where a refused region was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionSource {
+    /// `AWS_REGION` exported in the environment the program started in.
+    Exported,
+    /// `AWS_REGION` in the `env` block of a settings file.
+    EnvBlock,
+    /// `AWS_REGION` pinned by the machine-level file, which outranks every other layer.
+    Managed,
+    /// `options.region` of the `amazon-bedrock` entry under `provider`.
+    ProviderEntry,
+}
+
+/// A region that was refused for what it holds, with where it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRegion {
+    /// The refused value.
+    pub fault: RegionFault,
+    /// Where `AWS_REGION` came from.
+    pub source: RegionSource,
+    /// The settings file whose `env` block wrote the value, where `source` is
+    /// [`RegionSource::EnvBlock`] and the layers kept which file stated it. `None` for every other
+    /// source.
+    pub file: Option<std::path::PathBuf>,
+}
+
+/// Whether the switch that turns Bedrock on is set in `lookup`.
+fn enabled(lookup: &impl Fn(&str) -> Option<String>) -> bool {
+    lookup(env_var::USE_BEDROCK)
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+}
+
+impl Bedrock {
+    /// The region [`Bedrock::from_lookup`] refuses, where the switch is on and a region is named
+    /// that is not spelled as one, and `None` otherwise.
+    ///
+    /// With the switch off nothing is refused, because nothing was asked for. A blank region is
+    /// absence rather than a refusal, as it is for `from_lookup`.
+    pub fn refused_region(lookup: impl Fn(&str) -> Option<String>) -> Option<RegionFault> {
+        if !enabled(&lookup) {
+            return None;
+        }
+        trimmed(lookup(env_var::AWS_REGION))
+            .filter(|region| !is_region(region))
+            .map(|region| RegionFault { region })
+    }
+
+    /// Read Bedrock configuration from a lookup, or `None` if this build is not pointed at it.
+    ///
+    /// The switch alone is not enough. Without a region there is nothing to sign for and no host to
+    /// send to, so a block that sets the switch and stops is treated as not configured: falling
+    /// back to the aichat backend leaves a working agent, whereas guessing a region produces
+    /// requests that fail somewhere far from the mistake. A value that is not spelled as a region
+    /// (`is_region`) is no region.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        if !enabled(&lookup) {
+            return None;
+        }
+
+        let region = trimmed(lookup(env_var::AWS_REGION)).filter(|region| is_region(region))?;
+        let profile = trimmed(lookup(env_var::AWS_PROFILE));
+
+        let models = Tier::ALL
+            .into_iter()
+            .filter_map(|tier| trimmed(lookup(tier.env_var())).map(|id| Entry::for_tier(tier, id)))
+            .collect();
+
+        Some(Self {
+            region,
+            profile,
+            models,
+            output_budget: None,
+            cache_ttl: None,
+            patience: Patience::default(),
+        })
+    }
+
+    /// The URL for one request against a model, streamed or not.
+    ///
+    /// The route is the one whose body Bedrock states for every provider it hosts, rather than one
+    /// that passes a provider-specific body straight through, so which model this names decides
+    /// nothing about how the request is built.
+    ///
+    /// The model name is percent-encoded because an inference-profile ARN contains colons and
+    /// slashes, and pasting one into a path unencoded produces a URL whose path segments are not
+    /// the ones intended.
+    pub fn converse_url(&self, model: &str, streaming: bool) -> String {
+        let route = if streaming {
+            "converse-stream"
+        } else {
+            "converse"
+        };
+        format!(
+            "https://{}/model/{}/{route}",
+            self.host(),
+            encode_path_segment(model)
+        )
+    }
+
+    /// The host requests go to, which is also what SigV4 signs.
+    pub fn host(&self) -> String {
+        format!("bedrock-runtime.{}.amazonaws.com", self.region)
+    }
+
+    /// A configuration reaching the models a `provider` block named, rather than three tiers.
+    ///
+    /// The same account and the same transport; what differs is where the list came from and that
+    /// nothing in it is a tier. Kept here rather than beside the block because a request needs a
+    /// region to sign for and a profile to resolve, which is exactly what this holds.
+    ///
+    /// `None` where `region` is not spelled as one (`is_region`): the host is built from it, so
+    /// an account is never held with a region the host would not survive.
+    pub fn from_provider(
+        region: String,
+        profile: Option<String>,
+        models: Vec<Entry>,
+    ) -> Option<Self> {
+        is_region(&region).then_some(Self {
+            region,
+            profile,
+            models,
+            output_budget: None,
+            cache_ttl: None,
+            patience: Patience::default(),
+        })
+    }
+
+    /// The same account with an exported reply ceiling applied to every model it reaches.
+    pub fn with_output_budget(mut self, budget: Option<u64>) -> Self {
+        self.output_budget = budget;
+        self
+    }
+
+    /// The same account with the settings' cache lifetime applied to every request it sends.
+    pub fn with_cache_ttl(mut self, ttl: Option<crate::CacheTtl>) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
+    /// The cache lifetime a request to this account asks for, where somebody chose one.
+    pub fn cache_ttl(&self) -> Option<crate::CacheTtl> {
+        self.cache_ttl
+    }
+
+    /// The same account with the retry count and the idle gap its `provider` block stated.
+    pub fn with_patience(mut self, patience: Patience) -> Self {
+        self.patience = patience;
+        self
+    }
+
+    /// How often a request to this account is sent again, and how long a quiet reply is waited on,
+    /// where its block stated either.
+    pub fn patience(&self) -> Patience {
+        self.patience
+    }
+
+    /// How long a reply from `model` may run before the service cuts it off.
+    ///
+    /// An exported budget, then what the model's own block stated, then [`OUTPUT_LIMIT`]. That is
+    /// the order the rest of the configuration resolves in, and the one a person debugging a
+    /// session expects: a variable they exported for this run wins over a file they wrote once.
+    ///
+    /// A model this account does not offer still gets a figure rather than nothing. The request
+    /// would fail on the name long before the ceiling mattered, and a caller holding an
+    /// `Option<u64>` here would have to invent the same fallback.
+    pub fn output_limit(&self, model: &str) -> u64 {
+        self.stated_output_limit(model).unwrap_or(OUTPUT_LIMIT)
+    }
+
+    /// The ceiling somebody stated for `model`, exported or in its block, and `None` where
+    /// [`OUTPUT_LIMIT`] is assumed.
+    pub fn stated_output_limit(&self, model: &str) -> Option<u64> {
+        self.output_budget
+            .or_else(|| self.entry(model).and_then(|entry| entry.output_limit))
+    }
+
+    /// Every configured model, strongest tier first.
+    pub fn models(&self) -> &[Entry] {
+        &self.models
+    }
+
+    /// The model a tier names, if that tier was configured.
+    pub fn model_for(&self, tier: Tier) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|entry| entry.tier == Some(tier))
+            .map(|entry| entry.id.as_str())
+    }
+
+    /// The entry a name refers to, if this configuration offers it.
+    pub fn entry(&self, model: &str) -> Option<&Entry> {
+        self.models.iter().find(|entry| entry.id == model)
+    }
+
+    /// The model to use when the person has not chosen one.
+    ///
+    /// The strongest configured tier. A default that reached for the cheapest would quietly answer
+    /// a hard question with the weakest model available, and the person who configured three tiers
+    /// asked for the best of them by naming it.
+    ///
+    /// An account a `provider` block configured has no tiers to rank, its entries being model ids,
+    /// so this is the first entry it holds rather than the strongest of them. What it guarantees
+    /// there is only that the name is one the account offers, which is what a caller needing
+    /// something reachable is asking for.
+    pub fn default_model(&self) -> Option<&str> {
+        self.models.first().map(|entry| entry.id.as_str())
+    }
+
+    /// Whether a name is one of the configured models.
+    ///
+    /// Used to check a remembered choice before it becomes a request. Bedrock rejects an unknown
+    /// model rather than substituting one, so a stale name from `~/.bravebot/model` has to be
+    /// noticed here rather than sent.
+    pub fn offers(&self, model: &str) -> bool {
+        self.entry(model).is_some()
+    }
+}
+
+/// Whether `region` is spelled the way AWS spells one: lowercase letters, digits and `-`, starting
+/// with a letter or a digit.
+///
+/// The region is written into the name of the host a request is signed for and sent to, so every
+/// other character is refused: `/`, `@`, `?`, `#`, `:` and `.` each end that name or add to it, and
+/// the host would then be one the value chose. A Google location is held to the same characters
+/// ([BACKEND-49](../../../docs/specs/backends.md#BACKEND-49)).
+pub(crate) fn is_region(region: &str) -> bool {
+    region.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && region
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A value with surrounding space removed, or `None` when nothing is left.
+///
+/// A blank is absence: a placeholder settings file leaves values empty, and reading `""` as a
+/// region would build a request for a host that is just a dot.
+fn trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Percent-encode one path segment.
+///
+/// Written out rather than taken from a dependency: what needs escaping in a path segment is a
+/// short fixed set, and an ARN only contains a few of them. Everything not explicitly unreserved is
+/// escaped, so this errs toward encoding rather than guessing which bytes a service tolerates.
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::REGIONS_THAT_WOULD_MOVE_THE_REQUEST;
+
+    fn configured(pairs: &[(&str, &str)]) -> Option<Bedrock> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Bedrock::from_lookup(|name| {
+            owned
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    /// The common case: the switch, a region, and the three tiers.
+    #[test]
+    fn a_complete_block_configures_bedrock() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+            (env_var::AWS_PROFILE, "some-profile"),
+            (env_var::BEDROCK_OPUS_MODEL, "opus-arn"),
+            (env_var::BEDROCK_SONNET_MODEL, "sonnet-arn"),
+            (env_var::BEDROCK_HAIKU_MODEL, "haiku-arn"),
+        ])
+        .expect("configured");
+        assert_eq!(bedrock.region, "us-west-2");
+        assert_eq!(bedrock.profile.as_deref(), Some("some-profile"));
+        assert_eq!(bedrock.model_for(Tier::Opus), Some("opus-arn"));
+        assert_eq!(bedrock.model_for(Tier::Haiku), Some("haiku-arn"));
+    }
+
+    /// Absent unless asked for, or every existing build would start signing for a service it has
+    /// no credentials for.
+    #[test]
+    fn nothing_configured_is_not_bedrock() {
+        assert_eq!(configured(&[]), None);
+    }
+
+    /// Only `1` turns it on. A variable someone set to `0` or `false` to disable it must not read
+    /// as enabled, which is what testing for mere presence would do.
+    #[test]
+    fn only_one_turns_it_on() {
+        for value in ["0", "", "false", "no", "true", "yes", " "] {
+            assert_eq!(
+                configured(&[
+                    (env_var::USE_BEDROCK, value),
+                    (env_var::AWS_REGION, "us-west-2"),
+                ]),
+                None,
+                "{value:?} was read as enabled"
+            );
+        }
+    }
+
+    /// Without a region there is no host and nothing to sign for. Falling back to the working
+    /// backend beats guessing a region and failing far from the mistake.
+    #[test]
+    fn the_switch_without_a_region_is_not_configured() {
+        assert_eq!(configured(&[(env_var::USE_BEDROCK, "1")]), None);
+        assert_eq!(
+            configured(&[(env_var::USE_BEDROCK, "1"), (env_var::AWS_REGION, "   ")]),
+            None
+        );
+    }
+
+    /// The region is written into the host a request is sent to and the signature is bound to that
+    /// host, so a value that ends the host name early or moves it would send the person's signed
+    /// headers wherever a settings file said. Refusing it is the only answer that cannot send them
+    /// anywhere, and falling back to the working backend is what a block with no region gets.
+    #[test]
+    fn a_region_that_would_move_the_request_configures_nothing() {
+        for &region in REGIONS_THAT_WOULD_MOVE_THE_REQUEST {
+            assert_eq!(
+                configured(&[
+                    (env_var::USE_BEDROCK, "1"),
+                    (env_var::AWS_REGION, region),
+                    (env_var::BEDROCK_SONNET_MODEL, "sonnet-arn"),
+                ]),
+                None,
+                "region {region:?} was accepted"
+            );
+        }
+    }
+
+    /// The refusal is reported with the value as written, for every value `from_lookup` refuses,
+    /// and for nothing else: a blank region is absence, a spelled region is accepted, and a switch
+    /// that is off asked for nothing to refuse.
+    #[test]
+    fn a_region_from_lookup_refuses_is_the_one_refused_region_reports() {
+        for &region in REGIONS_THAT_WOULD_MOVE_THE_REQUEST {
+            let refused = Bedrock::refused_region(|name| match name {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some(region.into()),
+                _ => None,
+            });
+            assert_eq!(
+                refused.map(|fault| fault.region),
+                Some(region.trim().to_string()),
+                "region {region:?} was not reported"
+            );
+        }
+        let lookup = |region: &'static str, switch: &'static str| {
+            move |name: &str| match name {
+                env_var::USE_BEDROCK => Some(switch.to_string()),
+                env_var::AWS_REGION => Some(region.to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(Bedrock::refused_region(lookup("us-east-1", "1")), None);
+        assert_eq!(Bedrock::refused_region(lookup("   ", "1")), None);
+        assert_eq!(Bedrock::refused_region(lookup("a.b", "0")), None);
+    }
+
+    /// An account a `provider` block names is checked by the rule the tier variables are, since the
+    /// block is the other route to a host built from a region.
+    #[test]
+    fn a_provider_account_whose_region_would_move_the_request_is_not_built() {
+        for &region in REGIONS_THAT_WOULD_MOVE_THE_REQUEST {
+            assert_eq!(
+                Bedrock::from_provider(region.to_string(), None, Vec::new()),
+                None,
+                "region {region:?} was accepted"
+            );
+        }
+    }
+
+    /// Every spelling AWS gives a region is accepted, so a check tightened past the rule does not
+    /// quietly configure nothing for a real account. Space around the value is not part of it.
+    #[test]
+    fn a_region_holding_only_the_characters_aws_uses_is_accepted() {
+        for region in [
+            "us-east-1",
+            "eu-central-1",
+            "ap-southeast-2",
+            "us-gov-west-1",
+            "il-central-1",
+        ] {
+            let bedrock = configured(&[(env_var::USE_BEDROCK, "1"), (env_var::AWS_REGION, region)])
+                .expect("configured");
+            assert_eq!(bedrock.region, region);
+            assert_eq!(
+                bedrock.host(),
+                format!("bedrock-runtime.{region}.amazonaws.com")
+            );
+            assert_eq!(
+                Bedrock::from_provider(region.to_string(), None, Vec::new())
+                    .map(|account| account.region),
+                Some(region.to_string())
+            );
+        }
+        let padded = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "  eu-west-1\n"),
+        ])
+        .expect("configured");
+        assert_eq!(padded.region, "eu-west-1");
+    }
+
+    /// A profile is optional: a machine with instance credentials or a bare access key has none,
+    /// and the AWS CLI resolves those the same way it would for any other command.
+    #[test]
+    fn a_profile_is_optional() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+        ])
+        .expect("configured");
+        assert_eq!(bedrock.profile, None);
+    }
+
+    /// A tier with no variable set is one this configuration cannot reach. An ARN cannot be derived
+    /// from a model name, so a guessed one is a request that fails at the far end.
+    #[test]
+    fn an_unnamed_tier_is_left_out_rather_than_guessed() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+            (env_var::BEDROCK_SONNET_MODEL, "sonnet-arn"),
+        ])
+        .expect("configured");
+        assert_eq!(bedrock.model_for(Tier::Opus), None);
+        assert_eq!(bedrock.model_for(Tier::Haiku), None);
+        assert_eq!(bedrock.models().len(), 1);
+    }
+
+    /// The strongest configured tier, not the cheapest: someone who named three tiers asked for the
+    /// best of them, and quietly answering with the weakest is a downgrade nobody was told about.
+    #[test]
+    fn the_default_model_is_the_strongest_configured_tier() {
+        let all = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+            (env_var::BEDROCK_OPUS_MODEL, "opus-arn"),
+            (env_var::BEDROCK_SONNET_MODEL, "sonnet-arn"),
+        ])
+        .expect("configured");
+        assert_eq!(all.default_model(), Some("opus-arn"));
+
+        let weaker = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+            (env_var::BEDROCK_HAIKU_MODEL, "haiku-arn"),
+        ])
+        .expect("configured");
+        assert_eq!(weaker.default_model(), Some("haiku-arn"));
+    }
+
+    /// A block that turns Bedrock on and names nothing is still Bedrock. Reporting "no models
+    /// configured" is better than inventing one, and better than silently using the other backend
+    /// when the person asked for this one.
+    #[test]
+    fn bedrock_with_no_models_is_still_bedrock() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+        ])
+        .expect("configured");
+        assert!(bedrock.models().is_empty());
+        assert_eq!(bedrock.default_model(), None);
+    }
+
+    /// An ARN is full of colons and slashes. Pasted into a path unencoded, its segments are not the
+    /// ones intended and the request addresses something else entirely.
+    #[test]
+    fn a_model_arn_is_encoded_into_the_path() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+        ])
+        .expect("configured");
+        let url = bedrock.converse_url("arn:aws:bedrock:us-west-2:1:foo/bar", false);
+        assert!(url.contains("%3A"), "colons survived unencoded: {url}");
+        assert!(url.contains("%2F"), "slashes survived unencoded: {url}");
+        assert!(
+            url.ends_with("/converse"),
+            "the route is no longer the last segment: {url}"
+        );
+    }
+
+    /// The streamed and unstreamed routes are different paths on the same host, and a client that
+    /// asked the wrong one gets a reply in the wrong framing.
+    #[test]
+    fn streaming_and_buffered_requests_have_different_routes() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+        ])
+        .expect("configured");
+        assert!(
+            bedrock
+                .converse_url("m", false)
+                .ends_with("/model/m/converse")
+        );
+        assert!(
+            bedrock
+                .converse_url("m", true)
+                .ends_with("/model/m/converse-stream")
+        );
+    }
+
+    /// The host is derived from the region, and it is what SigV4 signs. A mismatch between the two
+    /// is a signature the service rejects.
+    #[test]
+    fn the_host_names_the_configured_region() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "eu-central-1"),
+        ])
+        .expect("configured");
+        assert_eq!(bedrock.host(), "bedrock-runtime.eu-central-1.amazonaws.com");
+    }
+
+    /// The three words a settings file written for Claude Code or opencode puts in its `model` key.
+    /// Case-insensitive because a hand-written file says `Opus` as readily as `opus`.
+    #[test]
+    fn the_tier_words_are_recognised_whatever_their_case() {
+        assert_eq!(Tier::from_alias("opus"), Some(Tier::Opus));
+        assert_eq!(Tier::from_alias("Sonnet"), Some(Tier::Sonnet));
+        assert_eq!(Tier::from_alias("HAIKU"), Some(Tier::Haiku));
+        assert_eq!(Tier::from_alias("  opus  "), Some(Tier::Opus));
+    }
+
+    /// Every tier names something on the roster every build can reach, or the word it came from
+    /// resolves to nothing and is silently reset by the endpoint. The names themselves are the
+    /// server's to change and are checked by hand; what is pinned here is that all three are
+    /// answered, and that none is left as the bare tier word.
+    #[test]
+    fn every_tier_names_a_brave_model() {
+        for tier in Tier::ALL {
+            let name = tier.brave_model();
+            assert!(!name.is_empty(), "{tier:?} names nothing");
+            assert_eq!(
+                Tier::from_alias(name),
+                None,
+                "{tier:?} resolves to the bare tier word, which the endpoint does not serve"
+            );
+        }
+    }
+
+    /// Three tiers, three distinct models. Two words collapsing onto one name would make a choice
+    /// between them no choice at all.
+    #[test]
+    fn the_tiers_name_different_brave_models() {
+        let names: Vec<&str> = Tier::ALL.into_iter().map(Tier::brave_model).collect();
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "{names:?} are not all distinct");
+    }
+
+    /// Everything else is a model name, and is used as written. An ARN and a name from the Brave
+    /// roster both have to survive this untouched.
+    #[test]
+    fn anything_that_is_not_a_tier_word_names_no_tier() {
+        for name in [
+            "arn:aws:bedrock:us-west-2:1:application-inference-profile/abc",
+            "claude-opus-4-8",
+            "llama-3-8b-instruct",
+            "automatic",
+            "opus-4",
+            "",
+        ] {
+            assert_eq!(Tier::from_alias(name), None, "{name} was read as a tier");
+        }
+    }
+
+    /// A remembered choice outlives the settings that made it reachable. Bedrock rejects an unknown
+    /// model rather than substituting one, so a stale name has to be caught before it is sent.
+    #[test]
+    fn a_model_that_is_not_configured_is_not_offered() {
+        let bedrock = configured(&[
+            (env_var::USE_BEDROCK, "1"),
+            (env_var::AWS_REGION, "us-west-2"),
+            (env_var::BEDROCK_OPUS_MODEL, "opus-arn"),
+        ])
+        .expect("configured");
+        assert!(bedrock.offers("opus-arn"));
+        assert!(!bedrock.offers("some-model-that-was-removed"));
+    }
+}

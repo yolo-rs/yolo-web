@@ -1,0 +1,35 @@
+{
+  "name": "yolo-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Unified Chromium-compatible browser monorepo in full Rust (Servo + Obscura + Brave) and Bun for AI agents and humans",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yolo-rs/yolo-web.git"
+  },
+  "license": "Apache-2.0 OR MPL-2.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/human-browser dev",
+    "start": "bun run --cwd apps/human-browser start",
+    "agent": "bun run --cwd apps/ai-agent-runner start",
+    "live-view": "bun tools/live-view.ts",
+    "test": "bun test",
+    "check": "bun --filter '*' check",
+    "fmt": "bun fmt",
+    "fmt:check": "bun fmt --check",
+    "lint": "bun lint",
+    "rust:info": "cargo run -p yolo-browser-cli -- info",
+    "rust:build": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render",
+    "rust:build:stealth": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
+    "rust:test": "cargo test -p yolo-browser -p obscura-ssrf -p obscura-dom -p euclid -p uluru -p fnv -p servo-svg -p servo-timers"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.2"
+  }
+}

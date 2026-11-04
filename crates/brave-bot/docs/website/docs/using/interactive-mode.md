@@ -1,0 +1,800 @@
+---
+sidebar_position: 1
+title: Interactive mode
+description: The input box, every key, and what a running turn refuses.
+---
+
+# Interactive mode
+
+```sh
+bravebot
+```
+
+The input box grows with what you type, up to ten rows, and then scrolls to the caret rather than
+growing further. It keeps growing while a turn runs.
+
+## Sending and editing
+
+| Key | What it does |
+|---|---|
+| Enter | send |
+| Ctrl-Enter | mid-turn, stop the turn and send what is waiting as one turn |
+| Shift-Enter, Ctrl-J | start a new line without sending |
+| Ctrl-G | compose in `$VISUAL` or `$EDITOR` and take back what you saved |
+| Ctrl-V | paste what is on the clipboard, a picture or a copied file included |
+| Ctrl-P | with a prompt typed, rewrite it to be more specific and leave the rewrite in the box to edit ([below](#enhancing-a-prompt)) |
+| Ctrl-S | put the line away, bring back the one you put away, or search this workspace |
+| Escape | discard a half-typed prompt, keeping it for Up, or stop a running turn (with vi editing, from NORMAL mode) |
+| Ctrl-C | stop the nearest thing there is to stop, and leave when there is nothing left |
+| Ctrl-Z | [suspend to the shell](#suspending-to-the-shell), and `fg` brings the session back. Not on Windows |
+| Up / Down | walk back through every prompt you have sent in any session, starting with a line you cleared |
+| Ctrl-N | on a prompt recalled with Up, cycle between every prompt, this project's and this session's. It stays where you put it, and a scope with nothing in it is skipped |
+| Ctrl-R | search every prompt you have sent |
+| Tab | complete a slash command or an `@path` |
+| Ctrl-U, Ctrl-K, Ctrl-W, Alt-D | delete to the line start, to the line end, the word before, the word after; the text is kept |
+| Ctrl-Y | put back the text the last of those deleted. Deletes in one direction in a row join, and vi's `p` puts back the same text |
+| Shift-Tab | choose how much the session asks before it acts |
+| `?` | on an empty line, list every key |
+
+Enter on an empty line does nothing. An Enter that arrives in the same read as other keys, as when a
+program writes a line and its return into the terminal, does not send: the line stays in the box and
+the row beneath says so. Pressing Enter again on its own sends it. Shift-Enter needs a terminal that reports the modifier
+(Ghostty, Kitty, WezTerm) or one configured to send a newline; **Ctrl-J is the fallback that always
+works**, in every terminal and in shell mode too.
+
+With [vi editing](#editing-the-way-vi-does) chosen, Escape enters NORMAL mode instead of discarding
+the line, and the letters do what they do in vi.
+
+Fifteen of these chords can be [moved to keys of your own](#moving-a-key), fourteen on Windows. Every chord named on this
+page, and every one the interface names on your screen, is the default.
+
+## Undoing an edit
+
+Ctrl-_ puts the line and the caret back as they were before the last edit, up to a thousand edits
+back. A run of typed characters is one edit. A delete, a kill (Ctrl-W, Alt-D, Ctrl-U, Ctrl-K) and a
+paste are one edit each, and undoing the deletion of a `[Image #1]`-style marker brings its
+attachment back with it. One press goes back one edit in either editing style, and it works while a
+turn is running. Sending the line, clearing it, putting it away or bringing it back, switching the
+editing style and recalling an earlier prompt leave nothing to undo.
+
+Some terminals report the same key as Ctrl-7, Ctrl-Shift-_, Ctrl-/ or Ctrl-Shift-/. While `undo` is on its default
+those answer too, except one that you moved another action onto. Ctrl-Z is not used, because it
+[suspends the session](#suspending-to-the-shell).
+
+## Suspending to the shell
+
+Ctrl-Z stops the session and gives the terminal back to the shell that started it. Run `fg` there to
+bring it back. The screen you left is as it was: the line you were writing, the caret, what is attached
+to it, and what is waiting in the queue are all still there, and the session is drawn again.
+
+It works at rest and while a turn runs, in either editing style and in shell mode. A turn stops with
+the session and carries on when you continue it. A command it started is not stopped: it keeps
+running, and what it prints waits until the session is back. A command is still held to its time limit,
+which a long stop can use up. A request to the model that was waiting for its answer may have been
+closed by the server by then, and the turn fails as any request does that the network ended.
+
+If you continue the session with `bg`, the terminal stops it again as soon as it tries to take the
+screen back, and the shell reports it as stopped for terminal output. `fg` carries it on from there.
+
+The scroller, the prompt search, a picker, the delegate view and the questions the session asks do not
+answer Ctrl-Z. A Ctrl-Z that arrives in the same read as other keys suspends nothing, and the row beneath
+says so, for the reason an Enter that arrives that way does not send. In a session that is not in a
+process group of its shell, such as the first process of a container, the stop has no effect.
+
+Windows has no suspend, so Ctrl-Z does nothing there and the `?` list does not name it.
+
+## Enhancing a prompt
+
+Ctrl-P with a prompt typed in the box asks the model you are using to make it more specific, and puts
+the rewrite in the box in place of what you wrote. Nothing is sent to a turn. You edit the rewrite and
+press Enter, which sends it as a prompt like any other. The request carries your line and the
+conversation so far, so the rewrite can name what you and the model have already been through, and it
+reads no file of its own: a file nobody has read in the session is not one the rewrite can name. It
+is asked not to add a requirement, a file name or a fact that neither your line nor the conversation
+gives, but it is a model's reading of what you meant, so read it before you send it. A `@path` in it
+is text until you send the line, and sending is what names the file, exactly as if you had typed it.
+
+Escape puts back the line you wrote, and Ctrl-C does the same in either editing style, since Escape in
+vi's style leaves INSERT. The rewrite is kept as the line Up brings back, so an edit you made to it is
+not lost. Pressing Ctrl-P again on a rewrite asks for another, and Escape still returns to what you
+first wrote. Emptying the box ends all of this, and what you type next is an ordinary line. The press
+that asks costs one request, charged to the session, and Escape or Ctrl-C while it is out stops it and
+leaves your line as it was.
+
+The key does nothing on an empty box, in [shell mode](./shell-mode.md), and while a turn is running.
+A line whose first word is a slash and a name is a command or a skill, a line holding a picture or a
+dropped file holds more than words, and a line over 4,000 characters is longer than a rewrite is put
+in the box at, so each is left as written with a note saying why. A line that begins with a path such
+as `/Users/me/proj/src/main.rs` is a prompt and is rewritten. A rewrite that comes back empty or
+longer than 4,000 characters is not put in the box, and neither is one written after the
+conversation has read something untrusted, since words written over that conversation are not ones
+the planner could have held. Your line stays where it was, and a note says why.
+
+### In the desktop app
+
+The desktop app's message box has the same thing: the sparkles button beside the attach button, or
+Ctrl+Shift+E (⌘⇧E on macOS) in the box. The rewrite replaces the text in the box and nothing is sent
+until you send it. Escape, or **Put back mine** on the note under the box, returns to what you wrote,
+and **Stop** or Escape while the request is out leaves your text as it was. A rewrite is not put over
+text you changed while it was being made. The same lines leave the box alone as in the terminal: an
+empty box, a turn running, more than 4,000 characters, a rewrite that comes back empty or too long,
+and a conversation that has read something untrusted. A message that names an attached picture, a
+dropped file or a bot picked for it is left as written too, since a rewrite of words would lose the
+marker that stands for it.
+
+## Editing the way vi does
+
+[`/config`](../reference/commands.md#config) chooses between the ordinary box and vi's editing keys,
+and [`editorMode`](../customize/configuration.md#editormode) in a settings file answers for somebody
+who has never made one. Every session opens in INSERT mode, and Escape enters NORMAL mode and leaves
+the line as it was. Discarding a half-typed line is still Ctrl-C. While a turn runs, Escape stops it
+only once the box has no use for the press, so the Escape you press out of habit after sending
+leaves INSERT and a second one stops the turn.
+
+[Editing the way vi does](./vi-mode.md) covers the modes, the motions, counts, operators, text
+objects, VISUAL selection and REPLACE mode, and how each treats a [marker](#markers).
+
+## Moving a key
+
+A `keybindings` block in [`settings.json`](../customize/configuration.md) names an action and the
+chord you want to answer it. Write a chord as `ctrl-x`, `alt-o` or `ctrl+x`. The block layers per
+action the way `env` does, so a project file moving one action says nothing about the others.
+
+```json
+{
+  "keybindings": {
+    "scroller": "alt-o",
+    "stash": "alt-s"
+  }
+}
+```
+
+**Fifteen actions can be moved, and nothing else can** (fourteen on Windows, which has no `suspend`):
+
+| Action | Default | What it does |
+|---|---|---|
+| `background` | `ctrl-b` | move the command a turn is waiting on to the background |
+| `editor` | `ctrl-g` | open your editor on the prompt |
+| `watch` | `ctrl-l` | open what a delegate did or an aside answered |
+| `outputs` | `alt-l` | open what the commands the session ran printed |
+| `scroller` | `ctrl-o` | open the transcript scroller |
+| `history` | `ctrl-r` | search the prompts you have sent |
+| `stash` | `ctrl-s` | put the line away, or bring it back |
+| `trail` | `ctrl-t` | show or hide the audit trail |
+| `paste` | `ctrl-v` | paste from the clipboard |
+| `panel` | `ctrl-x` | show or hide the [info panel](sessions.md#telling-sessions-apart) |
+| `todos` | `alt-a` | print the whole plan in the transcript, as [`/todos`](../reference/commands.md#todos) does |
+| `scope` | `ctrl-n` | cycle Up between every stored prompt, this project's and this session's |
+| `suspend` | `ctrl-z` | [suspend the session to the shell](#suspending-to-the-shell) |
+| `undo` | `ctrl-_` | put back the last edit to the line ([below](#undoing-an-edit)) |
+| `enhance` | `ctrl-p` | rewrite the line to be more specific ([below](#enhancing-a-prompt)) |
+
+**A chord has to carry Ctrl or Alt.** Every unmodified key is answered already: a character is typed,
+Enter sends, Escape clears, Tab takes what is offered, and the arrows walk the caret and the history.
+A settings file that could claim `x` would be one that took a letter out of the alphabet. Shift over a
+character is refused too, because a terminal reports Shift-A as `A` with Shift held, so `shift-a`
+names an event that never arrives. Four chords are refused even carrying Ctrl: Ctrl-C and Ctrl-D,
+which stop and leave, and Ctrl-J and Shift-Enter, which start a line. Ctrl-Alt-C and Ctrl-Alt-D are
+different chords from those two and can be given to an action; pressing them never stops a turn,
+clears the box or leaves.
+
+**Every action is left on a key of its own.** A chord that cannot be read, or one the box already
+answers, leaves that action on its default, and so does a chord two actions both ask for: both give it
+up rather than one of them winning by the order it was read in. Two actions *trading* chords is not a
+conflict and both get what they asked for.
+
+A configured chord takes precedence over line editing, so moving one onto `ctrl-u` or `alt-b` means
+the action answers rather than the editing key. In vi's NORMAL mode, `/` opens whatever chord
+`history` is on.
+
+**A mode reads the chord that opened it.** Inside the prompt search, `stash` narrows the scope and
+`history` closes the search; inside the view of what a delegate is doing, `watch` leaves it. Ctrl-C
+keeps its own meaning in both, and the chord an action was moved off of does nothing.
+
+The screen is written from the chords actually in force: the list `?` puts up, the row that says a
+line is waiting to come back, the border while you walk the history, the keys under the search, and
+the scroller's way out all name the key that works.
+
+## Composing in your editor
+
+**Ctrl-G** opens your editor on what is already in the box, and what you save replaces the line. It
+is refused while a turn runs, because an editor needs the screen the turn is drawing on.
+
+Every path that does not end in a save leaves the line untouched: quitting without saving, an editor
+that failed, an editor that was killed. One trailing newline is dropped, one only. The file holds
+your own words, is readable by nobody else, and does not outlive the edit.
+
+The same editor opens from a write prompt, on the proposed contents, with **e**
+([details](../security/permissions.md#changing-a-write-before-approving-it)).
+
+Which editor opens: `$VISUAL`, then `$EDITOR`, then the first of `vim`, `vi`, `emacs`, `nano` that is
+installed. That fallback list is the same on every platform. A name is looked for under every spelling
+your `PATH` may hold it under, so an editor installed as `vim.exe` on Windows is still found by
+`vim`. A bare name is found only in `PATH` directories that a program the agent runs cannot write, so
+an editor installed under the session's own directory (a project `node_modules/.bin`, say) reads as
+not found. A name with a path in it, such as `/opt/editors/vim`, is yours and is never looked up. A
+variable exported as empty counts as unset. An editor you named that will not start is
+reported as such and nothing else is tried, so a fallback never runs an editor you did not ask for.
+
+An editor is started under the name it was asked for, rather than under the file a symbolic link
+behind that name points at. This matters for MacVim, which installs `vim`, `vi` and `gvim` as links
+to a single program that reads the name it was called by: reached through the resolved path it is
+always the detached GUI one, which returns at once and leaves the prompt unedited. The name is kept
+only while it still reaches the same program. A link that now points elsewhere is started by resolved
+path instead.
+
+A GUI editor that would otherwise return the moment its window opens is told to wait, but only where
+you wrote no arguments of your own.
+
+## Looking up the keys
+
+`?` on an empty line puts up every key and what it does. A second `?` takes the list down, as does
+Escape, or typing anything at all, and so does a line arriving in the box by recall, a paste, your
+editor, the stash, or a stopped turn handing its prompt back. It is a mode rather than a character, the way `!` is: nothing
+lands in the box, so there is nothing to delete afterwards.
+
+Only on an empty line. A `?` part-way through a sentence is the punctuation you are asking a
+question with, and in shell mode it is a glob for your shell to expand.
+
+The list is not a completion. There is nothing in it to choose, so Tab and the arrows go on meaning
+what they mean everywhere else while it is up. It folds into as many columns as the width holds, and
+no row runs past the edge.
+
+The row beneath the box carries what the session is doing (the mode in force where it is not just
+asking, how full the context is and the share of the prompt read from the cache, the trail, a
+[`/loop`](../reference/commands.md#loop-interval-prompt) that is running and when its next tick is
+due, how many [background jobs](#moving-a-command-to-the-background) the turn has running, the key
+that opens the delegates once the session has any, the key and `/outputs` entry that open the commands once
+the session has run one, and the key that
+moves the command the turn is waiting on to the background while there is one), then
+`? for shortcuts`, and then the key that opens the [info panel](sessions.md#telling-sessions-apart)
+while the panel is closed and the terminal is wide enough for it. While the panel is drawn, the
+context and cache figures are in the panel and not on this row. It names no other binding of its own.
+
+**The context reading says which of three things the session knows.** A session that has measured a
+request says how full the context is, as a percentage of the budget it would be compacted at. One
+whose conversation has been shortened underneath that figure says it was *compacted*, and how much
+room that won back, since the number it held describes an exchange that is no longer the one on
+screen. A session that has measured nothing says that it has not measured anything. A resumed session
+opens with what the last request of the session it read came to, so the figure is there before this
+one has sent anything.
+
+**No state is drawn as a blank**, because one blank is indistinguishable from another, from a line too
+narrow to hold the figure, and from a reading that has stopped working. A count that arrived with no
+budget to divide it by reads as unmeasured, that being exactly as much as it knows.
+
+The room a compaction won back is a fraction of the budget it was compacted at, and is marked
+approximate in every case: it can only over-state, since what the summariser read counts the
+instructions it was given along with the exchange. A compaction the service reported no usage for says
+the conversation was compacted and gives no figure. Adopting a new budget afterwards leaves the figure
+alone, because what was won back is a fact about the exchange that was shortened.
+
+**A percentage against a budget nobody advertised is marked as approximate.** Against a window the
+endpoint stated, a hundred per cent means shorten the conversation. Against the
+[built-in default](../customize/configuration.md#context-budget), it may only mean that default is
+too small for the model in force, and the answer is to set the budget rather than to compact.
+
+The trail key is named only **once a turn has left a trail to look at**, since a trail is recorded
+when the turn it belongs to ends. The confinement is not on the row at all: it is settled before the
+session opens and cannot change while it runs. It is stated once at startup, and
+[`/status`](../reference/commands.md#status) answers for it whenever you ask.
+
+## Choosing how much the session asks
+
+**Shift-Tab** cycles the session through asking about everything, accepting edits, plan mode, and
+bypassing every check. It types nothing, is read before Tab so it never completes a half-typed line,
+and works while a turn runs. A turn in flight follows the mode you pressed last, from its next
+question or tool call; a question already on your screen is left as it is. Both spellings of the chord are answered, since which one arrives is the
+terminal's choice rather than yours. A click on the mode drawn on the row beneath the box moves to the
+next one too, but never into bypassing every check: only the key reaches that.
+
+The mode leads the row beneath the box and is the only part of it drawn in a colour. Asking about
+everything takes no room at all: what is drawn is a mode somebody chose. When the terminal is too
+narrow, the parts are given up whole and in order (the key that opens the info panel, a reading with
+no figure in it, the way to the bindings, the trail key, the figures, the move key, the count of
+background jobs, and a running loop after all of them), and the mode is the last to go. A note about what a press just did is drawn at the right of the same row and takes its
+room ahead of all of them, since a part fitted against the whole width is one the note writes over.
+
+See [modes](../security/permission-modes.md) for what each one answers and what
+choosing one costs.
+
+## Stopping and leaving
+
+Escape only ever stops, and never leaves. Ctrl-C is read against what is happening:
+
+| What is happening | What Ctrl-C does |
+|---|---|
+| a turn in flight, a summary, an aside or a goal check, or a command running | stops it, and the session stays where it was |
+| nothing running, a line in the box | takes the line, and offers the way out |
+| nothing running, an empty box | offers the way out |
+| nothing running, an empty box, the way out already offered | ends the session |
+
+Offering the way out says so on the row beneath the box, and names the key that ends the session.
+Ctrl-D leaves an empty box the same way. The offer lives for exactly one press: any input that is not
+one of the two keys that leave withdraws it, a mouse report or a resize included, and letting go of a
+key does not.
+
+`exit` or `quit` typed without the slash does not leave, since it is a prompt like any other line. A
+line that is only one of them is sent at the first Enter, and while the turn it starts runs, the row
+beneath the box says that it was sent as a prompt, that Ctrl-C stops it and that `/exit` leaves.
+
+**A turn you asked to stop says so until it ends.** From the press, the working indicator reads
+"Stopping" ahead of whatever it would otherwise say. A turn ends only once every delegate it started
+has returned, which can take seconds, so while delegates are still running it reads "Stopping, waiting
+on 2 delegates" and the count falls as they return. A further press finds the same word. If several delegates are waiting on an approval, the first press answers the one
+drawn and declines the rest without drawing them.
+
+**Leaving takes two separate presses.** Ctrl-C or Ctrl-D that arrives in the same read as other input
+does not count, and neither does one that answers an offer made by the same read. A program that
+writes into the terminal, such as an editor activating a virtualenv, therefore cannot end the session
+with one byte or with two. Stopping a turn still answers the first press.
+
+**Stopping shows a cancelled status**, which is its own outcome rather than a failure or an answer.
+The reply stops arriving, and the prompt comes back to the box for editing when the box can take it:
+no work had followed it, nothing is queued behind it, and the box is empty. Where the model had
+not yet replied, it also comes out of what the model reads, so sending it again does not repeat it
+in every later request. What still finishes is a tool call already running, because stopping one
+part way could leave a file half written.
+
+Otherwise the prompt stays in the transcript, marked stopped. That is any of three cases: the turn had
+already done something visible, there are prompts waiting behind it, or the box is not empty. The
+first two mean there is an order to keep and a line put back would be out of it. The third is a box
+that is taken, by a line you typed during the turn or walked back to, so the prompt has nowhere to go.
+A cancelled prompt drops out of the history you walk back through even where its transcript entry
+stays: see [Sessions](sessions.md).
+
+Escape and Ctrl-C reach an open mode before they reach anything else. A scroller, a delegate's view or
+a prompt search closes on that press, and the press that reaches the turn is the next one. Either key
+also stops a summary, an
+[aside](#watching-a-delegate-reading-a-command-and-asking-something-aside) or the check a goal is
+judged by: the request is dropped and the conversation stays as it was. Stopping a goal check takes
+the goal off too.
+
+## Sending while a turn runs
+
+**The only thing a running turn refuses is sending.** Typing, editing, pasting, dropping a file,
+putting a line away, walking back through earlier prompts, scrolling the transcript, toggling the
+audit trail, choosing how much the session asks and asking what the keys are all do exactly what
+they do at rest.
+
+Two things follow from that. Nothing is offered to **complete**, because what appears beneath the box
+is machinery for finishing a line that is about to be sent; the key list is documentation you asked
+for, and is drawn whether or not a turn is running. And **Ctrl-G** is refused, because handing the
+terminal to an editor would take the screen from the turn drawing on it.
+
+Enter mid-turn takes the line out of the box and holds it. It is drawn under the box, marked, so you
+can see that what you sent went somewhere. Beside the mark is where it is going:
+
+| Beside the mark | What it means |
+|---|---|
+| into this turn, next round | the running turn reads it once the calls in its current round are done |
+| a new turn after this | nothing running will read it, so it starts a turn when that ends: behind `/compact`, a plan or a goal check, or a turn you have asked to stop |
+| into the next turn | a prompt behind one that will start a turn, which that turn reads once the calls in its first round are done |
+| carried out after this | a slash command that waits for what is running to end rather than being sent into it |
+| run in your shell | a command line, which your shell runs when what is running ends, and whose output the model then reads |
+
+A turn that answers without another round never reaches the one its prompts were waiting for, so
+they wait for it to end instead, and the first becomes a turn of its own. On a terminal too narrow
+for the words, the mark stands alone, and on the last row the Ctrl-Enter offer keeps its place
+over them.
+
+**The turn in flight takes it.** A turn asks between rounds, after the round's tool calls have run
+and before the next request goes out. Everything waiting joins the conversation there, in the order
+you typed it. So "no, the other file" reaches the planner while the work it is about is still
+happening, instead of arriving after the thing it was meant to prevent. A prompt still waiting when
+the turn ends becomes a turn of its own.
+
+While the model waits in `job_output` for a job, a line you send ends the wait within a moment, with
+the job still running, and the turn reads the line at the boundary after it. You do not need to stop
+the turn to be heard. A line that is a command, or that waits behind one, does not end the wait.
+
+When the model is still thinking, or is partway through writing a tool call, the prompt does not
+wait for the round to finish: the request is ended, what the model had written so far is dropped,
+and the request goes out again with your prompt in it. When the model is writing text, the text is
+left to finish, because you may be reading it, and the prompt goes in at the next boundary. Pressing
+Escape still stops the turn.
+
+**A [slash command](../reference/commands.md) is never sent.** Most wait to be carried out: one
+comes off the box and is drawn under it like anything else waiting, but it is not offered to the turn
+in flight, so nothing about it reaches the planner. It runs when the queue is reached after the turn
+has ended, and a prompt behind it goes once it has. During a turn, `/cost`, `/status`, `/watch`, `/jobs`, `/panel`, `/todos`, `/thinking`, `/copy`, `/export`, `/btw`, `/loop`
+and `/goal` are carried out as you press Enter instead, except a `/loop` that starts a loop and a `/goal`
+that sets one, which wait. `/theme`, `/config` and `/language` are too, whatever is waiting. `/rename`, `/note`, `/issue`, `/pr`,
+`/forget-trust`, `/model` and `/effort` are too unless a line waiting ahead of them could change what they act on, a
+waiting `/clear` for `/rename`, say, and then they wait behind that line and the mark under the box names it. `/rename` and `/note` wait behind a prompt and a command that
+could change the record's name or notes, and are carried out as you press Enter behind a command line. `/style` is carried out as you press Enter behind a command line too, but waits behind a prompt, and `/forget-trust` waits behind both. A waiting `/sandbox off` holds none of
+them back. The four that open a list draw it over the turn. What they answer goes into the
+transcript as it is said, so it scrolls with the rest of the history, and nothing waiting moves. During a compaction, a `/btw` question asked with no turn running, a `/manifest` run or a goal check,
+every command waits. A `/btw` typed during a turn is carried out as you press Enter, and its answer is a row you open with Ctrl-L. A paste or a pasted picture arriving during one of them is kept in the box like any other. While work runs, the list of commands offered when you type `/` marks each row: `now` for a
+command carried out as you press Enter, `queued` for one that waits, and `now/queued` where it depends
+on what follows the word and on what is already waiting. A `now` row reads `queued` while a line of the
+same command waits, and during a compaction or an aside asked with no turn running every row reads `queued`. Tab, or Enter on a
+half-typed word, takes the highlighted row and queues nothing.
+
+**The turn in flight is the one on the screen.** Work handed out to a [delegate](#watching-a-delegate-reading-a-command-and-asking-something-aside)
+is a turn of its own, and you may not know one is running, so what you type waits for the turn you are
+watching rather than going to the delegate. A round the parent spends waiting for a delegate is a round
+of the parent, and the boundary it reaches when the delegate is back asks like any other.
+
+Between rounds and nowhere else: a round is a set of calls the planner asked for together, so
+answering some and abandoning the rest would leave calls hanging, and mid-round the request is already
+in flight. Stopping part way is what Escape and Ctrl-C are for.
+
+**An interjection cannot change where effects may land.** Routing is settled by the prompt that began
+the turn and stays that way, so what you type mid-turn reaches the planner as words to read, and every
+effect it goes on to ask for is gated against the routing the turn started with. It is trusted, on the
+footing of the prompt that opened the turn, since a keystroke has no author but the person at the
+keyboard. The audit trail records it as your own input, so a turn that changed course halfway through
+does not read as one that thought of it unprompted.
+
+**What it carries is text.** Markers resolve to words when the line is sent, because a running turn
+fixed the shape of its context before it read anything and has no trusted slot for a file to arrive
+in. A dropped file becomes its name, which the planner can go and read through the gate it reads
+anything else through, and a pasted picture says it cannot be shown. The box and the transcript keep
+the marker, because that is what you are looking at.
+
+A waiting prompt is not in the transcript. It moves there the moment the planner is given it, whether
+that is inside the running turn or as a turn of its own. What it names is settled when it is queued, so
+a file you took off the line afterwards was never part of it.
+
+Stopping a turn leaves the queue alone: the next waiting prompt starts as it would after any turn,
+and the rest go on waiting in order.
+
+**The desktop app sends Enter into the running turn too.** The planner reads the line at the turn's next
+round boundary, as the words of your own input and under the routing the turn began with. The line is
+drawn under the box as sent to this turn and moves into the transcript when the planner is given it. A
+turn that is being stopped, a plan run (which asks nothing between rounds) and a line still unread when
+the turn ends do not take it: the line becomes a turn of its own and goes at once, ahead of anything
+queued, even when Stop has paused the queue. **Alt+Enter**, or **Queue for after**, holds the line for
+after the turn instead; that queue is the one Stop pauses and **Resume** releases. A message with a file
+chosen by the attach button, and any message sent while a bot's memory is being updated, is queued rather than sent into the turn. A turn that failed for any other reason leaves an unread line in the queue it paused.
+
+### Sending the queue now
+
+**Ctrl-Enter** queues whatever is in the box, as Enter does, then stops the running turn so that what
+is waiting goes at once. The waiting prompts go together as one turn, one to a line, carrying the
+files and pictures each of them named, and the routing for that turn is settled from all of them. It
+reaches only as far as the first slash command or shell line, which keeps its place and runs after
+that turn as it would have anyway. A prompt waiting behind that command is not given to the turn that
+starts now: it goes after the command, as its own turn. A prompt you queue after pressing it waits for a turn of its own.
+
+Only a turn is stopped this way. During a compaction, a question asked aside, a goal check or a
+manifest run, Ctrl-Enter only queues the line, and Escape is still the key that stops one. A
+[`/loop`](../reference/commands.md#loop-interval-prompt) ends when its turn is stopped, so Ctrl-Enter ends it as Escape does.
+
+While something is waiting behind a turn, the last waiting row says so. It says so only where the
+terminal reports the modifier (see Shift-Enter above), because elsewhere Ctrl-Enter arrives as Enter
+and only queues the line. There, **Up**, then **Escape**, then **Enter** gets you the same turn. With
+vi editing, from INSERT mode, that is Escape twice.
+
+### Taking the queue back
+
+**Up** puts everything waiting back into the box in one press, in the order you typed it, one to a
+line. Nothing is waiting afterwards, so the rows under the box that said so go with it. A half-typed
+line stays below them, where the caret is, and what each prompt named comes back staged with it. A
+marker in a recalled line stands for the same file or picture it stood for when it went.
+
+**Only what the planner has not been given.** A prompt the running turn has already taken is in the
+conversation, so it cannot come back. Where the turn has taken every waiting prompt, the press leaves
+the box exactly as it was.
+
+They stay in the prompt history. From your side they were sent, and taking them back does not unsay
+them.
+
+A click on a waiting prompt does the same for it and the ones typed after it
+([the mouse](transcript.md#what-a-click-does)). The prompts before it keep waiting. Clearing the box is
+what cancels what came back.
+
+With nothing waiting the key is unchanged: it walks the history, and scrolls once there is nothing
+left to walk. Inside a paragraph it moves between rows first, and reaches the queue from the top
+row the same way it reaches the history there.
+
+## Getting back a line you cleared
+
+Escape, and the first Ctrl-C when there is a line in the box, clear it in one press. The line is kept
+as a draft, and **Up** puts it in the box ahead of the newest prompt you sent. Nothing is sent, and
+**Down** goes forward to what you were typing. There is one draft: clearing another line replaces it,
+and sending any prompt drops it. It lasts for the session only, is not written to the prompt history
+and does not appear in the Ctrl-R search. A line put away with Ctrl-S is a separate slot, which a
+clear does not touch.
+
+## Suggested next prompts
+
+With [`suggestions`](../customize/configuration.md#suggestions) set to `true`, the empty box shows the
+next prompt the model expects you to type, dimmed, after a turn that ended with a reply. **Tab** or
+**Right** moves it into the box to edit; nothing sends it. Any other key removes it. It costs a
+request per turn, and none is made in plan mode or an incognito session.
+
+## Searching the prompts you have sent
+
+**Ctrl-R** opens a search over every prompt in your history, drawn over the transcript in place of the
+box, newest at the bottom and seeded with whatever single line you had already typed.
+
+| Key | What it does |
+|---|---|
+| letters | narrow the list; every word you type has to match somewhere in the prompt |
+| Up / Down | walk the matches |
+| Ctrl-S | cycle between every prompt, the ones sent from this project and the ones this session sent |
+| Enter | put the prompt under the cursor into the box |
+| Escape, Ctrl-C, Backspace past the start | close the search and leave the box as it was |
+
+In a resumed session, "this session" holds the prompts the resumed record sent and the ones you send now. A prompt such as `continue` that other sessions also stored is not counted from before the session began, and a cancelled prompt is not counted.
+
+A paste, a dropped file and a Ctrl-V for a picture do nothing while the search is open: they reach
+neither the box nor the search, and closing the search leaves the box as it was.
+
+Each row says how long ago that prompt was sent, and the one under the cursor is drawn in full beside
+the list with a word for the lines that did not fit. A terminal too narrow for two columns keeps the
+list, and a search matching nothing says so rather than showing an empty panel.
+
+**Enter puts the prompt in the box rather than sending it.** A history file can be edited, on a shared
+machine by somebody else, so the keystroke that sends a stored line is your own, after you have read
+it. The search answers while a turn is running, on the same footing as the scroller, since searching
+sends nothing.
+
+## Putting a line away
+
+**Ctrl-S** is read against the line rather than remembered. A line in the box is put away and the box
+emptied. An empty box is where a line you put away earlier comes back, with the caret at its end,
+where you carry on typing. There is one place to put a line, so a second one replaces the first, and
+a line that has come back is no longer there to come back again: the next press on the empty box it
+left has nothing to do, and says nothing.
+
+**A prompt you walked back to is the one line the key does not put away.** There it opens the prompt
+search instead, already narrowed to this workspace, on the newest match with nothing typed in. Pressing
+Up says the prompt you want is an old one, and walking one at a time is no way to reach the hundredth,
+so this is the key that takes you off that path. The history is already holding that line, so putting it
+away would store a second copy of something stored. A line you put away earlier is still there
+afterwards, and further presses of the same key from inside the search move on to this session's prompts and back to every prompt.
+
+The border of the box names this chord beside Ctrl-R while you are walking the history. Where the row
+will not hold both beside which prompt is being shown, they are given up one at a time, this one first.
+
+Nothing is sent, so a running turn refuses none of it. What a line names is settled when it is sent
+rather than when it is put away, so a file attached to a stashed line is still staged, and is named
+again when the words holding it come back.
+
+**The words travel and the mode does not.** What is put away is what you typed, and `!` is a mode
+rather than a character, so it stays where you left it. A prompt comes back into an armed shell as
+the command you are writing now, and a command comes back onto an ordinary prompt as words.
+
+A line put away says so, on one row beneath the box (one row however long the line was), and names
+the key that returns it. Where the width will not hold both, the words stay and the reminder goes:
+which line is waiting is the part only that row can tell you, and the key is in the list `?` puts up
+as well.
+
+The caret is not carried back. It belongs to an edit that has finished, and restoring it would put
+you back in the middle of a sentence you have not looked at since.
+
+:::note
+Ctrl-S is the byte a terminal traditionally freezes its output with. It reaches bravebot because the
+session turns that flow control off for as long as it holds the terminal. Behind a `tmux`, `screen`
+or `ssh` configured to keep flow control, the key can be taken before it arrives, and then it does
+nothing here. Nothing is lost when that happens, because the line stays in the box.
+:::
+
+## Moving a command to the background
+
+While the turn waits on a command, the hint line beneath the box says `ctrl-b to background`. Press it
+and the turn stops waiting: the command goes on running as a job, the model is told you moved it and
+the job's name, and the turn carries on. The model reads what it printed with `job_output` when it
+needs to. The command is not restarted and keeps everything it printed. It has no deadline once
+moved, and it still ends when the turn does. See
+[background jobs](../reference/run-tool.md#moving-a-running-command-to-the-background) for which
+lines can be moved.
+
+The hint is there only while a press would move something. A command joined to another with `&&`
+or `||`, one with a redirection such as `2>&1`, and one a delegate is running cannot be moved, and
+the hint does not appear for them.
+
+**Sending a message moves it too.** A message you send while the turn waits on a command that could
+be moved goes into the turn at its next round, and the turn reaches that round only when the command
+returns. So once the command has run for 10 seconds, the message moves it to the background as the
+key would, and the turn reads your message next. A command, such as `/clear`, or a shell line waiting
+does not move it, since those wait for the turn to end anyway.
+
+**A job stays on the screen after its block scrolls away.** For as long as the turn has a job
+running, whether you moved it or the model started it in the background, the hint line says how many,
+as in `1 in the background`, in shell mode too. Each job is one row under
+[`/outputs`](#watching-a-delegate-reading-a-command-and-asking-something-aside), made when the job
+starts and before it has printed anything. The row says `background`, leads with the job's name, and
+says whether the job is still running and for how long, or how it ended. A delegate's `job:1` and the
+turn's `job:1` are separate rows.
+[`/status`](../reference/commands.md#status) and
+[`/jobs`](../reference/commands.md#jobs-stop-name-delegate) list them. `/jobs stop job:1` stops one
+while the rest of the turn goes on, and the model is told you stopped it. When the turn ends with a
+job still running, the turn stops it, and its row says `stopped when the turn ended`.
+
+The key works from the box. In the transcript view and the scroller, Ctrl-B pages back. In the box
+it is the move key and not a word back; Alt-B and Ctrl-Left move the caret a word back.
+
+Ctrl-B is also the prefix key tmux waits for. Inside tmux, press it twice, or
+[move it](#moving-a-key) to another chord with `"background": "alt-b"`.
+
+## The rows beneath the box
+
+They run in one order, nearest the box first:
+
+1. what the line in the box carries: attached files and pictures;
+2. a line you have put away;
+3. prompts waiting for the turn in flight;
+4. what a half-typed line could still become: slash-command or `@path` completions.
+
+## Markers
+
+A folded paste, a pasted picture and a dropped file each fold to a marker in the line, like
+`[Pasted text #2 +40 lines]` or `[Image #1]`. A marker behaves as one thing:
+
+- Backspace or Delete takes the whole marker in one press, and deleting it takes the attachment off.
+- Left or Right crosses it whole; the caret never rests inside one.
+- Up and Down keep their place along the line, and where that place falls inside a marker the caret
+  comes to rest on the marker instead.
+- The caret is drawn over every cell of the marker it is on, including the part that wrapped.
+
+Square brackets you typed yourself are still deleted a character at a time.
+
+See [Adding context](context.md) for what each kind of attachment does.
+
+## Slash commands and `@path`
+
+Typing `/` offers the commands and, beneath them, the [skills](../customize/skills.md#naming-a-skill-after-a-slash)
+the session has. A command or skill typed in full is drawn in the prompt's colour, and once a space
+follows it the argument it takes appears dimly after the caret. Typing `@` opens a picker over the workspace with directories
+first: a prefix narrows it, a slash descends, Tab completes without disturbing the rest of the
+sentence, and version-control and build directories are not offered. Sending a prompt that ends in a
+half-typed reference completes it rather than sending the fragment.
+
+See [Slash commands](../reference/commands.md) and [Adding context](context.md).
+
+## Reading back
+
+Ctrl-O opens the scroller over the transcript, and Ctrl-T toggles the audit trail. See
+[Reading the transcript](transcript.md) and [The audit trail](../security/audit-trail.md).
+
+## Watching a delegate, reading a command, and asking something aside
+
+**Ctrl-L opens the whole of what a delegate did and the answer to anything you asked with
+[`/btw`](../reference/commands.md#btw-question).** Where there is more
+than one row, a list is the way in: a panel over the transcript, a row each. Where there is one, its
+own lines open directly. Where there is nothing the key does nothing, and a session that ran
+commands and no delegate has nothing for it. The row beneath the box names the key and how many rows
+it opens, for as long as the session has any.
+
+**Alt-L, or `/outputs`, opens what the commands the session ran printed**, background jobs included, in the
+same mode with the same keys. Where no command has run it says so and opens nothing. Inside the mode
+Alt-L closes it over the commands, and moves to the commands from the delegates. Ctrl-L stays the key
+for delegates and asides, and does nothing where only commands have run. Once a command
+has run, the row beneath the box names Alt-L, `/outputs` and how many rows they open, beside the key's own
+count. `outputs` is one of the [chords you can move](#moving-a-key).
+
+**Left, with nothing typed in the box, or `/sessions`, opens the [Sessions screen](./sessions-screen.md)**:
+one list of every session on the machine, in every project, with what each is doing. It opens at the
+prompt and while a turn runs, and Escape puts it away. Left is the caret's as soon as anything is typed.
+
+| Key | What it does |
+|---|---|
+| Ctrl-L | open the list of delegates and asides, and close the mode from either level |
+| Alt-L | open the commands' output; over the commands, close the mode; over the delegates, switch to the commands |
+| Enter | open the row under the cursor |
+| Up / Down | move through the list |
+| n / p | in a delegate, step to the next or previous one without going back to the list; in a command, the next or previous command |
+| x | in a delegate that is working, stop that delegate and no other: it answers with what it has and the turn goes on |
+| q, Escape | back to the list from a delegate, then out |
+| Ctrl-C | close the mode, leaving the turn in flight running |
+
+In the transcript itself, each [delegate](../how-it-works.md#delegates) gets a **block of its own**,
+where the call that started it happened, holding the last three things it did and a count of the
+rest. The turn's own lines stay clear of it, and which block a line goes in is what the driver said
+rather than what the line says, since several runs report at once and where a line arrived says
+nothing about whose it is. A delegate that has finished collapses to the sentence the turn was told
+and the report it answered with; one that could not finish answered nothing, so its block carries the
+sentence alone. A report the planner was not allowed to read is drawn in the
+[marked block](transcript.md) every quarantined result uses, so you can see which of the two it was.
+What a command printed gets the same treatment: the transcript has room for the first lines and a
+count.
+
+**Every command the turn ran is a row of the `/outputs` list**, in the order they ran, so a row's
+place does not move under you while you are stepping through it. Opening one draws what the command
+printed, as far back as is kept, and says so rather than dropping quietly where more was printed than
+was kept. Where the planner was kept from the output, every row of it carries the margin every
+quarantined block carries. The row is there whether or not the planner read what it printed, and
+says which, that being the one thing about the bytes you cannot work out from them.
+
+**A background job is one row**, made when the job starts and named `background` in the list, so
+what it printed before the move and every look the model takes afterwards are in the same place.
+Opening it says which job it is and whether it is still running, has ended, or was stopped when the
+turn ended.
+
+While a turn runs, the newest lines a running job has printed since the model last looked are drawn after the row's own lines, with a note that the model has not read them. They appear without waiting for the model to call `job_output`. They are not part of the conversation, and the next look returns every line and takes them off the row. Between turns the row shows the lines it had at the turn's last step.
+
+**A command's row says how the run ended**, with the same three marks a delegate's row carries: one
+for a run whose every step exited zero, one for a run a step failed, and the mark of work still going
+for a run stopped at [its deadline](../reference/run-tool.md#a-line-has-a-deadline). Opening
+the row says it in words beside the command, naming the step that failed and its code. A stopped run
+keeps the working mark because that is what it was doing: a server told to serve a page prints as it
+goes and never exits, so a cross beside it would say something about the program that is not true.
+The verdict comes from the exit codes and the clock, never from a line the program printed.
+
+**A question asked with `/btw` is a row too**, before the delegates and in the order
+they were asked. Opening one draws the question above the answer, and the row says whether the record
+kept the answer. It comes first because it is the only row that survives a resume: put last, every
+delegate a later turn spawned would be inserted above it and move its place.
+
+The view opens on an aside the moment it is answered, which is the one thing that opens this mode
+without your having pressed the key. You typed the question a moment ago, and an answer left behind a
+key nobody told you about is not an answer. Any other mode you opened while you waited is put away as it opens, and leaving puts the turn's own
+view back where it was.
+
+**An aside leaves the transcript alone.** Neither the question nor the answer is drawn there, and an
+answer arriving while the turn is still going is not drawn over it: the aside lives in this view and
+nowhere else.
+
+The header and the footer name which kind of thing you are looking at: a delegate by its kind and its
+number, a command by the line that ran, an aside as an aside.
+
+**The session is the first row of the list**, and choosing it closes the mode and puts the turn's
+view back where you left it. Coming back to the list from a delegate puts the cursor on that delegate
+rather than on the session, because a press of Enter should not turn into an exit.
+
+The mode takes every key, so nothing you type reaches a box you cannot see. There is no way to talk
+to a delegate: it was given one task, has nobody to ask, and takes no line typed mid-turn.
+
+**What is on the screen only moves when you ask.** A delegate finishing leaves the view on it; a
+delegate starting takes the screen from neither an older one you are reading nor a command you have
+open, and does not move the cursor in the list either. Nothing the turn reports moves an open view, and nor does anything that happens without a press: a
+queued prompt starting its turn, a loop tick coming due, a watch firing, a goal sending the work back,
+or a command line that waited being run.
+
+Escape and Ctrl-C reach this mode before they reach what is running behind it, whether that is a turn,
+a summary, an aside or the check a goal is judged by, so the press that closes the view leaves all of
+them alone and a goal armed behind a check is not touched. A command line that waited in the queue
+begins as the turn ends with the view still open, and the press that closes the view does not stop it.
+
+A delegate keeps more of its work than its block draws, and drops its oldest once it holds several
+hundred lines, so arriving late at a very long run means reading from wherever that bound has reached.
+
+**None of this reaches a model.** The planner that asked is told the report and nothing else, no
+delegate is part of the record a session is resumed from, and `/clear` forgets them and what the
+commands printed alike, so a resumed session has the reports and none of the work behind them. You
+own the directory and may see what your agent did in it. What must not happen is those lines reaching
+a planner by any route, of which a record read back into a later turn would be one.
+
+An aside is the one row written down, and it reaches no model either: the record keeps the question
+and the answer, a resume puts them back into this view, and there is no path from the record into a
+conversation.
+
+## What the session takes from your terminal
+
+Starting a session puts the terminal in raw mode and moves it to a screen of its own, so whatever was
+in the terminal beforehand is untouched and is back on the screen afterwards. With that screen the
+session asks for four things, each because something here cannot work without it:
+
+| What it asks for | What it buys |
+|---|---|
+| mouse reporting of the buttons, the wheel, and the pointer's motion with a button held and with none, with coordinates in the form that can name a column or a row past 223 (not asked for where [`tui.mouse`](../customize/configuration.md#tuimouse) is `false`) | the wheel scrolls the transcript, a drag selects text, the target under the pointer is shown, and a click at the far side of a wide screen lands where it was made |
+| bracketed paste | a pasted prompt does not send itself on the newline most clipboards carry |
+| focus reporting | the clipboard is worth a look the moment a picture appears on it, rather than polled forever |
+| disambiguated keys, where the terminal says it understands the request | Shift-Enter and Ctrl-Enter arrive at all |
+
+**Every one of those is given back**, when the session ends by failing as much as by being left, and
+again around each handover of the terminal to another program: the editor a prompt is written in and
+the viewer a transcript is read in each get the terminal as it was found. None of them is this
+program's to keep, and a mode left on outlives the process: mouse reporting turns a later click into
+unreadable bytes, and bracketed paste prints its markers into whatever is typed next.
+
+**The transcript is a viewport repainted in place, not lines added to your terminal's scrollback.**
+What leaves the top of it is reachable through [the scroller](transcript.md#the-scroller) and nothing
+else, and a screen repainted in place is not a document a screen reader can follow. What that costs is
+a mode rather than the program: [`--plain`](../reference/cli.md#--plain) is the same session in lines,
+and it gives up everything this interface draws, the scroller and its search, the key list, the slash
+commands, `@` naming a file, a picture on the clipboard, and a session record to pick up again.
+
+## Long turns
+
+**An interactive turn has no round limit.** You can see what it is doing and a stop reaches it
+mid-round. A one-shot [`-p` run](headless.md) and a manifest run do carry one, since an unwatched
+loop has nothing else to end it.
+
+Where a bound applies, reaching it costs the turn its tools rather than ending it: the planner is
+told it has none left and answers with what it has. This is a bound on futility rather than a
+safety property. A gate refuses on the thousandth round what it refuses on the first.

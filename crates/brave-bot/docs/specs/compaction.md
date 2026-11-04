@@ -1,0 +1,590 @@
+---
+id: COMPACT
+title: Compacting a conversation
+status: normative
+governs:
+  - crates/agent/src/compact.rs
+  - crates/agent/src/conversation.rs
+guards:
+  - symbol: Policy::adopt_summary
+documented-by:
+  - docs/website/docs/using/sessions.md
+  - docs/website/docs/customize/configuration.md
+---
+
+## Scope
+
+Every round re-sends the whole conversation, so a long session grows its own request until the
+server refuses it. Compaction replaces the older part of the exchange, **in the request only**,
+with a summary of it. `/compact` asks for the same thing on demand.
+
+## Why the summariser is not a processor
+
+Compaction is never routed through a processor.
+
+What licenses the call instead is that there is nothing new to read. Every message in a
+conversation has already been past the gate that decides what the planner may see: either it was
+judged trusted and shown, or what went in was a reference and the bytes stayed in quarantine. So
+the summariser's context **is** the planner's context, and its answer is labelled from that
+context exactly as the planner's own words are. Nothing is upgraded.
+
+## Clauses
+
+<a id="COMPACT-1"></a>
+### COMPACT-1: a summary is adopted only while the context is trusted
+
+Once the context has gone untrusted the summary is refused and the conversation is left exactly as
+it was. It is not quarantined instead, and it is not relabelled to get past the gate.
+
+**Why.** A reference to the planner's own history is not a history. A conversation that cannot be
+shortened stays long, which is the one outcome here that is never wrong.
+
+**This cannot happen today.** A context only becomes untrusted by resuming one that already was,
+and nothing makes one untrusted in the first place: untrusted content is quarantined rather than
+shown, and the only place the context absorbs anything is where content was trusted enough to show.
+The gate is here anyway, because what makes that closure safe to rely on is that something refuses
+if it ever stops holding. If a change ever lets untrusted bytes into the planner's context, this is
+what catches it.
+
+`verified-by: bravebot_core::policy::a_summary_of_a_trusted_conversation_is_adopted`
+`verified-by: bravebot_core::policy::a_summary_of_an_untrusted_conversation_is_refused_rather_than_adopted`
+`verified-by: bravebot_agent::turn::a_summary_of_an_untrusted_conversation_leaves_the_conversation_whole`
+`verified-by: bravebot_agent::turn::compacting_on_request_an_untrusted_conversation_is_refused_and_leaves_no_line`
+
+<a id="COMPACT-2"></a>
+### COMPACT-2: the summariser is offered no tools
+
+It is asked for text and given nothing to act with.
+
+`verified-by: bravebot_agent::turn::the_summariser_is_offered_no_tools`
+`verified-by: bravebot_agent::turn::compacting_on_request_grants_itself_nothing_but_reaching_the_model`
+
+<a id="COMPACT-3"></a>
+### COMPACT-3: three things compaction never touches
+
+The **quarantine**, which holds the only copy of what a surviving reference names; the **reference
+counter**, since slots are written once and a name handed out twice would collide; and the
+**integrity**, since nothing here has un-read what the conversation read.
+
+None of these may be relaxed to save room.
+
+`verified-by: bravebot_agent::conversation::a_reference_minted_before_compaction_still_names_its_content_after_it`
+`verified-by: bravebot_agent::conversation::compaction_does_not_rewind_the_reference_counter`
+`verified-by: bravebot_agent::conversation::compaction_does_not_restore_integrity_the_conversation_had_lost`
+
+<a id="COMPACT-4"></a>
+### COMPACT-4: the cut never lands inside a round
+
+A call is never separated from its results, and a round in progress is not a place to cut. Whole
+exchanges are given up first, since the boundary between two of them is the one a person would
+draw. A turn that has gone long by itself has no earlier exchange to give, because it adds one
+prompt however many rounds follow, so it gives up earlier **rounds** instead.
+
+**Why.** A cut between a call and its results leaves the head saying the call never ran and the
+tail holding an answer to a call that is not there.
+
+`verified-by: bravebot_agent::conversation::compaction_never_separates_a_call_from_its_results`
+`verified-by: bravebot_agent::conversation::a_round_in_progress_is_never_a_place_to_cut`
+`verified-by: bravebot_agent::conversation::a_prose_shaped_round_is_as_indivisible_as_an_api_shaped_one`
+`verified-by: bravebot_agent::conversation::compaction_keeps_the_most_recent_exchanges_word_for_word`
+`verified-by: bravebot_agent::turn::a_long_turn_summarises_its_earlier_rounds_partway_through`
+
+<a id="COMPACT-5"></a>
+### COMPACT-5: a cut must give up at least as much as it keeps
+
+Summarising costs a model call, and a request has a floor it cannot go below: the system prompt and
+the tool schemas. A budget under that floor is unreachable however much history is given up, so a
+cut that would not free more than it retains is not made at all.
+
+**Why.** Without it, a turn in that position summarises itself once per round for the rest of its
+life and shortens nothing. Measured at 35 summaries in a turn that should have made none. Never
+relax this to compact sooner.
+
+"At least as much" is measured twice: in exchanges (or rounds), and in bytes of what each side
+holds. A count alone cannot tell a few repeated one-line prompts from eighty thousand tokens of file
+reads, so a cut that gives up two short prompts and keeps the reads is not made, and the round cut
+is tried instead.
+
+A skill the cut would send again ([COMPACT-17](#COMPACT-17)) counts as kept, since it takes the
+place of what was given up.
+
+`verified-by: bravebot_agent::conversation::a_cut_that_would_give_up_less_than_it_keeps_is_not_worth_a_request`
+`verified-by: bravebot_agent::conversation::a_long_turn_does_not_summarise_itself_once_per_round`
+`verified-by: bravebot_agent::conversation::a_cut_that_frees_a_few_bytes_and_keeps_huge_reads_is_not_made`
+`verified-by: bravebot_agent::conversation::a_cut_that_frees_more_than_it_keeps_is_still_made_after_a_large_exchange_is_given_up`
+`verified-by: bravebot_agent::conversation::a_head_that_is_only_an_earlier_summary_is_not_compacted_again`
+`verified-by: bravebot_agent::conversation::compacting_forgets_a_measurement_of_the_conversation_it_replaced`
+`verified-by: bravebot_agent::conversation::a_conversation_with_nothing_but_recent_exchanges_is_not_compacted`
+`verified-by: bravebot_agent::turn::a_conversation_nobody_has_measured_is_not_compacted`
+`verified-by: bravebot_agent::conversation::a_cut_that_brings_back_skills_must_give_up_enough_to_pay_for_them`
+
+<a id="COMPACT-6"></a>
+### COMPACT-6: the request is shortened, never the record
+
+The replaced messages go to an archive the transcript still reads and the session record still
+stores. The user owns their transcript; compaction is about what gets sent.
+
+`verified-by: bravebot_agent::conversation::what_compaction_took_out_of_the_request_is_still_recounted_to_the_person`
+`verified-by: bravebot_agent::conversation::a_compacted_conversation_survives_being_written_down`
+`verified-by: bravebot_agent::conversation::the_summary_is_not_shown_as_something_the_user_said`
+
+<a id="COMPACT-7"></a>
+### COMPACT-7: the budget is configurable, and a nonsensical one falls back
+
+A budget that makes no sense falls back to the default rather than disabling compaction, so a
+misconfiguration cannot quietly turn the mechanism off.
+
+`verified-by: bravebot_config::lib::the_context_budget_has_a_default`
+`verified-by: bravebot_config::lib::the_context_budget_can_be_overridden`
+`verified-by: bravebot_config::lib::a_budget_that_makes_no_sense_falls_back_rather_than_disabling_compaction`
+`verified-by: bravebot_agent::turn::a_conversation_past_the_budget_is_summarised_before_the_next_request`
+`verified-by: bravebot_agent::turn::compacting_on_request_reaches_the_model_and_shortens_the_conversation`
+
+<a id="COMPACT-8"></a>
+### COMPACT-8: compaction is tried before a request whose conversation is already over budget
+
+The figure compared is what the server said the **last** round's request came to, so the check is
+one round late by construction and the budget has to sit below the window rather than at it. A
+turn that has not measured anything yet compacts nothing: there is no figure to compare, and a
+guess would be one.
+
+It is tried before every round that qualifies, not once per turn. Ordinarily there is nothing
+worth cutting and nothing is sent, which costs nothing and says nothing. Only a summariser that
+**failed** stops it being tried again for the rest of the turn, because a call that errored once
+is not free to repeat.
+
+`/compact` asks for the same work on demand, at any size, and does not consult the budget.
+
+**Why the default sits well below any real window.** A budget above the window never fires, so
+being wrong upward does not make compaction late, it removes it. The default was once set above
+anything the backend serves and sessions ran to exhaustion having never been summarised. A default
+is therefore checked against the smallest window worth using rather than chosen to be generous.
+Where the endpoint advertises a window for the model in use, that is used instead, so the default is
+a fallback rather than the usual case: see COMPACT-9.
+
+`verified-by: bravebot_agent::turn::a_conversation_past_the_budget_is_summarised_before_the_next_request`
+`verified-by: bravebot_agent::turn::a_conversation_nobody_has_measured_is_not_compacted`
+`verified-by: bravebot_agent::conversation::a_long_turn_does_not_summarise_itself_once_per_round`
+`verified-by: bravebot_agent::turn::a_conversation_with_older_exchanges_and_no_measurement_is_not_compacted`
+`verified-by: bravebot_agent::turn::a_summariser_that_failed_is_not_asked_again_for_the_rest_of_the_turn`
+`verified-by: bravebot_agent::turn::a_turn_is_summarised_more_than_once_as_the_rounds_build_up`
+`verified-by: by-construction (the default budget is asserted below the smallest useful window at compile time)`
+
+<a id="COMPACT-9"></a>
+### COMPACT-9: the budget is the window the endpoint advertises, where it advertises one
+
+`GET /v1/models` reports a figure per model, and it is used as the budget for whichever model the
+person chose. The default only stands in: for `automatic-bravebot`, whose model is resolved per
+request so no one window describes it, and for an entry that reports nothing. A budget set by hand
+outranks both.
+A figure the endpoint advertises is believed even where it is small, and never raised toward
+something more comfortable.
+
+**The window is looked up whenever a model is in force, not only when one is picked.** A choice
+outlives the session that made it, and nothing on disk remembers the window that came with it, so a
+session starting on a model chosen earlier asks the endpoint again. A listing that cannot be fetched
+leaves the default in place and says nothing: a session that is merely offline should not open with a
+complaint about a request nobody asked for. The window found at a start is taken without a note,
+since nothing was chosen to announce; the window of a model a person picks is said when it changes
+the budget.
+
+**Why.** The default was a single constant standing in for a figure that varies across the roster by
+a factor of thirty. Sessions compacted at 24,000 tokens against a model advertising 102,400, giving
+up three quarters of the conversation it could have held, while models advertising 6,400 had a budget
+their window could never reach, so compaction could not fire for them at all. One number cannot be
+right for both.
+
+**On the unit.** The field is named `long_conversation_warning_character_limit` and holds **tokens**.
+The endpoint computes it as `conversation_token_limit * 0.8`, so it is a token count with a fifth
+already held back for the reply, and it is usable as a budget with no conversion. Reading the name
+literally and dividing by a characters-per-token estimate would compact roughly four times sooner
+than necessary, which is a mistake this project made before measuring the endpoint.
+
+`verified-by: bravebot_aichat::models::the_advertised_window_is_kept_as_tokens`
+`verified-by: bravebot_aichat::models::an_entry_that_advertises_no_window_reports_none`
+`verified-by: bravebot_aichat::models::the_placeholder_window_is_read_as_nothing_said`
+`verified-by: bravebot_aichat::models::automatic_advertises_no_window`
+`verified-by: bravebot_config::lib::an_advertised_window_replaces_the_default`
+`verified-by: bravebot_config::lib::a_small_advertised_window_is_believed_rather_than_raised`
+`verified-by: bravebot_config::lib::the_placeholder_window_is_not_adopted`
+`verified-by: bravebot_config::lib::nothing_advertised_leaves_the_default_alone`
+`verified-by: bravebot_config::lib::a_budget_set_by_hand_is_not_replaced_by_an_advertised_one`
+`verified-by: bravebot_config::lib::adopting_the_budget_already_in_use_reports_no_change`
+`verified-by: bravebot_config::lib::a_window_nobody_advertised_puts_the_default_back_in_place_of_an_adopted_budget`
+`verified-by: bravebot_config::lib::a_window_nobody_advertised_leaves_a_budget_set_by_hand_alone`
+`verified-by: bravebot_tui::app::the_window_of_a_model_chosen_earlier_is_found_in_the_listing`
+`verified-by: bravebot_tui::app::nothing_chosen_has_no_advertised_window`
+`verified-by: bravebot_tui::app::a_model_the_listing_no_longer_offers_has_no_window`
+`verified-by: bravebot_tui::app::a_model_that_advertises_nothing_has_no_window`
+`verified-by: bravebot_tui::app::a_run_with_no_session_adopts_the_window_of_the_model_in_force`
+`verified-by: bravebot_tui::app::a_run_whose_model_no_roster_describes_keeps_the_default`
+`verified-by: bravebot_tui::app::a_start_adopts_an_advertised_window_without_a_note_and_a_pick_says_it`
+
+<a id="COMPACT-10"></a>
+### COMPACT-10: every compaction is recorded, with what it gave up and where it happened
+
+The trail says how many messages were summarised, how many were kept word for word, what the
+summary cost, and which tool-calling round it landed on. A compaction asked for between rounds
+reports round zero, having interrupted nothing. Counts and nothing else, so the trail carries no
+more content than it did before.
+
+Recorded after the conversation is shortened, so a summary refused on the way back in leaves no
+line claiming one was made.
+
+**Why.** A compaction is the point a session stops being able to remember what it did, and it is
+read back afterwards to ask exactly two things: where that happened, and whether it helped. A
+record saying only that a summary was adopted answers neither, since one that gave up ninety
+messages and one that gave up three read identically. The round matters most for a compaction the
+budget forced, which lands in the middle of a turn's work: a timestamp says when in the session, and
+only the round says how far into the work.
+
+`verified-by: bravebot_agent::turn::the_trail_says_what_a_compaction_gave_up_and_what_it_cost`
+`verified-by: bravebot_agent::turn::the_trail_says_which_round_a_compaction_landed_on`
+`verified-by: bravebot_agent::turn::compacting_on_request_an_untrusted_conversation_is_refused_and_leaves_no_line`
+
+<a id="COMPACT-11"></a>
+### COMPACT-11: the summariser asks for no cache of the exchange it gives up
+
+The summariser's request marks its own instructions for caching and marks nothing on the end of the
+exchange it carries. Both wire formats a backend speaks are told the same thing, so which service
+answers does not change what is asked for.
+
+**Why.** A cache write is charged above the fresh tokens it covers, and it buys something only where
+a later request sends the same prefix again. Nothing sends this prefix again: the request opens with
+instructions no other request uses, ends with an instruction of its own, and the exchange between
+them is about to be replaced. It is also among the longest prefixes a session sends, being the
+conversation down to the cut, so marking the end of it pays the premium where it costs most and buys
+a cache nothing can read.
+
+**The instructions keep their mark, for the ordinary reason.** They are the same bytes every time a
+summary is asked for, which is what marking a prompt is for. Nothing here rests on a service storing
+them: these instructions are a few hundred tokens, short enough that a service with a minimum
+cacheable prefix stores nothing at all, so the mark buys a read where one is offered and costs a
+write at most where it is not.
+
+**Marking the end is the default a request opts out of.** The arithmetic is the other way round for
+the rounds of a turn, each of which sends the round before it again, and that is the case the default
+is written for. This is a request that says otherwise.
+
+`verified-by: bravebot_agent::turn::the_summariser_asks_for_no_cache_of_the_exchange_it_gives_up`
+`verified-by: bravebot_aichat::protocol::a_request_giving_up_its_conversation_marks_the_prompt_alone`
+`verified-by: bravebot_bedrock::protocol::a_request_giving_up_its_conversation_keeps_the_prompts_breakpoint_alone`
+`verified-by: bravebot_bedrock::lib::a_request_giving_up_its_conversation_sends_no_breakpoint_on_the_end_of_it`
+
+<a id="COMPACT-12"></a>
+### COMPACT-12: what a compaction costs the cache is the conversation
+
+A compaction rewrites the conversation and rewrites nothing of the system prompt or the tool schemas,
+so the round that follows one inside the same turn sends that prefix byte for byte and reads it back.
+Nothing of the conversation is read back, and that round pays a write to establish the shortened one.
+When a compaction happens is COMPACT-8's: the figure it compares is what the last request measured,
+and what a cache holds is no part of it.
+
+**Inside the turn, and nothing claimed past it.** A turn assembles its prompt and its tool schemas
+once and every round of it sends the same ones, which is what makes the round after a compaction
+comparable with the round before. A prompt assembled for a later turn can differ for reasons a
+compaction has no part in, among them the date, a tick's number under a loop, and an instruction file
+re-read from disk; and a turn that has spent its tool budget sends no schemas at all from then on.
+
+**Why it is stated rather than worked out.** A request marks two prefixes and a compaction rewrites
+one of them, so taking the pair as a unit gives the wrong answer twice: it reads as though a
+compaction cost the prompt's cache as well, which makes compacting look more expensive than it is,
+and it leaves a reader expecting the conversation's cache to survive a rewrite of the conversation.
+
+**Why the write is paid rather than avoided.** The alternative is holding a compaction back to keep a
+prefix warm, which trades a request the server will refuse for one cache read. A conversation that
+cannot be shortened stays long, and that is the outcome this document is here to prevent.
+
+`verified-by: bravebot_agent::turn::a_compaction_leaves_the_prompt_a_breakpoint_covers_alone`
+
+<a id="COMPACT-13"></a>
+### COMPACT-13: a person may say what the summary must keep, and the trail records that they did
+
+`/compact [focus]` takes what follows the space as the focus, verbatim, as the command rules in commands.md have it, and the
+summariser is told it on the closing instruction, after the exchange. The system prompt is not
+touched, so the instructions COMPACT-11 marks for caching stay the same bytes. Nothing else about
+the request changes: no tools (COMPACT-2), and a summary adopted only while the context is trusted
+(COMPACT-1).
+
+The focus is typed by the person, so it is trusted text and carries no label beyond their own, as a
+prompt does. A compaction the budget forces has no person to ask and carries none.
+
+The COMPACT-10 line says a focus was given and how many characters it was, and not the words, so
+the trail still carries no more content than it did. A compaction with no focus says nothing of one.
+
+**Why.** A person about to switch to another part of the task knows which facts must survive, and
+the summariser does not. Without the argument they find out what was dropped on the next turn.
+
+`verified-by: bravebot_agent::turn::a_focus_typed_after_compact_reaches_the_summariser_after_the_exchange`
+`verified-by: bravebot_agent::turn::the_trail_records_that_a_focus_was_given_and_never_its_words`
+`verified-by: bravebot_tui::app::the_compact_command_carries_its_focus_verbatim`
+`verified-by: bravebot_tui::app::a_word_longer_than_compact_is_still_a_prompt`
+`verified-by: bravebot_tui::render::the_compact_command_offers_a_focus_after_its_word`
+
+<a id="COMPACT-14"></a>
+### COMPACT-14: a request refused as written is answered with one compaction and sent again
+
+When a round's request comes back with a status a service uses to refuse the body (400 or 422), and
+a cut COMPACT-4 and COMPACT-5 would make exists, the turn compacts once, as COMPACT-8 would have, and
+sends the same request again. Once a turn: the second refusal is returned as the turn's error,
+unchanged, and compacts nothing. Where there is nothing to cut, the refusal is the turn's error,
+unchanged, and no summary is asked for.
+
+The inputs are the status and the driver's own measurement of the conversation, which is what
+COMPACT-5 decides on. The reply's body is never read, because it is bytes a remote service wrote and
+the driver does not branch on those. A 400 from the ChatGPT account whose body names a model the account
+does not offer is not answered with a compaction: the client that sent the request compares one field of
+the body with that one code and hands the driver the refusal of the model
+([CHATGPT-8](chatgpt-sign-in.md#CHATGPT-8)), not a status, so the driver reads no body and no summary is
+asked for.
+
+**Why a status is enough here, and is not enough elsewhere.** 400 and 422 are what a prompt too long
+and a field the service dislikes both come back as (backends.md, Known costs), so nothing about the
+cause is concluded. What a wrong guess costs is one summariser call, which COMPACT-5 bounds, and the
+refusal is then returned as the turn's error. The retry records nothing about breakpoints or effort levels:
+those probes learn from a refusal that a request without the field survives, and this refusal says
+nothing about a field.
+
+COMPACT-1 and COMPACT-6 apply to this summary as to any other: it is adopted only while the context
+is trusted, and the record keeps what the request gave up. A summariser that failed earlier in the turn is not tried
+again, as in COMPACT-8.
+
+`verified-by: bravebot_agent::turn::a_request_refused_as_too_large_is_sent_again_after_one_compaction`
+`verified-by: bravebot_agent::turn::a_second_refusal_is_reported_and_compacts_nothing_more`
+`verified-by: bravebot_agent::turn::a_refusal_with_nothing_to_cut_is_reported_without_a_summary`
+`verified-by: bravebot_agent::turn::a_refusal_after_a_failed_summary_is_reported_without_asking_for_another`
+`verified-by: bravebot_agent::backend::only_a_400_or_a_422_is_a_refusal_of_the_body`
+`verified-by: bravebot_agent::backend::a_refusal_of_the_account_is_not_a_refusal_of_the_body`
+
+<a id="COMPACT-15"></a>
+### COMPACT-15: the `summaryModel` setting names the model a summary runs on
+
+`summaryModel` holds one model name. The summariser runs on it, and on the session's own model
+where the key names nothing. A tier word in it resolves as it does for `model`. The key is read from
+`~/.bravebot/settings.json` and from the file `--settings` names, and from no project or local layer
+([BACKEND-24](backends.md#BACKEND-24)): the model it names is sent the conversation, which makes it
+a destination, so a layer that names it is dropped and `doctor` names the file.
+
+A model needing a sign-in this machine has not made refuses the compaction, which leaves the
+conversation exactly as it was, as every other refusal here does. It is not replaced by the
+session's model. A model the machine-level layer excludes is refused on the same terms: a model that
+layer rules out is requested by no route, and a key in a person's own file is a route, so this one
+asks before it sends rather than leaving an administrator's exclusion to the request. A name no
+configured service answers for is refused too, by the same question `model` and the advisor are put:
+sent anyway, it reaches a service that answers without the exchange, and a summary or a verdict
+written from nothing reads as an answer rather than as a failure.
+
+**Why refuse rather than fall back.** A cheaper model is a cost boundary. A summary quietly sent to
+the session's model instead spends the rate the person named this key to avoid, on the longest
+prefix a session sends.
+
+**What does not change with the model.** The labelling is the summariser's context, which is the
+planner's context ([COMPACT-1](#COMPACT-1)), so the model that answers does not enter into it. The
+summariser is still offered no tools ([COMPACT-2](#COMPACT-2)), and the budget is still measured
+against the window of the planner's model rather than this one
+([COMPACT-9](#COMPACT-9)).
+
+`verified-by: bravebot_config::settings::a_project_layer_cannot_name_the_summary_model`
+`verified-by: bravebot_config::lib::the_summary_setting_resolves_a_tier_word_and_is_absent_when_unset`
+`verified-by: bravebot_agent::turn::a_compaction_runs_on_the_summary_model_the_settings_name`
+`verified-by: bravebot_agent::turn::a_compaction_with_no_summary_model_runs_on_the_sessions_own`
+`verified-by: bravebot_agent::turn::a_summary_model_needing_a_sign_in_refuses_the_compaction_and_leaves_the_conversation_whole`
+`verified-by: bravebot_agent::compact::a_summary_model_the_machine_refuses_is_not_the_one_a_side_request_runs_on`
+`verified-by: bravebot_agent::compact::a_summary_model_nothing_serves_is_named_in_the_refusal_it_causes`
+`verified-by: bravebot_agent::compact::a_summary_model_no_configured_service_answers_for_is_refused_rather_than_sent`
+`verified-by: bravebot_agent::turn::a_summary_model_the_machine_excludes_refuses_the_compaction_and_leaves_the_conversation_whole`
+`verified-by: bravebot_cli::running::doctor_names_the_file_of_a_checkouts_summary_model_that_is_not_obeyed`
+
+<a id="COMPACT-16"></a>
+### COMPACT-16: the planner's latest task list is sent again after the summary
+
+When a compaction takes out of the request the result of the planner's latest accepted `todo_write`,
+the summary message ends with that list, word for word, as the tool result returned it. A list in
+the part that is kept is sent as it was and is not repeated. A `todo_write` that was refused, or
+whose result the planner was not shown, is not the latest list. A compaction asked for when no list
+was written adds nothing. The copy is carried through later compactions until the planner writes a
+newer list.
+
+The list is the planner's own output and is already in its context, so it comes back at the label of
+the context it came from, and only while the summary is adopted ([COMPACT-1](#COMPACT-1)). The driver
+records which message holds the list from the name of the tool the planner called and branches on
+nothing inside it. The summariser has no tools ([COMPACT-2](#COMPACT-2)) and does not produce it.
+
+**Why.** A summary describes finished and unstarted work in prose, which loses the exact steps and
+their order in the middle of a turn, when the list matters most.
+
+**Not kept across a resume.** The position of the list is not written to the session record, so a
+resumed session carries a list forward only from the next `todo_write`.
+
+`verified-by: bravebot_agent::conversation::a_task_list_written_before_the_cut_is_in_the_request_after_it`
+`verified-by: bravebot_agent::conversation::a_conversation_with_no_task_list_gains_none_from_a_compaction`
+`verified-by: bravebot_agent::conversation::a_task_list_the_cut_leaves_in_place_is_not_sent_twice`
+`verified-by: bravebot_agent::conversation::the_carried_list_survives_a_second_compaction_until_a_newer_one_replaces_it`
+`verified-by: bravebot_agent::turn::a_task_list_the_summary_replaced_is_sent_again_after_the_cut`
+`verified-by: bravebot_agent::turn::a_compaction_adds_no_task_list_where_the_planner_never_wrote_one`
+
+<a id="COMPACT-17"></a>
+### COMPACT-17: a skill the planner loaded is sent again after the summary
+
+A summary of a skill's instructions is not the instructions. The newest load of each skill whose
+result was shown to the planner before the cut is sent again as a message after the summary, in the
+skill's own words, so a skill stays in force through the compaction that replaced the result which
+carried it. A skill loaded again in the part the cut keeps is not sent twice.
+
+**What is found, and from what.** A result that `load_skill` produced and `Policy::present` showed
+is recorded with the name the catalogue gave the skill, not the name in the call's arguments and not
+anything in the skill's text. A result that went to quarantine is not recorded, and a refused or
+misspelled load has no skill to record. A compaction reads that record and the role of the message,
+and reads no word of the conversation to decide. It looks in the archive as well as the part being
+replaced, so a skill carried across one compaction is carried across the next from the result it
+was made from rather than from a copy of a copy.
+
+**Bounded.** The first 5,000 tokens of any one skill are sent, and 25,000 tokens across all of them,
+served newest first. The count is four bytes a token, because nothing here has a tokeniser. What is
+left out is said to the planner, with the call that reads the rest.
+
+**A skill the person named.** A skill its file keeps from the planner is put in front of the planner
+for the line that named it, with no call and no result ([SKILL-20](skills.md#SKILL-20)). It is found by
+its tag, as a loaded skill is, and sent again the same way, in its own words and without the driver's
+sentence that introduced it. Where it is cut, the planner is told only the person can have the rest
+loaded and is not told to call `load_skill`, which is refused for such a skill.
+
+**What it does not change.** The words around the skill are the driver's and the skill is the text
+the planner was already shown, so nothing enters the request that was not past the gate
+([COMPACT-1](#COMPACT-1)). The quarantine, the counter and the integrity are untouched
+([COMPACT-3](#COMPACT-3)). The result stays in the archive and the record, and a carried skill is
+drawn in no transcript ([COMPACT-6](#COMPACT-6)). No cut falls in front of a carried skill, and each one
+the cut would send counts as kept for [COMPACT-5](#COMPACT-5). A fork cut inside the archive leaves
+the copies out, since the results they repeat come back with it.
+
+**Not covered.** A result sent as prose, which is the fallback for a round whose calls carried no
+ids, is not recorded and is summarised like any other message.
+
+**Why.** A summary paraphrases or drops the instructions, so without this the planner stops
+following them once the result is replaced, and nothing tells it or the user.
+
+`verified-by: bravebot_agent::conversation::a_skill_loaded_before_a_cut_is_sent_again_word_for_word_after_it`
+`verified-by: bravebot_agent::conversation::a_skill_loaded_twice_is_sent_once_from_its_newer_load`
+`verified-by: bravebot_agent::conversation::a_skill_loaded_again_in_the_part_that_is_kept_is_not_sent_a_second_time`
+`verified-by: bravebot_agent::conversation::one_long_skill_is_cut_to_its_share_and_the_planner_is_told`
+`verified-by: bravebot_agent::conversation::skills_share_a_limit_and_the_newest_loads_are_served_first`
+`verified-by: bravebot_agent::conversation::a_carried_skill_is_neither_a_place_to_cut_nor_summarised_by_the_next_compaction`
+`verified-by: bravebot_agent::turn::a_skill_from_an_untrusted_project_is_not_sent_again_when_the_conversation_is_compacted`
+`verified-by: bravebot_agent::conversation::a_long_turn_is_not_cut_for_the_skills_it_carried`
+`verified-by: bravebot_agent::conversation::a_kept_read_follows_its_message_past_the_skills_a_compaction_carries`
+`verified-by: bravebot_agent::conversation::a_skill_survives_being_written_down_and_read_back`
+`verified-by: bravebot_agent::conversation::a_skill_cut_inside_a_character_is_cut_before_it`
+`verified-by: bravebot_agent::conversation::skills_the_cap_leaves_out_do_not_raise_what_a_cut_must_give_up`
+`verified-by: bravebot_agent::conversation::a_kept_task_list_is_still_found_after_a_compaction_carries_skills`
+`verified-by: bravebot_agent::conversation::a_carried_copy_of_a_skill_loaded_again_is_not_an_exchange_given_up`
+`verified-by: bravebot_agent::conversation::a_carried_copy_of_a_skill_loaded_again_is_not_a_round_given_up`
+`verified-by: bravebot_agent::conversation::a_skill_tag_on_anything_but_a_tool_result_carries_nothing`
+`verified-by: bravebot_agent::conversation::a_skill_is_not_drawn_as_something_the_user_said`
+`verified-by: bravebot_ui_bridge::fork::a_fork_inside_the_archive_leaves_out_the_skills_a_compaction_sent_again`
+`verified-by: bravebot_agent::turn::a_skill_the_planner_was_shown_is_tagged_and_a_refused_load_is_not`
+`verified-by: bravebot_agent::turn::a_skill_loaded_in_a_turn_is_sent_again_when_that_conversation_is_compacted`
+`verified-by: bravebot_agent::conversation::a_skill_the_person_named_is_sent_again_word_for_word_after_a_cut`
+`verified-by: bravebot_agent::conversation::a_skill_the_person_named_survives_being_written_down_and_a_second_cut`
+`verified-by: bravebot_agent::conversation::the_cut_of_a_skill_says_who_can_read_the_rest`
+`verified-by: bravebot_agent::conversation::a_cut_never_falls_in_front_of_a_skill_the_person_named`
+
+<a id="COMPACT-18"></a>
+### COMPACT-18: old tool results are dropped from the request before a summary is asked for
+
+When the budget says to compact ([COMPACT-8](#COMPACT-8)), the results of tool calls older than the
+recent part of the conversation are first sent as a stub, and a summary is asked for only if the
+conversation is still over the budget. "Older" is before the start of the last two exchanges or of
+the last six rounds, whichever is later, which are the points [COMPACT-4](#COMPACT-4) cuts at. The
+step is made only when it frees at least a fixed floor, about 4,000 tokens, so a rewrite of the
+request that gains little is not made ([COMPACT-5](#COMPACT-5)). Nothing has measured the shortened
+request, so the figure compared is lowered by the bytes dropped at four to a token, which is the
+estimate used elsewhere in this file and errs towards summarising.
+
+The stub is a fixed sentence with the tool's name and the size dropped, and nothing of the result:
+no prefix, no excerpt. The decision uses the role, the tag, the position and the length of the
+message, so the driver branches on nothing a result says. The name is the planner's own call or the
+driver's own prefix, and is repeated only if it is made of the characters a tool name is made of. A
+result shorter than about 500 tokens stays, which keeps every reference to quarantined content
+([COMPACT-3](#COMPACT-3)), and so does the planner's latest task list ([COMPACT-16](#COMPACT-16)).
+A skill, a message to another session and a vetted answer are not plain results and are not
+touched.
+
+The message stays, with the stub as its body, so a call is never separated from its result
+([COMPACT-4](#COMPACT-4)). The request is shortened and the record is not ([COMPACT-6](#COMPACT-6)):
+the stored messages, the transcript and the session file hold the whole result. A window of a file
+whose result was dropped is no longer recorded as shown, so reading it again sends its lines. A
+summary asked for afterwards is written from the request as sent.
+
+**Why.** A result the planner has already acted on is the bulk of a long session, and a summary
+that gives it up also gives up what the person said and decided. Dropping it first needs no model
+call.
+
+**Not recorded.** The step writes no line to the trail and no narration. The request view shows the
+stubs.
+
+`verified-by: bravebot_agent::conversation::an_old_tool_result_is_a_stub_in_the_request_and_whole_in_the_record`
+`verified-by: bravebot_agent::conversation::a_tool_result_in_the_recent_exchanges_is_left_alone`
+`verified-by: bravebot_agent::conversation::dropping_results_that_free_too_little_is_not_done`
+`verified-by: bravebot_agent::conversation::a_short_result_is_kept_however_old`
+`verified-by: bravebot_agent::conversation::the_planners_latest_task_list_is_not_dropped`
+`verified-by: bravebot_agent::conversation::a_read_whose_result_was_dropped_is_forgotten`
+`verified-by: bravebot_agent::conversation::a_prose_shaped_result_is_dropped_the_same_way`
+`verified-by: bravebot_agent::conversation::the_stub_repeats_nothing_but_a_well_formed_tool_name`
+`verified-by: bravebot_agent::conversation::results_already_dropped_are_not_dropped_again`
+`verified-by: bravebot_agent::conversation::a_compaction_moves_the_line_with_the_messages`
+`verified-by: bravebot_agent::conversation::a_cut_is_judged_on_what_the_request_holds`
+`verified-by: bravebot_agent::turn::old_tool_results_are_dropped_before_a_summary_is_asked_for`
+
+<a id="COMPACT-19"></a>
+### COMPACT-19: a delegate's task is sent again after the summary
+
+A delegate's conversation is its task and the rounds it has worked, so a cut by round gives the
+task up. When a compaction takes the task out of the request, the summary message ends with it,
+byte for byte as the kernel gave it to the delegate: no trimming, no truncation, no paraphrase and
+no cap on its size. The task is the whole of what the delegate was told ([AGENT-2](tools/spawn-agent.md#AGENT-2)),
+and the delegate has no tool that brings it back. A task in the part that is kept is sent as it was
+and is not repeated. The copy is carried through later compactions and is in the request once.
+
+The task is the text the kernel gave the delegate, so it comes back at the label of the context it
+came from, and only while the summary is adopted ([COMPACT-1](#COMPACT-1)). The driver records
+which message holds the task when the turn is a delegate's and branches on nothing inside it. The
+summariser has no tools ([COMPACT-2](#COMPACT-2)) and does not produce it. The copy counts as kept
+for [COMPACT-5](#COMPACT-5), so a task larger than what a cut would free makes no cut. The result
+stays in the archive and the record, and the copy is drawn in no transcript
+([COMPACT-6](#COMPACT-6)). The quarantine, the counter and the integrity are untouched
+([COMPACT-3](#COMPACT-3)).
+
+A turn that is not a delegate's records no task, and its opening prompt is left to the summary. `/compact` and the compaction of a request the server refused ([COMPACT-14](#COMPACT-14))
+end in the same step as the compaction in the middle of a turn, so they send the task again the
+same way. Masking old tool results ([COMPACT-18](#COMPACT-18)) leaves the task and its copy whole,
+since neither is a tool result.
+
+**Not covered.** The other messages a delegate's opening pushes around the task, such as context
+files and a skills overview, are summarised like any other message.
+
+**Not kept across a resume.** A delegate's conversation is not written to the session record, and
+the position of the task is not part of a snapshot.
+
+**Why.** A summary lists what was started and drops what was not, so without this a delegate
+given four items goes on with the first and nothing tells it or the person that the rest are gone.
+
+`verified-by: bravebot_agent::conversation::a_delegates_task_is_in_the_request_after_the_cut_byte_for_byte`
+`verified-by: bravebot_agent::conversation::the_carried_task_survives_a_second_compaction_once`
+`verified-by: bravebot_agent::conversation::a_task_the_cut_leaves_in_place_is_not_sent_again`
+`verified-by: bravebot_agent::conversation::a_conversation_that_never_recorded_a_task_gains_none`
+`verified-by: bravebot_agent::conversation::a_task_not_at_the_start_is_found_by_its_position`
+`verified-by: bravebot_agent::conversation::a_carried_task_counts_as_kept_for_the_cut`
+`verified-by: bravebot_agent::conversation::a_carried_task_is_one_more_message_kept_whatever_it_weighs`
+`verified-by: bravebot_agent::conversation::a_large_carried_task_delays_the_next_cut`
+`verified-by: bravebot_agent::conversation::the_carried_task_is_not_a_place_to_cut`
+`verified-by: bravebot_agent::conversation::the_carried_task_rides_in_the_summary_note_and_is_attributed_as_one`
+`verified-by: bravebot_agent::conversation::the_carried_task_is_in_the_archive_and_not_drawn_twice`
+`verified-by: bravebot_agent::conversation::carrying_a_task_leaves_the_quarantine_the_counter_and_the_integrity_alone`
+`verified-by: bravebot_agent::conversation::masking_old_results_leaves_the_task_and_its_carried_copy_whole`
+`verified-by: bravebot_agent::conversation::a_carried_task_is_not_dropped_with_the_old_tool_results`
+`verified-by: bravebot_agent::conversation::a_task_past_the_size_of_a_skill_is_carried_whole`
+`verified-by: bravebot_agent::conversation::a_restored_conversation_carries_no_task`
+`verified-by: bravebot_agent::turn::a_delegates_requests_after_a_compaction_still_hold_its_task_once`
+`verified-by: bravebot_agent::turn::a_fan_out_delegate_keeps_the_shared_task_and_its_entry_through_a_compaction`
+`verified-by: bravebot_agent::turn::a_turns_own_prompt_is_not_sent_again_after_a_compaction`
+`verified-by: bravebot_agent::turn::a_manual_compaction_sends_the_recorded_task_again`

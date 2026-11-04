@@ -1,0 +1,752 @@
+---
+id: WATCH
+title: Seeing what happened outside the transcript
+status: normative
+governs:
+  - crates/tui/src/state.rs
+  - crates/tui/src/state/queue.rs
+  - crates/tui/src/state/entry.rs
+  - crates/tui/src/state/standing.rs
+  - crates/tui/src/state/watching.rs
+  - crates/tui/src/render.rs
+  - crates/tui/src/render/watching.rs
+  - crates/tui/src/render/transcript.rs
+  - crates/tui/src/render/prompt.rs
+  - crates/tui/src/render/beneath.rs
+  - crates/tui/src/render/hint.rs
+  - crates/tui/src/app.rs
+  - crates/tui/src/app/side_requests.rs
+  - crates/tui/src/app/actions.rs
+  - crates/tui/src/app/keys.rs
+  - crates/agent/src/aside.rs
+documented-by: docs/website/docs/using/interactive-mode.md
+---
+
+## Scope
+
+What a person sees of what happened outside the transcript: the delegates a turn started, the
+commands it ran, and the questions a person asked beside the work, where their lines go, how much
+of them is kept, the mode Ctrl-L opens over the agents, the entry that opens the same mode over what
+commands printed, and what that mode does not offer. What a
+delegate is, how many run at once and what crosses back to the planner is
+[delegation.md](delegation.md); what a command line may do is
+[tools/command-line.md](tools/command-line.md). Nothing here changes either: the subject is what
+reaches a screen, not what reaches a model.
+
+What is drawn for the turn itself is [terminal-transcript.md](terminal-transcript.md). Reading
+back through what has already happened is [scroller.md](scroller.md), whose keys this mode borrows
+rather than inventing a second dialect of.
+
+## Why it exists
+
+A delegate's work is discarded by design: the planner is told a sentence, and the reading, the
+commands and the narration behind it end with the delegate. Drawn nowhere, that leaves the person
+with a single line about work they cannot see, done in a directory they own.
+
+A command's output has the same shape of problem. The transcript draws the first lines of it and a
+count, which is what a line in a sequence has room for, and the rest is drawn nowhere: a person who
+owns the directory is left with "12 lines, quarantined" about a program their agent ran there.
+
+Several delegates run at once, so there is no single thing to look at. Each is drawn on the
+screen the person is already reading, and the whole of what any one of them is doing is a key
+away.
+
+A question asked beside the work is here for the opposite reason. It has no shortage of room in
+the transcript: it is kept out of the transcript on purpose, because it is kept out of the
+conversation. An aside asked as a prompt would be a turn, read back by every turn after it, and
+the digression would be in front of the planner for the rest of the session. Answered here, the
+question and its answer are the person's, and this is the one screen they exist on.
+
+## Clauses
+
+<a id="WATCH-1"></a>
+### WATCH-1: a delegate's work is drawn under the delegate, and never among the turn's lines
+
+Each one has a block of its own, where the call that started it happened, and what it reads and
+runs is drawn inside that block. Nothing of it is drawn in the turn's own sequence.
+
+**Why.** Interleaved, neither sequence can be read: a turn that asked a delegate to run the build
+would have the build log in the middle of it, which is the context problem the whole design
+exists to avoid, reappearing on the screen. With several delegates running it is also ambiguous,
+since two of the same kind produce identical lines and nothing on the row says which run touched
+which file.
+
+`verified-by: bravebot_tui::state::a_delegates_work_goes_under_its_own_block_and_not_into_the_turns_lines`
+`verified-by: bravebot_tui::state::each_delegates_work_lands_under_the_delegate_that_did_it`
+`verified-by: bravebot_tui::render::every_delegate_is_drawn_with_its_own_work_under_it`
+
+<a id="WATCH-2"></a>
+### WATCH-2: which block a line goes in is what the driver said, never what the line says
+
+A report lands under the delegate the driver named as its author, and under the turn where it
+named none. Nothing reads a line to work out whose it is, and where a line arrived in the
+sequence decides nothing.
+
+**Why.** A line is prose a model had a hand in. An interface deciding from one which run it
+belonged to would be taking that decision from model output, which is the thing this repository
+refuses everywhere else. Order cannot stand in for it either: several runs report at once, so the
+order lines arrive in is the order the work happened rather than the order it was asked for.
+
+`verified-by: bravebot_tui::state::each_delegates_work_lands_under_the_delegate_that_did_it`
+`verified-by: bravebot_tui::state::the_turns_own_lines_come_back_once_a_delegate_has_finished`
+
+<a id="WATCH-3"></a>
+### WATCH-3: the block draws the last few of a delegate's work and counts the rest
+
+Three of its calls are drawn where it started, and a delegate that has made more than three says
+how many it has made.
+
+**Why.** The turn's own sequence is what the block sits in, and a delegate that makes thirty calls
+would otherwise push the turn off the screen. Three rows without the count read as a delegate
+doing very little, which is what the count answers.
+
+`verified-by: bravebot_tui::state::a_delegates_block_draws_the_last_of_its_work_and_counts_the_rest`
+`verified-by: bravebot_tui::render::a_delegate_that_has_done_more_than_is_drawn_says_so`
+`verified-by: bravebot_tui::state::a_preview_does_not_take_a_calls_place_in_the_block`
+`verified-by: bravebot_tui::render::a_delegates_previews_do_not_cost_its_block_the_rows_and_the_count`
+
+<a id="WATCH-4"></a>
+### WATCH-4: what the block has no room for is kept, up to a bound
+
+A delegate holds its work beyond the few its block draws, and drops its oldest once it is holding
+several hundred lines. The bound is on every line it holds, a call and a preview released beside
+one alike.
+
+**Why.** The block is a glance and the mode is the reading, so keeping only what the block draws
+would leave the mode with three rows to show for an hour's work. The bound is there because a
+delegate runs as long as a turn does, and this is held in memory for a person who may never look.
+It counts lines rather than calls because lines are what the memory holds: bounding only the lines
+added as calls leaves a delegate whose results release a preview each growing without limit.
+
+`verified-by: bravebot_tui::state::a_delegate_keeps_the_work_its_block_has_no_room_for`
+`verified-by: bravebot_tui::state::a_delegate_stops_keeping_its_oldest_work`
+`verified-by: bravebot_tui::state::a_preview_is_held_to_the_same_bound_as_a_call`
+
+<a id="WATCH-5"></a>
+### WATCH-5: a delegate that has finished collapses to what the turn was told
+
+Its block ends on the driver's sentence about how the run ended and the report the delegate
+answered with, and stops drawing the work behind it. The work is still there to be opened. A
+delegate that could not finish answered nothing, so its block carries the sentence alone.
+
+**Why.** What anybody acts on is the conclusion, and a block that stops without saying how it
+ended leaves a reader looking at a last tool call, unable to tell an answer from a failure.
+Several blocks left open at their last command also spend rows on work that is over.
+
+The sentence alone is not the conclusion. Everything a delegate read and ran ends with it, so the
+report is the only thing on the screen that says what the run was for: a delegate asked to pick a
+file says which one there and nowhere else, and a round count in its place leaves a person with a
+number for work done in a directory they own.
+
+`verified-by: bravebot_tui::render::a_finished_delegates_lines_are_still_there_to_be_opened`
+`verified-by: bravebot_tui::state::what_a_delegate_ended_with_closes_its_block`
+`verified-by: bravebot_tui::render::a_finished_delegate_collapses_to_what_the_turn_was_told`
+`verified-by: bravebot_tui::render::a_finished_delegate_says_what_it_reported`
+`verified-by: bravebot_tui::render::a_delegate_that_could_not_finish_reports_nothing`
+`verified-by: bravebot_agent::turn::what_a_delegate_reported_reaches_the_person_watching`
+`verified-by: bravebot_tui::render::a_finished_delegates_work_is_still_there_to_be_opened`
+
+<a id="WATCH-6"></a>
+### WATCH-6: a reply a delegate is writing is drawn nowhere
+
+What a delegate writes between its tool calls is not drawn, in its own view or the turn's. Its
+conclusion reaches the screen as the report.
+
+**Why.** The turn's own half-written reply is drawn at the tail of the screen. A delegate's
+sentence drawn there would read as the planner writing something it never wrote, and the same
+sentence drawn in a delegate's view would be the only thing on that screen the delegate did not
+do.
+
+`verified-by: bravebot_tui::state::a_reply_a_delegate_is_writing_is_not_drawn_over_the_turn`
+`verified-by: bravebot_tui::state::what_a_delegate_says_between_its_tool_calls_is_not_in_the_transcript`
+
+<a id="WATCH-7"></a>
+### WATCH-7: Ctrl-L opens the agents: the list where there are several rows, the one where there is one
+
+The agents are the delegates and the questions asked beside the work. A command's output is not an
+agent and is not in the list Ctrl-L opens, however many commands a session ran. What commands
+printed is a list of its own, opened by `/outputs` and by the `outputs` chord (Alt-L by default),
+over the same mode: the keys, the footer and the way out are the ones the agents have, and a row in
+it is opened by the clauses below. The chord and the command take one path, so
+they open the same list and say the same thing where there is nothing to open.
+
+The list is the way in where the list holds more than one row, and where it holds one that row's
+own lines are what opens. The view opens on the delegate that is working, and on the last row in
+the list where none is.
+
+Where the agents list holds nothing the key does nothing at all, and a session that ran commands
+and no delegate is such a session. `/outputs` where no command has run opens nothing and says so in
+the transcript, and so does the `outputs` chord. Ctrl-L does not fall back to the outputs: where only
+commands have run it does nothing.
+
+Inside the view the `outputs` chord is the view's own. Over the outputs list or a command's lines
+it closes the view, as the watch chord does. Over the agents list or a delegate's lines it switches
+to the outputs, or says there is no output and leaves the view where it was when no command has
+run. A chord that is moved onto another action's key, or another action's default, is refused, so
+Alt-L is never also the key of an action that opens the agents.
+
+A place in the list is a place in the list that is open. A delegate that starts moves a place in
+the agents list and no place in the outputs list, and a command that runs moves a place in the
+outputs list and none in the agents list.
+
+The list is a panel over the session, sized to the delegates it holds and never to the screen, and
+the transcript stays drawn behind it. A delegate's own lines take the screen. Where there are more
+delegates than the panel is tall, the rows drawn are the ones around the highlight.
+
+**Why.** A delegate is work somebody handed on and a command's output is what a program printed.
+They are read for different reasons, and a list holding both puts the build that passed beside the
+agent that did the work. A person who wants a build's output mid-turn should not have to type a
+command to read it. Every Ctrl letter is
+taken, so the chord is an Alt letter, and it is an action a settings file can move
+([INPUT-32](terminal-input.md#INPUT-32)) because a terminal may use Alt-L itself.
+
+Which row is the question a person has when several runs are going, and a mode that
+opened straight into one of them answers a question they did not ask. A list of one is a row to
+press through to reach the only thing behind it. A mode that opens on an empty screen is worse
+than a key that does not answer: it puts somebody somewhere, with nothing to read and something to
+get out of.
+
+The two are different shapes because they are read differently. The list is a question with a
+handful of answers, read once, and the transcript behind it is what somebody picking one is
+reading: taking the screen for it makes choosing between two delegates cost the whole of what led
+up to them. A delegate's own lines are a transcript, scrolled and read for as long as the run
+lasts, and a panel is the wrong container for that.
+
+`verified-by: bravebot_tui::app::ctrl_l_watches_the_delegate_that_is_working`
+`verified-by: bravebot_tui::app::ctrl_l_does_nothing_where_no_delegate_has_run`
+`verified-by: bravebot_tui::app::ctrl_l_lists_the_delegate_and_not_the_command`
+`verified-by: bravebot_tui::app::ctrl_l_does_nothing_where_only_commands_have_run`
+`verified-by: bravebot_tui::app::the_outputs_command_opens_what_commands_printed`
+`verified-by: bravebot_tui::app::alt_l_opens_the_outputs_and_not_the_agents`
+`verified-by: bravebot_tui::app::alt_l_says_what_the_outputs_command_says_where_no_command_has_run`
+`verified-by: bravebot_tui::app::ctrl_l_where_only_commands_ran_does_not_take_the_outputs_path`
+`verified-by: bravebot_tui::app::alt_l_inside_the_view_closes_the_outputs_and_switches_from_the_agents`
+`verified-by: bravebot_tui::app::alt_l_over_the_agents_with_no_command_says_so_and_stays`
+`verified-by: bravebot_tui::keybindings::the_outputs_chord_is_alt_l_and_can_be_moved_but_not_onto_another_actions_chord`
+`verified-by: bravebot_tui::state::the_watch_list_holds_the_delegate_and_not_the_command`
+`verified-by: bravebot_tui::state::the_two_lists_hold_their_own_kinds_of_row`
+`verified-by: bravebot_tui::app::enter_opens_the_delegate_the_list_is_on`
+`verified-by: bravebot_tui::state::watching_opens_on_the_delegate_that_is_working`
+`verified-by: bravebot_tui::state::there_is_nothing_to_watch_until_a_delegate_has_run`
+`verified-by: bravebot_tui::state::several_delegates_are_opened_on_the_list_of_them`
+`verified-by: bravebot_tui::state::one_delegate_is_opened_without_a_list_to_pick_from`
+`verified-by: bravebot_tui::render::the_list_stands_over_the_session_rather_than_replacing_it`
+`verified-by: bravebot_tui::render::a_list_taller_than_the_panel_keeps_the_highlighted_row_on_it`
+
+<a id="WATCH-8"></a>
+### WATCH-8: a delegate's view opens on what it was asked and closes on what it answered
+
+What is drawn is the delegate's work and none of the turn's. What it was asked to do stands above
+its lines, and the sentence the turn was told closes them, with the report under it.
+
+`n` and `p` move between delegates without going back to the list, and stop at each end rather
+than wrapping. They stay among the delegates: the session is a row in the list and not a step
+here. Coming out puts the turn's own view back where it was left.
+
+**Why.** The view is read by somebody who was not told what the delegate was asked to do, and a
+view that stopped at the last call leaves them looking at a command, unable to tell an answer from
+a failure. Comparing two runs is what having several is for, and stepping through wants to arrive
+at the last one and know that it is the last.
+
+`verified-by: bravebot_tui::state::watching_a_delegate_shows_its_lines_rather_than_the_turns`
+`verified-by: bravebot_tui::state::moving_between_delegates_stops_at_each_end`
+`verified-by: bravebot_tui::state::the_session_is_not_a_step_in_a_delegates_own_view`
+`verified-by: bravebot_tui::state::coming_back_from_a_delegate_puts_the_turns_view_where_it_was_left`
+`verified-by: bravebot_tui::state::the_turns_view_is_not_dragged_by_reading_through_a_delegate`
+`verified-by: bravebot_tui::render::a_delegates_view_draws_its_own_lines_and_not_the_turns`
+`verified-by: bravebot_tui::render::a_finished_delegates_view_ends_on_what_the_turn_was_told`
+`verified-by: bravebot_tui::render::a_delegates_view_opens_on_what_it_was_asked_above_its_lines`
+`verified-by: bravebot_tui::render::a_delegates_view_ends_on_what_it_reported`
+`verified-by: bravebot_tui::render::a_delegates_view_does_not_open_on_the_mark`
+`verified-by: bravebot_tui::app::n_and_p_move_between_delegates`
+`verified-by: bravebot_tui::render::a_delegates_view_names_what_it_was_asked_above_its_lines_and_keeps_it_there`
+
+<a id="WATCH-9"></a>
+### WATCH-9: the view takes every key, and the way out is read against the nearest level
+
+Nothing falls through to the input box, and the box is not drawn, behind the list's panel or
+anywhere else. `q` and Escape go back to the
+list from a delegate, and close the mode from the list or where there is no list behind it.
+Ctrl-L and Ctrl-C close it from either level and do nothing else. Escape and Ctrl-C reach the mode
+before they reach the turn: the turn in flight goes on, and the press that reaches it is the next
+one. A summary, an aside and a goal check are read the same way, each being a request the view can
+be open over. So is a command line that waited in the queue, which begins as the turn ends with the
+view still open, and the press that closes the view does not stop it. A goal armed behind a check
+is not touched either, since the press that closes the view is not a press about it.
+
+A click on the way back drawn in the header of a delegate's view, or on the sentence that closes it,
+closes the view as Ctrl-L does ([MOUSE-24](mouse.md#MOUSE-24)). Every key above still works.
+
+There is no key for talking to a delegate and no box for it. A delegate is given one task, has
+nobody to ask, and takes no line typed mid-turn.
+
+`x` in a delegate's own view asks that delegate to stop and nothing else
+([DELEGATE-25](delegation.md#DELEGATE-25)): the view stays open, the turn goes on, and the footer
+says `stopping` until the delegate answers. It does nothing on the list, on a command's view, on a
+delegate that has finished or one already asked, and with Ctrl or Alt held.
+
+**Why.** What a person types while watching would otherwise wait in a line they cannot see, to be
+sent to a turn they are not looking at. A person stops the nearest thing, and somebody who went to
+look at what a delegate was doing is not asking for the turn to end when they come back out;
+watching is also the mode most likely to be open while something is going wrong.
+
+`verified-by: bravebot_tui::app::a_typed_character_does_not_reach_the_box_while_a_delegate_is_watched`
+`verified-by: bravebot_tui::app::a_paste_and_a_drop_do_not_reach_the_line_while_the_view_is_open`
+`verified-by: bravebot_tui::app::q_goes_back_to_the_list_before_it_closes`
+`verified-by: bravebot_tui::app::q_closes_outright_where_there_is_no_list_to_go_back_to`
+`verified-by: bravebot_tui::app::escape_leaves_the_view_the_way_q_does`
+`verified-by: bravebot_tui::app::the_view_answers_the_stop_keys_before_a_single_request_does`
+`verified-by: bravebot_tui::app::the_view_answers_the_stop_keys_before_the_goal_check_does`
+`verified-by: bravebot_tui::app::the_view_answers_the_stop_keys_before_the_turn_does`
+`verified-by: bravebot_tui::app::the_release_of_the_press_that_closed_the_view_is_not_a_second_press`
+`verified-by: bravebot_tui::app::ctrl_c_and_ctrl_l_close_the_view_left_open_under_a_running_command`
+`verified-by: bravebot_tui::app::escape_and_q_under_a_running_command_go_back_to_the_list_before_they_close`
+`verified-by: bravebot_tui::app::the_press_after_the_view_closes_stops_the_command`
+`verified-by: bravebot_tui::app::the_view_left_open_under_a_running_command_still_moves_between_delegates`
+`verified-by: bravebot_tui::app::x_stops_the_delegate_the_view_is_on_and_no_other`
+`verified-by: bravebot_tui::app::x_does_nothing_on_the_list_or_on_a_delegate_that_is_not_working`
+`verified-by: bravebot_tui::app::a_chord_on_x_does_not_stop_a_delegate`
+`verified-by: bravebot_tui::render::the_footer_offers_the_stop_key_while_working_and_says_when_it_is_asked`
+
+<a id="WATCH-10"></a>
+### WATCH-10: what is on the screen changes when a person asks, and not otherwise
+
+A delegate finishing leaves the view on it. A delegate starting does not take the screen from
+somebody reading an older one. Nor does anything else that happens without a press: a turn the
+queue starts as the one before it ends, a tick of a loop coming due, a watch firing, a goal sending
+the work back, a command line that waited being run, and what that command printed each leave an
+open view where its reader put it, and the scroller where its reader put it too. Where neither is
+open the tail is where the session's own view belongs, so every one of those still takes the
+transcript there. A delegate starting is the running turn adding to the transcript, which
+[VIEW-1](terminal-transcript.md#VIEW-1) holds a scrolled-back view through.
+
+**Why.** Several delegates report at once, so a view that followed the newest event would move
+under the reader several times a second, and the run somebody opened would be the one run they
+could not keep on the screen. The rest are the program acting on something asked for rounds ago,
+which is further still from a person asking for the screen back: the only press a reader made was
+the one that opened the view they are in.
+
+`verified-by: bravebot_tui::state::a_delegate_that_finishes_is_still_the_one_being_watched`
+`verified-by: bravebot_tui::state::a_new_delegate_does_not_take_the_screen_from_the_one_being_read`
+`verified-by: bravebot_tui::state::a_new_delegate_does_not_take_the_screen_from_a_command_being_read`
+`verified-by: bravebot_tui::state::a_new_delegate_does_not_move_the_lists_highlight`
+`verified-by: bravebot_tui::state::a_new_delegate_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::nothing_the_turn_reports_moves_an_open_view`
+`verified-by: bravebot_tui::state::an_aside_beginning_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_turn_taking_a_queued_prompt_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_turn_the_queue_starts_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_loop_tick_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_watch_firing_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_queued_command_line_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::a_goal_sending_the_work_back_leaves_an_open_view_where_its_reader_put_it`
+`verified-by: bravebot_tui::state::what_starts_without_a_press_leaves_an_open_scroller_where_its_reader_put_it`
+
+<a id="WATCH-11"></a>
+### WATCH-11: the footer speaks in the interface's own words, and the turn's own row names the key
+
+The footer names the kind and the driver's number for it, says whether the delegate is working,
+answered or did not finish, and names the way out. Nothing a model wrote is quoted there: what the
+delegate was asked stands above the lines, where the conventions for drawing content apply. The
+position and the keys for moving between delegates appear only where there is more than one.
+
+The list carries its own title and its own key row, and fills the row that would open edge to
+edge rather than marking it.
+
+Once the agents list has anything to open, the hint line names the key and says how many rows it
+holds. Once a command has run, it also names the `outputs` chord and `/outputs` and says how many
+rows they open. Each figure counts what its own way in opens and nothing else, so a session with
+one delegate and two commands reads `ctrl-l 1 to open` beside `alt-l or /outputs 2 to open`, and a
+clause is absent while its list
+is empty. The key is in the shortcut list. No other row names it, including the one that reports
+what the turn is doing.
+
+**Why.** The turn's transcript shows one block and three rows of a delegate, and a preview and a
+count of what a command printed, so somebody who does not already know the key has no way to find
+out there is anything more to see. The hint line is where that is said because it outlasts the
+turn, and what the view holds is most worth opening afterwards: what a delegate leaves behind is a
+sentence about work nobody has read. The count is there because a key with nothing behind it does
+nothing, and that line is read at a glance.
+
+**Why a count for each way in.** A count stands for what its key opens. One figure for both lists
+names a key and counts rows it does not open, and a count of agents alone leaves a session that ran
+commands and spawned no delegate with an entry that opens something and no line on the screen
+saying so, which is the case the hint exists for.
+
+**Why only there.** One key named twice on one screen, once beside the spinner and once at the
+foot, reads as two things to press. The line that is always drawn is the one to put it on.
+
+`verified-by: bravebot_tui::render::the_footer_says_which_delegate_this_is_and_whether_it_is_working`
+`verified-by: bravebot_tui::render::one_delegate_is_given_no_position_and_no_key_for_moving`
+`verified-by: bravebot_tui::render::the_list_names_every_delegate_and_what_each_was_asked`
+`verified-by: bravebot_tui::render::the_row_that_would_open_is_filled_edge_to_edge`
+`verified-by: bravebot_tui::render::a_narrow_row_keeps_the_count_and_loses_the_end_of_the_task`
+`verified-by: bravebot_tui::render::the_row_that_says_what_the_turn_is_doing_leaves_the_key_to_the_hint_line`
+`verified-by: bravebot_tui::render::the_hint_line_names_the_delegate_key_once_one_has_run`
+`verified-by: bravebot_tui::render::the_hint_line_counts_what_each_way_into_the_view_opens`
+`verified-by: bravebot_tui::render::the_shell_hint_line_names_the_view_key_once_something_can_be_opened`
+`verified-by: bravebot_tui::render::the_shortcut_list_names_the_key_that_watches`
+
+<a id="WATCH-12"></a>
+### WATCH-12: none of this reaches a model, and a delegate's work is not written down
+
+A delegate's lines go to a screen and stop there. The planner that asked is told the report and
+nothing else, and no delegate is part of the record a session is resumed from, so a resumed
+session has no delegates in it. What a command printed is not written down either. Starting a new
+conversation forgets both, and the mode standing over any of it closes with them.
+
+An aside is the one row that is written down, and it reaches no model either: the record keeps the
+question and the answer, a resume puts them back into this view, and there is no path from the
+record into a conversation. What the record may hold is [sessions.md](sessions.md)'s.
+
+**Why.** A screen is not a context. The person owns the directory and may see what their agent
+did in it; what must not happen is those lines reaching a planner's context by any route. A
+record read back into a later turn is such a route, so a delegate's lines and a command's output
+are never written at all: both are content the planner may never have been shown, and neither can
+be told apart from the other once it is bytes in a file.
+
+An aside is different in kind rather than by exception. Its question is a line the person typed,
+and its answer is only ever written where the gate that decides what the planner may hold said it
+could: nothing lands in the record that could not have been in the exchange beside it.
+
+`verified-by: bravebot_agent::turn::what_a_delegate_read_never_reaches_the_planner_that_asked`
+`verified-by: bravebot_tui::state::clearing_forgets_the_delegates`
+`verified-by: bravebot_tui::state::clearing_closes_the_view_over_a_delegate`
+`verified-by: bravebot_tui::sessions::a_question_asked_beside_the_work_survives_a_resume`
+`verified-by: by-construction (a session's record is built from the conversation and the asides; a delegate's lines and what a command printed are held only by the interface and nothing writes them)`
+
+<a id="WATCH-13"></a>
+### WATCH-13: a report the planner may not read is drawn in the marked block
+
+Where a delegate's own context met something untrusted, the planner is handed a reference and the
+person is shown a preview of the words, in the same margin-marked block every quarantined result
+is drawn in. Where the planner was given the words, the person is shown the same words, unmarked.
+
+**Why.** Which of the two a report is was settled by the gate that decided what the planner got,
+and the drawing says which happened rather than deciding it. Marking a report the planner read
+would claim a confinement that is not there; drawing an unread one plain would hide one that is.
+
+`verified-by: bravebot_tui::render::a_report_the_planner_may_not_read_is_marked_where_it_is_drawn`
+`verified-by: bravebot_agent::turn::what_a_delegate_reported_reaches_the_person_watching`
+`verified-by: bravebot_tui::render::a_report_the_planner_read_is_drawn_plain`
+
+<a id="WATCH-14"></a>
+### WATCH-14: the session is the first row of the list, and choosing it goes back to the conversation
+
+Either list holds the session above its rows. The key that opens a row opens it, and what that
+does is close the mode and put the turn's own view back where it was left. Moving up from the
+first delegate reaches it; moving down from it reaches the first delegate again.
+
+Coming back to the list from a delegate puts the highlight on that delegate rather than on the
+session.
+
+**Why.** Every destination the mode can reach is a row, except the one somebody was reading
+before they opened it. Leaving was a key on no row, so a person comparing two delegates could
+reach either and had nothing on the screen telling them how to get back to what they came from.
+
+**Why the highlight does not start there.** Somebody pressing the key that goes back to the list
+asked for the list, not for the way out, and a highlight sitting on the way out turns the next
+press of enter into an exit.
+
+`verified-by: bravebot_tui::render::the_list_holds_the_session_above_the_delegates`
+`verified-by: bravebot_tui::state::moving_up_from_the_first_delegate_in_the_list_reaches_the_session`
+`verified-by: bravebot_tui::state::going_back_to_the_list_lands_on_the_delegate_that_was_open`
+`verified-by: bravebot_tui::state::moving_down_from_the_session_in_the_list_reaches_the_first_delegate`
+`verified-by: bravebot_tui::app::opening_the_session_row_goes_back_to_the_conversation`
+
+<a id="WATCH-15"></a>
+### WATCH-15: what a command printed is a row of the outputs list, which the view opens
+
+Every command a turn ran, background jobs included, is a row in the outputs list, in the order they
+ran. It is opened by `/outputs` and the `outputs` chord ([WATCH-7](#WATCH-7)) and is in no list
+Ctrl-L opens. Opening one
+draws what it printed, as far back as is kept, in the shape a delegate's own lines are
+drawn in. Where the planner was kept from the output, every row of it carries the margin every
+quarantined block carries, and what is not kept is said rather than dropped silently.
+
+A command's row is there whether or not the planner read what it printed, and the row says which.
+
+**Why.** The transcript has room for a preview and a count, and a person who owns the directory is
+entitled to the rest: "12 lines, quarantined" does not tell them what their agent just ran. That is
+the same reason a delegate has a view, so it is the same mode rather than a second one to learn.
+
+**Why a list of its own.** What a program printed is read as a log and an agent's work is read as
+a conversation, and a list holding both puts a log beside a conversation. One mode keeps the keys,
+the footer and the marks in one implementation.
+
+**Why oldest first.** A row's place is what somebody steps through, and a list ordered by when
+things happened would move the row under them every time a command finished.
+
+`verified-by: bravebot_agent::turn::what_a_command_printed_reaches_the_person_watching`
+`verified-by: bravebot_tui::state::a_command_this_session_ran_is_something_the_view_can_open`
+`verified-by: bravebot_tui::state::a_rows_place_in_the_list_does_not_move_when_the_next_command_runs`
+`verified-by: bravebot_tui::state::a_command_row_keeps_whether_the_planner_read_it`
+`verified-by: bravebot_tui::render::a_command_row_says_whether_the_planner_read_it`
+`verified-by: bravebot_tui::state::stepping_through_the_outputs_list_reaches_every_command`
+`verified-by: bravebot_tui::state::the_two_lists_hold_their_own_kinds_of_row`
+`verified-by: bravebot_tui::app::the_outputs_command_opens_what_commands_printed`
+`verified-by: bravebot_tui::state::a_new_delegate_does_not_take_the_screen_from_a_command_being_read`
+`verified-by: bravebot_tui::render::opening_a_command_shows_what_it_printed`
+`verified-by: bravebot_tui::render::output_the_planner_was_kept_from_is_marked_on_every_row`
+`verified-by: bravebot_tui::render::a_command_that_printed_more_than_is_kept_says_so`
+`verified-by: bravebot_tui::render::the_list_names_a_command_row_as_a_command`
+
+<a id="WATCH-16"></a>
+### WATCH-16: the view says which kind of thing it is showing
+
+The header and the footer name it: a delegate by its kind and its number, a command as a command
+with the line that ran, an aside as an aside. Stepping from one kind to another changes what they
+say. A command's view also says whether the planner read what it printed, and an aside's whether
+the record keeps its answer.
+
+**Why.** The agents list holds delegates and asides, and the keys that move through it do not ask
+what a row is. With nothing saying so, stepping from a delegate onto an aside reads as the same view
+showing different lines. A command's view and an agent's are the same mode, so the header and the
+footer say which of the two it is.
+Whether the planner read something, or will read it back, is the one thing about it that cannot be
+worked out from the bytes.
+
+`verified-by: bravebot_tui::render::the_view_says_which_kind_of_thing_it_is_showing`
+`verified-by: bravebot_tui::render::the_view_says_whether_the_model_read_what_a_command_printed`
+`verified-by: bravebot_tui::render::stepping_from_one_kind_of_row_to_another_changes_the_header_and_the_footer`
+`verified-by: bravebot_tui::render::a_commands_view_names_it_and_counts_the_outputs`
+
+<a id="WATCH-17"></a>
+### WATCH-17: a command's row and its view say how the run ended
+
+The row carries a mark for it, in the same three marks a delegate's row uses: one for a run whose
+every stage exited zero, one for a run a stage failed, and the mark of work still going for a run
+stopped at the wall-clock limit. The view says it in the driver's words, beside the command, which
+for a failure names the step and its code.
+
+It is said from the exit codes and the clock, and never from a byte the program printed.
+
+**Why.** A row that gives only the line count leaves a person unable to tell the build that
+passed from the one that failed, and unable to tell either from a run still going: twelve lines of
+a failing build look much like twelve lines of a passing one. The view says it as well as the row
+because a view opened on a long log draws its last lines, and the verdict is not always in them.
+
+**Why the mark of work still going, for a run that was stopped.** That is what it was doing. A
+server told to serve a page prints as it goes and never exits, so [tools/run.md](tools/run.md)
+RUN-11 has the limit end the run rather than fail it, and a cross beside it would say something
+about the program that is not true.
+
+`verified-by: bravebot_tui::render::a_command_row_says_how_the_run_ended`
+`verified-by: bravebot_tui::render::a_command_stopped_at_the_limit_is_marked_as_work_still_going`
+`verified-by: bravebot_tui::render::a_commands_view_says_how_the_run_ended`
+`verified-by: bravebot_agent::turn::what_a_command_printed_reaches_the_person_watching`
+
+<a id="WATCH-18"></a>
+### WATCH-18: a question asked beside the work is one of the rows the view opens
+
+Every `/btw` is a row in the agents list, before the delegates and in the order they were asked. Opening one draws the question above the answer, the question in the shape a
+prompt is drawn in and the answer in the shape a reply is. The row says whether the record keeps
+the answer.
+
+Neither half is anywhere else. Nothing about an aside is drawn among the turn's own lines, because
+neither half is in the conversation: the planner has read neither the question nor the answer, and
+an exchange drawn in the transcript is one a reader takes the planner to have had.
+
+**Why.** The answer exists nowhere else at all, so a row is not a convenience here: without it the
+person would have asked a question and been shown nothing. Both halves are drawn because a
+question with no answer under it is half of what somebody came to read, and an answer on its own
+stops meaning anything as soon as the list holds two.
+
+**Why before the delegates.** An aside is the only row that survives a resume, so a resumed
+session's list is asides alone. Put last, every delegate a later turn spawned would be inserted
+above them and move their places; put first, every delegate the session goes on to start appends
+after them.
+
+`verified-by: bravebot_tui::state::an_aside_is_something_the_view_can_open`
+`verified-by: bravebot_tui::state::an_aside_keeps_its_place_when_a_delegate_is_spawned_after_it`
+`verified-by: bravebot_tui::state::neither_half_of_an_aside_reaches_the_transcript`
+`verified-by: bravebot_tui::state::opening_an_aside_does_not_draw_a_delegates_lines`
+`verified-by: bravebot_tui::app::answering_a_question_beside_the_work_leaves_the_transcript_alone`
+`verified-by: bravebot_tui::app::an_answer_being_written_beside_the_work_is_not_drawn_over_the_turn`
+`verified-by: bravebot_tui::render::the_list_names_an_aside_row_as_an_aside`
+`verified-by: bravebot_tui::render::an_asides_view_draws_the_question_and_the_answer`
+`verified-by: bravebot_tui::render::an_asides_view_wraps_an_answer_that_is_one_long_line`
+`verified-by: bravebot_agent::turn::asking_beside_the_work_reaches_the_model_and_leaves_the_conversation_alone`
+
+<a id="WATCH-19"></a>
+### WATCH-19: the view opens on an aside the moment it is answered
+
+An answered question puts its own row on the screen, and leaving the mode puts the turn's own view
+back where it was left. Whatever mode a person opened while they waited is put away as this one
+opens, and the view the transcript comes back on is the one it had before any of them. This is the
+one thing that opens the mode without a person pressing the key.
+
+**Why.** WATCH-10 keeps the screen still because the events it is about are a turn's, and a person
+reading one delegate did not ask for another to take the screen. An aside is not one of those: the
+person typed the question a moment ago, and the press that asked for it came from the input box,
+which this mode does not draw. An answer left behind a key they have not been told about is not an
+answer.
+
+The wait answers keys, so the mode standing over the session when the answer lands is whichever
+one the person opened during it. The scroller is drawn in front of this view, so an answer under
+one is on no screen at all; and while this view is open the field the transcript's offset lives in
+holds an offset into a watched row's lines, so taking it for the turn's own view brings the
+conversation back somewhere it never was.
+
+An answer that lands beside a running turn is a row of the agents list and nothing more: the view
+is not opened, because the turn's own view is the one on the screen and the person is not waiting
+on the answer ([CMD-8](commands.md#CMD-8)). The row is there for the next time they open the mode.
+
+`verified-by: bravebot_tui::app::a_btw_answered_beside_a_turn_is_a_row_and_does_not_open_the_view`
+`verified-by: bravebot_tui::state::answering_a_question_beside_the_work_opens_the_view_on_it`
+`verified-by: bravebot_tui::state::answering_a_question_while_the_view_is_open_keeps_the_turns_own_view`
+`verified-by: bravebot_tui::state::answering_a_question_closes_a_history_search_opened_during_the_wait`
+`verified-by: bravebot_tui::render::an_answer_takes_the_screen_from_a_scroller_opened_while_it_was_awaited`
+
+<a id="WATCH-20"></a>
+### WATCH-20: an answer the record cannot hold is said to be on the screen only
+
+Where the gate that decides what the planner may hold quarantined the answer, the person is still
+shown it and the view says it is not written down. A resumed aside whose answer the record could
+not keep draws the question and says the answer did not come back, rather than drawing nothing
+under it.
+
+**Why.** Such an answer exists only for as long as the window is open, and that is worth knowing
+while the words are still there to copy rather than on the next resume when they are gone. An
+empty screen under a question is worse than either: it reads as a question that was never
+answered.
+
+`verified-by: bravebot_tui::render::an_asides_view_says_when_the_answer_is_not_written_down`
+`verified-by: bravebot_tui::render::a_resumed_aside_with_no_answer_says_the_record_did_not_keep_it`
+`verified-by: bravebot_tui::sessions::an_answer_the_planner_could_not_have_held_is_not_written_down`
+`verified-by: bravebot_agent::turn::an_answer_over_an_untrusted_exchange_is_shown_and_not_written_down`
+
+<a id="WATCH-21"></a>
+### WATCH-21: a question asks for no cache of the exchange it is asked beside
+
+An aside's request marks its own instructions for caching and marks nothing on the end of the
+exchange it carries.
+
+**Why.** A cache write is charged above the fresh tokens it covers, and it buys something only where
+a later request sends the same prefix again. A mark would sit at the end of everything the request
+holds, which is the question the person typed, and an aside adds nothing to the exchange it was
+asked beside, so what the write stored could only be read back by a later question repeating those
+words. Nothing sends that prefix again.
+
+**The instructions keep their mark**, being the same bytes every question, which is what marking a
+prompt is for. What is given up is a write and no read.
+
+`verified-by: bravebot_agent::turn::a_question_asked_beside_the_work_asks_for_no_cache_of_the_exchange`
+
+<a id="WATCH-22"></a>
+### WATCH-22: a background job is one row, made when it starts
+
+A job gets its row when the driver says it started, whether the planner started it or the person
+moved it ([RUN-26](tools/run.md#RUN-26)), with nothing printed yet. Every later look at it and
+its finish add their lines to that row and change its standing; none adds a row. The row keeps as
+many lines as one look does, and stops adding them at the first look that left some out, so it
+never joins two runs of lines with a gap between them; its count says how many it did not keep. A
+job is known by the name the driver minted and by whose it is, the turn's or a delegate's, so a
+delegate's `job:1` and the turn's `job:1` are two rows, and the delegate's says it is the
+delegate's.
+
+What a job printed is drawn in its row and nowhere else. No row, mark, count or name is made or
+changed from it. Lines drawn before any look returned them are [WATCH-24](#WATCH-24)'s, and sit
+after the row's own lines without joining them.
+
+**Why.** Before this, a job had a row only once something looked at it, so a job nobody had looked
+at yet was missing from the list, and each look was a row of its own. A job that is running and has
+printed nothing is still the thing a person needs to know about. A row per look also left the
+earlier rows saying the job was running after it had ended.
+
+`verified-by: bravebot_tui::state::a_job_has_its_row_from_the_moment_it_starts`
+`verified-by: bravebot_tui::state::a_look_and_the_finish_update_the_jobs_row_and_add_none`
+`verified-by: bravebot_tui::state::a_delegates_job_and_the_turns_of_the_same_name_are_two_rows`
+`verified-by: bravebot_tui::state::a_jobs_row_stops_adding_lines_at_a_gap_and_at_what_one_look_keeps`
+`verified-by: bravebot_tui::render::a_delegates_job_says_whose_it_is_and_the_turns_does_not`
+`verified-by: bravebot_tui::state::a_job_printing_status_shaped_lines_changes_no_row_mark_or_count`
+`verified-by: bravebot_tui::state::a_look_at_a_job_with_no_row_of_its_own_adds_no_row`
+`verified-by: bravebot_tui::kept_jobs_tests::a_job_stopped_between_turns_keeps_its_one_row_through_the_next_turns_report`
+`verified-by: bravebot_agent::turn::a_background_job_is_announced_when_it_starts_and_its_finish_carries_its_name`
+`verified-by: bravebot_agent::turn::a_look_that_stops_a_job_is_its_finish_under_its_name`
+
+<a id="WATCH-23"></a>
+### WATCH-23: a job's row and its view say it is a job, and whether it still runs
+
+The row names the kind as `background` and leads its line with the job's name. The view's header
+names the job, and says whether it is running, and for how long by this end's clock, or how it
+ended. A job the turn stopped when it ended reads as that, not as running and not as a failure.
+Until a look has printed something, and while the row holds no line a running job printed
+([WATCH-24](#WATCH-24)), neither the row nor the view says whether the model read it. A row that
+holds such lines says the model has not read them.
+
+**Why.** A job and a stopped foreground run carry the same mark ([WATCH-17](#WATCH-17)), since both
+are work that did not end on its own, so the mark alone cannot say whether the job is still going.
+The job's state can, and it comes from the driver's events, not from the job's output. The
+name is what the planner reads the job by, and it is the only thing that tells two runs of the same
+line apart. A job with nothing printed has nothing the model could have read or been kept from, so
+either word would be untrue.
+
+`verified-by: bravebot_tui::render::the_list_names_a_job_row_as_a_background_job`
+`verified-by: bravebot_tui::render::a_job_says_nothing_about_a_reading_until_it_has_printed`
+`verified-by: bravebot_tui::render::a_jobs_view_names_the_job_and_whether_it_still_runs`
+`verified-by: bravebot_tui::render::a_jobs_view_says_how_a_job_that_exited_ended`
+`verified-by: bravebot_tui::state::a_job_the_turn_stopped_reads_as_stopped_with_the_turn`
+`verified-by: bravebot_tui::state::a_turn_ending_ends_its_jobs_and_the_next_counts_only_its_own`
+`verified-by: bravebot_tui::render::a_jobs_live_lines_are_marked_as_unread_even_after_a_look_that_was_read`
+
+<a id="WATCH-24"></a>
+### WATCH-24: a running job's row gains the lines no look has returned
+
+At each step of a turn, the driver gives the screen what each running job has printed since the
+planner last looked: the newest of those lines, up to a bound, and how many there were. They are
+released through the gate that releases a look's lines, so output the planner may not read is drawn
+in the marked block, and they are drawn after the row's own lines, under the margin, saying the model
+has not read them. Each release is the newest of everything unread and replaces the one before it.
+The next look returns every line, adds them to the row's own lines and takes them off the live ones.
+
+These lines reach the screen only. They do not move the cursor `job_output` reports from, they are
+not written down ([WATCH-12](#WATCH-12)), and no row, mark, count or name is made or changed from
+them ([WATCH-22](#WATCH-22)).
+
+**Why.** A server or build moved to the background printed nothing a person could see until the
+model happened to look, which can be many minutes. Measured from the planner's last look, the live
+lines are exactly the ones it has not read, so the row never joins two runs of lines with a gap and
+never draws a line twice, and nothing has to be reconciled between a look and the screen.
+
+`verified-by: bravebot_agent::tools::unread_output_leaves_the_planners_cursor_where_it_was`
+`verified-by: bravebot_agent::turn::a_running_job_nobody_has_looked_at_gives_the_screen_its_lines_and_the_look_keeps_them`
+`verified-by: bravebot_agent::turn::an_unvouched_running_jobs_lines_are_drawn_and_never_reach_the_planner`
+`verified-by: bravebot_agent::turn::a_running_job_that_printed_past_the_bound_gives_the_screen_only_the_newest_lines`
+`verified-by: bravebot_tui::state::a_jobs_live_lines_replace_each_other_and_the_next_look_takes_them`
+`verified-by: bravebot_tui::state::a_job_printing_status_shaped_live_lines_changes_no_row_mark_or_count`
+`verified-by: bravebot_tui::state::a_delegates_live_lines_go_to_its_job_and_not_the_turns_of_the_same_name`
+`verified-by: bravebot_tui::render::a_jobs_live_lines_are_marked_as_unread_even_after_a_look_that_was_read`
+
+## Known costs
+
+- **A running job's row gains lines only while a turn runs.** The release is at a turn's steps,
+  because the gate that decides what may be drawn belongs to the turn. A job nobody has looked at,
+  between turns, shows the lines it had at the turn's last step.
+
+- **A delegate that runs long enough loses its oldest work.** Several hundred calls in, the start
+  of a run is gone from the screen, and a person arriving late reads from wherever the bound has
+  reached. The alternative is holding the whole of every delegate for the length of a session, for
+  a reader who may never open one.
+
+- **A delegate cannot be seen after the session that started it.** The record holds the
+  conversation, and a delegate's exchange is deliberately not in it, so resuming brings back the
+  report and none of the work behind it.
+
+- **A long report takes the rows it needs.** The block draws the whole of what a delegate
+  answered, so a delegate that reports several paragraphs takes several paragraphs of the turn's
+  own sequence. Capping it would cut the conclusion, which is the one part of a delegate nobody
+  can get back any other way.
+
+- **An aside cannot be asked about, and only one is out at a time beside a turn.** It is one question and one answer, with no box to follow up
+  in: a person who wants to press further asks a second `/btw`, over an exchange that still knows
+  nothing of the first. A second `/btw` typed while one is still out beside a turn is refused. The alternative is a second conversation to hold, resume and shorten, which
+  is a session rather than an aside.
+
+- **An aside taken over an untrusted exchange lasts as long as the window.** The answer is the
+  planner's own words over a context that has read something untrusted, so the record does not keep
+  it and a resume brings back the question alone. Keeping it would put bytes in the record that the
+  planner could not have held.
+
+- **The view says what a delegate is doing and not how it is going.** One row changes several
+  times a second while a delegate works, and nothing on the screen says whether those calls are
+  getting anywhere. The report says, and it says it at the end.

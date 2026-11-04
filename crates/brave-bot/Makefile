@@ -1,0 +1,1424 @@
+BINARY = bravebot
+VERSION = $(shell sed -nE 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' Cargo.toml | head -n 1)
+TAG = v$(VERSION)
+# Which remote a release is tagged against. `origin` is right for a clone of this repository
+# and wrong for a clone of a fork of it, where it names the fork: a tag pushed there is a tag
+# the releases page never sees, and it cannot be moved afterwards because the tag ruleset
+# refuses an update. Set it per clone rather than per release, with
+# `git config bravebot.releaseRemote upstream`.
+RELEASE_REMOTE = $(or $(shell git config bravebot.releaseRemote),origin)
+# Each of the three images below names a digest as well as a tag, because a tag is whatever its
+# publisher points at today and every one of them runs with the whole tree inside it.
+# `make check-security` fails on one that names a tag alone. Moving to a newer image is a
+# deliberate edit: read the digest with
+#   docker buildx imagetools inspect rust:slim --format '{{.Manifest.Digest}}'
+# and rewrite the tag beside it in the same line, so the line still says what it runs.
+#
+# The minimum toolchain CI builds against, declared once in Cargo.toml, and the image that ships
+# it. Docker goes by the digest and ignores the tag beside it, so check-msrv refuses to run while
+# the two disagree rather than building against a minimum nobody declared.
+MSRV = $(shell sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([0-9.]+)".*/\1/p' Cargo.toml | head -n 1)
+MSRV_IMAGE = rust:1.90-slim@sha256:7fa728f3678acf5980d5db70960cf8491aff9411976789086676bdf0c19db39e
+# The stable the check targets run, and the image the cross-build is built on, which `make strip`
+# runs a second time over the finished assets.
+STABLE_IMAGE = rust:1.98-slim@sha256:f47a8de237dcbb0b0ce1099901e60a89728e3d51f24e664b40e947171538ade7
+ZIGBUILD_IMAGE = ghcr.io/rust-cross/cargo-zigbuild:0.23.0@sha256:b8364c2c60cdcc9b95c402d17654bff517410926a35678bd89dd924b8158d6ae
+# The two that pack the desktop application's Linux packages. Neither compiles anything: each
+# holds the one tool its format is built with, over a tree that is already finished, so what the
+# digest buys is the tool behaving the same way on every host rather than a reproducible build.
+# Debian ships `dpkg-deb` in the base image and Fedora does not ship `rpmbuild`, which is the
+# one install below.
+DEB_IMAGE = debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+RPM_IMAGE = fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
+# Every file that states the version, which is what a bump rewrites and commits. The two under
+# ui/ are the desktop application's: it is packaged from its own manifest, so a version left
+# behind there is an app bundle naming a release that does not exist. The lock under fuzz/ records
+# the version of every bravebot crate the fuzz targets build, so `check-fuzz` fails on a stale one.
+VERSION_FILES = Cargo.toml Cargo.lock fuzz/Cargo.lock package.json ui/package.json
+
+# Forwarded into the cross-build container, which does not inherit the host environment.
+BUILD_ENV = SERVICES_KEY_AICHAT BRAVE_SERVICES_KEY_ID BRAVE_AI_CHAT_ENDPOINT \
+            BRAVE_AI_CHAT_PREMIUM_ENDPOINT BRAVEBOT_DEFAULT_MODEL \
+            BACKTRACE_SUBMIT_URL BRAVEBOT_ALLOW_UNCONFIGURED_BUILD
+
+.PHONY: help
+help:
+	@echo "bravebot $(VERSION)"
+	@echo
+	@echo "Development:"
+	@echo "  make init                  Configure bravebot, Claude Code, Codex and Cursor; install hooks"
+	@echo "  make hooks                 Copy the checked-in git hooks into the git directory and point git at them"
+	@echo "  make build                 Debug build"
+	@echo "  make test                  Run all tests"
+	@echo "  make check                 Format check, clippy, tests, and toolchain age"
+	@echo "  make check-all-local       All checks except Docker platform checks"
+	@echo "  make check-affected        The host checks this branch's changes need [BASE=ref]"
+	@echo "  make check-affected-containers  The Docker checks they need [BASE=ref]"
+	@echo "  make check-spec            Check docs/specs against the implementation"
+	@echo "  make check-security        The security audit's deterministic half"
+	@echo "  make check-maintenance     Dead, repeated, deeply nested, coupled or untested code, as candidates for the maintenance skill"
+	@echo "  make check-locales         Hold the catalogs to contrib/untranslated-messages.txt"
+	@echo "  make check-versions        Whether every file stating the version states the same one"
+	@echo "  make check-code-selectors  Whether each variable gcloud runs code from has its tests"
+	@echo "  make check-lint-increase   Whether this branch adds sites of the clippy lints held to the base"
+	@echo "  make check-narration       Whether this branch's commits and lines narrate their writer's process [BASE=ref]"
+	@echo "  make check-docs            Build the documentation website under docs/website"
+	@echo "  make docs-changes          What has landed in the specs since the site was updated"
+	@echo "  make docs-updated-to-sha   The commit the documentation site is current as of"
+	@echo "  make write-unverified      Write agents/unverified-clauses.txt, which check-spec holds it to"
+	@echo "  make write-untranslated    Write contrib/untranslated-messages.txt, which check-locales holds it to"
+	@echo "  make check-reviewdog       The PR security scan, on this branch's changes [BASE=ref]"
+	@echo "  make check-reviewdog-full  The same scan, over the whole tree"
+	@echo "  make check-npm             The npm package tests, the pnpm lockfiles in sync with their manifests, and their lint"
+	@echo "  make check-deps            Advisories, licences, duplicate versions, and sources"
+	@echo "  make check-fuzz            Lint, build, replay and briefly run every fuzz target [FUZZ_SECONDS=$(FUZZ_SECONDS)]; needs the nightly toolchain and cargo-fuzz"
+	@echo "  make fuzz TARGET=<name>    Run one fuzz target [FUZZ_SECONDS=$(FUZZ_SECONDS)]; the targets are $(FUZZ_TARGETS)"
+	@echo "  make fuzz-cmin TARGET=<name>  Reduce fuzz/corpus/<name> to the inputs that each reach something new"
+	@echo "  make fuzz-install          Install cargo-fuzz $(CARGO_FUZZ_VERSION), the version CI runs"
+	@echo "  make check-msrv            Build against the declared minimum toolchain ($(MSRV))"
+	@echo "  make check-windows         Lint the Windows target that ships, cross-compiled"
+	@echo "  make check-ui              Build the desktop UI, run the tests pinning what it marks, drive it"
+	@echo "  make check-extension       Test the two Brave extensions against a fake browser and a fake debugger"
+	@echo "  make check-agent-client    Build and test the TypeScript session client against a real bravebot-rpc"
+	@echo "  make check-mobile          Type-check and test the React Native app (no device or simulator)"
+	@echo "  make check-all             All local checks, including Linux, UI and the security scan"
+	@echo "  make locales               What each translation has, and what it is missing"
+	@echo "  make check-linux           The same checks on Linux, current stable toolchain"
+	@echo "  make review-ready          Open PRs that are mergeable, not draft, with passing checks, approved by the reviewer; waits up to WAIT seconds for ones GitHub reports UNKNOWN [REPO=owner/name REVIEWER=login LIMIT=n WAIT=$(REVIEW_WAIT)]"
+	@echo "  make implement-issues ISSUES=\"<issues or search>\"  Open the implement-issues skill in the terminal client, after refusing an issue assigned to someone else, assigning you, and labelling bot/in-progress for the session [NOTES=\"<instructions for the run>\"] [BRAVEBOT=path]"
+	@echo "  make clean-worktrees       Remove every linked git worktree but the one this runs in, including ones with uncommitted changes; exits 1 if any is kept"
+	@echo "  make fmt                   Apply formatting"
+	@echo "  make aws-logout            End every cached AWS SSO session, to test signing in again"
+	@echo
+	@echo "Reproducible cross-builds (requires Docker):"
+	@echo "  make all-platforms  Every target below"
+	@echo "  make darwin-arm64   macOS Apple silicon"
+	@echo "  make darwin-amd64   macOS Intel"
+	@echo "  make linux-amd64    Linux x86_64"
+	@echo "  make linux-arm64    Linux aarch64"
+	@echo "  make windows-amd64  Windows x86_64"
+	@echo "  make windows-arm64  Windows aarch64"
+	@echo
+	@echo "Releasing:"
+	@echo "  make bump-version BUMP=bugfix|minor|major   Set the next version"
+	@echo "  make github-release                         Tag it; Jenkins and npm publish are later"
+	@echo "  make npm-bootstrap                          Create the name of each new platform package, before its first publish"
+	@echo "  make publish-npm [TAG=v<version>]           Publish npm for TAG, or the latest GitHub release"
+	@echo "  make package-manifests TAG=v<version>       Write the Homebrew cask and WinGet manifests into dist/packages"
+	@echo "  make app-bundle                             Package the desktop application, release build"
+	@echo "  make app-release                            Its disk images for both Mac architectures, unsigned"
+	@echo "  make app-release-linux                      Its .deb and .rpm for both Linux architectures, unsigned"
+	@echo "  make app-release-windows                    Its Windows installers for both architectures, unsigned"
+	@echo "  make cli-packages-linux                     The CLI's .deb and .rpm for both Linux architectures, unsigned"
+	@echo
+	@echo "  make clean          Remove build output"
+
+# agents/ is the checked-in source of truth for skills, subagents and AGENTS.md, and no tool
+# reads it: each tool looks under its own discovery paths. This creates the symlinks that
+# bridge them, and writes the TOML files Codex reads its subagents from. They are
+# gitignored, so a fresh clone needs it once, and it is idempotent, so re-running costs
+# nothing. Run it again after a definition in agents/agents/ changes.
+.PHONY: init
+init: hooks
+	python3 agents/setup.py link
+
+# .git/hooks is not versioned, so a fresh clone commits with nothing checking it
+# until this runs. Idempotent, and part of `init` so nobody has to know it exists.
+#
+# The hooks are copied into the repository's common git directory and git is pointed at the
+# copy by absolute path. A relative path is resolved against each worktree's own top level, so
+# in the worktree of a pull request git would run the hooks that pull request tracks, as
+# whoever runs git there. No branch tracks the copy. Run this again after .githooks changes.
+# A linked worktree installs nothing, since the copy would come from its branch. The directory
+# name is the one agents/pr_worktree.py reads (HOOKS_DIR).
+.PHONY: hooks
+hooks:
+	@common="$$(cd "$$(git rev-parse --git-common-dir)" && pwd -P)" && \
+	if [ "$$(git rev-parse --absolute-git-dir)" != "$$common" ]; then \
+		echo "hooks: nothing installed from a linked worktree, whose branch may track hooks nobody reviewed; run make hooks in the main checkout" >&2; \
+	else \
+		mkdir -p "$$common/bravebot-hooks" && cp -p .githooks/* "$$common/bravebot-hooks/" && \
+		git config core.hooksPath "$$common/bravebot-hooks" && echo "hooks: $$common/bravebot-hooks"; \
+	fi
+
+.PHONY: build
+build:
+	cargo build
+
+.PHONY: test
+test:
+	cargo test --all
+
+.PHONY: fmt
+fmt:
+	cargo fmt --all
+
+# The counterpart to the sign-in a Bedrock turn does for itself, for testing that path deliberately
+# rather than waiting for a token to expire.
+#
+# Every profile, because that is the only thing the CLI offers: `aws sso logout` removes every cached
+# token and takes no option to narrow it, so `--profile` would scope nothing while reading as though
+# it had. One token serves every profile sharing an sso_session, and other tools reading the same
+# cache, Claude Code among them, need a fresh `aws sso login` after this.
+.PHONY: aws-logout
+aws-logout:
+	@echo "ending every cached AWS SSO session; sign in again with: aws sso login --profile <name>"
+	aws sso logout
+
+# Host formatting, Clippy, tests and toolchain age. Platform and UI checks are separate.
+# Report an old toolchain after the test results, since CI may use newer lints.
+.PHONY: check
+RUST_TEST_THREADS ?= 4
+check:
+	cargo fmt --all -- --check
+	cargo clippy --all-targets --all-features -- -D warnings
+	@python3 contrib/check-lint-increase.py
+	RUST_TEST_THREADS="$(RUST_TEST_THREADS)" cargo test --all --locked
+	@python3 contrib/check-versions.py
+	@python3 contrib/check-code-selectors.py --selftest
+	@python3 contrib/check-code-selectors.py
+	@python3 contrib/check-toolchain.py
+
+# Whether every variable gcloud's launcher reads to choose code to run, as listed in
+# CODE_SELECTORS in crates/agent/src/gcloud.rs, has a test that keeps a safe value and a test that
+# removes one a stage may write. It cannot tell that the list is complete: that is PATH-008 in
+# docs/best-practices/paths.md. Run by `check` and by CI.
+.PHONY: check-code-selectors
+check-code-selectors:
+	@python3 contrib/check-code-selectors.py --selftest
+	@python3 contrib/check-code-selectors.py
+
+# Whether every file that states the version states the same one: the workspace manifest, the
+# published wrapper and its lockfile, and the desktop application and its lockfile. The tagging
+# path refuses a disagreement too, but that is release day, and the front end sat at 0.1.0
+# against a 0.9.0 workspace from the day it was folded in with nothing to say so. Run by `check`
+# and by CI, so the pull request that causes one is where it is reported.
+.PHONY: check-versions
+check-versions:
+	@python3 contrib/check-versions.py --selftest
+	@python3 contrib/check-versions.py
+
+# Whether this branch adds sites of a clippy lint the tree has hundreds of: clippy runs over the
+# libraries and binaries at the merge base and here, and a lint with more sites in a crate than it
+# had fails. Nothing is recorded in the tree. Run by `check` and, on a pull request, by CI. It
+# compiles the workspace twice, so it skips a change that touches nothing clippy reads.
+.PHONY: check-lint-increase
+check-lint-increase:
+	@python3 contrib/check-lint-increase.py
+
+# Whether clippy here knows the lints CI will fail on. Run by `check`; on its own it costs
+# nothing and answers immediately.
+.PHONY: check-toolchain
+check-toolchain:
+	@python3 contrib/check-toolchain.py
+
+# The mechanical half of the spec check: clause numbering, the tests each clause names,
+# the paths it governs, the symbols it guards, and the table in the specs README. No model
+# is involved, so this is deterministic and belongs in CI. Whether the code actually does
+# what a clause says needs a reading of the governed source: run the check-spec skill for
+# that half.
+#
+# Numbering is read against main as well as within the file, because a file renumbered
+# to close a gap still reads 1..N and leaves every citation of a moved id pointing at another
+# clause. A renumber meant on purpose is declared in agents/renumbered-clauses.txt, by hand.
+#
+# The screenshot renderer rides along because it is the other half's tool: the skill pastes what
+# it prints into issue bodies, it is standard library Python like everything else here, and a
+# renderer that is quietly wrong sends a plausible and untrue screen to whoever has to fix the bug.
+#
+# The issue-poster check rides along too: every skill that files an issue has to name
+# agents/agents/issue-poster.md, and the labels that file writes have to be ones labelling-issues.md
+# describes. It is here rather than in `check` because a change to a skill or to docs/ runs no Rust
+# gate, and this one runs on every change.
+.PHONY: check-spec
+check-spec:
+	python3 agents/skills/check-spec/selftest.py
+	python3 agents/skills/check-spec/check-spec.py --mechanical-only
+	@python3 contrib/terminal-screenshot.py --selftest
+	@python3 contrib/check-issue-posters.py --selftest
+	@python3 agents/issue_helper_selftest.py
+	@python3 agents/work_dir_selftest.py
+	@python3 agents/setup_selftest.py
+	@python3 contrib/check-issue-posters.py
+
+# The deterministic half of the security audit. It answers the questions check-spec cannot: whether
+# two documents agree about how many exceptions to the rule are admitted, whether every crate
+# keeping a network client of its own is one the egress register admits and no comment claims a
+# dependency a manifest beside it declares, whether the register admitting them leaves as many
+# prompts out of a verdict's reach as the clause deciding that does, whether a field documented as
+# read in one place is read in one place, whether anything reaches into a Labelled, whether a spec
+# pins the constructors as well as the releases, whether every gate handing released content to a
+# closure the driver wrote is counted rather than merely named and so is every function forwarding
+# its caller's closure to one, whether every workflow step is on a commit rather than a tag
+# somebody else can move, whether every container image this tree runs names a digest rather than
+# a tag its publisher can move, and whether a job holding `id-token: write` or a secret installs or
+# runs an npm dependency, which every step in that job could read the credential from, whether a
+# checkout of this tree names a kind of ref rather than a bare name a branch and a tag can share,
+# and whether the check contexts a merge is held to are written down in
+# contrib/required-checks.txt, name jobs that exist, and cover every job whose purpose is running a
+# check. No model takes part, so it belongs in CI.
+# The lanes that read code are the skill, and a person runs those.
+#
+# It passes on this tree now that `Labelled::trusted` has a `guards` entry beside `Labelled::new`,
+# so ci.yml runs it and check-all has it below. It was held out of both while it failed, because a
+# red check-all is the normal state nobody reads.
+.PHONY: check-security
+check-security:
+	python3 agents/skills/security-audit/selftest.py
+	python3 agents/skills/security-audit/security-audit.py --mechanical-only
+
+# The scan half of the maintenance skill: public items nothing names, items only tests name,
+# allowances silencing a lint, blocks and string literals repeated across files, files and
+# functions past a length, deeply nested functions, modules that use many others, public functions
+# no test names, shared mutable state, commented-out code and string-typed errors. It reads no
+# code, so a candidate may be wrong in either direction, and it exits zero whatever it finds.
+# Candidates that docs/maintenance-reviewed holds a verdict for are left out. The clippy lane is
+# left out, because it compiles and this target needs no toolchain: the skill runs it. Deciding
+# which candidates are worth an issue needs a reading of the code: run the maintenance skill for
+# that half.
+.PHONY: check-maintenance
+check-maintenance: check-maintenance-selftest
+	python3 agents/skills/maintenance/maintenance.py --mechanical-only --no-clippy
+
+# agents/unverified-clauses.txt, written from the specs. It is the list of clauses nothing pins, and
+# check-spec fails while it and the specs disagree, so this is what to run after giving a clause
+# a test, or setting one to none.
+.PHONY: write-unverified
+write-unverified:
+	python3 agents/skills/check-spec/check-spec.py --write-unverified
+
+# contrib/untranslated-messages.txt, written from the catalogs. It is the list of messages each translation
+# is missing, and check-locales fails while it and the catalogs disagree, so this is what to run
+# after translating a message, or after adding one to the reference that no catalog has yet.
+.PHONY: write-untranslated
+write-untranslated:
+	python3 contrib/check-locales.py --write
+
+# The security scan that comments on our pull requests, before pushing rather than
+# after. Nothing here configures it: it arrives as an organization-level workflow
+# calling brave/security-action, so contrib/check-reviewdog.sh clones that repository
+# and drives its reviewdog runners against this checkout, pinning the tool versions
+# its action.yml pins. First run downloads opengrep, reviewdog and the rule set into
+# ~/.cache; later runs re-use them and take about half a minute.
+#
+# The two targets are the action's own two modes. On a pull request it scans what the
+# branch changed; on workflow_dispatch it scans everything. A finding here is one the
+# bot would post, so the full scan reports plenty that predates any given branch --
+# check-reviewdog is the one to run before pushing.
+#
+# No model is involved, so both are deterministic.
+.PHONY: check-reviewdog
+check-reviewdog: check-reviewdog-selftest
+	@contrib/check-reviewdog.sh $(if $(BASE),--base '$(BASE)')
+
+.PHONY: check-reviewdog-full
+check-reviewdog-full: check-reviewdog-selftest
+	@contrib/check-reviewdog.sh --full
+
+# The npm-lockfile job. The published package is a thin wrapper that downloads the
+# release binary, and it has no dependencies, so that download is the whole supply chain surface
+# it has. The four projects with dependencies are ui/ (Electron's tree), docs/website,
+# packages/agent-client and mobile/. Each has a pnpm lockfile of its own and none is a workspace
+# of another deliberately, so nothing else reaches them.
+#
+# `install --frozen-lockfile --lockfile-only` fails when a lockfile does not satisfy its
+# package.json and fetches nothing. contrib/check-pnpm-lockfiles.py then holds each lockfile's
+# sources to the registry and the one git dependency its manifest names.
+#
+# The npm tests are the only thing in this tree that runs any of docs/specs/releases.md as
+# code: they call the origin the package script composes with an environment set against it,
+# so a release repository something outside the script can choose fails here rather than at a
+# publish, and they run the real launcher against a package that script builds. They need no
+# dependency, so they run before the install rather than after it. `ls` precedes the run
+# because `node --test` given a pattern matching nothing exits 0 having run nothing, which
+# would make a renamed-away pin a passing gate.
+.PHONY: check-npm
+check-npm:
+	ls npm/tests/*.test.mjs >/dev/null && node --test npm/tests/*.test.mjs
+	python3 contrib/check-pnpm-lockfiles.py --selftest
+	pnpm --dir ui install --frozen-lockfile --lockfile-only
+	pnpm --dir docs/website install --frozen-lockfile --lockfile-only
+	pnpm --dir packages/agent-client install --frozen-lockfile --lockfile-only
+	pnpm --dir mobile install --frozen-lockfile --lockfile-only
+	python3 contrib/check-pnpm-lockfiles.py
+
+# The dependency policy in .config/deny.toml. CI runs this target rather than cargo-deny's action,
+# so the version below is the only one anywhere and a pass here means what it means there.
+#
+# Installed under the cache rather than into ~/.cargo/bin, so running this never changes what
+# `cargo deny` means anywhere else.
+#
+# contrib/check-deny-reasons.py runs first, since it answers at once and the install below does not.
+#
+# unmatched-skip is a warning by default: raised here because a skip entry that no longer
+# matches is a recorded reason for a duplicate that is no longer there. --locked for the same
+# reason every other cargo command here takes it: the answer is about the versions Cargo.lock
+# pins, not the ones a resolve on the spot would pick.
+#
+# The fuzz package is a workspace of its own, so the first run does not read its graph, and the
+# second reads it with the same policy. The skip entries describe the root graph: the first run
+# fails on one that matches nothing, and the second does not report them. The one licence exception
+# is for a crate only the fuzz graph has, so the second run fails on an exception that matches
+# nothing and the first does not report it. An exception for a crate only the root graph has would
+# need the flags the other way round.
+CARGO_DENY_VERSION = 0.20.2
+CARGO_DENY_ROOT = $(HOME)/.cache/bravebot-deny
+.PHONY: check-deps
+check-deps:
+	@python3 contrib/check-deny-reasons.py --selftest
+	@python3 contrib/check-deny-reasons.py
+	@"$(CARGO_DENY_ROOT)/bin/cargo-deny" --version 2>/dev/null | grep -qx "cargo-deny $(CARGO_DENY_VERSION)" || { \
+		echo "building cargo-deny $(CARGO_DENY_VERSION) into $(CARGO_DENY_ROOT), which takes a few minutes"; \
+		cargo install --quiet --locked cargo-deny@$(CARGO_DENY_VERSION) --root "$(CARGO_DENY_ROOT)"; \
+	}
+	"$(CARGO_DENY_ROOT)/bin/cargo-deny" --config .config/deny.toml --locked check --deny unmatched-skip --allow license-exception-not-encountered
+	"$(CARGO_DENY_ROOT)/bin/cargo-deny" --manifest-path fuzz/Cargo.toml --config .config/deny.toml --locked check \
+		--allow unmatched-skip --allow unnecessary-skip --deny license-exception-not-encountered
+
+# The fuzz targets in fuzz/, which is a package of its own with its own workspace and lockfile, so
+# nothing above compiles libFuzzer's C++.
+#
+# libFuzzer needs a nightly toolchain, and the date of the one the targets are built with is
+# written here and nowhere else. Moving to a newer one is an edit to this line, which
+# `make check-fuzz` then checks the targets still build with.
+#
+# Targets are built with debug assertions and overflow checks, which `-a` asks for by name so that
+# it does not depend on cargo-fuzz's default, and with AddressSanitizer. A release build of
+# bravebot sets no `overflow-checks`, so a sum that overflows there wraps and the function goes on
+# with a wrong number: built this way, an input that reaches one is reported instead.
+#
+# `-max_len` is the longest input the fuzzer makes. `diff` reads two texts, so it is given room
+# for both. bravebot-config's build script refuses to build without credentials unless told that a
+# binary configured at run time is acceptable, which is all a fuzz target needs.
+FUZZ_TOOLCHAIN = nightly-2026-10-01
+# The cargo-fuzz CI installs, and the one `make fuzz-install` installs for a person.
+CARGO_FUZZ_VERSION = 0.13.2
+FUZZ_TARGETS = regex diff event_stream sse
+FUZZ_SECONDS = 20
+FUZZ_FLAGS = -timeout=10 -rss_limit_mb=2048
+FUZZ_ENV = BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1
+fuzz_max_len = $$([ "$(1)" = diff ] && echo 65536 || echo 4096)
+# cargo-fuzz does not read a dictionary by itself, so each target that has one is handed it.
+fuzz_dict = $$([ -f fuzz/dictionaries/$(1).dict ] && echo -dict=fuzz/dictionaries/$(1).dict)
+
+# The toolchain, for the commands in docs/development/fuzzing.md to name without writing its date.
+.PHONY: fuzz-toolchain
+fuzz-toolchain:
+	@echo $(FUZZ_TOOLCHAIN)
+
+# Built from source into cargo's own bin directory. taiki-e/install-action has no manifest for
+# cargo-fuzz, and its fallback fetches whichever cargo-binstall is current.
+.PHONY: fuzz-install
+fuzz-install:
+	cargo install --locked cargo-fuzz@$(CARGO_FUZZ_VERSION)
+
+.PHONY: fuzz-prerequisites
+fuzz-prerequisites:
+	@command -v rustup >/dev/null 2>&1 && rustup toolchain list | grep -q '^$(FUZZ_TOOLCHAIN)' || { \
+		echo "fuzz: the $(FUZZ_TOOLCHAIN) toolchain is not installed: rustup toolchain install $(FUZZ_TOOLCHAIN) --profile minimal -c rustfmt -c clippy -c rust-src" >&2; \
+		exit 1; \
+	}
+	@cargo fuzz --version >/dev/null 2>&1 || { \
+		echo "fuzz: cargo-fuzz is not installed: make fuzz-install" >&2; \
+		exit 1; \
+	}
+	@[ "$$(cargo fuzz list | sort | tr '\n' ' ')" = "$$(printf '%s\n' $(FUZZ_TARGETS) | sort | tr '\n' ' ')" ] || { \
+		echo "fuzz: FUZZ_TARGETS in the Makefile ($(FUZZ_TARGETS)) differs from the [[bin]] entries in fuzz/Cargo.toml ($$(cargo fuzz list | tr '\n' ' '))" >&2; \
+		exit 1; \
+	}
+
+# The targets one to a line, which .github/workflows/fuzz.yml makes a leg of each from.
+.PHONY: fuzz-targets
+fuzz-targets:
+	@printf '%s\n' $(FUZZ_TARGETS)
+
+# What `fuzz` and `fuzz-cmin` need of TARGET.
+.PHONY: fuzz-named-target
+fuzz-named-target:
+	@echo "$(FUZZ_TARGETS)" | tr ' ' '\n' | grep -qxF -- '$(TARGET)' || { \
+		echo "fuzz: name a target, as in make fuzz TARGET=regex. They are: $(FUZZ_TARGETS)" >&2; \
+		exit 1; \
+	}
+
+# One target, with the flags CI uses: make fuzz TARGET=regex [FUZZ_SECONDS=60]. New inputs go to
+# fuzz/corpus/<target>, which is not committed; the seeds and the reproducers of fixed crashes are
+# read from their own directories.
+.PHONY: fuzz
+fuzz: fuzz-prerequisites fuzz-named-target
+	@mkdir -p fuzz/corpus/$(TARGET)
+	$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) fuzz run -a $(TARGET) fuzz/corpus/$(TARGET) fuzz/seeds/$(TARGET) fuzz/regressions/$(TARGET) -- \
+		-max_total_time=$(FUZZ_SECONDS) $(FUZZ_FLAGS) -max_len=$(call fuzz_max_len,$(TARGET)) $(call fuzz_dict,$(TARGET))
+
+# Replaces fuzz/corpus/<target> with the inputs of it that each reach something new, which is what
+# the weekly run saves. cargo-fuzz leaves the corpus as it was and exits 0 where the merge fails.
+.PHONY: fuzz-cmin
+fuzz-cmin: fuzz-prerequisites fuzz-named-target
+	@mkdir -p fuzz/corpus/$(TARGET)
+	$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) fuzz cmin -a $(TARGET) fuzz/corpus/$(TARGET) -- -max_len=$(call fuzz_max_len,$(TARGET))
+
+# Formatting, clippy and the unit tests of the code the targets share, a build of every target, a
+# replay of the seeds and the reproducers of fixed crashes with -runs=0, and then each target for
+# FUZZ_SECONDS. Stops at the first failure.
+.PHONY: check-fuzz
+check-fuzz: fuzz-prerequisites
+	cargo +$(FUZZ_TOOLCHAIN) fmt --manifest-path fuzz/Cargo.toml -- --check
+	$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+	$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) test --manifest-path fuzz/Cargo.toml --lib --locked
+	$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) fuzz build -a
+	@set -e; for target in $(FUZZ_TARGETS); do \
+		echo "replay $$target"; \
+		$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) fuzz run -a $$target fuzz/seeds/$$target fuzz/regressions/$$target -- \
+			-runs=0 $(FUZZ_FLAGS) -max_len=$(call fuzz_max_len,$$target); \
+	done
+	@set -e; for target in $(FUZZ_TARGETS); do \
+		echo "run $$target for $(FUZZ_SECONDS)s"; \
+		mkdir -p fuzz/corpus/$$target; \
+		$(FUZZ_ENV) cargo +$(FUZZ_TOOLCHAIN) fuzz run -a $$target fuzz/corpus/$$target fuzz/seeds/$$target fuzz/regressions/$$target -- \
+			-max_total_time=$(FUZZ_SECONDS) $(FUZZ_FLAGS) -max_len=$(call fuzz_max_len,$$target) $(call fuzz_dict,$$target); \
+	done
+
+# The minimum-toolchain job. Built in a container pinned to the declared MSRV, because
+# rustup is not a given here and a Homebrew or distro Rust cannot switch toolchains.
+# Catches a feature that only compiles on a newer toolchain than the release build has.
+.PHONY: check-msrv
+# The source archive contains working-tree edits but excludes ignored local state.
+# pipefail keeps a failed archive from becoming a successful container check.
+check-msrv check-windows check-linux: SHELL := /bin/bash -o pipefail
+check-msrv:
+	@case "$(MSRV_IMAGE)" in rust:$(MSRV)-slim@sha256:*) ;; \
+		*) echo "MSRV is $(MSRV) and MSRV_IMAGE is $(MSRV_IMAGE): bump both"; exit 1;; esac
+	python3 contrib/check-source.py | docker run --rm -i -e BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1 \
+		-w /work $(MSRV_IMAGE) sh -c '\
+		tar -xf - && \
+		cargo build --all --locked'
+
+# The windows job. Nothing else compiles the `#[cfg(windows)]` arms of this tree for a check:
+# the cross-build produces the shipped binary and lints nothing, and never compiles a test target
+# at all. Cross-compiled rather than run on a Windows host, which clippy allows because it stops
+# before linking, and in a container for the reason check-msrv is in one: rustup is not a given
+# here, and the C compiler ring wants for the target is a package rather than a toolchain
+# component.
+.PHONY: check-windows
+check-windows:
+	python3 contrib/check-source.py | docker run --rm -i -e BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1 \
+		-w /work $(STABLE_IMAGE) sh -c '\
+		tar -xf - && \
+		apt-get update >/dev/null && \
+		apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 >/dev/null && \
+		rustup component add clippy >/dev/null && \
+		rustup target add x86_64-pc-windows-gnu >/dev/null && \
+		cargo clippy --target x86_64-pc-windows-gnu --all-targets --all-features --locked \
+			-- -D warnings'
+
+# docusaurus.config.js throws on a broken link or anchor, so building the site is the whole
+# of its correctness check. --ignore-scripts because the site's dependency tree is a
+# thousand packages deep and none of them needs an install hook to build.
+.PHONY: check-docs
+check-docs:
+	pnpm --dir docs/website install --frozen-lockfile --ignore-scripts
+	pnpm --dir docs/website run build
+
+# help.rs compiles each page under docs/website/docs into a fixed table, builds an index naming
+# every page by the title in its front matter, and loads a page by the exact name that index
+# gives. An add, an edit that breaks a page's front matter, or a remove can fail a test that
+# reads one of those, so a change under docs/website/docs/ runs this, whatever its status.
+# Narrower than `check`, which compiles and tests the whole workspace for what only these tests
+# in bravebot-agent need.
+.PHONY: check-help
+check-help:
+	cargo test -p bravebot-agent --lib --locked -- help::tests:: \
+		tools::tests::a_documentation_page_loads_by_the_name_the_index_gives_it
+
+# How far the site has fallen behind the specs it describes. docs/docs-updated-to-sha records how
+# far reading got; these two report against it. Neither is a gate and no CI job runs them:
+# the site going stale is not something a diff can decide, so what they are for is answering
+# the question without spending a model run. The update-docs skill calls the same script to
+# move the baseline or defer a commit, which is why neither of those is a target here.
+.PHONY: docs-changes
+docs-changes:
+	@python3 agents/skills/update-docs/docs-ref.py changes
+
+.PHONY: docs-updated-to-sha
+docs-updated-to-sha:
+	@python3 agents/skills/update-docs/docs-ref.py show
+
+# The pull requests a reviewer can pick up now: mergeable, not a draft, with every check passed
+# or skipped, whose latest review by REVIEWER is an approval, and with no latest review by anyone
+# that requests changes. REPO names another repository, REVIEWER another account and LIMIT raises
+# how many are read. GitHub reports mergeable as UNKNOWN for every open pull request after main
+# moves, until each has been read, so contrib/review-ready.py reads the list again every few seconds
+# while an approved, passing, non-draft pull request is UNKNOWN, for WAIT seconds in total, and
+# names on stderr any still UNKNOWN at the end. Each ready pull request is printed as soon as it is
+# seen.
+REVIEW_REPO = brave/bravebot
+REVIEW_REVIEWER = netzenbot-reviewer
+REVIEW_LIMIT = 500
+REVIEW_WAIT = 30
+.PHONY: review-ready
+review-ready:
+	@python3 contrib/review-ready.py --repo '$(or $(REPO),$(REVIEW_REPO))' --reviewer '$(or $(REVIEWER),$(REVIEW_REVIEWER))' \
+	  --limit '$(or $(LIMIT),$(REVIEW_LIMIT))' --wait '$(or $(WAIT),$(REVIEW_WAIT))'
+
+# Opens the implement-issues skill in the terminal client on ISSUES, which the skill receives as
+# written: issue numbers, links and search queries separated by commas. NOTES is the person's
+# instructions for the run, such as how to group the issues. The skill reads it, and no issue is taken
+# from it. Before the session opens, with no model, agents/skills/implement-issues/implement-issues.py
+# stops when an issue is assigned to anybody but the account gh writes as, assigns that account, and
+# adds the label bot/in-progress, which it removes when the session ends. ISSUES and NOTES reach the
+# script through the environment, so no quote in them needs escaping. BRAVEBOT names the client when
+# it is not the one on PATH.
+.PHONY: implement-issues
+implement-issues:
+	@python3 agents/skills/implement-issues/implement-issues.py $(if $(BRAVEBOT),--bravebot '$(BRAVEBOT)') --notes="$$NOTES" -- "$$ISSUES"
+
+# Removes every linked worktree git knows about, wherever it lives, unlocking locked ones first.
+# The first entry `git worktree list` prints is the main working tree and is never touched.
+# A worktree with uncommitted or untracked files is removed too, and that work is lost. Branches are kept. Removals run CLEAN_WORKTREES_JOBS at a time.
+.PHONY: clean-worktrees
+CLEAN_WORKTREES_JOBS ?= 16
+clean-worktrees:
+	@here=$$(git rev-parse --show-toplevel) && \
+	git worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 | grep -vxF "$$here" | tr '\n' '\0' \
+	  | xargs -0 -r -n 1 -P $(CLEAN_WORKTREES_JOBS) sh -c \
+	    'git worktree unlock "$$0" 2>/dev/null; \
+	     if git worktree remove --force "$$0"; then echo "removed $$0"; else echo "kept $$0"; exit 1; fi'; \
+	status=$$?; git worktree prune; exit $$status
+
+# All local checks before pushing, including the UI and Linux code paths.
+# Requires Docker and the desktop runtime dependencies described in checks.md.
+.PHONY: check-all-local check-all
+check-all-local: check-scripts check check-spec check-security check-locales check-versions check-narration check-docs check-npm check-deps check-ui check-agent-client check-mobile check-reviewdog
+check-all: check-all-local check-msrv check-windows check-linux
+
+# The gates this branch's changes need, against its merge base with BASE, which check-reviewdog
+# is measured from too: the ones that always run in CI, then each one contrib/affected-checks.py
+# says a touched path could fail, the way CI decides which of its jobs to run. For iterating before a push; check-all is still the whole.
+# The container gates are their own target, since they are the ones that need Docker.
+# The classifier failing, or naming nothing, fails the target rather than handing make an empty
+# list, which it would answer by running its default goal and passing.
+.PHONY: check-affected check-affected-containers
+check-affected:
+	@targets="$$(python3 contrib/affected-checks.py $(if $(BASE),--base '$(BASE)'))" && \
+		[ -n "$$targets" ] || { echo "check-affected: no gates were named, so none ran" >&2; exit 1; }; \
+		$(MAKE) --no-print-directory -k $$targets
+
+check-affected-containers:
+	@targets="$$(python3 contrib/affected-checks.py --containers $(if $(BASE),--base '$(BASE)'))" && \
+		{ [ -z "$$targets" ] || $(MAKE) --no-print-directory -k $$targets; }
+
+.PHONY: check-scripts check-all-selftest check-reviewdog-selftest check-rebase-selftest check-affected-selftest \
+	check-peer-advisories-selftest check-peer-features-selftest check-pr-fix-selftest check-pr-worktree-selftest check-release-preflight-selftest check-package-manifests-selftest \
+	check-maintenance-selftest check-session-review-selftest check-lint-increase-selftest check-implement-issues-selftest \
+	check-review-ready-selftest
+check-scripts: check-all-selftest check-reviewdog-selftest check-rebase-selftest check-affected-selftest \
+	check-peer-advisories-selftest check-peer-features-selftest check-pr-fix-selftest check-pr-worktree-selftest check-release-preflight-selftest check-package-manifests-selftest \
+	check-maintenance-selftest check-session-review-selftest check-lint-increase-selftest check-implement-issues-selftest \
+	check-review-ready-selftest
+
+check-all-selftest:
+	python3 contrib/check-all-selftest.py
+
+check-affected-selftest:
+	python3 contrib/affected-checks.py --selftest
+
+check-reviewdog-selftest:
+	python3 contrib/check-reviewdog-selftest.py
+
+check-rebase-selftest:
+	python3 agents/skills/rebase/selftest.py
+
+check-peer-advisories-selftest:
+	python3 agents/skills/peer-advisories/selftest.py
+
+check-peer-features-selftest:
+	python3 agents/skills/peer-features/selftest.py
+
+check-pr-fix-selftest:
+	python3 agents/skills/pr-fix/selftest.py
+
+check-pr-worktree-selftest:
+	python3 agents/pr_worktree_selftest.py
+
+check-maintenance-selftest:
+	python3 agents/skills/maintenance/selftest.py
+
+check-session-review-selftest:
+	python3 agents/skills/session-review/selftest.py
+
+check-lint-increase-selftest:
+	python3 contrib/check-lint-increase.py --selftest
+
+check-implement-issues-selftest:
+	python3 agents/skills/implement-issues/selftest.py
+
+check-review-ready-selftest:
+	python3 contrib/review-ready-selftest.py
+
+check-release-preflight-selftest:
+	python3 contrib/release-preflight.py --selftest
+
+check-package-manifests-selftest:
+	python3 contrib/package-manifests.py --selftest
+
+# CI and local runs share the same desktop checks. Linux uses a virtual display;
+# macOS uses the logged-in desktop session.
+#
+# The Node tests this runs are the only thing pinning what the desktop renderer owes the layering
+# spec: that released content is marked by a container it cannot forge, reaches no raw markup and
+# makes the app fetch nothing, and that a replayed message is drawn from the record rather than
+# from its own words. Both are properties of a surface this workspace does not compile, so no Rust
+# test can cite them and `make check` never ran them. `ls` precedes the run because `node --test`
+# given a pattern matching nothing exits 0 having run nothing, which would make a renamed-away pin
+# a passing gate. The helper six of them spawn for real is built by the bridge script that
+# `pnpm run build` calls, so it needs no step of its own here.
+.PHONY: check-ui check-ui-build check-ui-walkthrough
+check-ui: check-ui-build
+	$(MAKE) check-ui-walkthrough
+
+# The Brave extension's tools against a fake browser, and the tests of the second extension, which
+# holds the browser's debugger, against a fake debugger. Node alone and nothing to install, and run
+# by check-ui-build so the job CI gives the desktop UI runs it as well: the two front ends in
+# JavaScript share the one job and its Node. `ls` first for the reason check-ui-build gives. A test
+# that never ends fails after two minutes and does not hold the check.
+.PHONY: check-extension
+check-extension:
+	ls extension/tests/*.test.mjs extension-trusted/tests/*.test.mjs >/dev/null && node --test --test-timeout=120000 extension/tests/*.test.mjs extension-trusted/tests/*.test.mjs
+
+# The TypeScript session client under packages/agent-client: its types, its build, and its tests,
+# which drive a real bravebot-rpc, and bravebot-host with the development relay, against a model
+# service of their own. The binaries are built here because the tests never build them. The
+# package has its own lockfile and is not a pnpm workspace. `ls` first for the reason check-extension gives.
+.PHONY: check-agent-client
+check-agent-client:
+	ls packages/agent-client/test-fixtures/scenarios/*.json >/dev/null
+	BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1 cargo build -p bravebot-ui-bridge --bin bravebot-rpc --bin bravebot-host
+	pnpm --dir packages/agent-client install --frozen-lockfile --ignore-scripts
+	pnpm --dir packages/agent-client run check
+
+# The React Native app under mobile/: its types and its tests, against the session client it links.
+# The client is built first because the app resolves it through its dist. Neither a device nor a
+# simulator is involved, so this is a check of the TypeScript only. The app has its own lockfile and
+# is not a pnpm workspace.
+.PHONY: check-mobile
+check-mobile:
+	pnpm --dir packages/agent-client install --frozen-lockfile --ignore-scripts
+	pnpm --dir packages/agent-client run build
+	pnpm --dir mobile install --frozen-lockfile --ignore-scripts
+	pnpm --dir mobile run check
+
+# The install the desktop application's recipes start from: here, and for the two Windows packaging
+# steps below. Leo's build is cached in pnpm's store, which CI restores, so a warm install does
+# not build it again.
+UI_INSTALL ?= pnpm --dir ui install --frozen-lockfile
+check-ui-build: check-extension
+	$(UI_INSTALL)
+	pnpm --dir ui run typecheck
+	BRAVEBOT_BUILD_UNCONFIGURED=1 pnpm --dir ui run build
+	cd ui && ls scripts/*.test.mjs >/dev/null && node --test scripts/*.test.mjs
+
+check-ui-walkthrough:
+	cd ui && if [ "$$(uname -s)" = Linux ]; then \
+		xvfb-run -a node scripts/drive-manual-walkthrough.mjs; \
+	else \
+		node scripts/drive-manual-walkthrough.mjs; \
+	fi
+
+# What each catalog has of the reference, and what it is missing. The build says so too, in a
+# warning, but a warning is only printed when the build script actually runs, so a translator
+# working through a file learns nothing from a cached build. This always answers, and no gap it
+# finds makes it fail: it is the report to read while translating, and check-locales is the gate.
+.PHONY: locales
+locales:
+	@python3 contrib/check-locales.py --report
+
+# Whether this branch's commit messages and added lines, and in CI the pull request's title and
+# body, narrate their writer's process: a correction of an earlier claim, or an account of what was
+# guessed or checked. A fixed list of phrases, so a paraphrase still needs a reviewer. On a pull
+# request the range is the merge commit's two parents, and elsewhere it is BASE's merge base with
+# this branch, including uncommitted and untracked files. No toolchain, so CI answers in seconds.
+.PHONY: check-narration
+check-narration:
+	python3 contrib/check-narration.py --selftest
+	python3 contrib/check-narration.py $(if $(BASE),--base '$(BASE)')
+
+# Whether every catalog matches contrib/untranslated-messages.txt, which records the messages each
+# translation is knowingly missing. A gap is allowed and silence about one is not: falling back to
+# English is deliberate, so what this gates on is a gap nobody wrote down, and a recorded gap that
+# is no longer there. No toolchain and no build, so CI answers in seconds.
+.PHONY: check-locales
+check-locales:
+	python3 contrib/check-locales.py --selftest
+	python3 contrib/check-locales.py
+
+# Runs the same checks on Linux with the stable toolchain its image is pinned to. Worth doing
+# before pushing platform-specific code: a macOS host never compiles the Linux backend, and
+# clippy gains lints between releases, so both can fail in CI while passing locally. The image
+# names a digest, so what it runs stays where it is put while stable moves on: when
+# `make check-toolchain` reports the host is behind, the tag and digest below are what to bump.
+# The environment the container needs: the build script refuses an unconfigured build
+# without the first, which ci.yml sets for CI, and the shell-mode test reads `$$USER` the way
+# a terminal would, which a CI runner image provides and a bare container does not. The third
+# is set here and must not be set in CI: Docker Desktop's kernel implements no Landlock at
+# all, so the sandbox tests would fail rather than skip, while on a CI runner that same
+# failure is the report that the Linux half of confinement went unexercised.
+#
+# Keep test parallelism bounded in Docker, as it is for the host checks.
+# Python runs the redirected-process fixture in the turn tests.
+# The container's home starts with no ~/.bravebot, so the last step fails on any record a test
+# saved there, which is the check CI's test jobs make after the suite.
+.PHONY: check-linux
+check-linux:
+	python3 contrib/check-source.py | docker run --rm -i -e BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1 -e USER=root \
+		-e BRAVEBOT_ALLOW_MISSING_LANDLOCK=1 \
+		-w /work $(STABLE_IMAGE) sh -c '\
+		tar -xf - && \
+		apt-get update >/dev/null && \
+		apt-get install -y --no-install-recommends python3 >/dev/null && \
+		rustup component add clippy rustfmt >/dev/null 2>&1 && \
+		cargo fmt --all -- --check && \
+		cargo clippy --all-targets --all-features -- -D warnings && \
+		cargo test --all -- --test-threads=4 && \
+		if [ -n "$$(ls -A "$$HOME/.bravebot/sessions" 2>/dev/null)" ]; then \
+			echo "The tests wrote into $$HOME/.bravebot/sessions:"; \
+			find "$$HOME/.bravebot/sessions" -mindepth 1; \
+			exit 1; \
+		fi'
+
+.PHONY: darwin-arm64
+darwin-arm64:
+	$(call cross-build,$@,aarch64-apple-darwin)
+
+.PHONY: darwin-amd64
+darwin-amd64:
+	$(call cross-build,$@,x86_64-apple-darwin)
+
+.PHONY: linux-amd64
+linux-amd64:
+	$(call cross-build,$@,x86_64-unknown-linux-gnu)
+
+.PHONY: linux-arm64
+linux-arm64:
+	$(call cross-build,$@,aarch64-unknown-linux-gnu)
+
+.PHONY: windows-amd64
+windows-amd64:
+	$(call cross-build,$@,x86_64-pc-windows-gnu)
+
+.PHONY: windows-arm64
+windows-arm64:
+	$(call cross-build,$@,aarch64-pc-windows-gnullvm)
+
+.PHONY: all-platforms
+all-platforms: darwin-arm64 darwin-amd64 linux-amd64 linux-arm64 windows-amd64 windows-arm64
+	@echo
+	@echo "built:"
+	@ls -1 dist/
+
+# The desktop application as something somebody else can run: the third family of artifact a
+# release produces, beside the signed binaries above and the npm package.
+#
+# The Rust half is built here rather than through ui/scripts/build-bridge.sh, for the two things
+# that script does which a release must not. It builds the debug profile, so a bundle packaged
+# after it carries an unoptimised agent; and it defaults BRAVEBOT_ALLOW_UNCONFIGURED_BUILD to 1,
+# so a shell with no credentials in it yields a bundle that starts, lists sessions and then fails
+# at the first inference request, which is the binary crates/config/build.rs exists to refuse.
+# Setting it to 0 fails that build here instead, while whoever is packaging is still watching. It
+# is set to 0 rather than left unset because the permission is granted by that exact value: a
+# recipe that only declined to set it would still grant it in a shell that exports it, which the
+# front-end script and every CI job here do.
+# Credentials come from the environment, as they do for every other release build: direnv at the
+# root of this repository, or a release job's own secrets.
+#
+# `install --frozen-lockfile`, never a bare `install`: the lockfile is what CI lints and a resolve
+# on the spot is a dependency change. The application's postinstall runs, and has to: the packager
+# copies the Electron runtime into the bundle, and that runtime is what it fetches (setup:electron
+# in ui/package.json). electron-vite is then run directly
+# rather than through `pnpm run build`, which would build the debug pair again on the way past.
+#
+# Nothing here signs or notarises the result, so the bundle is installable and not distributable;
+# the job that signs the binaries is where that belongs, and issue #394 is where it is decided.
+# It is fused, as a release is, so it runs no Node program it is handed and Playwright cannot
+# drive it: `pnpm run package` in ui/ is the bundle the drivers attach to.
+.PHONY: app-bundle
+app-bundle:
+	BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=0 cargo build --release --locked \
+		-p bravebot-ui-bridge -p bravebot-ui-files
+	cd ui && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm exec electron-vite build && \
+		node scripts/package.mjs --release
+
+# The desktop application's release assets, built on a Mac from what the cross-build left in
+# dist/, for both architectures whichever one this Mac is:
+#
+#   reads   dist/bravebot-rpc-darwin-<arch>, dist/bravebot-ui-files-darwin-<arch>
+#   writes  dist/bravebot-app-darwin-<arch>.dmg
+#
+# for <arch> arm64 and amd64, the names the CLI assets use. The executables are the ones
+# `make darwin-arm64 darwin-amd64 strip` produces, so the agent inside the app is the same build as
+# the one beside it on the releases page, and nothing here needs a Rust toolchain.
+#
+# Two steps, because signing goes between them. `app-bundles` writes a fused, unsigned bundle per
+# architecture to ui/dist/Brave Bot-darwin-<arm64|x64>/, which a signing job signs where it lies;
+# `app-dmg` then puts each one in its disk image, beside the two licence files the packager writes
+# next to the bundle rather than into it. `app-release` is both with nothing in between. Fusing
+# has to come first because it rewrites the Electron binary, which a signature covers.
+#
+# Each pair is the architecture's name in an asset and Electron's name for it, which differ for
+# Intel, and this list is the one place that says so. Linux and Windows use the same two names for
+# the same two architectures, so `app-bundles-linux` and `app-bundles-windows` below read this
+# list too; the Linux packages then have a third spelling each, which
+# ui/scripts/linux-package.mjs holds.
+APP_ARCHES = arm64:arm64 amd64:x64
+
+.PHONY: app-release
+app-release: app-bundles
+	$(MAKE) app-dmg
+
+.PHONY: app-bundles
+app-bundles:
+	@missing=; builds=; for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; lacks=; \
+		for name in bravebot-rpc bravebot-ui-files; do \
+			test -f dist/$$name-darwin-$$arch || lacks="$$lacks $$name-darwin-$$arch"; \
+		done; \
+		if [ -n "$$lacks" ]; then missing="$$missing$$lacks"; builds="$$builds darwin-$$arch"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "missing from dist/:$$missing" >&2; \
+		echo "run \`make$$builds strip\` first" >&2; exit 1; \
+	fi
+	cd ui && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm exec electron-vite build
+	@set -e; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		mkdir "$$stage/$$arch"; \
+		install -m 0755 dist/bravebot-rpc-darwin-$$arch "$$stage/$$arch/bravebot-rpc"; \
+		install -m 0755 dist/bravebot-ui-files-darwin-$$arch "$$stage/$$arch/bravebot-ui-files"; \
+		(cd ui && node scripts/package.mjs --executables="$$stage/$$arch" --arch=$$electron); \
+	done
+
+.PHONY: app-dmg
+app-dmg:
+	@set -e; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		bundle="ui/dist/Brave Bot-darwin-$$electron"; \
+		mkdir "$$stage/$$arch"; \
+		ditto "$$bundle/Brave Bot.app" "$$stage/$$arch/Brave Bot.app"; \
+		cp "$$bundle/LICENSE" "$$bundle/LICENSES.chromium.html" "$$stage/$$arch/"; \
+		ln -s /Applications "$$stage/$$arch/Applications"; \
+		hdiutil create -quiet -volname "Brave Bot" -srcfolder "$$stage/$$arch" -ov -format UDZO \
+			dist/bravebot-app-darwin-$$arch.dmg; \
+		echo "wrote dist/bravebot-app-darwin-$$arch.dmg"; \
+	done
+
+# The desktop application's Linux release assets, built on a Linux host from what the cross-build
+# left in dist/, for both architectures whichever one this host is:
+#
+#   reads   dist/bravebot-rpc-linux-<arch>, dist/bravebot-ui-files-linux-<arch>
+#   writes  dist/bravebot-app-linux-<arch>.deb, dist/bravebot-app-linux-<arch>.rpm
+#
+# for <arch> arm64 and amd64, from `make linux-amd64 linux-arm64 strip`, and needing no Rust
+# toolchain. Two steps for the same reason the Mac is two: `app-bundles-linux` writes a fused,
+# unsigned directory per architecture under ui/dist/, and `app-packages-linux` puts each one in
+# its packages. Signing them, and the repository that would serve updates, are issue #770.
+#
+# The packages are what is shipped rather than a tarball or an AppImage, and the reason is
+# Chromium's sandbox. Where unprivileged user namespaces are unavailable, which Ubuntu 24.04's
+# AppArmor policy makes the default, Electron needs `chrome-sandbox` owned by root with mode 4755
+# and otherwise aborts at start. Only an installer can set that; anything a person unpacks
+# themselves leaves `--no-sandbox` as the way to start it, which must not be a supported way to
+# run an agent.
+#
+# Both architectures are packaged on one host: the packager downloads the Electron runtime for
+# the architecture it is asked for, and the two tools below archive a finished tree rather than
+# executing anything in it, so neither needs the machine the package is for. What is not covered
+# here is installing the result, which needs a virtual machine of each supported release rather
+# than a container: a container shares this kernel and its AppArmor policy, so it cannot exercise
+# the sandbox the packages exist for.
+.PHONY: app-release-linux
+app-release-linux: app-bundles-linux
+	$(MAKE) app-packages-linux
+
+.PHONY: app-bundles-linux
+app-bundles-linux:
+	@missing=; builds=; for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; lacks=; \
+		for name in bravebot-rpc bravebot-ui-files; do \
+			test -f dist/$$name-linux-$$arch || lacks="$$lacks $$name-linux-$$arch"; \
+		done; \
+		if [ -n "$$lacks" ]; then missing="$$missing$$lacks"; builds="$$builds linux-$$arch"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "missing from dist/:$$missing" >&2; \
+		echo "run \`make$$builds strip\` first" >&2; exit 1; \
+	fi
+	cd ui && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm exec electron-vite build
+	@set -e; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		mkdir "$$stage/$$arch"; \
+		install -m 0755 dist/bravebot-rpc-linux-$$arch "$$stage/$$arch/bravebot-rpc"; \
+		install -m 0755 dist/bravebot-ui-files-linux-$$arch "$$stage/$$arch/bravebot-ui-files"; \
+		(cd ui && node scripts/package.mjs --executables="$$stage/$$arch" --arch=$$electron); \
+	done
+
+# The install tree and the two package descriptions are written once by
+# ui/scripts/linux-package.mjs, so the layout a person gets is the same whichever format they
+# installed, and only the packing is done per format. The .deb takes its own control directory
+# in a copy of the tree rather than in the tree itself, because a DEBIAN directory left there is a
+# file the rpm build would refuse as unpackaged.
+#
+# Both tools build from a copy in the container's own /tmp rather than in the mounted stage.
+# Docker Desktop's file sharing drops the setuid bit from a file copied onto it and cannot hardlink
+# a symlink at all, and a package records the modes its build root holds. Each container runs as
+# root, since installing rpmbuild needs it, so each hands its output back to whoever is packaging
+# before it exits.
+#
+# rpmbuild is given its target from the spec's `ExclusiveArch`, for the reason rpmSpec() in
+# ui/scripts/linux-package.mjs gives.
+.PHONY: app-packages-linux
+app-packages-linux:
+	@set -e; mkdir -p dist; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		bundle="ui/dist/Brave Bot-linux-$$electron"; \
+		test -d "$$bundle" || { echo "no $$bundle: run \`make app-bundles-linux\` first" >&2; exit 1; }; \
+		mkdir "$$stage/$$arch"; \
+		node ui/scripts/linux-package.mjs --bundle="$$bundle" --arch=$$arch --stage="$$stage/$$arch"; \
+		docker run --rm -e OWNER="$$(id -u):$$(id -g)" -v "$$stage/$$arch:/stage" -w /stage $(DEB_IMAGE) sh -c '\
+			cp -a payload /tmp/deb && mkdir /tmp/deb/DEBIAN && cp control /tmp/deb/DEBIAN/control && \
+			dpkg-deb --build --root-owner-group /tmp/deb out.deb && \
+			chown "$$OWNER" out.deb'; \
+		docker run --rm -e OWNER="$$(id -u):$$(id -g)" -v "$$stage/$$arch:/stage" -w /stage $(RPM_IMAGE) sh -c '\
+			dnf -y --setopt=install_weak_deps=False install rpm-build >/dev/null && \
+			target=$$(sed -n "s/^ExclusiveArch: //p" brave-bot.spec) && \
+			rpmbuild -bb --target "$${target:?brave-bot.spec states no ExclusiveArch}" \
+				--define "_sourcedir /stage" --define "_topdir /tmp/rpm" \
+				--define "_rpmdir /stage" --define "_rpmfilename out.rpm" brave-bot.spec && \
+			chown "$$OWNER" out.rpm'; \
+		mv "$$stage/$$arch/out.deb" dist/bravebot-app-linux-$$arch.deb; \
+		mv "$$stage/$$arch/out.rpm" dist/bravebot-app-linux-$$arch.rpm; \
+		rm -rf "$$stage/$$arch"; \
+		echo "wrote dist/bravebot-app-linux-$$arch.deb dist/bravebot-app-linux-$$arch.rpm"; \
+	done
+
+# The Windows half of the same thing, and the first of its two steps:
+#
+#   reads   dist/bravebot-rpc-windows-<arch>.exe, dist/bravebot-ui-files-windows-<arch>.exe
+#   writes  ui/dist/Brave Bot-win32-<x64|arm64>/
+#
+# for <arch> arm64 and amd64 again, from `make windows-amd64 windows-arm64 strip`. Unlike
+# `app-bundles` this runs on any host: everything platform-specific about a Windows bundle is the
+# icon and the version resource in `Brave Bot.exe`, which `@electron/packager` writes with resedit,
+# a JavaScript library, so no Windows node and no Wine is involved. The release job then signs
+# every PE in the bundle where it lies: `Brave Bot.exe`, both helpers, and Electron's own DLLs.
+# `app-release-windows` is this and the second step with nothing in between, so the second step
+# uses the packages the first one installed rather than installing them again.
+.PHONY: app-release-windows
+app-release-windows: app-bundles-windows
+	$(MAKE) app-installers-windows UI_INSTALL=true
+
+.PHONY: app-bundles-windows
+app-bundles-windows:
+	@missing=; builds=; for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; lacks=; \
+		for name in bravebot-rpc bravebot-ui-files; do \
+			test -f dist/$$name-windows-$$arch.exe || lacks="$$lacks $$name-windows-$$arch.exe"; \
+		done; \
+		if [ -n "$$lacks" ]; then missing="$$missing$$lacks"; builds="$$builds windows-$$arch"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "missing from dist/:$$missing" >&2; \
+		echo "run \`make$$builds strip\` first" >&2; exit 1; \
+	fi
+	$(UI_INSTALL)
+	cd ui && pnpm run typecheck && pnpm exec electron-vite build
+	@set -e; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		mkdir "$$stage/$$arch"; \
+		install -m 0755 dist/bravebot-rpc-windows-$$arch.exe "$$stage/$$arch/bravebot-rpc.exe"; \
+		install -m 0755 dist/bravebot-ui-files-windows-$$arch.exe "$$stage/$$arch/bravebot-ui-files.exe"; \
+		(cd ui && node scripts/package.mjs --executables="$$stage/$$arch" --platform=win32 --arch=$$electron); \
+	done
+
+# The second step, which puts each signed bundle in its installer:
+#
+#   reads   ui/dist/Brave Bot-win32-<x64|arm64>/
+#   writes  dist/bravebot-desktop-windows-<arch>-setup.exe
+#
+# The installer is NSIS, per user, and written by electron-builder from the bundle as it lies, so
+# the signatures on it are the ones installed; ui/scripts/windows-installer.mjs says what else it
+# fixes. It runs on Windows or a Mac and not on Linux, where electron-builder needs Wine to write the
+# uninstaller, so a release runs it on the Windows node that signed the bundles, which then signs the
+# two installers too.
+.PHONY: app-installers-windows
+app-installers-windows:
+	$(UI_INSTALL)
+	@set -e; for pair in $(APP_ARCHES); do \
+		arch=$${pair%%:*}; electron=$${pair#*:}; \
+		node ui/scripts/windows-installer.mjs --bundle="ui/dist/Brave Bot-win32-$$electron" --arch=$$arch --out=dist; \
+	done
+
+# The CLI's Linux packages, the ones the apt and dnf repositories will serve, built on a Linux
+# host from what the cross-build left in dist/:
+#
+#   reads   dist/bravebot-linux-<arch>
+#   writes  dist/bravebot-linux-<arch>.deb, dist/bravebot-linux-<arch>.rpm
+#
+# for <arch> amd64 and arm64, from `make linux-amd64 linux-arm64 strip`, and needing no Rust
+# toolchain. The four names are the ones the publish job uploads, so they are a contract: a
+# rename here publishes nothing. The payload is the one binary at /usr/bin/bravebot, and both
+# descriptions are written here from one architecture list, so neither format can be built for
+# an architecture the other is not.
+#
+# One target per format, and each runs where its own tool is: `cli-packages-linux-deb` where
+# dpkg-deb is, `cli-packages-linux-rpm` where rpmbuild is. Neither starts a container of its own,
+# so each can run inside one; `cli-packages-linux` runs each in the digest-pinned container the
+# app's packages use, one per format, with the tree mounted read-only beside dist/.
+#
+# Each container stages its tree in its own /tmp rather than in the mounted stage, for the
+# reason `app-packages-linux` gives; runs as root, since installing its tool needs that; and
+# hands its output back to whoever is packing. rpmbuild is given its target from the spec's
+# `ExclusiveArch`, as `app-packages-linux` reads it.
+#
+# The dependencies are the binary's own, from its dynamic section: libm, libc, libpthread and
+# libdl, all four libc6 on Debian and glibc on Fedora, required at 2.30 or newer, the newest
+# symbol version either architecture asks for. The Electron list the app declares is not copied:
+# none of it is needed here.
+#
+# The package files carry no signature of their own: what is signed is the checksum each one is
+# published with, as it is for the Linux binaries, and what a repository client checks is the
+# signed metadata over them, which the publish job writes and signs.
+
+# The assets' two architectures, and the name rpmbuild wants for each: an asset and its .deb
+# name agree, so a pair is the asset and its rpm name.
+CLI_ARCHES = amd64:x86_64 arm64:aarch64
+
+.PHONY: cli-packages-linux
+cli-packages-linux:
+	@docker run --rm -e OWNER="$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/work:ro" -v "$(CURDIR)/dist:/work/dist:rw" -w /work $(DEB_IMAGE) sh -c '\
+		apt-get update >/dev/null && \
+		apt-get install -y --no-install-recommends make >/dev/null && \
+		make cli-packages-linux-deb && \
+		chown "$$OWNER" dist/bravebot-linux-*.deb'
+	@docker run --rm -e OWNER="$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/work:ro" -v "$(CURDIR)/dist:/work/dist:rw" -w /work $(RPM_IMAGE) sh -c '\
+		dnf -y --setopt=install_weak_deps=False install make rpm-build >/dev/null && \
+		make cli-packages-linux-rpm && \
+		chown "$$OWNER" dist/bravebot-linux-*.rpm'
+
+.PHONY: cli-packages-linux-deb
+cli-packages-linux-deb:
+	@set -e; missing=; builds=; for pair in $(CLI_ARCHES); do \
+		arch=$${pair%%:*}; \
+		test -f dist/bravebot-linux-$$arch || { missing="$$missing bravebot-linux-$$arch"; builds="$$builds linux-$$arch"; }; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "missing from dist/:$$missing" >&2; \
+		echo "run \`make$$builds strip\` first" >&2; exit 1; \
+	fi
+	@set -e; mkdir -p dist; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(CLI_ARCHES); do \
+		arch=$${pair%%:*}; \
+		dir="$$stage/$$arch"; \
+		install -d -m 0755 "$$dir/usr/bin" "$$dir/DEBIAN"; \
+		install -m 0755 dist/bravebot-linux-$$arch "$$dir/usr/bin/bravebot"; \
+		size=$$(( ($$(wc -c < dist/bravebot-linux-$$arch) + 1023) / 1024 )); \
+		{ printf '%s\n' \
+			'Package: bravebot' \
+			'Version: $(VERSION)' \
+			"Architecture: $$arch" \
+			'Maintainer: Brave Software, Inc. <support@brave.com>' \
+			"Installed-Size: $$size" \
+			'Depends: libc6 (>= 2.30)' \
+			'Section: devel' \
+			'Priority: optional' \
+			'Homepage: https://github.com/brave/bravebot' \
+			'Description: A general-purpose agent with structural resistance to indirect prompt injection' \
+			' bravebot is a general-purpose agent that runs in a terminal. Untrusted content can be' \
+			' carried and written, and it never decides what happens.'; } > "$$dir/DEBIAN/control"; \
+		dpkg-deb --build --root-owner-group "$$dir" "$$stage/out-$$arch.deb"; \
+		mv -f "$$stage/out-$$arch.deb" dist/bravebot-linux-$$arch.deb; \
+		echo "wrote dist/bravebot-linux-$$arch.deb"; \
+	done
+
+.PHONY: cli-packages-linux-rpm
+cli-packages-linux-rpm:
+	@set -e; missing=; builds=; for pair in $(CLI_ARCHES); do \
+		arch=$${pair%%:*}; \
+		test -f dist/bravebot-linux-$$arch || { missing="$$missing bravebot-linux-$$arch"; builds="$$builds linux-$$arch"; }; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "missing from dist/:$$missing" >&2; \
+		echo "run \`make$$builds strip\` first" >&2; exit 1; \
+	fi
+	@set -e; mkdir -p dist; stage=$$(mktemp -d); trap 'rm -rf "$$stage"' EXIT; \
+	for pair in $(CLI_ARCHES); do \
+		arch=$${pair%%:*}; rpmarch=$${pair#*:}; \
+		dir="$$stage/$$arch"; \
+		install -d -m 0755 "$$dir/payload/usr/bin"; \
+		install -m 0755 dist/bravebot-linux-$$arch "$$dir/payload/usr/bin/bravebot"; \
+		{ printf '%s\n' \
+			'%global __os_install_post %{nil}' \
+			'%global debug_package %{nil}' \
+			'%global _build_id_links none' \
+			'' \
+			'Name: bravebot' \
+			'Version: $(VERSION)' \
+			'Release: 1' \
+			'Summary: A general-purpose agent with structural resistance to indirect prompt injection' \
+			'License: MPL-2.0' \
+			'URL: https://github.com/brave/bravebot' \
+			'Packager: Brave Software, Inc. <support@brave.com>' \
+			"ExclusiveArch: $$rpmarch" \
+			'AutoReqProv: no' \
+			'Requires: glibc >= 2.30' \
+			'' \
+			'%description' \
+			'bravebot is a general-purpose agent that runs in a terminal. Untrusted content can be' \
+			'carried and written, and it never decides what happens.' \
+			'' \
+			'%install' \
+			'cp -a %{_sourcedir}/payload/. %{buildroot}/' \
+			'' \
+			'%files' \
+			'%defattr(-,root,root,-)' \
+			'/usr/bin/bravebot'; } > "$$dir/bravebot.spec"; \
+		target="$$(sed -n 's/^ExclusiveArch: //p' "$$dir/bravebot.spec")"; \
+		rpmbuild -bb --target "$${target:?bravebot.spec states no ExclusiveArch}" \
+			--define "_sourcedir $$dir" --define "_topdir $$dir/rpmbuild" \
+			--define "_rpmdir $$stage" --define "_rpmfilename out-$$arch.rpm" "$$dir/bravebot.spec"; \
+		mv -f "$$stage/out-$$arch.rpm" dist/bravebot-linux-$$arch.rpm; \
+		echo "wrote dist/bravebot-linux-$$arch.rpm"; \
+	done
+
+# Symbols are kept during the build because Rust's own strip can corrupt some targets
+# under zigbuild, so they are removed here instead.
+#
+# rust-objcopy is LLVM-based and handles Mach-O, ELF, and PE alike, so one tool covers
+# every target; the per-target GNU strip binaries are not all present in the image.
+#
+# The container is asked where its own toolchain is rather than being told: the image is
+# published for two architectures and each variant names that directory after its own triple,
+# so a written-out path resolves on one release host and not the other, and states the Rust
+# version besides. That directory is also LD_LIBRARY_PATH, because rust-objcopy loads the
+# libLLVM beside it.
+#
+# Run by the publish job after `all-platforms`, and in this repository only by CI's
+# cross-build, on the helpers its Windows installers are built from, so a release carries
+# stripped binaries while a local cross-build keeps its symbols.
+.PHONY: strip
+strip:
+	@for f in dist/$(BINARY)-*; do \
+		case "$$f" in *.sha256|*SHA256SUMS|*.dmg|*.deb|*.rpm|*-setup.exe) continue;; esac; \
+		docker run --rm -v "$(PWD)/dist:/dist" -e ASSET="/dist/$$(basename $$f)" \
+			$(ZIGBUILD_IMAGE) sh -c '\
+			lib=$$(rustc --print sysroot)/lib && \
+			host=$$(rustc -vV | sed -n "s/^host: //p") && \
+			LD_LIBRARY_PATH=$$lib \
+			"$$lib/rustlib/$$host/bin/rust-objcopy" --strip-all "$$ASSET"'; \
+	done
+	@echo "stripped:"
+	@ls -lh dist/ | awk 'NR>1 {print "  " $$9, $$5}'
+
+# Nothing in this repository runs this, and the publish job hashes the signed binaries itself.
+# It is the statement of the format those files have to be in: the digest alone, with no filename
+# beside it, which is the only thing the npm postinstall accepts. SHA256SUMS is the conventional
+# form of the same hashes, for verifying a download by hand. The desktop application's two
+# executables are left out: they go into its own packages and are not assets of their own.
+.PHONY: checksums
+checksums:
+	@cd dist && rm -f ./*.sha256 SHA256SUMS && \
+	for f in $(BINARY)-*; do \
+		case "$$f" in bravebot-rpc-*|bravebot-ui-files-*) continue;; esac; \
+		shasum -a 256 "$$f" | awk '{print $$1}' > "$$f.sha256"; \
+		shasum -a 256 "$$f" >> SHA256SUMS; \
+	done
+	@echo "wrote dist/SHA256SUMS"
+
+# Edits the four files that state the version and commits exactly those, so no lockfile is
+# left behind still naming the old one. It stops there: nothing is pushed and nothing is
+# tagged, and the commit is still reviewed before `github-release` will tag it.
+#
+# The four JSON files are written by contrib/check-versions.py, which is also what reads them, so
+# the bump and the check cannot disagree about where a version is stated. It replaced a node
+# program embedded in this recipe that could not run at all: a recipe's line continuations are
+# literal backslashes inside the single quotes holding the program, so node was handed a source
+# beginning with one and refused it. No lockfile is re-derived: the wrapper has no dependencies and
+# so no lockfile, and pnpm's lockfile under ui/ does not record the version of the project it locks.
+#
+# check-versions then runs as a check, so a bump that missed a file fails here rather than at the
+# tag.
+.PHONY: bump-version
+bump-version:
+	@if [ "$(BUMP)" != "bugfix" ] && [ "$(BUMP)" != "minor" ] && [ "$(BUMP)" != "major" ]; then \
+		echo "error: BUMP must be one of: bugfix, minor, major"; \
+		exit 1; \
+	fi
+	@python3 contrib/release-preflight.py $(if $(YES),--yes)
+	@set -eu; \
+	current="$(VERSION)"; \
+	if [ -z "$$current" ]; then \
+		echo "error: unable to read version from Cargo.toml"; \
+		exit 1; \
+	fi; \
+	if ! git diff --quiet -- $(VERSION_FILES) || ! git diff --cached --quiet -- $(VERSION_FILES); then \
+		echo "error: $(VERSION_FILES) already modified; commit or stash that first"; \
+		exit 1; \
+	fi; \
+	major="$${current%%.*}"; rest="$${current#*.}"; \
+	minor="$${rest%%.*}"; patch="$${rest#*.}"; \
+	case "$(BUMP)" in \
+		bugfix) patch="$$((patch + 1))" ;; \
+		minor) minor="$$((minor + 1))"; patch=0 ;; \
+		major) major="$$((major + 1))"; minor=0; patch=0 ;; \
+	esac; \
+	next="$$major.$$minor.$$patch"; \
+	awk -v v="$$next" ' \
+		BEGIN { in_pkg = 0; done = 0 } \
+		/^\[/ { in_pkg = ($$0 == "[workspace.package]") } \
+		in_pkg && !done && /^version[[:space:]]*=/ { \
+			print "version = \"" v "\""; done = 1; next \
+		} \
+		{ print }' Cargo.toml > Cargo.toml.tmp; \
+	mv Cargo.toml.tmp Cargo.toml; \
+	if [ "$$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' Cargo.toml | head -n 1)" != "$$next" ]; then \
+		echo "error: Cargo.toml version was not rewritten"; \
+		exit 1; \
+	fi; \
+	cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace >/dev/null; \
+	cargo update --workspace --manifest-path fuzz/Cargo.toml --offline >/dev/null 2>&1 \
+		|| cargo update --workspace --manifest-path fuzz/Cargo.toml >/dev/null; \
+	python3 contrib/check-versions.py --set "$$next"; \
+	python3 contrib/check-versions.py; \
+	git commit -q -m "Bump version to $$next" -- $(VERSION_FILES); \
+	echo "committed: bumped $$current -> $$next ($(VERSION_FILES))"; \
+	echo "review it, land it on main, then run: make github-release"
+
+# Tags the current version and pushes it. GitHub Actions runs CI on the tag.
+# Signed assets and the npm package are published later, each by hand: Jenkins
+# (bravebot-build with UPLOAD and RELEASE), then make publish-npm.
+#
+# A refused push takes the tag with it. A tag left behind locally is one the
+# remote never got, and the next run reports the version as already tagged
+# while the releases page shows nothing.
+.PHONY: github-release
+github-release:
+	@set -eu; \
+	if [ -z "$(VERSION)" ]; then \
+		echo "error: unable to read version from Cargo.toml"; \
+		exit 1; \
+	fi; \
+	if ! python3 contrib/check-versions.py; then \
+		echo "error: the files that state the version disagree; run make bump-version"; \
+		exit 1; \
+	fi; \
+	if ! git diff --quiet || ! git diff --cached --quiet; then \
+		echo "error: working tree must be clean before tagging"; \
+		exit 1; \
+	fi; \
+	branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	if [ "$$branch" != "main" ]; then \
+		echo "error: releases are tagged from main, not $$branch"; \
+		exit 1; \
+	fi; \
+	if ! git remote get-url "$(RELEASE_REMOTE)" >/dev/null 2>&1; then \
+		echo "error: no remote named $(RELEASE_REMOTE); set bravebot.releaseRemote to one this clone has"; \
+		exit 1; \
+	fi; \
+	git fetch --quiet "$(RELEASE_REMOTE)" main; \
+	if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse $(RELEASE_REMOTE)/main)" ]; then \
+		echo "error: HEAD differs from $(RELEASE_REMOTE)/main; push or pull first"; \
+		exit 1; \
+	fi; \
+	if git rev-parse -q --verify "refs/tags/$(TAG)" >/dev/null; then \
+		echo "error: tag $(TAG) already exists"; \
+		exit 1; \
+	fi; \
+	git tag -a -m "bravebot $(TAG)" "$(TAG)"; \
+	if ! git push "$(RELEASE_REMOTE)" "$(TAG)"; then \
+		git tag -d "$(TAG)"; \
+		echo "error: push failed; removed the local $(TAG) so this can be run again"; \
+		exit 1; \
+	fi; \
+	echo "pushed $(TAG) to $(RELEASE_REMOTE); GitHub Actions will run CI on the tag"; \
+	echo "publish signed assets later with Jenkins job bravebot-build (UPLOAD and RELEASE)"; \
+	echo "then publish npm: make publish-npm TAG=$(TAG)"; \
+	echo "watch CI with: gh run watch --repo brave/bravebot"
+
+# Publishes a placeholder under each platform package name the registry has no package of, so
+# that package can be given a trusted publisher on npmjs.com. Needs npm login as a maintainer who
+# can publish @brave. Does nothing when every name exists. publish-npm refuses until it has run.
+.PHONY: npm-bootstrap
+npm-bootstrap:
+	node npm/scripts/bootstrap-platform-packages.js
+
+# Without TAG on the command line, the latest GitHub release: this tree may be bumped past it.
+# Refuses first when the registry has no package of a platform's name (make npm-bootstrap).
+.PHONY: publish-npm
+publish-npm:
+	@set -eu; \
+	if [ "$(origin TAG)" = "command line" ]; then \
+		tag="$(TAG)"; \
+	else \
+		tag="$$(gh release view --repo brave/bravebot --json tagName --jq .tagName)"; \
+	fi; \
+	node npm/scripts/bootstrap-platform-packages.js --check; \
+	echo "dispatching publish-npm.yml for $$tag"; \
+	gh workflow run publish-npm.yml --repo brave/bravebot --ref "$$tag" -f tag="$$tag"; \
+	echo "watch it with: gh run watch --repo brave/bravebot"
+
+.PHONY: package-manifests
+package-manifests:
+	@set -eu; \
+	[ "$(origin TAG)" = "command line" ] || { echo "error: name the release: make package-manifests TAG=v<version>" >&2; exit 1; }; \
+	checksums="$$(mktemp -d)"; trap 'rm -rf "$$checksums"' EXIT INT TERM; \
+	gh release download "$(TAG)" --repo brave/bravebot --dir "$$checksums" \
+		--pattern 'bravebot-darwin-*.sha256' --pattern 'bravebot-windows-*.sha256'; \
+	python3 contrib/package-manifests.py "$(TAG)" "$$checksums" dist/packages
+
+.PHONY: clean
+clean:
+	cargo clean
+	rm -rf dist
+	rm -rf docs/website/build docs/website/.docusaurus
+
+# Configuration reaches the build as a BuildKit secret rather than a build argument,
+# which would record the signing key in the image metadata. The temporary file is
+# mode 600 and removed even if the build fails.
+define cross-build
+	set -e; \
+	env_file="$$(mktemp)"; trap 'rm -f "$$env_file"' EXIT INT TERM; \
+	for name in $(BUILD_ENV); do \
+		eval "value=\$$$$name"; \
+		if [ -n "$$value" ]; then printf 'export %s=%s\n' "$$name" "$$value" >> "$$env_file"; fi; \
+	done; \
+	DOCKER_BUILDKIT=1 docker build -f contrib/Dockerfile.cross -t $(BINARY)-$(1) \
+		--build-arg TARGET=$(2) \
+		--secret id=bravebot_env,src="$$env_file" .
+	$(call extract,$(BINARY)-$(1),$(1))
+endef
+
+# `docker create` on a scratch image needs a command argument even though it never
+# runs; the container exists only so the binary can be copied out. Every target's image also
+# holds the desktop application's two executables, which land beside the CLI under the names
+# `app-bundles`, `app-bundles-linux` and `app-bundles-windows` read, and are stripped with it.
+# The Windows pair gets the `.exe` the CLI asset beside it has, since that is the name the
+# bundle carries.
+define extract
+	mkdir -p dist
+	docker rm -f tmp-$(BINARY)-$(2) 2>/dev/null || true
+	docker create --name tmp-$(BINARY)-$(2) $(1) /dev/null
+	docker cp tmp-$(BINARY)-$(2):/$(BINARY) dist/$(call artifact,$(2))
+	$(if $(or $(findstring darwin,$(2)),$(findstring linux,$(2))),for helper in bravebot-rpc bravebot-ui-files; do \
+		docker cp tmp-$(BINARY)-$(2):/$$helper dist/$$helper-$(2) || exit 1; done)
+	$(if $(findstring windows,$(2)),for helper in bravebot-rpc bravebot-ui-files; do \
+		docker cp tmp-$(BINARY)-$(2):/$$helper dist/$$helper-$(2).exe || exit 1; done)
+	docker rm tmp-$(BINARY)-$(2)
+endef
+
+define artifact
+$(BINARY)-$(1)$(if $(findstring windows,$(1)),.exe,)
+endef

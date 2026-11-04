@@ -1,0 +1,338 @@
+---
+sidebar_position: 5
+title: Vetting quarantined content
+description: A second model reads quarantined content and reports what it found, so you have an opinion in front of you before you decide.
+---
+
+# Vetting quarantined content
+
+Content nobody vouched for is **quarantined**: it is held in a slot, and the planner is handed a
+reference to that slot rather than the bytes. A fetched page, what a program printed, a file outside
+any [trusted directory](trust.md): the planner can carry these and write them somewhere, and it cannot
+read them.
+
+Every way out of quarantine ends at you answering a prompt. A **check** is what puts a second opinion
+beside the bytes before you answer, so the question is not the first time anything has looked at what
+the content holds.
+
+## The three ways out
+
+| The prompt | What a yes does |
+|---|---|
+| `vet_content` | promotes one slot's bytes once |
+| `read_output` | releases what a program printed to the planner |
+| the vouch offer on a read | writes a [trust rule](trust.md) about the path |
+
+Everything else stays quarantined for the life of the session.
+
+The single-use promotion exists partly for the friction. Wanting the agent to use a fetched page
+otherwise leaves two moves: read every byte of it yourself, or vouch for a whole path, which is very
+much larger. This covers one slot's bytes, once, and leaves nothing behind.
+
+## What a check is
+
+A second model call that holds nothing:
+
+| | |
+|---|---|
+| Tools | none, and the request carries no tool list at all |
+| Memory | none: the messages are built from nothing each time |
+| Conversation | one request, one reply, no loop to steer |
+| Reads | one piece of content, fixed before the call |
+| Writes | **nothing**: no slot, no reference, no destination of any kind |
+
+A [processor](../how-it-works.md) can mint one slot. A check mints none, ever, and holds no field that
+could name a place for a result to go. The only things that come back are one word from a fixed set and
+free text for you to read.
+
+The content is enclosed as a single JSON string literal, so it occupies one physical line whatever it
+holds and a newline inside it is written as an escape. That encoding is the containment: the content
+may spell the block markers, but it cannot put one at the start of a line, because it cannot produce a
+line.
+
+Unlike a processor, which is asked to leave an injection attempt out of its output, a check exists to
+say so. Where it cannot tell, it warns.
+
+## The planner can ask for one
+
+`vet_content` names one reference and says in a sentence what the planner expects it to hold. The
+reference is the only field that decides anything, and you are shown the bytes behind it, so the field
+you approve is the field the call turns on.
+
+That sentence is drawn on the prompt so you can see why the planner wants this, and it is sent to the
+check so a page can be judged against what it was supposed to be. It must not be private: your own data
+must not become another model's prompt. Where the content came from is said in Brave Bot's words, as a
+path, a URL or a command, because a reference name means something to the planner and nothing to you.
+
+It refuses a reference to nothing, a private sentence, and a call from a delegate. A reference to a file
+nothing has read yet is opened rather than refused, since naming one is the ordinary way for the planner
+to ask about a file it may not read.
+
+### Asking for the result in the same call
+
+A `fetch_url` call, and a call to a tool of an [MCP server](../customize/mcp-servers.md), can carry
+`read: true`. It asks for the result in the result of the call, without a `vet_content` call after it.
+The argument is offered only to a session that is offered `vet_content`, so a delegate or a definition
+that leaves the tool out is not offered it. A server that lists an argument named `read` of its own
+keeps it: that argument is the server's, is sent to it as written, and does not ask for anything here.
+
+The content is quarantined as it always is, then released by the same path `vet_content` uses, with
+the same label and the same audit entry, and the reference it was kept under comes back beside it.
+That happens in two cases:
+
+- Permissions are bypassed and screening was not asked for. Nobody is asked and no check is made.
+- Auto-vetting is on and the check says `safe`. The check is made at the call and is announced and
+  counted like one made for `vet_content`.
+
+In every other case the content stays behind its reference and the result says the argument did not
+return it. That includes any other word from the check and a check that could not be made, and it
+names neither. Nobody is asked at the call. Where you answer `vet_content` yourself, `read` changes
+nothing: you are asked only if the planner calls `vet_content`. A picture is never released this way,
+content longer than one result may hold stays behind its reference with the reason, and content of
+zero bytes is reported as empty without a check. `read` must be `true` or `false`, and a call that
+gives anything else is refused before it is made. Asking this way saves the model round a
+`vet_content` call would have cost. [`run`](../reference/run-tool.md#reading-the-output-in-the-same-result)
+has the same argument for a program's output.
+
+## A picture or a PDF
+
+A PNG, JPEG, GIF, WebP or PDF file the planner read goes the same way as text, with two differences. The
+check is given the file itself and told it is a file, so it reads words drawn in the picture. And the
+prompt shows you the picture rather than bytes: a path to a copy of it, with its media type, its size
+and what the check said. A terminal that draws Kitty, iTerm2 or Sixel pictures also draws the picture
+in the prompt. That is left out for a PDF, for a format that is not decoded, and in a terminal that
+can only draw with half-block characters, which cannot show small writing.
+
+Open the copy in your own viewer, zoom in if you need to, and press `y` to let the planner see it. The copy is
+the bytes that were read, not the file as it is now, is readable only by your account, and is removed
+when the prompt closes. With auto-vetting on, a check that found nothing lets the picture through
+unasked; bypassing permissions with no screening lets it through with no check made.
+
+A picture that is let through is attached to the planner's next request, never pasted into your own
+message, and comes once: the next read of the same file is quarantined again. It is refused before a
+check where the gateway lists the model in use as not taking pictures (or PDFs), and where the machine
+names no cache directory to put a copy in.
+
+### A picture that arrives
+
+A picture is held out of the model's reach from the moment it arrives, whether the model read it from a
+file or a tool of an [MCP server](../customize/mcp-servers.md) returned it, such as a screenshot of a
+page. The model is handed a reference that names its type and size, and nothing the picture holds. You
+are shown two rows behind the margin, under the label, and not the first lines of its base64:
+
+```
+  ┃ untrusted · what weather:get_forecast returned with no failure reported · (U,priv)
+  ┃ a picture, image/png, 20480 bytes, held as ref:2 and kept from the model
+  ┃ Ask the model to write it to a file you can open, or to use vet_content on it, which asks you
+  ┃ about a copy of it before the model sees it.
+```
+
+The rows do not show you the picture. There are two ways to look at it, and both go through the
+model, which holds only the reference:
+
+- Ask the model to write it to a file. Unless a mode answers for you, it asks you before it writes,
+  showing you the name and the size, and writes the picture as the file it encodes, to a name ending
+  in the picture's type. Open that file in your own viewer. A file written from a tool's picture is
+  not trusted afterwards.
+- Ask the model to call `vet_content` on it. Unless a mode answers for you, the question described
+  above puts a copy of it to you before the model sees it. Answer no and the copy is deleted and the
+  model never sees the picture. Answer yes and the model sees it once.
+
+The second row names the ways the turn has. A turn addressed to an [agent definition](../customize/agents.md)
+that leaves out `write_file` or `vet_content`, or one started with `--tools` that does, is shown the
+way that is left, and where neither is left the row says there is no way to open the picture from
+here.
+
+A picture can also be handed to a [processor](../reference/tools.md#spawn_processor), which looks at
+it and reports back. What it says is quarantined, and you are not shown the picture by it.
+
+A yes about a picture is weaker than a yes about text. A file can hold bytes no viewer draws, such as
+metadata, or a PDF's text layer, and a model may be handed them. Opening it also hands attacker-owned bytes
+to your viewer, outside every confinement Brave Bot has.
+
+A delegate is not offered it because the prompt would belong to you, about content you never asked to
+see, in the middle of work you are not reading. The rows you are shown for a picture a delegate holds
+do not suggest it either. The second row says instead that the delegate cannot ask you to look at the
+picture, and whether it can write it to a file for you to open, which it can where it has the
+`write_file` tool.
+
+### A page in a browser
+
+The tools of the [Brave extension](../customize/mcp/brave.md) return a page's text, the list of its
+elements, a picture of it or its console as a result, and the model holds a reference to each. The
+model looks at a page only after the result is vetted: you answer yes at `vet_content`, after
+opening the copy of a picture or reading the text, or, with auto-vetting on, a check that found
+nothing answers in your place. The model sees it once.
+
+The model can then act on the page, in a loop. It **looks** at a vetted screenshot, **names** an
+element in words (a role and an accessible name, or a number from a list you looked at), you
+**confirm** in the window the browser opens, which shows the element the words led to, and the
+extension **acts** on that element. The cost is one vetting step for each look and one confirmation
+for each action on an element, and a second look is a second vetting step. With auto-vetting on, a
+model's word replaces your yes at the look, and the confirmation is still yours.
+
+The model does not read a page, a picture or a list of elements before that. It is given no selector,
+node id or coordinate from a page, so what it chooses is the words, the page decides which element they
+lead to, and you are shown that element before anything is done to it.
+[Looking at a page](../customize/mcp/brave.md#looking-at-a-page) lists the steps.
+
+## Every promoting prompt runs a check first
+
+A check runs before the prompt is drawn, not after it is answered, on all three routes:
+
+| The prompt | What the check reads |
+|---|---|
+| `vet_content` | the slot the planner named |
+| `read_output` | the slot the planner named |
+| the vouch offer on a read | **the whole file**, not the preview |
+
+The vouch offer reads the whole file because it shows you the head of one and a yes grants all of it, so
+a check over the preview would report on the part an injection attempt has the least reason to be in. The
+check reads what the answer covers.
+
+All three, because otherwise the quickest way past a check is to ask for the prompt that does not run
+one. The one exemption is [bypassing mode](permission-modes.md#bypassing), which draws no prompt at all: there a check
+would be a model call whose word nobody reads, so the verdict is filled in as inconclusive, which claims
+nothing. That holds when the run asked for no screening. With `--vet` the check is made on the two
+prompts that release one slot, because its word is what answers.
+
+A check takes a moment, so the interface says when one begins, with how many lines it was given (or
+that it is a picture or a PDF), and says when it is over, including when it ended in a failure. The
+notice carries nothing of the content and nothing of the verdict.
+
+## What comes back
+
+A reply states `safe` or `unsafe`. Any other word, a reply stating no verdict, a truncated reply or one
+that leaves an object open, a timeout and a backend error are all **inconclusive**, which says nothing about the content. It fails
+closed on every path: a check that half worked lands where a check that did not run lands.
+
+The three outcomes are told apart on your screen. "This looks like an attempt to give instructions" and
+"nothing looked at this" are different facts about different risks.
+
+## A verdict is advice
+
+Unless you have turned auto-vetting on, **the only thing a verdict decides is which prompt you read.**
+The bytes are in front of you whatever the check said, the keys that answer are the same whatever it
+said, and the answer is yours. Safe promotes nothing by itself, and unsafe withholds nothing.
+
+The one key a verdict does decide is the one that answers no question: the standing key offering to turn
+auto-vetting on, which appears only where the check completed and found nothing.
+
+What the check says reaches you and no model. Neither the verdict word nor the sentence reaches the
+planner, whichever way you answer, and neither reaches a second check. The sentence is free text about
+content an attacker may own, so it is untrusted and private like the content, and it is drawn inside the
+margin a prompt puts round anything nobody vouched for. The [audit trail](audit-trail.md) records the
+word and never the sentence.
+
+## What promoting does, and does not, grant
+
+Promoting is an assertion about one slot's bytes:
+
+- **One slot, once.** The endorsement names that exact slot and cannot be replayed. An approval given to
+  a different question is not one of these: approving a read of what a program printed promotes nothing.
+- **No rule is written.** Nothing reaches the trust map. A later read of the same file makes a new slot
+  and is quarantined exactly as before, and the same content asked about again asks again.
+- **Confidentiality is never lowered.** What comes back is private. The bytes may have come out of your
+  workspace, and nothing about a check or about you reading them makes them fit to leave the machine or
+  to become a field that decides where something lands. **Vetting unlocks no egress.**
+
+## Auto-vetting is off until you turn it on
+
+With it on, a check that completed and found nothing answers in your place at the two prompts that
+promote one slot's bytes: no prompt is drawn and the bytes reach the planner. Three routes turn it on,
+differing in how long the answer lasts:
+
+| Route | Read from | Lasts |
+|---|---|---|
+| `--vet` | the [command line](../reference/cli.md) | this run |
+| `~/.bravebot/vetting`, one word | your own directory, written by the standing key at a vetting prompt | until you change it |
+| `"vetting": { "auto": true }` | `~/.bravebot/settings.json`, the **home layer only** | every session |
+
+Any one of them is enough. `--vet` outranks both of the others, a recorded `off` included, because it is
+the narrowest in time. A choice recorded in your own directory outranks the settings key, so turning the
+mode off is written to that file rather than the file being removed, and a settings file cannot turn it
+back on for you tomorrow. There is no flag the other way.
+
+Nothing writes your settings file. The standing key writes `~/.bravebot/vetting` instead.
+
+**An [incognito](../using/incognito.md) session does not read that
+file.** It is the one thing such a session reads differently, because the answer in it decides whether
+you are asked rather than what the session looks like. The other two routes work there as anywhere.
+
+**The settings key is read from the home layer and no other.** A project `.bravebot/settings.json`
+naming it, a machine-local one, and a file the command line named are each reported by `doctor` and not
+obeyed. Every other name in those files decides where a request goes or how the interface behaves; this
+one decides whether you are asked before content nobody vouched for reaches the planner, so a line in a
+checkout could turn the asking off for whoever opened it. See
+[configuration](../customize/configuration.md) for how the layers work.
+
+A session that leaves nothing behind reads no recorded choice. It reads the model and the theme, because
+those decide what it looks like; this decides whether somebody is asked.
+
+**A session that opened with the mode on says so, and goes on saying so.** Once at the top of the
+transcript, before the first slot can reach it, and in `/status` for the rest of the session with the
+file it is kept in named. A note scrolls away, and the one thing you cannot read off a transcript is a
+question that was never put. A session that is asking says nothing, since a line reporting the ordinary
+state is a line people learn to skim.
+
+### What it covers, and what it does not
+
+| The prompt | With the mode on |
+|---|---|
+| `vet_content` | a safe verdict answers |
+| `read_output` | a safe verdict answers |
+| the vouch offer on a read | **still asks** |
+
+Every other verdict falls back to the prompt, carrying the banner it would have carried anyway. Unsafe
+and a check that did not complete are still told apart on the screen.
+
+Where there is nobody to fall back to, the fallback is a refusal. A run started with
+`--dangerously-skip-permissions` puts no prompt to anybody, so with the mode on a verdict that is not safe
+keeps the bytes back instead of promoting them with a warning nobody is reading, and the planner is told
+the slot was kept from it and nothing more. A check that did not complete is answered the same way:
+content has some influence over the call that reads it, so promoting on a failure would be promoting on
+something an attacker can arrange. That is how a run nobody is watching is screened, and without the mode
+on the same run releases both slots unshown and makes no check at all.
+
+The line falls on the shape of the grant, not on which tool produced the bytes. Both promotions cover one
+slot's bytes once and leave nothing behind, so what a verdict can buy is bounded by a single slot either
+way. A trust rule is different in kind, being a standing decision about a whole path rather than about
+bytes in front of a reader, and it is the one grant the mode does not touch.
+
+The route the mode covers most often in practice is the output prompt, since a run's output is quarantined
+by default. That is the reason the mode reaches it, and equally the reason the mode is off until you turn
+it on.
+
+What the mode never decides is anything but who answers: the slot is the planner's choice either way, the
+content comes back private either way, the endorsement is single-use either way, and no trust rule is
+written either way. Which of the two released the bytes is recorded, because a trail crediting a person
+who was never shown them would be the one record a reader cannot check. The row left in the
+transcript says it too: a release you answered reads as before, a safe verdict reads "read without
+asking: a check found nothing", and a run bypassing permissions with no screening reads "read without
+asking or checking".
+
+## Known costs
+
+- **A quarantined slot's contents reach the backend a second time.** A check is a model call, so asking
+  about a page sends it where the page would only have gone if a processor had been asked about it. The
+  reader holds nothing, but the call happens whether or not you then approve.
+- **A read of a quarantined file now sends the file, before anybody has agreed to anything.** The check in
+  front of the vouch prompt reads the whole file, so reading a path nobody vouched for puts those bytes on
+  the wire even where you then say no. Refusing keeps the bytes out of the planner rather than off the
+  wire. It is bounded by the offer being made once per path per turn, never for a picture or a directory,
+  and by the checking conversation holding no tools, no memory and no destination.
+- **The check is a model, so it is wrong sometimes, in both directions.** A safe verdict on content that
+  is an attack draws the quiet banner under bytes you still read; an unsafe verdict on an ordinary page
+  draws the warning under bytes that are fine. Neither changes what approving does.
+- **A plausible sentence may persuade you to skim.** The check's own words are attacker reachable and can
+  lie, and nothing holds a sentence against the content it describes. What keeps it from deciding anything
+  is that the bytes are on the same screen.
+- **With auto-vetting on, the bytes are on no screen at all.** On the routes it covers nobody reads the
+  content, and a model's word is the whole of what stood between the planner's context and a fetched page.
+  That is the mode working as asked rather than a flaw in it, and it is why it is off by default and why
+  the key that turns it on is not readable from a checkout.
+- **A screened run with nobody to ask stops where you would have been asked.** Failing closed on a check
+  that did not complete means a rate-limited or unreachable backend keeps content back, so an unattended
+  run can refuse every release for a reason that has nothing to do with the bytes it was reading, and it
+  costs a model call per release on the way. What it buys is that the same run cannot be made to release
+  content by arranging for the check to fail.

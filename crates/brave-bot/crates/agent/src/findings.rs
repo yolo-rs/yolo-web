@@ -1,0 +1,1104 @@
+//! Where the credentials a scan found in what a turn wrote are kept.
+//!
+//! One file per workspace under `~/.bravebot/findings`, keyed the way the session store and the
+//! granted rules are keyed ([`crate::home::key_for`]), so what was found in one checkout is read
+//! back in that checkout and nowhere else.
+//!
+//! [`bravebot_core::credentials`] is what a finding is and what it is allowed to hold; this module
+//! is the file: how an entry is spelled, when it is written, and what happens when it cannot be
+//! read.
+//!
+//! # Why a finding is written down at all
+//!
+//! A finding is shown to the person on the approval or beside the refusal, and a line on a screen
+//! lasts as long as somebody is looking at it. The scan exists to tell a person what is in their
+//! own tree, and a person who scrolled past the line, or who was not at the terminal when it was
+//! drawn, has been told nothing. The record is the half of that which survives the turn
+//! ([CRED-19]).
+//!
+//! # Never in the tree, and never the value
+//!
+//! The record is in the state directory and not in the checkout, for the reason the granted rules
+//! are ([`crate::granted`]) and for one of its own: a collection of findings is a map of every
+//! credential in the repository, so writing it into the tree hands that map to the next thing that
+//! reads the tree, this program's own later turns included.
+//!
+//! An entry holds the kind, the path, the line, the salted fingerprint and the masked preview,
+//! which is the whole of what a finding holds. The value is not in the [`Finding`] this is written
+//! from, so there is nothing here to leave out.
+//!
+//! # A fingerprint compares within a run
+//!
+//! The salt is drawn once per process ([`bravebot_core::credentials::run_salt`]), so two entries
+//! written by one run are comparable and two written by different runs are not. That bound is the
+//! reason [CRED-22]'s baseline is not built on this yet: an allowlist keyed on a fingerprint needs
+//! a salt that outlives the run, which is a value somebody has to keep somewhere and a decision of
+//! its own. What the record answers today is what was found, where, and what it looked like.
+//!
+//! # An acceptance expires
+//!
+//! A person can accept a finding ([`Store::accept`]). An acceptance is one entry in a second file
+//! beside the record, and it must carry an expiry: the function has no form without one. Once the
+//! expiry has passed the acceptance is ignored, and [`Store::open_at`] reports the finding as open
+//! again ([CRED-21]). An acceptance names the kind, the path and the fingerprint of the finding, so
+//! it stops applying to a finding whose fingerprint differs ([CRED-22]). Because the fingerprint is
+//! salted per run, an acceptance currently applies only to findings made by the run that was
+//! accepted; see the section above.
+//!
+//! Nothing a turn runs calls [`Store::accept`]: it is for a person's command to call, and no tool
+//! exposes it ([CRED-22]).
+//!
+//! # One line per entry, appended
+//!
+//! JSON, one object per line, added rather than the file rewritten, so two sessions open in one
+//! workspace cannot lose each other's findings. This is [`crate::granted`]'s shape, for
+//! [`crate::granted`]'s reasons.
+//!
+//! An unreadable line is skipped and the rest of the file still reads. An entry holding a field
+//! this build does not know is skipped too: a later build narrows what an entry means by adding a
+//! field, and an older one that read past it would report as an open finding something the newer
+//! build would not.
+//!
+//! # A record is removed when it has not been written for the retention period
+//!
+//! [`remove_unwritten_since`] removes a record file whose modification time is before a cutoff, and
+//! leaves the acceptances beside them: an acceptance carries an expiry of its own, and one removed
+//! before it would report a finding open that a person had accepted. The age is the file's
+//! modification time and nothing it holds, so no byte of a finding decides whether it is kept.
+//!
+//! # Nothing here may fail a turn
+//!
+//! No home directory, a full disk, a read-only state directory: each means the record does not
+//! outlive the session, which is where every finding was before this existed. The person has
+//! already been told on the screen, and a write that has been approved is not refused because the
+//! note about it could not be filed.
+//!
+//! [CRED-19]: ../../../docs/specs/credential-protection.md
+//! [CRED-21]: ../../../docs/specs/credential-protection.md
+//! [CRED-22]: ../../../docs/specs/credential-protection.md
+
+use bravebot_core::credentials::{Finding, Kind};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// The directory the per-workspace records live in, inside the state directory.
+const FINDINGS: &str = "findings";
+
+/// The directory, inside [`FINDINGS`], that holds acceptances. A directory of its own so that no
+/// workspace key can name the same file as a record.
+const ACCEPTED: &str = "accepted";
+
+/// The current time as seconds since the Unix epoch.
+///
+/// A clock that cannot be read answers the latest time there is, so every acceptance has lapsed
+/// rather than none of them.
+pub fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
+}
+
+/// Remove the record files under `home` that have not been written since `cutoff`, returning how
+/// many went.
+///
+/// `home` is the state directory itself. Only a plain file directly inside `findings` is a record:
+/// the directory of acceptances and anything that is not a file are left where they are, and a link
+/// standing as `findings`, or as an entry in it, is stepped over rather than followed, because where
+/// it leads is outside the directory this was given. A file whose time is not before the cutoff
+/// stays, which includes one stamped in the future by a clock that was wrong when it was written. A
+/// removal that fails costs that file and nothing more.
+pub fn remove_unwritten_since(home: &Path, cutoff: std::time::SystemTime) -> usize {
+    crate::home::files_unwritten_since(&home.join(FINDINGS), cutoff)
+        .into_iter()
+        .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+        .count()
+}
+
+/// Whether this session may add a line to a record.
+///
+/// False in a session that adds nothing to `~/.bravebot`, which keeps a closed list of what still
+/// reaches the filesystem and this is not on it ([INCOG-5]). A private session still scans, still
+/// refuses what it would refuse, and still puts the finding on the screen: what it declines is the
+/// part that outlives it, which is the same division every other record here makes.
+///
+/// Reading is unchanged, for the reason a granted rule is still read there: a finding an earlier
+/// ordinary session recorded in this workspace is still a thing a person can read back.
+///
+/// [INCOG-5]: ../../../docs/specs/incognito.md
+pub fn may_be_added_to() -> bool {
+    !bravebot_core::incognito::engaged()
+}
+
+/// Where a scan's findings are written, and under whose name.
+///
+/// The two travel together from the turn to every scan in it, so they are carried together rather
+/// than as a pair of arguments each caller could get the order of wrong. Both are the caller's:
+/// which state directory this build uses and which session this is belong to whoever started the
+/// turn, for the reason [`Store::new`] gives.
+///
+/// The default records nothing, which is what a caller that named no state directory gets.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Recording<'a> {
+    /// The state directory, or `None` where the caller named none.
+    pub home: Option<&'a Path>,
+    /// The session the scan ran in, or `None` for a run with no session to name.
+    pub session: Option<&'a str>,
+}
+
+impl Recording<'_> {
+    /// Write what a scan found in `workspace` down, where there is anywhere to write it.
+    ///
+    /// Nothing is recorded without a state directory: a library that reached for the home
+    /// directory itself would write into whatever the developer running the tests happens to have
+    /// installed.
+    pub fn record(&self, workspace: &Path, findings: &[&Finding]) {
+        let Some(home) = self.home else {
+            return;
+        };
+        Store::new(home, workspace).record(findings, self.session);
+    }
+}
+
+/// The record for one workspace.
+///
+/// Holds where the file is rather than what it says, as [`crate::granted::Store`] does: the file
+/// belongs to every session begun in the workspace, so it is read at the moment somebody asks.
+#[derive(Debug, Clone)]
+pub struct Store {
+    path: PathBuf,
+    /// The workspace the findings were made in, written into each entry.
+    ///
+    /// The key is lossy, so two workspaces whose names reduce to the same segment share a file.
+    /// Recording the real path is what decides which entries in a shared file are this
+    /// workspace's, exactly as the granted record holds the tree its key was made from.
+    workspace: PathBuf,
+    /// Where this workspace's acceptances are.
+    accepted_path: PathBuf,
+}
+
+impl Store {
+    /// The record for `workspace` inside `home`.
+    ///
+    /// Takes the state directory rather than resolving it, for the reason everything else in this
+    /// crate takes it: a library that reached for `$HOME` behind its callers' backs would make
+    /// every test that writes a file depend on whatever the developer happened to have installed.
+    pub fn new(home: &Path, workspace: &Path) -> Self {
+        let file = format!("{}.jsonl", crate::home::key_for(workspace));
+        Self {
+            path: home.join(FINDINGS).join(&file),
+            workspace: workspace.to_path_buf(),
+            accepted_path: home.join(FINDINGS).join(ACCEPTED).join(file),
+        }
+    }
+
+    /// Accept `finding` until `expires_at`, given as seconds since the Unix epoch.
+    ///
+    /// The expiry is a required argument: there is no acceptance without an end. From `expires_at`
+    /// on, the acceptance is ignored and [`Store::open_at`] reports the finding again. `reason`
+    /// is what the person said it is accepted for.
+    ///
+    /// Appended, as the record is. Unlike [`Store::record`] this reports failure, because a person
+    /// who asked for an acceptance has to be told it was not kept. A session that adds nothing to
+    /// `~/.bravebot` ([`may_be_added_to`]) keeps none.
+    ///
+    /// # Errors
+    ///
+    /// The acceptance was not written: this session may not add to the state directory, or the
+    /// file could not be opened or written.
+    pub fn accept(&self, finding: &Finding, reason: &str, expires_at: u64) -> std::io::Result<()> {
+        if !may_be_added_to() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "this session adds nothing to the state directory",
+            ));
+        }
+        let Some(parent) = self.accepted_path.parent() else {
+            return Err(std::io::Error::other(
+                "the acceptance file has no directory",
+            ));
+        };
+        crate::home::create_directory(parent)?;
+        let mut encoded = serde_json::to_string(&Accepted {
+            workspace: WrittenPath::of(&self.workspace),
+            kind: WrittenKind::of(finding.kind),
+            path: finding.path.clone(),
+            fingerprint: finding.fingerprint.clone(),
+            reason: reason.to_string(),
+            expires_at,
+        })
+        .map_err(std::io::Error::other)?;
+        encoded.push('\n');
+        crate::home::append_to_file(&self.accepted_path)?.write_all(encoded.as_bytes())
+    }
+
+    /// Every finding this record holds that no acceptance covers at `now`, oldest first.
+    ///
+    /// `now` is seconds since the Unix epoch. An acceptance covers a finding until its expiry and
+    /// not at it: at `expires_at` the finding is open again. One covers a finding only when the
+    /// kind, the path and the fingerprint all agree, so a finding whose fingerprint differs is a new
+    /// finding rather than a renewed acceptance.
+    ///
+    /// Nothing comes back accepted for a file that is not there, cannot be read, or holds nothing
+    /// this build understands, so an acceptance that cannot be read leaves its finding open.
+    pub fn open_at(&self, now: u64) -> Vec<Finding> {
+        let accepted = self.accepted_at(now);
+        self.recorded()
+            .into_iter()
+            .filter(|finding| {
+                !accepted.iter().any(|entry| {
+                    entry.kind.kind() == finding.kind
+                        && entry.path == finding.path
+                        && entry.fingerprint == finding.fingerprint
+                })
+            })
+            .collect()
+    }
+
+    /// [`Store::open_at`] at the current time.
+    pub fn open(&self) -> Vec<Finding> {
+        self.open_at(now_seconds())
+    }
+
+    /// The acceptances for this workspace that have not expired at `now`.
+    fn accepted_at(&self, now: u64) -> Vec<Accepted> {
+        let Ok(contents) = std::fs::read_to_string(&self.accepted_path) else {
+            return Vec::new();
+        };
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<Accepted>(line).ok())
+            .filter(|entry| entry.workspace.to_path().as_deref() == Some(&*self.workspace))
+            .filter(|entry| now < entry.expires_at)
+            .collect()
+    }
+
+    /// Where the record is, which is what anything offering to show it has to be able to name.
+    ///
+    /// Deleting the file is the way to be rid of a record, so a person who cannot find it cannot
+    /// be rid of one.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Write these findings down, attributed to the session that made them.
+    ///
+    /// Appended, never rewritten. Best effort: a home that is full or read-only means the findings
+    /// do not outlive this session, which is where they were before this existed, and is not a
+    /// reason to fail the turn that found them.
+    ///
+    /// A finding is written whatever was done about it. The refused, the approved and the declined
+    /// are all findings, and which of them a write went ahead with is a question about the write.
+    pub fn record(&self, findings: &[&Finding], session: Option<&str>) {
+        if !may_be_added_to() || findings.is_empty() {
+            return;
+        }
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        if crate::home::create_directory(parent).is_err() {
+            return;
+        }
+        let Ok(mut file) = crate::home::append_to_file(&self.path) else {
+            return;
+        };
+        for finding in findings {
+            let Ok(mut encoded) = serde_json::to_string(&Written {
+                workspace: WrittenPath::of(&self.workspace),
+                session: session.map(str::to_string),
+                kind: WrittenKind::of(finding.kind),
+                path: finding.path.clone(),
+                line: finding.line,
+                fingerprint: finding.fingerprint.clone(),
+                preview: finding.preview.clone(),
+            }) else {
+                continue;
+            };
+            encoded.push('\n');
+            let _ = file.write_all(encoded.as_bytes());
+        }
+    }
+
+    /// Every finding this record holds for this workspace, oldest first.
+    ///
+    /// Read afresh on every call, because the file is shared by every session begun here. An entry
+    /// naming another workspace is skipped: the key is lossy, so a shared file holds somebody
+    /// else's findings as readily as this workspace's own.
+    ///
+    /// Nothing comes back for a file that is not there, cannot be read, or holds nothing this
+    /// build understands, which is what a session had before this existed.
+    pub fn recorded(&self) -> Vec<Finding> {
+        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<Written>(line).ok())
+            .filter(|entry| entry.workspace.to_path().as_deref() == Some(&*self.workspace))
+            .map(|entry| Finding {
+                kind: entry.kind.kind(),
+                path: entry.path,
+                line: entry.line,
+                fingerprint: entry.fingerprint,
+                preview: entry.preview,
+            })
+            .collect()
+    }
+}
+
+/// One entry as it is spelled on disk.
+///
+/// A field this build does not know refuses the whole entry rather than being passed over, as an
+/// entry in the granted record does. A later build narrows what an entry means by adding a field,
+/// and an older build reading past it would report a finding that the newer one would not.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Written {
+    /// The workspace the finding was made in, in full.
+    workspace: WrittenPath,
+    /// The session the scan ran in. Decides nothing; it is what a reader sees.
+    ///
+    /// Absent for a turn with no session to name, which is a one-shot run: the finding is still
+    /// the same finding, and a record that skipped it to avoid an empty field would lose exactly
+    /// the runs nobody was watching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+    /// Which layer recognised the value, and as what.
+    kind: WrittenKind,
+    /// The file it is in, as the person watching saw the path written.
+    path: String,
+    /// The line it is on, counted from one.
+    line: usize,
+    /// The fingerprint, salted for the run that made the finding.
+    fingerprint: String,
+    /// How long the value is and what it is made of. Every character masked.
+    preview: String,
+}
+
+/// One acceptance as it is spelled on disk.
+///
+/// Holds the fingerprint and never a value, and refuses an entry with a field this build does not
+/// know, for the reason [`Written`] does.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Accepted {
+    /// The workspace the finding was made in, in full.
+    workspace: WrittenPath,
+    /// Which layer recognised the value, and as what.
+    kind: WrittenKind,
+    /// The file it is in.
+    path: String,
+    /// The fingerprint of the finding accepted.
+    fingerprint: String,
+    /// What the person accepted it for.
+    reason: String,
+    /// Seconds since the Unix epoch at which the acceptance stops applying.
+    expires_at: u64,
+}
+
+/// A [`Kind`] as this record spells it.
+///
+/// A spelling of its own rather than a serialization of [`Kind`]: `bravebot-core` takes no
+/// dependencies at all, and what a file written by one build has to mean to the next is this
+/// module's business rather than the scanner's. Each name is written out, so renaming a variant
+/// does not silently rename what is on disk.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum WrittenKind {
+    #[serde(rename = "aws-access-key")]
+    AwsAccessKey,
+    #[serde(rename = "github-token")]
+    GitHubToken,
+    #[serde(rename = "slack-token")]
+    SlackToken,
+    #[serde(rename = "google-api-key")]
+    GoogleApiKey,
+    #[serde(rename = "stripe-key")]
+    StripeKey,
+    #[serde(rename = "anthropic-key")]
+    AnthropicKey,
+    #[serde(rename = "openai-key")]
+    OpenAiKey,
+    #[serde(rename = "private-key")]
+    PrivateKey,
+    #[serde(rename = "url-password")]
+    UrlPassword,
+    #[serde(rename = "assigned")]
+    Assigned,
+    #[serde(rename = "standalone")]
+    Standalone,
+}
+
+impl WrittenKind {
+    fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::AwsAccessKey => Self::AwsAccessKey,
+            Kind::GitHubToken => Self::GitHubToken,
+            Kind::SlackToken => Self::SlackToken,
+            Kind::GoogleApiKey => Self::GoogleApiKey,
+            Kind::StripeKey => Self::StripeKey,
+            Kind::AnthropicKey => Self::AnthropicKey,
+            Kind::OpenAiKey => Self::OpenAiKey,
+            Kind::PrivateKey => Self::PrivateKey,
+            Kind::UrlPassword => Self::UrlPassword,
+            Kind::Assigned => Self::Assigned,
+            Kind::Standalone => Self::Standalone,
+        }
+    }
+
+    fn kind(self) -> Kind {
+        match self {
+            Self::AwsAccessKey => Kind::AwsAccessKey,
+            Self::GitHubToken => Kind::GitHubToken,
+            Self::SlackToken => Kind::SlackToken,
+            Self::GoogleApiKey => Kind::GoogleApiKey,
+            Self::StripeKey => Kind::StripeKey,
+            Self::AnthropicKey => Kind::AnthropicKey,
+            Self::OpenAiKey => Kind::OpenAiKey,
+            Self::PrivateKey => Kind::PrivateKey,
+            Self::UrlPassword => Kind::UrlPassword,
+            Self::Assigned => Kind::Assigned,
+            Self::Standalone => Kind::Standalone,
+        }
+    }
+}
+
+/// A path as this record spells it.
+///
+/// A string for a path that has a text spelling, and a list of bytes for one that has none.
+/// Untagged, because JSON already distinguishes a string from a list, so an entry from an earlier
+/// build reads back as the workspace it always named.
+///
+/// [`Spelling`] is why a rendering will not do: `to_string_lossy` maps every byte it cannot read
+/// onto one replacement character, so a record keyed on a rendering would answer for every
+/// workspace that renders the same way. This is [`crate::granted`]'s spelling, for
+/// [`crate::granted`]'s reasons.
+///
+/// [`Spelling`]: bravebot_core::command::Spelling
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum WrittenPath {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl WrittenPath {
+    fn of(path: &Path) -> Self {
+        match bravebot_core::command::Spelling::of(path) {
+            bravebot_core::command::Spelling::Text(text) => Self::Text(text),
+            bravebot_core::command::Spelling::Bytes(bytes) => Self::Bytes(bytes),
+        }
+    }
+
+    fn to_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Text(text) => bravebot_core::command::Spelling::Text(text.clone()),
+            Self::Bytes(bytes) => bravebot_core::command::Spelling::Bytes(bytes.clone()),
+        }
+        .into_path()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The value these tests find, which never reaches a record and is asserted absent from one.
+    const VALUE: &str = "AKIAIOSFODNN7EXAMPLE";
+
+    /// A state directory of this test's own, removed with it.
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = crate::testutil::scratch_dir(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch state directory");
+            Self { path }
+        }
+
+        fn store(&self, workspace: &str) -> Store {
+            Store::new(&self.path, Path::new(workspace))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// One finding as a scan would have made it, over `VALUE`.
+    ///
+    /// Taken from the scanner rather than built by hand, so the preview and the fingerprint these
+    /// tests assert about are the ones a real finding carries.
+    fn found(path: &str, line: usize) -> Finding {
+        let text = format!("{}AWS_ACCESS_KEY_ID={VALUE}", "\n".repeat(line - 1));
+        bravebot_core::credentials::scan(path, &text, 17)
+            .into_iter()
+            .next()
+            .expect("a finding over the key")
+    }
+
+    /// CRED-19: a finding is written outside the tree, so a person who was not watching the screen
+    /// when it was drawn can still read what was found and where.
+    #[test]
+    fn a_finding_one_session_recorded_is_read_back_by_another() {
+        let scratch = Scratch::new("findings-across-sessions");
+        let finding = found("config.yml", 3);
+        scratch.store("/work").record(&[&finding], Some("first"));
+
+        assert_eq!(scratch.store("/work").recorded(), [finding]);
+    }
+
+    /// Set a file's modification time to `days` ago, standing in for the last write that long ago.
+    fn written_days_ago(path: &Path, days: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open the file")
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400),
+            )
+            .expect("age the file");
+    }
+
+    fn thirty_days_ago() -> std::time::SystemTime {
+        std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400)
+    }
+
+    /// STATE-4: a record not written for longer than the period is removed and one written inside it
+    /// is kept, so the sweep is told apart from one that empties the directory.
+    #[test]
+    fn a_record_older_than_the_period_is_removed_and_a_newer_one_is_kept() {
+        let scratch = Scratch::new("findings-retention-age");
+        let finding = found("config.yml", 1);
+        let old = scratch.store("/old");
+        let new = scratch.store("/new");
+        old.record(&[&finding], None);
+        new.record(&[&finding], None);
+        written_days_ago(old.path(), 40);
+        written_days_ago(new.path(), 3);
+
+        let removed = remove_unwritten_since(&scratch.path, thirty_days_ago());
+
+        assert_eq!(removed, 1);
+        assert!(
+            !old.path().exists(),
+            "a record unwritten for forty days was kept"
+        );
+        assert_eq!(
+            new.recorded(),
+            [finding],
+            "a record from three days ago was removed"
+        );
+    }
+
+    /// STATE-4: an acceptance has an expiry of its own, so the sweep leaves it. One removed early
+    /// would report as open a finding a person had accepted.
+    #[test]
+    fn an_acceptance_is_left_where_it_is_whatever_its_age() {
+        let scratch = Scratch::new("findings-retention-accepted");
+        let finding = found("config.yml", 1);
+        let store = scratch.store("/work");
+        store.record(&[&finding], None);
+        store
+            .accept(&finding, "a development key", u64::MAX)
+            .expect("accepted");
+        written_days_ago(&store.path, 400);
+        written_days_ago(&store.accepted_path, 400);
+
+        remove_unwritten_since(&scratch.path, thirty_days_ago());
+
+        assert!(!store.path.exists());
+        assert!(
+            store.accepted_path.is_file(),
+            "an acceptance was removed by age before its expiry"
+        );
+    }
+
+    /// STATE-1: removal stops at the state directory and steps over links. A link standing as the
+    /// directory of records, or as one record, leads to something this was not given.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_does_not_follow_a_link_out_of_the_state_directory() {
+        let scratch = Scratch::new("findings-retention-link");
+        let elsewhere = scratch.path.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a directory outside");
+        let theirs = elsewhere.join("theirs.jsonl");
+        std::fs::write(&theirs, "somebody's own").expect("write");
+        written_days_ago(&theirs, 400);
+
+        let state = scratch.path.join("state");
+        std::fs::create_dir_all(state.join(FINDINGS)).expect("findings");
+        std::os::unix::fs::symlink(&theirs, state.join(FINDINGS).join("linked.jsonl"))
+            .expect("link a record");
+        assert_eq!(remove_unwritten_since(&state, thirty_days_ago()), 0);
+        assert!(
+            theirs.is_file(),
+            "a file outside was removed through a link"
+        );
+
+        let linked_state = scratch.path.join("linked-state");
+        std::fs::create_dir_all(&linked_state).expect("state");
+        std::os::unix::fs::symlink(&elsewhere, linked_state.join(FINDINGS))
+            .expect("link the directory of records");
+        assert_eq!(remove_unwritten_since(&linked_state, thirty_days_ago()), 0);
+        assert!(
+            theirs.is_file(),
+            "a directory outside was swept through a link"
+        );
+    }
+
+    /// STATE-4: only a record file is removed. A directory in the place of one is not a file this
+    /// build wrote.
+    #[test]
+    fn a_directory_among_the_records_is_left_where_it_is() {
+        let scratch = Scratch::new("findings-retention-directory");
+        let held = scratch.path.join(FINDINGS).join("held.jsonl");
+        std::fs::create_dir_all(&held).expect("a directory by a record's name");
+        std::fs::write(held.join("inside"), "somebody's own").expect("write");
+
+        assert_eq!(
+            remove_unwritten_since(
+                &scratch.path,
+                std::time::SystemTime::now() + std::time::Duration::from_secs(60)
+            ),
+            0
+        );
+        assert!(held.join("inside").is_file());
+    }
+
+    /// CRED-19: a key standing as a whole file is recorded as that, not dropped or read back as a
+    /// kind the scanner did not report.
+    #[test]
+    fn a_key_standing_as_a_whole_file_is_read_back_as_one() {
+        let scratch = Scratch::new("findings-standalone");
+        let finding = bravebot_core::credentials::scan(
+            "config/master.key",
+            "c8f1a0b4d2e6f7a9c3b5d8e0f2a4c6b8d1e3f5a7\n",
+            17,
+        )
+        .into_iter()
+        .next()
+        .expect("a finding over the whole file");
+        assert_eq!(finding.kind, Kind::Standalone);
+        scratch
+            .store("/work")
+            .record(&[&finding], Some("a-session"));
+
+        assert_eq!(scratch.store("/work").recorded(), [finding]);
+    }
+
+    /// CRED-19: an OpenAI key is recorded under the spelling `openai-key` and read back as that
+    /// kind, not as another kind or as one spelled after the variant. The key is built here from
+    /// a run of letters and digits, so this file holds no value a secret scanner would take for
+    /// one.
+    #[test]
+    fn an_openai_key_is_read_back_as_an_openai_key() {
+        let scratch = Scratch::new("findings-openai-key");
+        let run: String = ('a'..='z').chain('0'..='9').cycle().take(74).collect();
+        let text = format!("OPENAI_API_KEY=sk-proj-{run}T3BlbkFJ{run}\n");
+        let finding = bravebot_core::credentials::scan(".env", &text, 17)
+            .into_iter()
+            .next()
+            .expect("a finding over the key");
+        assert_eq!(finding.kind, Kind::OpenAiKey);
+        let store = scratch.store("/work");
+        store.record(&[&finding], Some("a-session"));
+
+        let written = std::fs::read_to_string(store.path()).expect("the record");
+        assert!(
+            written.contains(r#""kind":"openai-key""#),
+            "the record spelled the kind another way: {written}"
+        );
+        assert_eq!(
+            store.recorded(),
+            [finding],
+            "the key was read back as another kind"
+        );
+    }
+
+    /// CRED-19: and it holds no credential value. The kind, the location, the fingerprint and the
+    /// masked preview are the whole of an entry, so the file a scan leaves behind is not itself
+    /// the map of secrets the scan exists to describe.
+    ///
+    /// No part of one either. A prefix or a suffix is most of what somebody needs to recognise a
+    /// key they already hold and a fair start on guessing the rest, so the assertion is that no
+    /// run of the value survives into the file rather than that the whole of it did not.
+    #[test]
+    fn nothing_in_the_record_repeats_the_value() {
+        let scratch = Scratch::new("findings-no-value");
+        let finding = found("config.yml", 1);
+        let store = scratch.store("/work");
+        store.record(&[&finding], Some("a-session"));
+
+        let written = std::fs::read_to_string(store.path()).expect("the record");
+        for run in VALUE.as_bytes().windows(4) {
+            let piece = std::str::from_utf8(run).expect("the value is ASCII");
+            assert!(
+                !written.contains(piece),
+                "the record carried a piece of the value ({piece}): {written}"
+            );
+        }
+        // Every part of a finding is there, so the assertion above is about the value rather than
+        // about the record having failed to hold anything at all.
+        assert!(
+            written.contains("aws-access-key")
+                && written.contains("config.yml")
+                && written.contains(&finding.fingerprint)
+                && written.contains(&finding.preview),
+            "the record did not say what was found or where: {written}"
+        );
+    }
+
+    /// CRED-19: the record is per workspace, so a finding made in one checkout is not read back in
+    /// another. The scan describes one tree.
+    #[test]
+    fn a_finding_made_in_one_workspace_is_not_read_back_in_another() {
+        let scratch = Scratch::new("findings-per-workspace");
+        let finding = found("config.yml", 1);
+        scratch
+            .store("/work")
+            .record(&[&finding], Some("a-session"));
+
+        assert!(scratch.store("/other").recorded().is_empty());
+    }
+
+    /// The key a workspace reduces to is lossy, so two workspaces can share a file. The full path
+    /// is written into every entry, so a session reads its own workspace's lines rather than
+    /// whatever else reduced to the same name.
+    #[test]
+    fn a_workspace_sharing_a_key_with_another_does_not_read_its_findings() {
+        let scratch = Scratch::new("findings-lossy-key");
+        let mine = "/a/b";
+        let theirs = "/a-b";
+        assert_eq!(
+            crate::home::key_for(Path::new(mine)),
+            crate::home::key_for(Path::new(theirs)),
+            "this test needs two paths that reduce to one key"
+        );
+        let finding = found("config.yml", 1);
+        scratch.store(theirs).record(&[&finding], Some("a-session"));
+
+        assert!(
+            scratch.store(mine).recorded().is_empty(),
+            "a finding made in one tree was read back in another that renders the same way"
+        );
+    }
+
+    /// An entry is added rather than the record rewritten, so two sessions open in one workspace
+    /// cannot lose each other's findings.
+    #[test]
+    fn a_second_finding_is_added_rather_than_replacing_the_first() {
+        let scratch = Scratch::new("findings-append");
+        let store = scratch.store("/work");
+        let first = found("config.yml", 1);
+        let second = found("other.yml", 1);
+        store.record(&[&first], Some("one"));
+        store.record(&[&second], Some("two"));
+
+        assert_eq!(store.recorded(), [first, second]);
+    }
+
+    /// Nothing here may fail a turn, and nothing here may invent a finding. A record that is not
+    /// there or cannot be read holds nothing, which is where every finding was before this
+    /// existed.
+    #[test]
+    fn a_record_that_cannot_be_read_holds_nothing() {
+        let scratch = Scratch::new("findings-unreadable");
+        let store = scratch.store("/work");
+        assert!(store.recorded().is_empty(), "a missing file held a finding");
+
+        std::fs::create_dir_all(store.path().parent().expect("a parent")).expect("made");
+        std::fs::write(store.path(), "{ not json at all\n").expect("written");
+        assert!(store.recorded().is_empty());
+    }
+
+    /// One unreadable line does not take the rest of the file with it. A half-written line from a
+    /// disk that filled should not lose every finding ever made in a workspace.
+    #[test]
+    fn a_line_nothing_can_read_leaves_the_rest_of_the_record_readable() {
+        let scratch = Scratch::new("findings-partial-line");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], Some("a-session"));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.path())
+            .expect("opened");
+        file.write_all(b"{\"workspace\":\"/work\",\"kind\":\"assigned\"\n")
+            .expect("written");
+        drop(file);
+
+        assert_eq!(store.recorded(), [finding]);
+    }
+
+    /// An entry holding a field this build does not know is skipped rather than read past. A later
+    /// build narrows what an entry means by adding a field, and an older one reading past it would
+    /// report as an open finding something the newer build would not.
+    #[test]
+    fn an_entry_this_build_does_not_fully_understand_is_not_read() {
+        let scratch = Scratch::new("findings-unknown-field");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], Some("a-session"));
+
+        let written = std::fs::read_to_string(store.path()).expect("the record");
+        let narrowed = written.replacen(
+            r#"{"workspace""#,
+            r#"{"something-later-builds-key-on":"x","workspace""#,
+            1,
+        );
+        assert_ne!(
+            narrowed, written,
+            "the entry was not rewritten, so this test proves nothing"
+        );
+        std::fs::write(store.path(), narrowed).expect("rewritten");
+
+        assert!(
+            store.recorded().is_empty(),
+            "an entry with a field this build cannot account for was read as a finding"
+        );
+    }
+
+    /// A scan that found nothing writes nothing, not even the directory. An empty file is a record
+    /// that a scan ran in this workspace, which is more than nothing found is entitled to say.
+    #[test]
+    fn a_scan_that_found_nothing_leaves_no_record() {
+        let scratch = Scratch::new("findings-nothing-found");
+        let store = scratch.store("/work");
+        store.record(&[], Some("a-session"));
+
+        assert!(
+            !store.path().exists(),
+            "a scan that found nothing created a record anyway"
+        );
+        assert!(
+            !store.path().parent().expect("a parent").exists(),
+            "a scan that found nothing created the directory a record would live in"
+        );
+    }
+
+    /// CRED-21: an acceptance covers a finding until its expiry, and the finding is open again from
+    /// the expiry on. The three times are one second before, at, and after the expiry, so an
+    /// acceptance that never lapses, or one that lapses a step early or late, fails one of them.
+    #[test]
+    fn an_acceptance_lapses_into_a_finding_when_its_expiry_passes() {
+        let scratch = Scratch::new("findings-accept-expires");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], Some("a-session"));
+        store
+            .accept(&finding, "a development key", 1_000)
+            .expect("the acceptance is kept");
+
+        assert!(
+            store.open_at(999).is_empty(),
+            "an unexpired acceptance left the finding open"
+        );
+        assert_eq!(
+            store.open_at(1_000),
+            vec![finding.clone()],
+            "open at the expiry"
+        );
+        assert_eq!(
+            store.open_at(5_000),
+            vec![finding.clone()],
+            "open after the expiry"
+        );
+        assert_eq!(store.recorded(), [finding], "accepting rewrote the record");
+    }
+
+    /// CRED-21 and CRED-22: an acceptance names one finding. A finding of the same kind at the same
+    /// path with another fingerprint is a new finding, and an acceptance made in another workspace
+    /// covers nothing here.
+    #[test]
+    fn an_acceptance_covers_only_the_finding_it_names() {
+        let scratch = Scratch::new("findings-accept-scope");
+        let store = scratch.store("/work");
+        let accepted = found("config.yml", 1);
+        let text = format!("AWS_ACCESS_KEY_ID={VALUE}");
+        let other_run = bravebot_core::credentials::scan("config.yml", &text, 18)
+            .into_iter()
+            .next()
+            .expect("a finding over the key");
+        assert_ne!(accepted.fingerprint, other_run.fingerprint);
+        store.record(&[&accepted, &other_run], None);
+        store
+            .accept(&accepted, "a development key", 1_000)
+            .expect("the acceptance is kept");
+
+        assert_eq!(store.open_at(10), vec![other_run.clone()]);
+
+        let elsewhere = scratch.store("/other");
+        elsewhere.record(&[&accepted], None);
+        assert_eq!(
+            elsewhere.open_at(10),
+            [accepted],
+            "an acceptance made in /work covered a finding in /other"
+        );
+    }
+
+    /// CRED-21: an acceptance line with a field this build does not know is not read, so the finding
+    /// it would cover stays open. A later build that narrows an acceptance by adding a field must
+    /// not have an older one apply it as the wider acceptance.
+    #[test]
+    fn an_acceptance_this_build_does_not_fully_understand_leaves_its_finding_open() {
+        let scratch = Scratch::new("findings-accept-unknown-field");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], Some("a-session"));
+        store
+            .accept(&finding, "a development key", 1_000)
+            .expect("the acceptance is kept");
+        assert!(
+            store.open_at(10).is_empty(),
+            "the acceptance did not apply before it was rewritten, so this test proves nothing"
+        );
+
+        let file = store.accepted_path.clone();
+        let written = std::fs::read_to_string(&file).expect("the acceptance");
+        let narrowed = written.replacen(
+            r#"{"workspace""#,
+            r#"{"something-later-builds-key-on":"x","workspace""#,
+            1,
+        );
+        assert_ne!(
+            narrowed, written,
+            "the entry was not rewritten, so this test proves nothing"
+        );
+        std::fs::write(&file, narrowed).expect("rewritten");
+
+        assert_eq!(
+            store.open_at(10),
+            [finding],
+            "an acceptance with a field this build cannot account for was applied"
+        );
+    }
+
+    /// CRED-21: an acceptance holds the fingerprint and a reason and never the value.
+    #[test]
+    fn an_acceptance_repeats_no_part_of_the_value() {
+        let scratch = Scratch::new("findings-accept-no-value");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store
+            .accept(&finding, "a development key", 1_000)
+            .expect("the acceptance is kept");
+
+        let dir = store.path().parent().expect("a parent").join(ACCEPTED);
+        let file = std::fs::read_dir(&dir)
+            .expect("the acceptance directory")
+            .next()
+            .expect("an acceptance file")
+            .expect("readable")
+            .path();
+        let written = std::fs::read_to_string(file).expect("the acceptance");
+        for run in VALUE.as_bytes().windows(4) {
+            let piece = std::str::from_utf8(run).expect("the value is ASCII");
+            assert!(!written.contains(piece), "the acceptance carried {piece}");
+        }
+        assert!(written.contains(&finding.fingerprint) && written.contains("1000"));
+    }
+
+    /// A turn with no session to name still records what it found. A one-shot run is exactly the
+    /// case with nobody watching the screen, so it is the case the record matters most for.
+    #[test]
+    fn a_turn_with_no_session_to_name_still_records_what_it_found() {
+        let scratch = Scratch::new("findings-no-session");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], None);
+
+        assert_eq!(store.recorded(), [finding]);
+    }
+
+    /// CRED-22: recording a finding, which is what a turn does, adds no acceptance, so the finding
+    /// stays open until a person accepts it. A record call that also accepted would let a turn
+    /// clear its own leak by finding it.
+    #[test]
+    fn recording_a_finding_accepts_nothing() {
+        let scratch = Scratch::new("findings-record-accepts-nothing");
+        let store = scratch.store("/work");
+        let finding = found("config.yml", 1);
+        store.record(&[&finding], Some("a-session"));
+
+        assert!(
+            !store.accepted_path.exists(),
+            "recording a finding wrote an acceptance for it"
+        );
+        assert_eq!(store.open_at(0), [finding]);
+    }
+
+    /// CRED-22: nothing a turn runs calls [`Store::accept`]. The method is public so that the
+    /// person's own command can reach it, and a call from the code that runs a turn would let the
+    /// model's session clear a finding by naming it.
+    ///
+    /// Read off the source because the property is which code can call it. Every shipped file in
+    /// the workspace that mentions findings is held to it, so the call is not hidden in another
+    /// crate that the turn reaches; the person's command, when it exists, is the one place to name
+    /// here.
+    #[test]
+    fn no_shipped_code_that_handles_findings_accepts_one() {
+        fn sources(directory: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("a source directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crates directory");
+        let mut files = Vec::new();
+        for member in std::fs::read_dir(crates).expect("the crates directory") {
+            let source = member.expect("a member").path().join("src");
+            if source.is_dir() {
+                sources(&source, &mut files);
+            }
+        }
+
+        let own = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/findings.rs");
+        let mut handling = 0;
+        for file in files.iter().filter(|file| **file != own) {
+            let text = std::fs::read_to_string(file).expect("a source file");
+            let mut end = text.len();
+            let mut from = 0;
+            while let Some(found) = text[from..].find("#[cfg(test)]\nmod ") {
+                let start = from + found;
+                if text[start..]
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|line| line.ends_with('{'))
+                {
+                    end = start;
+                    break;
+                }
+                from = start + 1;
+            }
+            let code = &text[..end];
+            if !code.contains("findings::") {
+                continue;
+            }
+            handling += 1;
+            assert!(
+                !code.contains(".accept("),
+                "{} handles findings and calls `accept`, which a turn must not reach",
+                file.display()
+            );
+        }
+        assert!(
+            handling > 0,
+            "no shipped file outside this one mentions findings, so this read nothing"
+        );
+    }
+}

@@ -1,0 +1,10691 @@
+//! Drawing the session.
+//!
+//! Untrusted content, whether model replies or tool output, is shown, but the interface makes its
+//! provenance visible rather than presenting everything as equally authoritative. That is
+//! the point of showing labels in the trail: a user can see which text the system trusted
+//! and which it merely carried.
+//!
+//! The layout is deliberately quiet: the transcript has no frame so replies read as text
+//! rather than as boxed output, and only the input keeps a border, since that is the one
+//! place the cursor needs locating.
+
+use bravebot_agent::diff::Change;
+use bravebot_agent::report::{Activity, Landing, Reported, Returned, Shown};
+use bravebot_i18n::t;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+
+use crate::colour_codes;
+use crate::state::{Delegate, Laid, Session};
+use crate::theme;
+use crate::wrap;
+
+mod beneath;
+mod export;
+mod hint;
+mod hover;
+mod menu;
+mod prompt;
+mod scroller;
+mod sessions_screen;
+pub(crate) use sessions_screen::{
+    status_in_words as session_status_in_words, status_word as session_status_word,
+};
+mod transcript;
+mod watching;
+
+pub use self::export::{as_drawn_at, as_last_drawn, as_markdown, as_text};
+pub(crate) use self::hint::{cache_hit_rate, context_reading};
+pub(crate) use self::transcript::{
+    EntryLines, ReplyLines, Rows, links_of_the_latest_reply, opening_screen, place_top_of_view,
+    plan_item_row, reply_as_text, rows_of, top_of_view,
+};
+
+use self::beneath::{
+    first_waiting_row, fit_to_room, lines_beneath_the_box, offered_picks, queue_words,
+};
+use self::hint::draw_hint;
+use self::prompt::{draw_input, draw_status, input_height, status_height};
+use self::scroller::draw_scroller;
+use self::transcript::draw_transcript;
+use self::watching::draw_watching;
+
+#[cfg(test)]
+use self::beneath::{PointerKeys, entry_lines, shortcut_lines, shortcuts, stashed_lines};
+#[cfg(test)]
+use self::hint::{COMPACTED_CONTEXT, SHORTCUTS_HINT, UNMEASURED_CONTEXT, loop_part};
+#[cfg(test)]
+use self::prompt::input_text_width;
+#[cfg(test)]
+use self::scroller::needle_that_fits;
+#[cfg(test)]
+use self::transcript::{counted, lay_out, transcript_lines};
+#[cfg(test)]
+use self::watching::padded;
+#[cfg(test)]
+use crate::keybindings::Keybindings;
+#[cfg(test)]
+use crate::state::Status;
+#[cfg(test)]
+use ratatui::style::Color;
+#[cfg(test)]
+use ratatui::widgets::Wrap;
+
+/// Marks a turn boundary in the transcript.
+const TURN_MARKER: &str = "⏺";
+
+/// Columns the transcript's own lead occupies before a reply's text.
+///
+/// A table is budgeted against what is left after it. Given the full width it would be two
+/// columns too wide on every row, and the paragraph would soft-wrap the columns it just aligned.
+const LEAD: usize = 2;
+/// Marks a detail belonging to the entry above it.
+const DETAIL_MARKER: &str = "⎿";
+/// Joins the first task to the line above it, so the list reads as belonging to that turn.
+const BRANCH_MARKER: &str = "└";
+
+fn dim() -> Style {
+    Style::default().fg(theme::muted())
+}
+
+/// The inks of a task's mark and of its text.
+///
+/// Tasks no longer outstanding are struck through and dimmed, which is what makes progress legible
+/// at a glance: the eye finds the unstruck lines. A cancelled one is struck too, with its marker in
+/// the muted colour rather than the success one, so dropped work does not read as finished work.
+/// Shared by the plan under a turn and the plan `/todos` prints, so the two read alike.
+fn task_inks(row: &bravebot_core::todo::Row) -> (Style, Style) {
+    if row.status == bravebot_core::todo::Status::Cancelled {
+        (dim(), dim().add_modifier(Modifier::CROSSED_OUT))
+    } else if row.struck() {
+        (
+            Style::default().fg(theme::ok()),
+            dim().add_modifier(Modifier::CROSSED_OUT),
+        )
+    } else {
+        (
+            Style::default().fg(theme::running()),
+            Style::default().add_modifier(Modifier::BOLD),
+        )
+    }
+}
+
+/// Draw a task list beneath whatever it belongs to.
+///
+/// The first row carries a branch so the block attaches to the line above rather than floating.
+///
+/// `left_open` is whether the list is drawn for a turn that has already ended: a row still
+/// outstanding is then drawn hollow and dim rather than filled, running and bold, so it reads as
+/// work nobody is doing rather than work the turn above it is still going through, the way the
+/// panel draws the same row (PANEL-10).
+fn todo_lines(todos: &[bravebot_core::todo::Row], left_open: bool) -> Vec<Line<'static>> {
+    todos
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let lead = if index == 0 {
+                format!("  {BRANCH_MARKER} ")
+            } else {
+                "    ".to_string()
+            };
+            let (glyph, marker, text) = if left_open && !row.struck() {
+                (crate::panel::LEFT_OPEN_MARKER, dim(), dim())
+            } else {
+                let (marker, text) = task_inks(row);
+                (row.marker, marker, text)
+            };
+            Line::from(vec![
+                Span::styled(lead, dim()),
+                Span::styled(format!("{glyph} "), marker),
+                Span::styled(row.content.clone(), text),
+            ])
+        })
+        .collect()
+}
+
+fn status_word(status: bravebot_core::todo::Status) -> &'static str {
+    use bravebot_core::todo::Status;
+    match status {
+        Status::Pending => t!(todos_status_pending),
+        Status::Active => t!(todos_status_active),
+        Status::Done => t!(todos_status_done),
+        Status::Cancelled => t!(todos_status_cancelled),
+    }
+}
+
+/// The columns every mark of a task takes, the hollow one a row left open has included.
+const MARK_COLUMNS: usize = 1;
+
+/// The columns of blank before the mark of a printed task.
+const INDENT_COLUMNS: usize = 2;
+
+/// The columns of blank between the mark of a printed task and its status word.
+const SPACE_COLUMNS: usize = 1;
+
+/// The columns of blank between the status word of a printed task and its text.
+const GAP_COLUMNS: usize = 2;
+
+/// The columns of the margin of a printed task that are not its status word.
+pub(crate) const MARGIN_BESIDE_THE_STATUS: usize =
+    INDENT_COLUMNS + MARK_COLUMNS + SPACE_COLUMNS + GAP_COLUMNS;
+
+/// The columns a printed task's text keeps at the least, so that a character two columns wide
+/// still fits a row.
+const LEAST_TEXT_COLUMNS: usize = 2;
+
+fn status_column() -> usize {
+    use bravebot_core::todo::Status;
+    [
+        Status::Pending,
+        Status::Active,
+        Status::Done,
+        Status::Cancelled,
+    ]
+    .into_iter()
+    .map(|status| wrap::display_width(status_word(status)))
+    .max()
+    .unwrap_or(0)
+}
+
+/// The columns the margin of a printed plan takes at `width` (VIEW-37).
+///
+/// The indent, the mark, a space, the status column and the gap before the text. A width that would
+/// leave the text fewer than [`LEAST_TEXT_COLUMNS`] shortens it, and it is never less than the
+/// column the mark takes.
+pub(crate) fn printed_margin(width: usize) -> usize {
+    let whole = MARGIN_BESIDE_THE_STATUS + status_column();
+    whole
+        .min(width.saturating_sub(LEAST_TEXT_COLUMNS))
+        .max(MARK_COLUMNS)
+}
+
+/// The margin of the first row of a printed task, `margin` columns wide: its mark and, where the
+/// margin has room beyond the mark, the indent, the status in words and the gap.
+///
+/// A status word wider than the room the margin has for it is cut with an ellipsis. A margin with
+/// room for a single column of it, which an ellipsis alone would fill, holds the mark and blanks.
+fn first_margin(
+    row: &bravebot_core::todo::Row,
+    mark: Span<'static>,
+    margin: usize,
+) -> Vec<Span<'static>> {
+    if margin <= MARGIN_BESIDE_THE_STATUS + 1 {
+        return vec![mark, Span::raw(" ".repeat(margin - MARK_COLUMNS))];
+    }
+    let column = margin - MARGIN_BESIDE_THE_STATUS;
+    let word = crate::status::cut(status_word(row.status), column);
+    let padding = " ".repeat(column - wrap::display_width(&word));
+    vec![
+        Span::raw(" ".repeat(INDENT_COLUMNS)),
+        mark,
+        Span::raw(" ".repeat(SPACE_COLUMNS)),
+        Span::styled(format!("{word}{padding}"), dim()),
+        Span::raw(" ".repeat(GAP_COLUMNS)),
+    ]
+}
+
+/// `text` with each character wider than `room` columns drawn as a replacement character, so that
+/// no row built from it is wider than `room`. `text` has been through [`printable`].
+fn fitting(text: &str, room: usize) -> String {
+    let mut fitted = String::with_capacity(text.len());
+    let mut at = 0;
+    for (bytes, columns) in wrap::clusters(text) {
+        if columns > room {
+            fitted.push('\u{fffd}');
+        } else {
+            fitted.push_str(text.get(at..at + bytes).unwrap_or_default());
+        }
+        at += bytes;
+    }
+    fitted
+}
+
+/// The whole plan, as `/todos` and its key print it (VIEW-37): a mark and the status in words for
+/// each task, then the task wrapped to `width`.
+///
+/// A row that is neither completed nor cancelled is drawn as work being done, as the plan under a
+/// turn is, or, where `left_open` says no turn is running, hollow and dim as the panel draws it
+/// (PANEL-10). The status word is the planner's either way.
+///
+/// The task is the planner's text, so it is laid out by [`marked_rows`] as the lines of a call's
+/// result are: control characters are drawn as visible characters, and every row the task breaks
+/// into begins with a margin drawn here. The first row's margin holds the mark and the status the
+/// task carries and the others' are blank, so no task can draw a mark, a status or a margin of its
+/// own.
+///
+/// No row is wider than `width`, so the transcript does not wrap one again and a continuation never
+/// starts outside the margin. The margin is shortened to leave the text [`LEAST_TEXT_COLUMNS`]
+/// (see [`printed_margin`]). Where `width` leaves the text a single column, a character that does
+/// not fit it is drawn as a replacement character, and at a single column there is room for the
+/// margin alone, so a task is drawn as its mark.
+pub(crate) fn plan_lines(
+    plan: &[bravebot_core::todo::Row],
+    left_open: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    if plan.is_empty() {
+        return Vec::new();
+    }
+    let margin = printed_margin(width);
+    let room = width.saturating_sub(margin);
+    plan.iter()
+        .flat_map(|row| {
+            let (glyph, mark_ink, text_ink) = if left_open && !row.struck() {
+                (crate::panel::LEFT_OPEN_MARKER, dim(), dim())
+            } else {
+                let (mark_ink, text_ink) = task_inks(row);
+                (row.marker, mark_ink, text_ink)
+            };
+            let first = first_margin(row, Span::styled(glyph, mark_ink), margin);
+            if room == 0 {
+                return vec![Line::from(first)];
+            }
+            let blank = Span::raw(" ".repeat(margin));
+            let text = fitting(&printable(&row.content), room);
+            let mut rows = marked_rows(&blank, &[Span::styled(text, text_ink)], width);
+            if let Some(head) = rows.first_mut() {
+                head.spans.splice(0..1, first);
+            }
+            rows
+        })
+        .collect()
+}
+
+/// How many diff lines a finished write shows before the rest is summarised away.
+///
+/// Enough to see what happened, not so much that a large edit pushes everything before it off
+/// the screen. The approval prompt showed the whole thing; this is the record afterwards.
+const MAX_DIFF_LINES: usize = 12;
+
+/// Drawn down the margin of everything the model was not allowed to read.
+///
+/// One glyph, on every line of the block, so the mark cannot be ended by anything written inside
+/// it. A caption could be imitated; a margin cannot.
+pub(crate) const QUARANTINE_BAR: &str = "\u{2503}";
+
+/// What the box says when there is nothing in it.
+///
+/// Drawn rather than typed, so it is never part of a prompt and never has to be deleted: the
+/// first character typed takes its place, because the line it was standing in for now exists.
+fn placeholder() -> &'static str {
+    t!(input_placeholder)
+}
+
+/// Replace control characters, so drawn text cannot move the cursor or recolour the screen.
+///
+/// The interface's structure is drawn by this module: the margin down a quarantine block, the `!`
+/// before a command, the colour that says which is which. An escape sequence in the text would let
+/// the text draw those instead, and a forged margin is worse than no margin, since the whole point
+/// of drawing one is that content cannot.
+///
+/// Everything the terminal would act on becomes a visible glyph, so what is on the screen stays a
+/// faithful record of the bytes without being able to act. A tab is replaced like the rest, since
+/// ratatui drops it without drawing anything. Callers that lay a tab out as width do so before
+/// this, and lines are already split, so no newline reaches it.
+pub(crate) fn printable(text: &str) -> String {
+    if !text.chars().any(|c| c.is_control()) {
+        return text.to_string();
+    }
+    text.chars()
+        .map(|c| {
+            if !c.is_control() {
+                c
+            } else {
+                // The Unicode pictures for C0, so an escape reads as ␛ rather than vanishing: a
+                // character silently dropped is one a user cannot tell was ever there.
+                char::from_u32(0x2400 + c as u32).unwrap_or('\u{fffd}')
+            }
+        })
+        .collect()
+}
+
+/// Lay styled text out behind a margin, one drawn row at a time.
+///
+/// The bar goes at the head of every row the terminal draws, rather than at the head of every
+/// logical line. Everything built here is handed to a wrapping paragraph, and ratatui prefixes
+/// nothing to the rows its own wrapping produces: a line wider than the screen used to continue at
+/// column 0 with no margin at all, which is the one thing the marking exists to make impossible,
+/// and with the right padding the content could paint a bar of its own in the margin column.
+/// Breaking the text here means no row can begin with content.
+///
+/// Control characters are replaced on the way in, for the same reason they are anywhere else the
+/// margin means something: a row the renderer laid out is still a row the content could otherwise
+/// move the cursor off.
+pub(crate) fn marked_rows(
+    margin: &Span<'static>,
+    spans: &[Span<'static>],
+    width: usize,
+) -> Vec<Line<'static>> {
+    // One column at least. A terminal too narrow for the margin still gets the margin, and the
+    // content is broken a character at a time rather than drawn outside it.
+    let room = width.saturating_sub(margin.width()).max(1);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+
+    for span in spans {
+        for piece in pieces(&printable(&span.content)) {
+            let mut piece = piece;
+            loop {
+                let reached = wrap::display_width(&piece);
+                if used + reached <= room {
+                    used += reached;
+                    row.push(Span::styled(piece, span.style));
+                    break;
+                }
+                if used > 0 {
+                    rows.push(behind(margin, std::mem::take(&mut row)));
+                    used = 0;
+                    // The break falls between words, so the spaces that ended a row stay on it.
+                    piece = piece.trim_start().to_string();
+                    continue;
+                }
+                // A word wider than the row itself. There is nowhere better to break it, and
+                // dropping the tail would lose bytes the person is being shown on purpose. It is
+                // cut into rows in one pass, since measuring what is left after each cut takes
+                // time that grows with the square of the word.
+                let (heads, tail) = cut_to_width(&piece, room);
+                for head in heads {
+                    row.push(Span::styled(head.to_string(), span.style));
+                    rows.push(behind(margin, std::mem::take(&mut row)));
+                }
+                piece = tail.to_string();
+            }
+        }
+    }
+
+    // Always a row, so an empty line is a marked one rather than a gap in the block.
+    rows.push(behind(margin, row));
+    rows
+}
+
+/// One row, with the margin in front of it.
+fn behind(margin: &Span<'static>, mut spans: Vec<Span<'static>>) -> Line<'static> {
+    spans.insert(0, margin.clone());
+    Line::from(spans)
+}
+
+/// Text split into words carrying the spaces that follow them, which is where a row may break.
+fn pieces(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut spacing = false;
+    for c in text.chars() {
+        if c == ' ' {
+            spacing = true;
+        } else if spacing {
+            out.push(std::mem::take(&mut current));
+            spacing = false;
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// `text` cut into rows of at most `width` display columns, each taking at least one grapheme
+/// cluster, and what is left after them.
+///
+/// What is left is the last row when it fits in `width`, so the caller can go on filling it. When
+/// the last row is a single cluster wider than `width` it is one of the rows and nothing is left.
+/// The rows and what is left are what cutting [`split_at_width`] off `text` over and over gives,
+/// found without measuring the remainder each time.
+fn cut_to_width(text: &str, width: usize) -> (Vec<&str>, &str) {
+    let mut rows = Vec::new();
+    // What has not been cut off yet, of which the first `taken` bytes are the row being filled.
+    let mut rest = text;
+    let mut taken = 0usize;
+    let mut used = 0usize;
+    for (bytes, reached) in wrap::clusters(text) {
+        if taken > 0 && used + reached > width {
+            let (row, after) = rest.split_at(taken);
+            rows.push(row);
+            rest = after;
+            taken = 0;
+            used = 0;
+        }
+        used += reached;
+        taken += bytes;
+    }
+    if used > width {
+        rows.push(rest);
+        return (rows, "");
+    }
+    (rows, rest)
+}
+
+/// `text` cut where it reaches `width` display columns, taking at least one grapheme cluster.
+///
+/// At least one, or a wide character in a one-column row would cut nothing and the caller would
+/// break the same word forever. Cut between clusters and measured as the paragraph measures them,
+/// so a row built from the head is never wider than `width` when it is drawn.
+fn split_at_width(text: &str, width: usize) -> (String, String) {
+    let mut used = 0usize;
+    let mut index = 0usize;
+    for (bytes, reached) in wrap::clusters(text) {
+        if index > 0 && used + reached > width {
+            return (text[..index].to_string(), text[index..].to_string());
+        }
+        used += reached;
+        index += bytes;
+    }
+    (text.to_string(), String::new())
+}
+
+/// One delegate, with the last of its own work under it.
+///
+/// The block is a live view of something working rather than a second transcript. While it runs
+/// it shows what it is doing now, and when it finishes it collapses to the sentence the turn was
+/// told: what it read and what it ran ended with it, which is the whole point of delegating.
+///
+/// The task is drawn because it is the only thing telling two delegates of the same kind apart.
+/// It is what the planner wrote, released for a screen exactly as the target of any call is, and
+/// nothing here reads it.
+fn delegate_lines(delegate: &Delegate, width: usize) -> Vec<Line<'static>> {
+    let head = if delegate.is_running() {
+        Style::default().fg(theme::running())
+    } else if delegate.failed() {
+        Style::default().fg(theme::fail())
+    } else {
+        Style::default().fg(theme::ok())
+    };
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{TURN_MARKER} "), head),
+        Span::styled(
+            format!("{} delegate", delegate.kind),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {}", one_line(&delegate.task)), dim()),
+    ])];
+
+    match &delegate.note {
+        // Finished, so the sentence it ended on and what it reported are the block. Its own lines
+        // are behind it, and what anybody acts on is what it concluded.
+        Some(note) => {
+            lines.push(Line::from(Span::styled(
+                format!("  {DETAIL_MARKER} {}", one_line(note)),
+                if delegate.failed() {
+                    Style::default().fg(theme::fail())
+                } else {
+                    dim()
+                },
+            )));
+            if let Some(reported) = &delegate.reported {
+                lines.extend(reported_lines(reported, "    ", width));
+            }
+        }
+        // Still working, so what it is doing now, indented under it. Indented rather than drawn
+        // flat, because several delegates and the turn all report at once and the indent is what
+        // says which of them a row belongs to.
+        None => {
+            let latest = delegate.latest();
+            for entry in &latest {
+                if let Some(activity) = &entry.activity {
+                    for line in
+                        activity_lines(activity, entry.landing, false, width.saturating_sub(2))
+                    {
+                        lines.push(indented(line));
+                    }
+                }
+            }
+            // Said only where there were more than are drawn, since "3 calls" over three rows is
+            // a row spent saying what the reader can already see. Against the calls drawn rather
+            // than the lines held, so a delegate whose lines also hold a preview still says how
+            // many calls the block left out.
+            if delegate.calls > latest.len() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {DETAIL_MARKER} {}",
+                        t!(delegate_more_calls, count = delegate.calls)
+                    ),
+                    dim(),
+                )));
+            }
+        }
+    }
+
+    lines
+}
+
+/// What a delegate handed back, under the sentence saying how its run ended.
+///
+/// The only thing on the screen that says what a run was for. Everything a delegate read and ran
+/// ends with it, so a report drawn nowhere leaves a person with a round count for work done in a
+/// directory they own: a delegate asked to pick a file said which one here and nowhere else.
+///
+/// Wrapped here rather than left to the paragraph that draws it, so the rows a long report
+/// continues onto keep the indent that says which block they belong to.
+fn reported_lines(reported: &Reported, indent: &str, width: usize) -> Vec<Line<'static>> {
+    match reported {
+        // Marked, because the planner was handed a reference and these are the bytes behind it.
+        // The same block any quarantined result is drawn in, for the same reason: the person owns
+        // the directory, and a screen is not a context.
+        Reported::Kept(shown) => quarantined_lines(shown, width),
+        // Plain, because the planner read exactly this. Dressing it as quarantined would say the
+        // opposite of what is true.
+        Reported::Said(text) => {
+            let margin = Span::raw(indent.to_string());
+            text.lines()
+                .flat_map(|line| marked_rows(&margin, &[Span::raw(line.to_string())], width.max(1)))
+                .collect()
+        }
+    }
+}
+
+/// Move a line two columns right, so it reads as belonging to the block above it.
+fn indented(line: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
+/// The first line of something, for a place with one row to spend on it.
+///
+/// A task is a paragraph and a report is several sentences, and either drawn whole would push the
+/// rest of the screen out of the way.
+pub(crate) fn one_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().trim().to_string()
+}
+
+/// The rows naming one call: what it is for as the headline, and the call itself under it.
+///
+/// The planner's reason says what is happening, which is what a person scanning a run of calls
+/// wants to read; `Read(tests/test_scripts.py)` is the detail behind it. A call that gave no
+/// reason is headed by the call, as before. Only the reason's first line is drawn, since the
+/// headline is one row of a transcript and not a paragraph.
+fn call_rows(marker: Span<'static>, call: String, style: Style, why: &str) -> Vec<Line<'static>> {
+    let why = one_line(why);
+    if why.is_empty() {
+        return vec![Line::from(vec![marker, Span::styled(call, style)])];
+    }
+    vec![
+        Line::from(vec![marker, Span::styled(why, style)]),
+        Line::from(Span::styled(format!("  {DETAIL_MARKER} {call}"), dim())),
+    ]
+}
+
+/// Draw one tool call: what it is, and what came of it.
+///
+/// The shape mirrors a turn's own: a marker, then the detail indented beneath it, so a call
+/// and its result read as one thing rather than two unrelated lines.
+fn activity_lines(
+    activity: &Activity,
+    landing: Option<Landing>,
+    expanded: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let head = if activity.is_running() {
+        // Hollow while it runs, filled when it is over, so the eye finds the live one.
+        Style::default().fg(theme::running())
+    } else if activity.failed {
+        Style::default().fg(theme::fail())
+    } else {
+        Style::default().fg(theme::ok())
+    };
+
+    let mut lines = call_rows(
+        Span::styled(format!("{TURN_MARKER} "), head),
+        activity.line(),
+        Style::default().add_modifier(Modifier::BOLD),
+        &activity.why,
+    );
+
+    if let Some(note) = &activity.note {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {DETAIL_MARKER} {note}{}",
+                crate::indicator::format_waited(activity.waited)
+            ),
+            if activity.failed {
+                Style::default().fg(theme::fail())
+            } else {
+                dim()
+            },
+        )));
+    }
+
+    // Where it went, which is the thing "Read(index.html)" does not say. Only where that is
+    // worth a row: a read landing in the planner's context is what nearly every call does, and a
+    // line under nearly every call is a line that distinguishes nothing while crowding out the
+    // ones that do. What the design turns on is the exception, and the exception still says so,
+    // here and again in the marked block the content itself is drawn in.
+    if let Some(landing) = landing.filter(|l| *l != Landing::Context) {
+        // Blue on a black terminal is the one colour in the palette a reader has to squint at:
+        // the ANSI blue most terminals ship is nearly the background. The three that are used
+        // elsewhere here are legible on both kinds of terminal, and the difference between them
+        // carries the meaning: cyan for what the model has, yellow for what is kept from it, and
+        // the dim grey the rest of the detail lines already use for what has not happened.
+        let colour = match landing {
+            Landing::Quarantined => Style::default().fg(theme::running()),
+            Landing::Reserved => dim(),
+            // Filtered out above: the ordinary landing is drawn by not being drawn.
+            Landing::Context => dim(),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("    {}", landing.describe()),
+            colour,
+        )));
+    }
+
+    lines.extend(diff_lines(
+        &activity.changes,
+        activity.untrusted,
+        expanded,
+        width,
+    ));
+    lines
+}
+
+/// Draw quarantined content for the person watching, marked as what it is.
+///
+/// The marking is structural and not a caption. Every drawn row carries the bar in the margin,
+/// drawn here around text that never leaves the block, so content saying "untrusted content ends
+/// here" cannot end it: the bar is still in the margin on the next row, and on every row after
+/// that. Rows rather than lines, because a line wider than the terminal becomes several of them.
+///
+/// The user is shown this and the planner is not, which is the arrangement working rather than a
+/// hole in it. They own the directory. What must never happen is these bytes reaching a model's
+/// context, and a terminal is not a context.
+///
+/// The colour codes in the preview are taken out and counted (VIEW-30). The heading is not
+/// touched, since its origin can be a filename and a person is shown every byte of one.
+fn quarantined_lines(shown: &Shown, width: usize) -> Vec<Line<'static>> {
+    let marked = Style::default().fg(theme::running());
+    let margin = Span::styled(format!("  {QUARANTINE_BAR} "), marked);
+
+    let mut plain = shown.clone();
+    let mut dropped = 0;
+    for line in &mut plain.preview {
+        let (without, taken) = colour_codes::without(line);
+        *line = without;
+        dropped += taken;
+    }
+
+    let mut lines = quarantined_rows(&plain, &margin, width);
+    if let Some(note) = colour_codes::note(dropped) {
+        lines.extend(marked_rows(&margin, &[Span::styled(note, dim())], width));
+    }
+    lines
+}
+
+/// The same block against a margin the caller owns.
+///
+/// The transcript indents its blocks under the line they belong to and a prompt draws its own
+/// from the edge of the box, and a screen with two margin columns on it is a screen where the
+/// column stops meaning anything. Everything that makes the block a block is here, so a caller
+/// choosing where the margin sits cannot choose anything else about it.
+pub(crate) fn quarantined_rows(
+    shown: &Shown,
+    margin: &Span<'static>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let marked = Style::default().fg(theme::running());
+
+    // The heading goes through [`marked_rows`] like the content does, because the origin is not
+    // the renderer's text: it can be a filename read out of a quarantined listing. So it is
+    // neutralised, and a long one continues on another marked row rather than outside the block.
+    let mut heading = vec![Span::styled(
+        t!(
+            quarantined_heading,
+            origin = &shown.origin,
+            label = &shown.label
+        ),
+        marked.add_modifier(Modifier::BOLD),
+    )];
+    if let Some(note) = shown.reach.note() {
+        heading.push(Span::styled(format!("  {note}"), dim()));
+    }
+    let mut lines = marked_rows(margin, &heading, width);
+
+    for line in &shown.preview {
+        lines.extend(marked_rows(
+            margin,
+            &[Span::styled(line.clone(), dim())],
+            width,
+        ));
+    }
+
+    // Said rather than silently dropped, for the same reason a truncated diff says so.
+    if shown.lines > shown.preview.len() {
+        lines.extend(marked_rows(
+            margin,
+            &[Span::styled(
+                t!(
+                    transcript_more_lines,
+                    count = shown.lines - shown.preview.len()
+                ),
+                dim(),
+            )],
+            width,
+        ));
+    }
+
+    lines
+}
+
+/// A few lines of what a call handed the planner, under the call.
+///
+/// Behind a plain margin rather than the bar, because the planner read exactly this, and through
+/// [`marked_rows`] all the same, because a file the planner may read can still hold an escape.
+/// One row a line, cut rather than wrapped, so a glimpse stays the size it says it is.
+fn returned_lines(returned: &Returned, expanded: bool, width: usize) -> Vec<Line<'static>> {
+    let drawn = if expanded {
+        &returned.whole
+    } else {
+        &returned.lines
+    };
+    let margin = Span::raw("    ");
+    let room = width.saturating_sub(margin.width()).max(1);
+    let mut dropped = 0;
+    let mut rows: Vec<Line<'static>> = drawn
+        .iter()
+        .flat_map(|line| {
+            let (line, taken) = colour_codes::without(line);
+            dropped += taken;
+            // Measured as drawn: an escape is no column wide until it is made visible.
+            let line = printable(&line.replace('\t', "    "));
+            let cut = if wrap::display_width(&line) <= room {
+                line
+            } else {
+                format!(
+                    "{}…",
+                    split_at_width(&line, room.saturating_sub(1).max(1)).0
+                )
+            };
+            marked_rows(&margin, &[Span::styled(cut, dim())], width)
+        })
+        .collect();
+
+    // Said rather than silently dropped, and at the end the glimpse was taken from the other side of.
+    let left_out = returned.total.saturating_sub(drawn.len());
+    if left_out > 0 {
+        let count = if returned.from_the_end {
+            t!(transcript_earlier_lines, count = left_out)
+        } else {
+            t!(transcript_more_lines, count = left_out)
+        };
+        let said = marked_rows(&margin, &[Span::styled(count, dim())], width);
+        if returned.from_the_end {
+            rows.splice(0..0, said);
+        } else {
+            rows.extend(said);
+        }
+    }
+
+    // Last, whichever side the glimpse was taken from, since it is about the lines above it.
+    if let Some(note) = colour_codes::note(dropped) {
+        rows.extend(marked_rows(&margin, &[Span::styled(note, dim())], width));
+    }
+    rows
+}
+
+/// The hunks of a write, trimmed to what fits without burying the rest of the transcript.
+fn diff_lines(
+    changes: &[Change],
+    untrusted: bool,
+    expanded: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let cap = if expanded { usize::MAX } else { MAX_DIFF_LINES };
+    // The same margin the transcript draws down everything the model was not allowed to read. A
+    // body that came out of a quarantined file is that, and the person reading the hunks should
+    // not have to work out which kind of change they are looking at.
+    let margin = if untrusted {
+        Span::styled(
+            format!("  {QUARANTINE_BAR}  "),
+            Style::default().fg(theme::running()),
+        )
+    } else {
+        Span::raw("     ")
+    };
+    let mut lines: Vec<Line> = changes
+        .iter()
+        .take(cap)
+        .flat_map(|change| {
+            // Neutralised and broken to the width by [`marked_rows`]: a hunk of a file an attacker
+            // wrote is the same bytes as a quarantine preview, and here they sit beside a margin
+            // that means something.
+            let body = match change {
+                Change::Added(text) => {
+                    Span::styled(format!("+ {text}"), Style::default().fg(theme::ok()))
+                }
+                Change::Removed(text) => {
+                    Span::styled(format!("- {text}"), Style::default().fg(theme::fail()))
+                }
+                Change::Kept(text) => Span::styled(format!("  {text}"), dim()),
+                Change::Elided(count) => {
+                    Span::styled(t!(transcript_unchanged, count = *count), dim())
+                }
+            };
+            marked_rows(&margin, &[body], width)
+        })
+        .collect();
+
+    // Said rather than silently dropped: a change that stops without saying so reads as the
+    // whole change, which is how a reviewer misses half of it. Worded for both kinds of write,
+    // since a new file's lines were never a diff of anything.
+    if changes.len() > cap {
+        lines.extend(marked_rows(
+            &margin,
+            &[Span::styled(
+                t!(transcript_more_lines, count = changes.len() - cap),
+                dim(),
+            )],
+            width,
+        ));
+    }
+
+    lines
+}
+
+/// Draw the whole interface, and say what the transcript came to.
+///
+/// The measurements go back to the session, because a key pressed next is answered against them
+/// and none of them exist before a frame: how tall the transcript is, and where in it the rows
+/// worth jumping to are, are both answers about a paragraph wrapped at a particular width.
+pub fn draw(frame: &mut Frame, session: &Session) -> Laid {
+    let (columns, lines) = (frame.area().width, frame.area().height);
+    let mut laid = Laid {
+        columns,
+        lines,
+        ..draw_frame(frame, session)
+    };
+    // Over whatever the frame holds, as it is at rest: the panel is a question about the session
+    // behind it, and a turn goes on being drawn there. Recorded, so a press that lands on it is
+    // the panel's and not the frame's (MOUSE-45).
+    if let Some(picking) = session.picking() {
+        picking.draw(frame);
+        laid.targets.extend(picking.popup(frame.area()).recorded());
+    }
+    // The menu a right click opened is drawn over the picker as over the frame, and holds the input
+    // as a picker does (MOUSE-52).
+    if let Some(open) = session.menu() {
+        laid.targets.extend(menu::draw_menu(frame, open).recorded());
+    }
+    // Last, over everything, where the pointer is over a target that says what a click on it does
+    // (MOUSE-51).
+    hover::mark_the_hovered(frame, session, &laid);
+    hover::say_what_a_click_does(frame, session, &laid);
+    laid
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one function draws each mode of the session, and each mode is one early return"
+)]
+fn draw_frame(frame: &mut Frame, session: &Session) -> Laid {
+    // A named theme paints the frame so chrome and text share one background. `brave` leaves the
+    // terminal's own colours alone. It is painted before the mode is chosen, since the scroller
+    // covers the same frame.
+    if theme::paints_background() {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::background()).fg(theme::text())),
+            frame.area(),
+        );
+    }
+
+    // A different screen rather than the same one with a different footer: nothing below the
+    // transcript is reachable while the scroller is open, so nothing below it is drawn.
+    if session.scrolling() {
+        return draw_scroller(frame, session);
+    }
+
+    // A delegate's own work, on the same footing: while it is open no key reaches the box, so the
+    // box is not drawn and what it cost goes to the lines somebody opened the mode to read.
+    if session.watching().is_some() {
+        return draw_watching(frame, session);
+    }
+
+    // The Sessions screen takes the screen in the same way: while it is open no key reaches
+    // the box, so the box is not drawn (SCREEN-1).
+    if session.showing_sessions() {
+        return sessions_screen::draw_sessions_screen(frame, session);
+    }
+
+    // The same shape for the same reason: while the history is being searched the box takes no
+    // keys, and the rows it would have had go to the list of prompts standing in for it. The
+    // transcript stays, because a prompt is recognised by what it was asked about.
+    if session.searching_history() {
+        return draw_history_search(frame, session);
+    }
+
+    // The hint line keeps the whole width, and the panel takes the right of everything above it
+    // (PANEL-6). Everything in the left column is measured against the left column's width.
+    let [body, hint_row] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .areas(frame.area());
+    let (left, panel) = if crate::panel::drawn(session, frame.area().width) {
+        let [left, panel] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(session.panel_columns(frame.area().width)),
+            ])
+            .areas(body);
+        (left, Some(panel))
+    } else {
+        (body, None)
+    };
+    let width = left.width;
+
+    // What is running sits above the box rather than in place of it, so the two are measured
+    // together: whatever the indicator takes is height the input no longer has.
+    let status_height = status_height(session, width, frame.area().height);
+
+    // The input's height depends on how far the text wraps, so it is measured before the layout
+    // rather than fixed: a fixed height is what made typing past the edge disappear.
+    let input_height = input_height(
+        session,
+        width,
+        frame.area().height.saturating_sub(status_height),
+    );
+
+    // Beneath the box while something is being typed towards, and gone otherwise. Built rather
+    // than counted, so a session offering nothing gives the whole height to the transcript and the
+    // rows reserved are the rows drawn: the shortcut list folds into as many columns as the width
+    // holds, so its height is not something a count of the entries can know. Bounded, so neither a
+    // directory of many files nor a narrow terminal can push the transcript off the screen.
+    let offered = session.offered();
+    let room = frame
+        .area()
+        .height
+        .saturating_sub(status_height)
+        .saturating_sub(input_height + 1)
+        .saturating_sub(1);
+    let beneath = lines_beneath_the_box(session, width, &offered);
+    let (beneath, offered_first) =
+        fit_to_room(session, width, &offered, beneath, usize::from(room));
+    let offered_height = (beneath.len() as u16).min(room);
+
+    // Thumbnails of the pictures the line carries, between the box and the rows that describe
+    // them. Only as many rows as the screen can spare after everything above, so a small terminal
+    // loses the thumbnail before it loses the transcript.
+    let thumbs = session.previews_on_the_line();
+    let spare = room.saturating_sub(offered_height);
+    let preview_height = thumbs
+        .iter()
+        .map(|thumb| thumb.height())
+        .max()
+        .unwrap_or(0)
+        .min(spare);
+
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),                 // transcript
+            Constraint::Length(status_height),  // what is running
+            Constraint::Length(input_height),   // input
+            Constraint::Length(preview_height), // pictures the line carries
+            Constraint::Length(offered_height), // what is being offered
+        ])
+        .split(left);
+
+    let mut laid = draw_transcript(frame, areas[0], session);
+    laid.offered_first = offered_first;
+    laid.panes = [
+        (
+            crate::select::Pane::Transcript,
+            text_beside_the_bar(&laid, areas[0]),
+        ),
+        (crate::select::Pane::Status, areas[1]),
+        (crate::select::Pane::Input, inside_the_border(areas[2])),
+        (crate::select::Pane::Offered, areas[4]),
+        (crate::select::Pane::Hint, hint_row),
+    ]
+    .into_iter()
+    .chain(panel.map(|rect| (crate::select::Pane::Panel, rect)))
+    .filter(|(_, rect)| !rect.is_empty())
+    .collect();
+    draw_status(frame, areas[1], session);
+    laid.targets.extend(draw_input(frame, areas[2], session));
+    draw_previews(frame, areas[3], &thumbs);
+    frame.render_widget(Paragraph::new(beneath), areas[4]);
+    laid.targets
+        .extend(queued_prompts(session, width, offered_height, areas[4]));
+    let (hints, taken) = draw_hint(frame, hint_row, session);
+    laid.targets.extend(hints);
+    laid.hint_row = Some(crate::state::HintRow {
+        area: hint_row,
+        taken,
+    });
+    laid.targets.extend(offered_picks(
+        session,
+        width,
+        &offered,
+        offered_first,
+        areas[4],
+    ));
+    if let Some(panel) = panel {
+        laid.targets
+            .extend(crate::panel::draw(frame.buffer_mut(), panel, session));
+    }
+
+    // Last, over everything: the selection is of the screen rather than of any one widget, and
+    // the user swept it over whatever happened to be there.
+    highlight_selection(frame, session, &laid);
+
+    laid
+}
+
+/// The rows a click on a waiting prompt answers on. Each waiting prompt is two rows, and a click on
+/// either takes it back, with the words on the first that remove it (MOUSE-28). Only the rows drawn
+/// are recorded.
+fn queued_prompts(
+    session: &Session,
+    width: u16,
+    offered_height: u16,
+    area: Rect,
+) -> Vec<crate::state::Target> {
+    let Some(first) = first_waiting_row(session, width) else {
+        return Vec::new();
+    };
+    let mut recorded = Vec::new();
+    for place in 0..session.queued.len() {
+        let top = first + 2 * place;
+        let Some(rows) = usize::from(offered_height)
+            .checked_sub(top)
+            .filter(|rows| *rows > 0)
+        else {
+            break;
+        };
+        let y = area.y + u16::try_from(top).unwrap_or(u16::MAX);
+        recorded.push(crate::state::Target::on_screen(
+            Rect::new(
+                area.x,
+                y,
+                area.width,
+                u16::try_from(rows.min(2)).unwrap_or(2),
+            ),
+            crate::state::Hit::Queued(place),
+        ));
+        // Over the row's own target, since the last one recorded is the one found.
+        if let Some(words) = queue_words(width, place, session.queued.len()) {
+            for (cells, which) in [
+                (words.clear, crate::state::Discard::All),
+                (Some(words.remove), crate::state::Discard::One(place)),
+            ] {
+                if let Some(cells) = cells {
+                    recorded.push(crate::state::Target::on_screen(
+                        Rect::new(area.x + cells.start, y, cells.end - cells.start, 1),
+                        crate::state::Hit::Discard(which),
+                    ));
+                }
+            }
+        }
+    }
+    recorded
+}
+
+/// Paint the selection, where there is one, over what the frame already holds, passing over the
+/// cells drawn for a click.
+///
+/// A selection of the transcript is placed by the view this frame drew, which can have scrolled
+/// since the frame the session last recorded. Placed by the old one, the frame that moved the view
+/// would mark the rows its text was on before it moved (MOUSE-34). Where the frame is not drawing
+/// the rows the selection counts, or the text on them is not what it was put on, it marks nothing.
+fn highlight_selection(frame: &mut Frame, session: &Session, laid: &Laid) {
+    let Some(mut selection) = session.selection else {
+        return;
+    };
+    if selection.scrolls()
+        && !(laid
+            .window
+            .is_some_and(|window| selection.follow(window, laid.rows))
+            && laid.marks.is_none_or(|now| selection.keep_marks(now)))
+    {
+        return;
+    }
+    crate::select::highlight(frame.buffer_mut(), &selection, &laid.chrome);
+}
+
+/// Draw the thumbnails side by side, leftmost first, each only where it fits whole.
+///
+/// A picture is drawn at the size it was made at or not at all: a half-drawn image protocol is
+/// worse than none, and the marker row beneath still says the picture is there.
+fn draw_previews(frame: &mut Frame, area: Rect, thumbs: &[&crate::preview::Thumb]) {
+    let mut x = area.x + 2;
+    for thumb in thumbs {
+        let (width, height) = (thumb.width(), thumb.height());
+        if height > area.height || x + width > area.x + area.width {
+            break;
+        }
+        thumb.draw(frame, Rect::new(x, area.y, width, height));
+        x += width + 2;
+    }
+}
+
+/// The cells inside a box's border, which are the ones with text in them: a selection of the box
+/// takes no border (MOUSE-1).
+fn inside_the_border(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+/// The part of the transcript's pane a selection can reach. The scrollbar is chrome and not text, so
+/// the column it is in is left out (VIEW-39).
+fn text_beside_the_bar(laid: &Laid, pane: Rect) -> Rect {
+    match laid.bar {
+        Some(_) => Rect {
+            width: pane.width.saturating_sub(1),
+            ..pane
+        },
+        None => pane,
+    }
+}
+
+/// Draw the history search: the transcript, and the list of prompts where the box was.
+fn draw_history_search(frame: &mut Frame, session: &Session) -> Laid {
+    let panel = crate::history_search::height(session, frame.area());
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),        // transcript
+            Constraint::Length(panel), // the search
+        ])
+        .split(frame.area());
+
+    let mut laid = draw_transcript(frame, areas[0], session);
+    crate::history_search::draw(frame, areas[1], session);
+    // The search holds the input where the box was, so a press is its own (MOUSE-15, MOUSE-47).
+    laid.targets.extend(
+        crate::state::Popup {
+            panel: crate::state::Panel::HistorySearch,
+            area: areas[1],
+            list: None,
+        }
+        .recorded(),
+    );
+    laid.targets
+        .extend(crate::history_search::picks(session, areas[1]));
+    // What a release copies is what is marked, here as in every other view.
+    highlight_selection(frame, session, &laid);
+    laid
+}
+
+/// The opening of a line, with an ellipsis where it was cut.
+///
+/// The opposite end from [`tail_of`], and for the opposite reason: a path is identified by its
+/// end and a sentence by its beginning. A queued prompt runs to one row, and the words that say
+/// which prompt it is are the first ones.
+pub(crate) fn head_of(line: &str, room: usize) -> String {
+    // A prompt may be a paragraph; it is one row here, so the rest is not shown at all.
+    let first = line.lines().next().unwrap_or("");
+    if wrap::display_width(first) <= room && first.len() == line.len() {
+        return first.to_string();
+    }
+    // Cut by the columns the row draws each cluster in, so what is kept and the ellipsis never come
+    // to more than the room, whatever the characters are.
+    let shown = printable(first);
+    let mut kept = String::new();
+    let mut used = 0;
+    for (cluster, columns) in wrap::cluster_strs(&shown) {
+        if used + columns > room.saturating_sub(1) {
+            break;
+        }
+        kept.push_str(cluster);
+        used += columns;
+    }
+    format!("{kept}…")
+}
+
+/// A path shortened from the left, keeping as much of the end as will fit.
+///
+/// From the left because the end is the part that identifies the file. Cutting the other way is
+/// what a plain truncation does, and it leaves every attachment in a deep directory reading as the
+/// same long prefix with the filename gone, which is the one thing the row exists to show.
+fn tail_of(path: &str, room: usize) -> String {
+    if wrap::display_width(path) <= room || room == 0 {
+        return path.to_string();
+    }
+
+    // One column for the ellipsis that says something was cut, and the rest cut by the columns the row
+    // draws each cluster in.
+    let shown = printable(path);
+    let mut tail = Vec::new();
+    let mut used = 0;
+    for (cluster, columns) in wrap::cluster_strs(&shown).into_iter().rev() {
+        if used + columns > room.saturating_sub(1) {
+            break;
+        }
+        tail.push(cluster);
+        used += columns;
+    }
+    tail.reverse();
+    format!("…{}", tail.concat())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::inks_on_row_containing;
+    use bravebot_core::capability::Capability;
+    use bravebot_core::event::Event;
+    use bravebot_core::label::Label;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    mod delegates {
+        use super::*;
+        use crate::state::Entry;
+        use bravebot_agent::report::{DelegateId, Delegation};
+
+        /// The panel's own rows, read off the screen by position.
+        ///
+        /// So an assertion about the list is not answered by the transcript standing behind it:
+        /// a delegate's block there names the same task the row does.
+        fn listed(session: &Session, width: u16, height: u16) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+            (0..height)
+                .map(|row| {
+                    (0..width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .filter(|row| row.contains('│'))
+                .collect::<Vec<String>>()
+                .join("\n")
+        }
+
+        /// The one panel row that names `command`, so an assertion about one row is not answered
+        /// by another.
+        fn row_naming(panel: &str, command: &str) -> String {
+            panel
+                .lines()
+                .find(|row| row.contains(command))
+                .unwrap_or_else(|| panic!("{command} was not drawn: {panel}"))
+                .to_string()
+        }
+
+        /// A delegate beginning, numbered the way the driver numbers them.
+        fn spawn(session: &mut Session, kind: &'static str, task: &str) -> DelegateId {
+            let id = DelegateId::nth(session.delegates().len() as u32 + 1);
+            session.delegate_started(Delegation {
+                stop: Default::default(),
+                id,
+                kind: kind.to_string(),
+                task: task.to_string(),
+            });
+            session.reporting_for(Some(id));
+            id
+        }
+
+        /// The whole of what the mode is for. The turn's own lines are three rows of a block, and
+        /// what a delegate actually did is only here.
+        #[test]
+        fn a_delegates_view_draws_its_own_lines_and_not_the_turns() {
+            let mut session = Session::new("kernel-enforced");
+            session.reporting_for(None);
+            session.transcript.push(Entry::user("A-TURN-OF-ITS-OWN"));
+            spawn(&mut session, "reader", "find the parser");
+            session.start_activity(Activity::running("Read", "PECULIAR-FILE-NAME"));
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("PECULIAR-FILE-NAME"),
+                "the delegate's own work was not drawn: {screen}"
+            );
+            assert!(
+                !screen.contains("A-TURN-OF-ITS-OWN"),
+                "the turn's lines were drawn in the delegate's view: {screen}"
+            );
+        }
+
+        /// WATCH-8. What the delegate was asked stands above its lines, on a row of its own, and
+        /// stays there while a person reads back through more calls than the screen holds. A task
+        /// drawn among the lines would scroll away with them and answer which run this is only at
+        /// the top.
+        #[test]
+        fn a_delegates_view_names_what_it_was_asked_above_its_lines_and_keeps_it_there() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "FIND-THE-PARSER-ENTRY");
+            for n in 0..60 {
+                let file = format!("CALLED-FILE-{n:02}");
+                session.finish_activity(Activity::running("Read", file).done("1 line"));
+            }
+            session.watch();
+
+            let row_of =
+                |rows: &[String], needle: &str| rows.iter().position(|row| row.contains(needle));
+
+            for (scroll, a_line) in [(0, "CALLED-FILE-59"), (1000, "CALLED-FILE-00")] {
+                session.scroll = scroll;
+                let rows = rows_at(&session, 90, 24);
+                let asked = row_of(&rows, "FIND-THE-PARSER-ENTRY")
+                    .unwrap_or_else(|| panic!("scroll {scroll}: the task was not drawn: {rows:?}"));
+                let line = row_of(&rows, a_line)
+                    .unwrap_or_else(|| panic!("scroll {scroll}: no line was drawn: {rows:?}"));
+                assert!(
+                    asked < line,
+                    "scroll {scroll}: the task was not above the delegate's lines: {rows:?}"
+                );
+                assert!(
+                    !rows[asked].contains("CALLED-FILE"),
+                    "scroll {scroll}: the task shares a row with a line: {}",
+                    rows[asked]
+                );
+            }
+        }
+
+        /// Two questions a person watching has, and the last tool line answers neither: is this
+        /// still going, and which of them am I looking at.
+        #[test]
+        fn the_footer_says_which_delegate_this_is_and_whether_it_is_working() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "checker", "run the build");
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(screen.contains("checker delegate"), "{screen}");
+            assert!(screen.contains("working"), "{screen}");
+
+            session.delegate_finished(id, "the build failed at step 3".to_string(), true, None);
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("did not finish"),
+                "a delegate that failed was drawn as one that answered: {screen}"
+            );
+        }
+
+        /// The key is named where somebody who has gone looking for a way to stop one delegate
+        /// reads, only while there is something to stop, and the press is answered on the screen.
+        #[test]
+        fn the_footer_offers_the_stop_key_while_working_and_says_when_it_is_asked() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "checker", "run the build");
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(screen.contains("x stops it"), "{screen}");
+
+            assert!(session.stop_watched_delegate());
+            let screen = rendered(&session);
+            assert!(screen.contains("stopping"), "{screen}");
+            assert!(
+                !screen.contains("x stops it"),
+                "the key was offered again after it was pressed: {screen}"
+            );
+
+            session.delegate_finished(id, "answered".to_string(), false, None);
+            let screen = rendered(&session);
+            assert!(
+                !screen.contains("x stops it") && !screen.contains("stopping"),
+                "a delegate that had finished was drawn as one that could be stopped: {screen}"
+            );
+        }
+
+        /// A transcript that stopped at the last command leaves a reader looking at it, unable to
+        /// tell an answer from a failure.
+        #[test]
+        fn a_finished_delegates_view_ends_on_what_the_turn_was_told() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "find the parser");
+            session.start_activity(Activity::running("Read", "state.rs"));
+            session.delegate_finished(id, "THE-PARSER-IS-IN-LEX".to_string(), false, None);
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("THE-PARSER-IS-IN-LEX"),
+                "the view did not say how the delegate ended: {screen}"
+            );
+        }
+
+        /// WATCH-8: what the delegate was asked stands above its lines, so a reader who was not
+        /// told the task can tell what the lines were for.
+        #[test]
+        fn a_delegates_view_opens_on_what_it_was_asked_above_its_lines() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "FIND-THE-PARSER-ENTRY");
+            session.start_activity(Activity::running("Read", "PECULIAR-FILE-NAME"));
+            session.watch();
+
+            let screen = rendered(&session);
+            let asked = screen
+                .find("FIND-THE-PARSER-ENTRY")
+                .unwrap_or_else(|| panic!("the task was not drawn: {screen}"));
+            let work = screen
+                .find("PECULIAR-FILE-NAME")
+                .unwrap_or_else(|| panic!("the work was not drawn: {screen}"));
+            assert!(asked < work, "the task was drawn below the lines: {screen}");
+        }
+
+        /// WATCH-5: a delegate that has finished still has its lines to open.
+        #[test]
+        fn a_finished_delegates_lines_are_still_there_to_be_opened() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "find the parser");
+            session.start_activity(Activity::running("Read", "PECULIAR-FILE-NAME"));
+            session.delegate_finished(id, "answered".to_string(), false, None);
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("PECULIAR-FILE-NAME"),
+                "a finished delegate's lines were cleared: {screen}"
+            );
+        }
+
+        fn ran(session: &mut Session, command: &str, read: bool, lines: &[&str], total: usize) {
+            printed(
+                session,
+                command,
+                read,
+                lines,
+                total,
+                bravebot_agent::report::Outcome::Succeeded,
+            );
+        }
+
+        fn printed(
+            session: &mut Session,
+            command: &str,
+            read: bool,
+            lines: &[&str],
+            total: usize,
+            outcome: bravebot_agent::report::Outcome,
+        ) {
+            session.command_printed(bravebot_agent::report::Printed {
+                command: command.to_string(),
+                lines: lines.iter().map(|line| (*line).to_string()).collect(),
+                total,
+                read_by_the_planner: read,
+                outcome,
+                job: None,
+            });
+        }
+
+        /// The view exists so what a command printed can be read in full. Drawn nowhere else at
+        /// that length: the transcript shows a preview, and a person who owns the directory is
+        /// entitled to the rest.
+        #[test]
+        fn opening_a_command_shows_what_it_printed() {
+            let mut session = Session::new("kernel-enforced");
+            ran(
+                &mut session,
+                "cargo test --workspace",
+                true,
+                &["PECULIAR-FIRST-LINE", "PECULIAR-LAST-LINE"],
+                2,
+            );
+            session.watch_outputs();
+
+            let screen = rendered(&session);
+            assert!(screen.contains("PECULIAR-FIRST-LINE"), "{screen}");
+            assert!(screen.contains("PECULIAR-LAST-LINE"), "{screen}");
+            assert!(
+                screen.contains("cargo test --workspace"),
+                "the view did not say which command this was: {screen}"
+            );
+        }
+
+        /// The agents list and the outputs list share one view and one set of keys, so the view
+        /// says which kind of thing it is showing. Without that, a command's lines would read as
+        /// the same view showing different lines.
+        #[test]
+        fn the_view_says_which_kind_of_thing_it_is_showing() {
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cargo test", true, &["ok"], 1);
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("what this command printed"),
+                "the view did not name what it was showing"
+            );
+        }
+
+        /// The thing a person cannot work out from the bytes, said in the view rather than left
+        /// to be inferred: the same output either reached a model's context or did not.
+        #[test]
+        fn the_view_says_whether_the_model_read_what_a_command_printed() {
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cat notes", false, &["a line"], 1);
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("has not read this"),
+                "the view did not say the output was kept from the planner"
+            );
+
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cargo test", true, &["a line"], 1);
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("has read this"),
+                "the view did not say the output reached the planner"
+            );
+        }
+
+        /// The outputs list holds commands alone, so its footer counts commands and names the
+        /// kind and whether the planner read the output; stepping moves between commands and
+        /// reaches no delegate or aside.
+        #[test]
+        fn a_commands_view_names_it_and_counts_the_outputs() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "checker", "run the build");
+            asked(&mut session, "and the base case?", "it is a leaf", true);
+            ran(&mut session, "cat notes", false, &["a line"], 1);
+            ran(&mut session, "cargo test", true, &["a line"], 1);
+            session.watch_outputs();
+            session.open_watched();
+            let footer = |session: &Session| {
+                rows_at(session, 90, 24)
+                    .last()
+                    .expect("a footer")
+                    .trim_start()
+                    .to_string()
+            };
+
+            assert!(
+                footer(&session).starts_with("command  ·  the model has read this  ·  2 of 2"),
+                "{}",
+                footer(&session)
+            );
+            session.watch_previous();
+            assert!(
+                footer(&session).starts_with("command  ·  the model has not read this  ·  1 of 2"),
+                "{}",
+                footer(&session)
+            );
+            session.watch_previous();
+            assert!(
+                footer(&session).starts_with("command  ·  the model has not read this  ·  1 of 2"),
+                "stepping past the first command left the outputs list: {}",
+                footer(&session)
+            );
+        }
+
+        /// The agents list holds asides and a delegate, and the keys that step through it do not
+        /// ask what a row is. What changes as they step is the header and the footer, each naming
+        /// its own kind: a delegate by kind and number, an aside as an aside with whether the
+        /// record keeps its answer.
+        #[test]
+        fn stepping_from_one_kind_of_row_to_another_changes_the_header_and_the_footer() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "checker", "run the build");
+            asked(&mut session, "and the base case?", "it is a leaf", true);
+            asked(&mut session, "why recursive?", "because of nesting", false);
+            let delegate = format!("checker delegate {id}");
+            let screen = |session: &Session| {
+                let rows = rows_at(session, 90, 24);
+                let footer = rows.last().expect("a footer").trim_start().to_string();
+                (rows, footer)
+            };
+
+            let (rows, footer) = screen(&session);
+            assert!(
+                rows[0].contains("a question asked beside the work"),
+                "{rows:?}"
+            );
+            assert!(rows[1].contains("on your screen only"), "{rows:?}");
+            assert!(
+                footer.starts_with("aside  ·  screen only  ·  2 of 3"),
+                "{footer}"
+            );
+
+            session.watch_previous();
+            let (rows, footer) = screen(&session);
+            assert!(
+                rows[0].contains("a question asked beside the work"),
+                "{rows:?}"
+            );
+            assert!(
+                rows[1].contains("the answer, which the conversation has not read"),
+                "{rows:?}"
+            );
+            assert!(footer.starts_with("aside  ·  kept  ·  1 of 3"), "{footer}");
+
+            session.watch_next();
+            session.watch_next();
+            let (rows, footer) = screen(&session);
+            assert!(rows[0].contains(&delegate), "{rows:?}");
+            assert!(rows[1].contains("run the build"), "{rows:?}");
+            assert!(
+                footer.starts_with(&format!("{delegate}  ·  working  ·  3 of 3")),
+                "{footer}"
+            );
+
+            for _ in 0..2 {
+                session.watch_previous();
+            }
+            let (rows, footer) = screen(&session);
+            assert!(
+                rows[0].contains("a question asked beside the work"),
+                "{rows:?}"
+            );
+            assert!(footer.starts_with("aside  ·  kept  ·  1 of 3"), "{footer}");
+        }
+
+        /// Marked the way every other block the planner was kept from is marked, and marked
+        /// structurally: the bar is in the margin on every row, so content saying the block ends
+        /// cannot end it.
+        #[test]
+        fn output_the_planner_was_kept_from_is_marked_on_every_row() {
+            let mut session = Session::new("kernel-enforced");
+            ran(
+                &mut session,
+                "cat notes",
+                false,
+                &["PECULIAR-KEPT-ONE", "PECULIAR-KEPT-TWO"],
+                2,
+            );
+            session.watch_outputs();
+
+            let screen = rendered(&session);
+            for line in ["PECULIAR-KEPT-ONE", "PECULIAR-KEPT-TWO"] {
+                let row = screen
+                    .lines()
+                    .find(|row| row.contains(line))
+                    .unwrap_or_else(|| panic!("{line} was not drawn: {screen}"));
+                assert!(
+                    row.contains(crate::render::QUARANTINE_BAR),
+                    "a kept row was drawn without the margin: {row}"
+                );
+            }
+        }
+
+        /// A command that printed more than is kept says so, for the same reason a truncated diff
+        /// does: a sample read as the whole of it is how somebody concludes a build passed.
+        #[test]
+        fn a_command_that_printed_more_than_is_kept_says_so() {
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cargo build", true, &["one", "two"], 900);
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("more lines were printed"),
+                "the view did not say what it left out"
+            );
+        }
+
+        /// A row that gives only the line count leaves a person unable to tell the build that
+        /// passed from the one that failed, and unable to tell either from a run still going: the
+        /// mark a delegate's row uses for that is the one this needs.
+        #[test]
+        fn a_command_row_says_how_the_run_ended() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "find the parser");
+            printed(
+                &mut session,
+                "cargo build",
+                true,
+                &["ok"],
+                1,
+                bravebot_agent::report::Outcome::Succeeded,
+            );
+            printed(
+                &mut session,
+                "cargo test",
+                true,
+                &["ok"],
+                1,
+                bravebot_agent::report::Outcome::Failed {
+                    detail: "step 1 exited 101".to_string(),
+                    confinement: None,
+                },
+            );
+            session.watch_outputs();
+
+            let panel = listed(&session, 90, 24);
+            let row = |command: &str| row_naming(&panel, command);
+            assert!(
+                row("cargo build").contains('✓'),
+                "a command that succeeded was not marked as one: {}",
+                row("cargo build")
+            );
+            assert!(
+                row("cargo test").contains('✗'),
+                "a command that failed was not marked as one: {}",
+                row("cargo test")
+            );
+        }
+
+        /// A server told to serve a page never exits, so the limit ends it. A cross beside it would
+        /// say the program failed, and a tick would say it finished.
+        #[test]
+        fn a_command_stopped_at_the_limit_is_marked_as_work_still_going() {
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cargo build", true, &["ok"], 1);
+            printed(
+                &mut session,
+                "serve the page",
+                true,
+                &["listening"],
+                1,
+                bravebot_agent::report::Outcome::Stopped(std::time::Duration::from_secs(60)),
+            );
+            session.watch_outputs();
+
+            let panel = listed(&session, 90, 24);
+            let row = row_naming(&panel, "serve the page");
+            assert!(
+                row.contains('●'),
+                "a run stopped at the limit was not marked as work still going: {row}"
+            );
+            assert!(
+                !row.contains('✗') && !row.contains('✓'),
+                "a run stopped at the limit was marked as ended: {row}"
+            );
+
+            let mut session = Session::new("kernel-enforced");
+            printed(
+                &mut session,
+                "serve the page",
+                true,
+                &["listening"],
+                1,
+                bravebot_agent::report::Outcome::Stopped(std::time::Duration::from_secs(60)),
+            );
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("so it was stopped"),
+                "the view did not say the run was stopped"
+            );
+        }
+
+        /// A view opened on a long log draws its last lines, and the verdict of a build is not
+        /// always in them.
+        #[test]
+        fn a_commands_view_says_how_the_run_ended() {
+            let mut session = Session::new("kernel-enforced");
+            printed(
+                &mut session,
+                "cargo test",
+                true,
+                &["a line"],
+                1,
+                bravebot_agent::report::Outcome::Failed {
+                    detail: "step 1 exited 101".to_string(),
+                    confinement: None,
+                },
+            );
+            session.watch_outputs();
+            assert!(
+                rendered(&session).contains("step 1 exited 101"),
+                "the view did not say how the run ended"
+            );
+        }
+
+        /// Whether the planner read what a command printed is the thing the whole design turns
+        /// on, and the list is where somebody scanning several runs would look for it.
+        #[test]
+        fn a_command_row_says_whether_the_planner_read_it() {
+            let mut session = Session::new("kernel-enforced");
+            ran(&mut session, "cargo build", true, &["ok"], 1);
+            ran(&mut session, "cat notes", false, &["a line"], 1);
+            session.watch_outputs();
+
+            let panel = listed(&session, 90, 24);
+            let row = |command: &str| row_naming(&panel, command);
+            assert!(
+                row("cargo build").contains("read") && !row("cargo build").contains("not read"),
+                "a row the planner read was not drawn as one: {}",
+                row("cargo build")
+            );
+            assert!(
+                row("cat notes").contains("not read"),
+                "a row the planner was kept from was not drawn as one: {}",
+                row("cat notes")
+            );
+        }
+
+        /// The outputs list names a row as a command, and holds no delegate: the agents have
+        /// their own list.
+        #[test]
+        fn the_list_names_a_command_row_as_a_command() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "find the parser");
+            ran(&mut session, "cargo build", true, &["ok"], 1);
+            ran(&mut session, "cargo test", true, &["ok"], 1);
+            session.watch_outputs();
+            assert!(
+                session.listing_delegates(),
+                "two rows did not open the list"
+            );
+
+            let screen = listed(&session, 90, 24);
+            assert!(screen.contains("command"), "{screen}");
+            assert!(screen.contains("cargo test"), "{screen}");
+            assert!(screen.contains("cargo build"), "{screen}");
+            assert!(
+                !screen.contains("reader"),
+                "the outputs list held a delegate: {screen}"
+            );
+        }
+
+        fn job_started(session: &mut Session, name: &str, line: &str) {
+            session.job(bravebot_agent::report::JobEvent::Started {
+                name: name.to_string(),
+                line: line.to_string(),
+                moved_after: None,
+                stop: bravebot_core::cancel::JobStop::new(),
+            });
+        }
+
+        /// A job's row says it is one and leads with the name the planner reads it by, since the
+        /// same line run twice in the background is two rows that are otherwise alike.
+        #[test]
+        fn the_list_names_a_job_row_as_a_background_job() {
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "sleep 600");
+            ran(&mut session, "cargo test", true, &["ok"], 1);
+            session.watch_outputs();
+            assert!(
+                session.listing_delegates(),
+                "two rows did not open the list"
+            );
+
+            let screen = rendered(&session);
+            assert!(screen.contains("background"), "{screen}");
+            assert!(screen.contains("job:1  sleep 600"), "{screen}");
+            assert!(screen.contains("command"), "{screen}");
+        }
+
+        /// A job carries the same mark while it runs as one stopped at its deadline, so the view
+        /// says which from the job's state, and says so once the turn has stopped it.
+        #[test]
+        fn a_jobs_view_names_the_job_and_whether_it_still_runs() {
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "sleep 600");
+            session.watch_outputs();
+
+            let screen = rendered(&session);
+            assert!(screen.contains("what background job:1 printed"), "{screen}");
+            // Its clock is this end's, so the seconds are whatever the test took to get here.
+            assert!(screen.contains("running "), "{screen}");
+
+            session.job(bravebot_agent::report::JobEvent::Dropped {
+                name: "job:1".to_string(),
+            });
+            let screen = rendered(&session);
+            assert!(screen.contains("stopped when the turn ended"), "{screen}");
+            assert!(!screen.contains("running "), "{screen}");
+        }
+
+        /// A job that exited on its own is neither still running nor stopped by the turn, so its view
+        /// says how it ended from its outcome, whichever way that went.
+        #[test]
+        fn a_jobs_view_says_how_a_job_that_exited_ended() {
+            for (outcome, words) in [
+                (bravebot_agent::report::Outcome::Succeeded, "succeeded"),
+                (
+                    bravebot_agent::report::Outcome::Failed {
+                        detail: "exited with code 2".to_string(),
+                        confinement: None,
+                    },
+                    "exited with code 2",
+                ),
+            ] {
+                let mut session = Session::new("kernel-enforced");
+                job_started(&mut session, "job:1", "cargo build");
+                session.watch_outputs();
+                session.job(bravebot_agent::report::JobEvent::Ended {
+                    name: "job:1".to_string(),
+                    outcome,
+                });
+
+                let screen = rendered(&session);
+                assert!(screen.contains(words), "{words}: {screen}");
+                assert!(!screen.contains("running "), "{screen}");
+                assert!(!screen.contains("stopped when the turn ended"), "{screen}");
+            }
+        }
+
+        /// A job that has printed nothing holds nothing the planner could have read or been kept
+        /// from, so neither its view nor its row says the model read it.
+        #[test]
+        fn a_job_says_nothing_about_a_reading_until_it_has_printed() {
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "sleep 600");
+            session.watch_outputs();
+            let screen = rendered(&session);
+            assert!(!screen.contains("has read this"), "{screen}");
+            assert!(!screen.contains("has not read this"), "{screen}");
+
+            session.command_printed(bravebot_agent::report::Printed {
+                command: "sleep 600".to_string(),
+                lines: vec!["waiting".to_string()],
+                total: 1,
+                read_by_the_planner: true,
+                outcome: bravebot_agent::report::Outcome::Running {
+                    ran_for: std::time::Duration::from_secs(1),
+                    waited: None,
+                },
+                job: Some("job:1".to_string()),
+            });
+            let screen = rendered(&session);
+            assert!(screen.contains("the model has read this"), "{screen}");
+
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "sleep 600");
+            ran(&mut session, "cargo test", true, &["ok"], 1);
+            session.watch_outputs();
+            let row = row_naming(&listed(&session, 90, 24), "job:1");
+            assert!(!row.contains("read"), "{row}");
+        }
+
+        /// WATCH-23, WATCH-24. Lines no look has returned are drawn under the margin and the
+        /// row and view say the model has not read them, whatever an earlier look found.
+        #[test]
+        fn a_jobs_live_lines_are_marked_as_unread_even_after_a_look_that_was_read() {
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "sleep 600");
+            session.job(bravebot_agent::report::JobEvent::Printed {
+                name: "job:1".to_string(),
+                lines: vec!["LIVE-NEWEST".to_string()],
+                total: 4,
+            });
+            session.watch_outputs();
+            let screen = rendered(&session);
+            assert!(screen.contains("the model has not read this"), "{screen}");
+            let drawn = screen
+                .lines()
+                .find(|row| row.contains("LIVE-NEWEST"))
+                .unwrap_or_else(|| panic!("the live line was not drawn: {screen}"));
+            assert!(drawn.contains(QUARANTINE_BAR), "{drawn}");
+            assert!(screen.contains("3 earlier lines"), "{screen}");
+
+            let mut listing = Session::new("kernel-enforced");
+            job_started(&mut listing, "job:1", "sleep 600");
+            ran(&mut listing, "cargo test", true, &["ok"], 1);
+            listing.job(bravebot_agent::report::JobEvent::Printed {
+                name: "job:1".to_string(),
+                lines: vec!["LIVE-NEWEST".to_string()],
+                total: 1,
+            });
+            listing.watch_outputs();
+            let row = row_naming(&listed(&listing, 90, 24), "job:1");
+            assert!(row.contains("not read"), "{row}");
+
+            session.command_printed(bravebot_agent::report::Printed {
+                command: "sleep 600".to_string(),
+                lines: vec!["LOOKED".to_string()],
+                total: 1,
+                read_by_the_planner: true,
+                outcome: bravebot_agent::report::Outcome::Running {
+                    ran_for: std::time::Duration::from_secs(1),
+                    waited: None,
+                },
+                job: Some("job:1".to_string()),
+            });
+            session.job(bravebot_agent::report::JobEvent::Printed {
+                name: "job:1".to_string(),
+                lines: vec!["AFTER-THE-LOOK".to_string()],
+                total: 1,
+            });
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("the model has not read this"),
+                "an earlier look's reading stood for lines it never returned: {screen}"
+            );
+            assert!(
+                screen.contains("LOOKED") && screen.contains("AFTER-THE-LOOK"),
+                "{screen}"
+            );
+        }
+
+        /// A delegate numbers its jobs from one as the turn does, so its job's row and view say
+        /// whose job it is, and the turn's say only the name.
+        #[test]
+        fn a_delegates_job_says_whose_it_is_and_the_turns_does_not() {
+            let mut session = Session::new("kernel-enforced");
+            job_started(&mut session, "job:1", "cargo build");
+            let id = spawn(&mut session, "reader", "find the parser");
+            job_started(&mut session, "job:1", "cargo test");
+            session.reporting_for(None);
+            session.watch_outputs();
+            let theirs = format!("job:1 of delegate {id}");
+
+            let rows = listed(&session, 90, 24);
+            let row = row_naming(&rows, "cargo test");
+            assert!(row.contains(&theirs), "{row}");
+            let row = row_naming(&rows, "cargo build");
+            assert!(!row.contains("of delegate"), "{row}");
+
+            for _ in 0..session.outputs().len() + 1 {
+                if matches!(session.watched_output(), Some(o) if o.command == "cargo test") {
+                    break;
+                }
+                session.watch_next();
+            }
+            session.open_watched();
+            let screen = rendered(&session);
+            assert!(
+                screen.contains(&format!("what background {theirs} printed")),
+                "{screen}"
+            );
+        }
+
+        fn asked(session: &mut Session, question: &str, answer: &str, kept: bool) {
+            session.asked_aside(bravebot_session::sessions::Aside {
+                question: question.to_string(),
+                answer: Some(answer.to_string()),
+                kept,
+            });
+        }
+
+        /// The agents list holds asides and delegates, so a row has to say which it is: an aside
+        /// and a delegate are both a line of text with a sentence beside it. A command that ran
+        /// is in neither.
+        #[test]
+        fn the_list_names_an_aside_row_as_an_aside() {
+            let mut session = Session::new("kernel-enforced");
+            asked(&mut session, "why recursive?", "because of nesting", true);
+            spawn(&mut session, "reader", "find the parser");
+            ran(&mut session, "cargo test", true, &["ok"], 1);
+            session.watch();
+            assert!(
+                session.listing_delegates(),
+                "two rows did not open the list"
+            );
+
+            let screen = rendered(&session);
+            assert!(screen.contains("aside"), "{screen}");
+            assert!(screen.contains("why recursive?"), "{screen}");
+            assert!(screen.contains("reader"), "{screen}");
+            assert!(
+                !screen.contains("cargo test"),
+                "the agents list held a command: {screen}"
+            );
+        }
+
+        /// Both halves, because a question with no answer under it is half of what a person came
+        /// here to read, and an answer alone stops making sense as soon as there are two asides.
+        #[test]
+        fn an_asides_view_draws_the_question_and_the_answer() {
+            let mut session = Session::new("kernel-enforced");
+            asked(
+                &mut session,
+                "why is the parser recursive?",
+                "because the grammar nests",
+                true,
+            );
+
+            let screen = rendered(&session);
+            assert!(screen.contains("why is the parser recursive?"), "{screen}");
+            assert!(screen.contains("because the grammar nests"), "{screen}");
+        }
+
+        /// An answer is usually one paragraph with no line break in it, and a row of the screen
+        /// holds fewer characters than that. The end of it has to be drawn on the rows below.
+        #[test]
+        fn an_asides_view_wraps_an_answer_that_is_one_long_line() {
+            let mut session = Session::new("kernel-enforced");
+            let answer = format!("{} and finally the last word", "word ".repeat(40));
+            asked(&mut session, "/recap", &answer, true);
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("the last word"),
+                "the end of a long answer was clipped at the edge of the screen: {screen}"
+            );
+        }
+
+        /// The answer lands out of a loop that answers keys, so the person may have opened the
+        /// scroller while they waited. The scroller is drawn in front of this view, so an answer
+        /// that leaves it standing is on no screen at all, behind a key nobody was told about.
+        #[test]
+        fn an_answer_takes_the_screen_from_a_scroller_opened_while_it_was_awaited() {
+            let mut session = Session::new("kernel-enforced");
+            session.open_scroller();
+
+            asked(
+                &mut session,
+                "why is the parser recursive?",
+                "because the grammar nests",
+                true,
+            );
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("because the grammar nests"),
+                "the answer was drawn on no screen: {screen}"
+            );
+            assert!(
+                !session.scrolling(),
+                "the scroller was left standing over the answer"
+            );
+        }
+
+        /// An answer the record cannot hold is on the screen and nowhere else, so it is said while
+        /// the words are still there to copy rather than discovered by resuming and finding them
+        /// gone.
+        #[test]
+        fn an_asides_view_says_when_the_answer_is_not_written_down() {
+            let mut session = Session::new("kernel-enforced");
+            asked(
+                &mut session,
+                "why recursive?",
+                "because the grammar nests",
+                false,
+            );
+
+            let screen = rendered(&session);
+            assert!(screen.contains("on your screen only"), "{screen}");
+            assert!(
+                screen.contains("because the grammar nests"),
+                "the answer itself was withheld from the person: {screen}"
+            );
+        }
+
+        /// A resumed aside whose answer the record could not keep. Said out loud, because an
+        /// empty screen under a question reads as an answer that was never given.
+        #[test]
+        fn a_resumed_aside_with_no_answer_says_the_record_did_not_keep_it() {
+            let mut session = Session::new("kernel-enforced");
+            session.restore_asides(vec![bravebot_session::sessions::Aside {
+                question: "why recursive?".to_string(),
+                answer: None,
+                kept: false,
+            }]);
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(screen.contains("why recursive?"), "{screen}");
+            assert!(
+                screen.contains("could not keep this answer"),
+                "an aside with no answer was drawn as an empty screen: {screen}"
+            );
+        }
+
+        /// The whole of what a delegate did ends with it, so what it answered is the only thing
+        /// that says what the run was for. A view that closed on the round count leaves somebody
+        /// who read every call it made still not knowing what it concluded from them.
+        #[test]
+        fn a_delegates_view_ends_on_what_it_reported() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "pick a file at random");
+            session.start_activity(Activity::running("List", "."));
+            session.delegate_finished(
+                id,
+                "answered after 1 round".to_string(),
+                false,
+                Some(Reported::Said("I PICKED build.log".to_string())),
+            );
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("I PICKED build.log"),
+                "the view did not say what the delegate answered: {screen}"
+            );
+        }
+
+        /// A report whose delegate met something untrusted is drawn in the block every quarantined
+        /// result is drawn in. The person owns the directory and may read it; what it must not do
+        /// is arrive looking like something the planner was given.
+        #[test]
+        fn a_report_the_planner_may_not_read_is_marked_where_it_is_drawn() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "read the log");
+            session.delegate_finished(
+                id,
+                "answered after 1 round".to_string(),
+                false,
+                Some(Reported::Kept(Shown {
+                    origin: "a reader delegate".to_string(),
+                    reach: bravebot_agent::report::Reach::NotThePlanner,
+                    label: "untrusted".to_string(),
+                    preview: vec!["PECULIAR-LOG-BODY".to_string()],
+                    lines: 1,
+                })),
+            );
+
+            let screen = rendered(&session);
+            let marked = screen
+                .lines()
+                .find(|row| row.contains("PECULIAR-LOG-BODY"))
+                .expect("the report was not drawn at all");
+            assert!(
+                marked.contains(QUARANTINE_BAR),
+                "a report the planner may not read was drawn without its margin: {marked}"
+            );
+        }
+
+        /// A report the planner read is shown to the person as the same words, with no quarantine
+        /// margin: marking it would claim a confinement the report is not under.
+        #[test]
+        fn a_report_the_planner_read_is_drawn_plain() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "read the log");
+            session.delegate_finished(
+                id,
+                "answered after 1 round".to_string(),
+                false,
+                Some(Reported::Said("PLAIN-REPORT-WORDS".to_string())),
+            );
+
+            let screen = rendered(&session);
+            let plain = screen
+                .lines()
+                .find(|row| row.contains("PLAIN-REPORT-WORDS"))
+                .expect("the report was not drawn at all");
+            assert!(
+                !plain.contains(QUARANTINE_BAR),
+                "a report the planner read was drawn in the quarantine margin: {plain}"
+            );
+            assert!(
+                !screen.contains(QUARANTINE_BAR),
+                "the screen carries a quarantine margin for a report that was never kept: {screen}"
+            );
+        }
+
+        /// A delegate that could not finish answered nothing, so there is nothing to draw under
+        /// the line saying so. A block that invented one would be putting words in its mouth.
+        #[test]
+        fn a_delegate_that_could_not_finish_reports_nothing() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "checker", "run the build");
+            session.delegate_finished(
+                id,
+                "error: the delegate could not finish: the model refused".to_string(),
+                true,
+                None,
+            );
+
+            let screen = rendered(&session);
+            assert!(screen.contains("could not finish"), "{screen}");
+            assert!(
+                !screen.contains(QUARANTINE_BAR),
+                "a delegate that reported nothing was drawn with a block anyway: {screen}"
+            );
+        }
+
+        /// One delegate has no position to be in and nowhere to move to, so a row that offered
+        /// both would be advertising keys that do nothing.
+        #[test]
+        fn one_delegate_is_given_no_position_and_no_key_for_moving() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "find the parser");
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(!screen.contains("1 of 1"), "{screen}");
+            assert!(
+                !screen.contains("another delegate"),
+                "a lone delegate offered a key for moving between them: {screen}"
+            );
+        }
+
+        /// Which delegate is the question the list exists to answer, and two of the same kind are
+        /// told apart only by what each was asked to do.
+        #[test]
+        fn the_list_names_every_delegate_and_what_each_was_asked() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "FIND-THE-PARSER");
+            spawn(&mut session, "reader", "COUNT-THE-CALLERS");
+            session.watch();
+
+            assert!(session.listing_delegates());
+            let rows = listed(&session, 90, 24);
+            assert!(rows.contains("FIND-THE-PARSER"), "{rows}");
+            assert!(rows.contains("COUNT-THE-CALLERS"), "{rows}");
+        }
+
+        /// Every destination the mode can reach is a row, the conversation included. Without it,
+        /// somebody comparing two delegates could reach either and could not reach the thing they
+        /// were reading before by any key the list names.
+        #[test]
+        fn the_list_holds_the_session_above_the_delegates() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "FIND-THE-PARSER");
+            spawn(&mut session, "checker", "RUN-THE-BUILD");
+            session.watch();
+
+            let rows = listed(&session, 90, 24);
+            let session_row = rows
+                .find("session")
+                .expect("the session is not a row: {rows}");
+            let first = rows
+                .find("FIND-THE-PARSER")
+                .expect("the first delegate is not a row");
+            assert!(
+                session_row < first,
+                "the session was drawn below the delegates: {rows}"
+            );
+        }
+
+        /// The list is a question with a handful of answers, and the transcript is what somebody
+        /// picking one is reading. A list that took the screen made choosing between two
+        /// delegates cost the whole of what led up to them.
+        #[test]
+        fn the_list_stands_over_the_session_rather_than_replacing_it() {
+            let mut session = Session::new("kernel-enforced");
+            session.note("PECULIAR-THING-THE-TURN-SAID");
+            spawn(&mut session, "reader", "find the parser");
+            spawn(&mut session, "checker", "run the build");
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(session.listing_delegates());
+            assert!(
+                screen.contains("PECULIAR-THING-THE-TURN-SAID"),
+                "the list took the session's own view with it: {screen}"
+            );
+            assert!(
+                screen.contains(&t!(watching_list_title).to_string()),
+                "the panel was not drawn: {screen}"
+            );
+        }
+
+        /// The panel is sized to what it holds, so a session that spawned more delegates than it
+        /// is tall has rows it cannot draw. The one the cursor is on is the one row that must be
+        /// among them, or the highlight is somewhere nobody can see.
+        #[test]
+        fn a_list_taller_than_the_panel_keeps_the_highlighted_row_on_it() {
+            let mut session = Session::new("kernel-enforced");
+            for at in 0..12 {
+                spawn(&mut session, "reader", &format!("TASK-NUMBER-{at}"));
+            }
+            session.watch();
+            for _ in 0..11 {
+                session.watch_next();
+            }
+
+            let rows = listed(&session, 90, 12);
+            assert!(
+                rows.contains("TASK-NUMBER-11"),
+                "the delegate under the cursor was drawn off the panel: {rows}"
+            );
+        }
+
+        /// A mark beside a short name reads as decoration on the text. A filled row reads as the
+        /// row being chosen, which is the whole question the list is asking.
+        #[test]
+        fn the_row_that_would_open_is_filled_edge_to_edge() {
+            let _held = theme::exclusive();
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "find the parser");
+            spawn(&mut session, "checker", "run the build");
+            session.watch();
+            session.watch_previous();
+
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+
+            let filled: Vec<u16> = (0..24)
+                .filter(|row| {
+                    (0..90).any(|column| buffer[(column, *row)].bg == theme::brand_primary())
+                })
+                .collect();
+            assert_eq!(
+                filled.len(),
+                1,
+                "exactly one row is the one that would open, and {} were filled",
+                filled.len()
+            );
+
+            // Edge to edge inside the panel, so a short task does not leave the bar stopping
+            // where the words do.
+            let row = filled[0];
+            let bar: Vec<u16> = (0..90)
+                .filter(|column| buffer[(*column, row)].bg == theme::brand_primary())
+                .collect();
+            let width = bar.last().expect("a filled row") - bar[0] + 1;
+            assert_eq!(
+                width as usize,
+                bar.len(),
+                "the fill has holes in it rather than running the width of the row"
+            );
+        }
+
+        /// The row is built by taking the count off the width and giving a task the rest, which is
+        /// arithmetic that goes wrong at the narrow end: a row too small for the columns must
+        /// still draw, and must keep the count rather than the sentence.
+        #[test]
+        fn a_narrow_row_keeps_the_count_and_loses_the_end_of_the_task() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(
+                &mut session,
+                "reader",
+                "find where the parser is defined and who calls it",
+            );
+            spawn(&mut session, "checker", "run the build");
+            session.watch();
+
+            let rows = listed(&session, 44, 10);
+            assert!(
+                rows.contains("call"),
+                "the count was lost to the task: {rows}"
+            );
+            assert!(
+                !rows.contains("who calls it"),
+                "the task was drawn past the edge of the row: {rows}"
+            );
+        }
+
+        /// The counts down the right edge of the list line up only if the column before them is
+        /// exactly as wide on every row, so a short task is padded out to its room and a long one
+        /// is cut to it. A cut one ends in an ellipsis, so it does not read as the whole task. The
+        /// room is counted in characters, as the rest of the row's columns are.
+        #[test]
+        fn a_list_column_is_cut_with_an_ellipsis_or_padded_to_its_room() {
+            assert_eq!(padded("", 0), "");
+            assert_eq!(
+                padded("run the build", 0),
+                "…",
+                "a row with no room still says something was cut"
+            );
+            assert_eq!(padded("run", 6), "run   ");
+            assert_eq!(padded("run the", 7), "run the");
+            assert_eq!(padded("run the build", 7), "run th…");
+            assert_eq!(padded("héllo", 6), "héllo ");
+            assert_eq!(padded("ééééé", 3), "éé…");
+        }
+
+        /// The mark invites a prompt, and a delegate takes none. A delegate that has not made a
+        /// call yet satisfies "nothing has been said" vacuously, which is how it came to be drawn
+        /// as an empty session.
+        #[test]
+        fn a_delegates_view_does_not_open_on_the_mark() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "reader", "find the parser");
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                !screen.contains("kernel-enforced"),
+                "the opening mark was drawn over a delegate: {screen}"
+            );
+        }
+
+        /// One key named twice on one screen reads as two things to press. The hint line is where
+        /// it is said, so the row reporting what the turn is doing says what the turn is doing.
+        #[test]
+        fn the_row_that_says_what_the_turn_is_doing_leaves_the_key_to_the_hint_line() {
+            let mut session = Session::new("kernel-enforced");
+            session.status = Status::Working;
+            session.turns = 1;
+            spawn(&mut session, "checker", "run the build");
+
+            assert_eq!(
+                rendered(&session).matches("ctrl-l").count(),
+                1,
+                "the key is named more than once while a delegate is working"
+            );
+            // And the one naming it is the hint line, which outlasts the turn.
+            assert!(
+                hint_row_at(&session, 90, 24).contains("ctrl-l"),
+                "the hint line stopped naming the key while a delegate was working"
+            );
+
+            // Once and only once wherever the key has been moved to, since the count is what the
+            // line is for and the chord is what makes it worth reading.
+            let mut moved = std::collections::BTreeMap::new();
+            moved.insert("watch".to_string(), "alt-y".to_string());
+            session.adopt_keybindings(&moved);
+            let screen = rendered(&session);
+            assert_eq!(screen.matches("alt-y").count(), 1, "{screen}");
+            assert!(
+                !screen.contains("ctrl-l"),
+                "the hint went on naming the key nothing answers: {screen}"
+            );
+        }
+
+        /// The list of keys is where a binding's meaning lives, and a key absent from it is one
+        /// nobody finds.
+        #[test]
+        fn the_shortcut_list_names_the_key_that_watches() {
+            assert!(
+                shortcuts(
+                    crate::vim::Editing::Ordinary,
+                    &Keybindings::default(),
+                    PointerKeys::CapturedWithMenu,
+                )
+                .iter()
+                .any(|(key, _)| key == "ctrl-l"),
+                "the shortcut list does not name the key"
+            );
+        }
+
+        /// Everything on one screen is the answer to having several: a person sees what each is
+        /// doing without going anywhere, and the two blocks cannot be confused for each other.
+        #[test]
+        fn every_delegate_is_drawn_with_its_own_work_under_it() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "checker", "run the build");
+            session.start_activity(Activity::running("Run", "cargo test"));
+            spawn(&mut session, "reader", "find the callers");
+            session.start_activity(Activity::running("Read", "state.rs"));
+
+            let screen = rendered(&session);
+            assert!(screen.contains("checker delegate"), "{screen}");
+            assert!(screen.contains("run the build"), "{screen}");
+            assert!(screen.contains("reader delegate"), "{screen}");
+            assert!(screen.contains("find the callers"), "{screen}");
+            assert!(
+                screen.contains("cargo test") && screen.contains("state.rs"),
+                "what the delegates were doing was not drawn: {screen}"
+            );
+        }
+
+        /// Two questions a person watching has: is this still going, and did it get anywhere.
+        /// The last tool line answers neither.
+        #[test]
+        fn a_finished_delegate_collapses_to_what_the_turn_was_told() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "find the parser");
+            session.start_activity(Activity::running("Read", "PECULIAR-FILE-NAME"));
+            session.delegate_finished(
+                id,
+                "a reader delegate answered after 2 rounds".to_string(),
+                false,
+                None,
+            );
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("answered after 2 rounds"),
+                "the block does not say how it ended: {screen}"
+            );
+            assert!(
+                !screen.contains("PECULIAR-FILE-NAME"),
+                "a finished delegate is still drawing the work behind it: {screen}"
+            );
+        }
+
+        /// WATCH-5. The block in the transcript stops drawing the work behind a finished
+        /// delegate, and the work is still there to be opened in the delegate's own view. A
+        /// finish that cleared the lines would collapse the block and leave nothing behind it.
+        #[test]
+        fn a_finished_delegates_work_is_still_there_to_be_opened() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "find the parser");
+            session.start_activity(Activity::running("Read", "PECULIAR-FILE-NAME"));
+            session.delegate_finished(
+                id,
+                "a reader delegate answered after 2 rounds".to_string(),
+                false,
+                None,
+            );
+            assert!(
+                !rendered(&session).contains("PECULIAR-FILE-NAME"),
+                "the block did not collapse, so opening the delegate proves nothing"
+            );
+
+            session.watch();
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("PECULIAR-FILE-NAME"),
+                "the work of a finished delegate was gone from its view: {screen}"
+            );
+        }
+
+        /// The block is where somebody who never opens the mode reads what came of a delegate,
+        /// and the round count says nothing about what it found.
+        #[test]
+        fn a_finished_delegate_says_what_it_reported() {
+            let mut session = Session::new("kernel-enforced");
+            let id = spawn(&mut session, "reader", "pick a file at random");
+            session.start_activity(Activity::running("List", "."));
+            session.delegate_finished(
+                id,
+                "a reader delegate answered after 1 round".to_string(),
+                false,
+                Some(Reported::Said("I PICKED build.log".to_string())),
+            );
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("answered after 1 round"),
+                "the block does not say how it ended: {screen}"
+            );
+            assert!(
+                screen.contains("I PICKED build.log"),
+                "the block does not say what it answered: {screen}"
+            );
+        }
+
+        /// The block shows the last few of many, so a person reading three rows under a delegate
+        /// that has made thirty calls would otherwise be reading it as a delegate doing very
+        /// little.
+        #[test]
+        fn a_delegate_that_has_done_more_than_is_drawn_says_so() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "checker", "run everything");
+            for round in 0..9 {
+                session.start_activity(Activity::running("Run", format!("step {round}")));
+            }
+
+            let screen = rendered(&session);
+            assert!(
+                screen.contains("9 calls"),
+                "the block did not say how much it had done: {screen}"
+            );
+        }
+
+        /// A delegate reading untrusted files has a preview of each held among its lines, and a
+        /// preview is not a call. Counting lines rather than calls drew one row for a delegate
+        /// that had made four, and left the count off too, since the count is said only where
+        /// there are more calls than rows drawn.
+        #[test]
+        fn a_delegates_previews_do_not_cost_its_block_the_rows_and_the_count() {
+            let mut session = Session::new("kernel-enforced");
+            spawn(&mut session, "worker", "summarise the notes");
+            for round in 0..4 {
+                let call = Activity::running("Isolated processor", format!("notes{round}.md"));
+                session.start_activity(call.clone());
+                session.finish_activity(call.done("wrote 1 line"));
+                // The two previews one spawn_processor result releases: what the processor said
+                // about the file, and the file it wrote.
+                session.show(Shown {
+                    origin: "what the isolated processor said".to_string(),
+                    reach: bravebot_agent::report::Reach::NoModel,
+                    label: "(U,priv)".to_string(),
+                    preview: vec!["a line nobody vouched for".to_string()],
+                    lines: 1,
+                });
+                session.show(Shown {
+                    origin: format!("notes{round}.md"),
+                    reach: bravebot_agent::report::Reach::NoModel,
+                    label: "(U,priv)".to_string(),
+                    preview: vec!["a line nobody vouched for".to_string()],
+                    lines: 1,
+                });
+            }
+
+            let screen = rendered(&session);
+            for drawn in ["notes1.md", "notes2.md", "notes3.md"] {
+                assert!(
+                    screen.contains(drawn),
+                    "the block left out the call on {drawn}: {screen}"
+                );
+            }
+            assert!(
+                screen.contains("4 calls"),
+                "the block did not say how many calls it had made: {screen}"
+            );
+        }
+    }
+
+    /// Render into a test backend and return the visible text.
+    fn rendered(session: &Session) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    mod scroller {
+        use super::*;
+        use crate::state::{Entry, Laid};
+        use bravebot_agent::report::Activity;
+
+        /// A session reading back over one prompt, one reply, and a file it was not allowed to
+        /// read, with the scroller open over it.
+        fn reading() -> Session {
+            reading_over(24)
+        }
+
+        /// The same, over a transcript already this many rows tall when the scroller opens.
+        ///
+        /// The layout is noted before the mode opens, because noting it afterwards is rows
+        /// arriving underneath an open scroller, which is a different thing and moves the view.
+        fn reading_over(rows: u16) -> Session {
+            let shown = Shown {
+                origin: "notes.md".to_string(),
+                reach: bravebot_agent::report::Reach::NotThePlanner,
+                label: "(U,priv)".to_string(),
+                preview: vec![
+                    "the haystack holds a needle".to_string(),
+                    // What the terminal would act on, on its way to a glyph, beside a colour code,
+                    // which is taken out and not drawn.
+                    "a needle behind \u{1b}[31m\u{1b}[2J an escape".to_string(),
+                ],
+                lines: 40,
+            };
+
+            let mut session = Session::new("kernel-enforced");
+            session.transcript.push(Entry::user("look at the notes"));
+            session.transcript.push(Entry::assistant(
+                "there is a needle in there".to_string(),
+                Vec::new(),
+            ));
+            let mut read = Entry::tool(Activity::running("read", "notes.md").done("40 lines"));
+            read.shown = Some(shown);
+            session.transcript.push(read);
+            session.note_layout(Laid {
+                width: 90,
+                height: 24,
+                rows,
+                ..Laid::default()
+            });
+            session.open_scroller();
+            session
+        }
+
+        /// Render, and give back both what is on the screen and which cells are wearing the
+        /// highlight, since a match is a thing you can see rather than a thing you are told about.
+        fn screen(session: &Session) -> (String, String) {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+            let drawn: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+            // Only above the box. The caret in it is drawn reversed as well, and what this is
+            // asking about is the transcript.
+            let box_top = (0..buffer.area.height)
+                .find(|row| buffer[(0, *row)].symbol() == "╭")
+                .unwrap_or(buffer.area.height);
+            let marked: String = (0..box_top)
+                .flat_map(|row| (0..buffer.area.width).map(move |column| (column, row)))
+                .map(|at| &buffer[at])
+                .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+                .map(|cell| cell.symbol())
+                .collect();
+            (drawn, marked)
+        }
+
+        /// The rows of the `?` list as it draws them, inside its border and nothing else.
+        ///
+        /// Read from inside the border rather than off the whole screen, so a key spelled with
+        /// one letter is looked for where it is a key rather than wherever that letter happens to
+        /// land.
+        fn help_rows(session: &Session) -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+
+            // The box the scroller took away is not on the screen, so the one rounded corner
+            // there is belongs to the list.
+            let (left, top) = (0..buffer.area.height)
+                .flat_map(|row| (0..buffer.area.width).map(move |column| (column, row)))
+                .find(|at| buffer[*at].symbol() == "\u{256d}")
+                .expect("the list is drawn inside a border");
+            let right = (left + 1..buffer.area.width)
+                .find(|column| buffer[(*column, top)].symbol() == "\u{256e}")
+                .expect("the border closes across");
+            let bottom = (top + 1..buffer.area.height)
+                .find(|row| buffer[(left, *row)].symbol() == "\u{2570}")
+                .expect("the border closes down");
+
+            (top + 1..bottom)
+                .map(|row| {
+                    (left + 1..right)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect()
+                })
+                .collect()
+        }
+
+        /// A reference is drawn as its token under a header naming it, and each header says whose
+        /// words follow.
+        #[test]
+        fn the_request_view_draws_each_span_under_its_provenance() {
+            let mut session = Session::new("kernel-enforced");
+            session.note_layout(Laid {
+                width: 90,
+                height: 24,
+                rows: 24,
+                ..Laid::default()
+            });
+            session.set_last_request(bravebot_agent::request_view::RequestView {
+                model: "m".to_string(),
+                spans: vec![
+                    bravebot_agent::request_view::Span {
+                        role: "user",
+                        provenance: bravebot_agent::request_view::Provenance::Typed,
+                        text: "read it".to_string(),
+                    },
+                    bravebot_agent::request_view::Span {
+                        role: "tool",
+                        provenance: bravebot_agent::request_view::Provenance::Reference(
+                            "ref:1".to_string(),
+                        ),
+                        text: "ref:1 stands for a file".to_string(),
+                    },
+                ],
+                tools: vec!["read_file".to_string()],
+                tools_bytes: 0,
+            });
+            session.show_request();
+            let (drawn, _) = screen(&session);
+            assert!(drawn.contains("-- user · typed"), "{drawn}");
+            assert!(drawn.contains("-- tool · ref:1"), "{drawn}");
+            assert!(drawn.contains("ref:1 stands for a file"), "{drawn}");
+            assert!(drawn.contains("read_file"), "{drawn}");
+        }
+
+        /// The row names every instruction file the system prompt carried, with its bytes, so a
+        /// person can see what loaded without reading the prompt.
+        #[test]
+        fn the_request_view_names_the_instruction_files_loaded_with_their_lengths() {
+            let mut session = Session::new("kernel-enforced");
+            session.note_layout(Laid {
+                width: 90,
+                height: 24,
+                rows: 24,
+                ..Laid::default()
+            });
+            session.set_last_request(bravebot_agent::request_view::RequestView {
+                model: "m".to_string(),
+                spans: vec![
+                    bravebot_agent::request_view::Span {
+                        role: "system",
+                        provenance: bravebot_agent::request_view::Provenance::TrustedFile(
+                            "AGENTS.md".to_string(),
+                        ),
+                        text: "Use tabs.".to_string(),
+                    },
+                    bravebot_agent::request_view::Span {
+                        role: "system",
+                        provenance: bravebot_agent::request_view::Provenance::Trusted("skill list"),
+                        text: "- design".to_string(),
+                    },
+                ],
+                tools: vec![],
+                tools_bytes: 0,
+            });
+            session.show_request();
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("Instruction files loaded: AGENTS.md (9 bytes)"),
+                "{drawn}"
+            );
+        }
+
+        /// A request built with no instruction file says none loaded, rather than leaving the row
+        /// out and reading as though the question had not been answered.
+        #[test]
+        fn the_request_view_says_so_when_no_instruction_file_loaded() {
+            let mut session = Session::new("kernel-enforced");
+            session.note_layout(Laid {
+                width: 90,
+                height: 24,
+                rows: 24,
+                ..Laid::default()
+            });
+            session.set_last_request(bravebot_agent::request_view::RequestView {
+                model: "m".to_string(),
+                spans: vec![bravebot_agent::request_view::Span {
+                    role: "system",
+                    provenance: bravebot_agent::request_view::Provenance::Driver,
+                    text: "You are careful.".to_string(),
+                }],
+                tools: vec![],
+                tools_bytes: 0,
+            });
+            session.show_request();
+            let (drawn, _) = screen(&session);
+            assert!(drawn.contains("Instruction files loaded: none"), "{drawn}");
+        }
+
+        /// A session reading back over a quarantined block whose one preview line is `preview`,
+        /// with the scroller open over it.
+        fn reading_a_block(preview: &str) -> Session {
+            let mut session = Session::new("kernel-enforced");
+            let mut read = Entry::tool(Activity::running("read", "notes.md").done("40 lines"));
+            read.shown = Some(Shown {
+                origin: "notes.md".to_string(),
+                reach: bravebot_agent::report::Reach::NotThePlanner,
+                label: "(U,priv)".to_string(),
+                preview: vec![preview.to_string()],
+                lines: 40,
+            });
+            session.transcript.push(read);
+            session.note_layout(Laid {
+                width: 90,
+                height: 24,
+                rows: 24,
+                ..Laid::default()
+            });
+            session.open_scroller();
+            session
+        }
+
+        /// Search `session` for `needle`, the way the keys do it.
+        fn search(session: &mut Session, needle: &str) {
+            session.begin_search();
+            for c in needle.chars() {
+                session.type_into_search(c);
+            }
+            session.run_search();
+        }
+
+        /// The session [`reading`] gives back, searched for `needle`.
+        fn searching(needle: &str) -> Session {
+            let mut session = reading();
+            search(&mut session, needle);
+            session
+        }
+
+        /// Long transcript, for measuring what laying one out costs.
+        fn a_long_session() -> Session {
+            let mut session = Session::new("kernel-enforced");
+            for n in 0..500 {
+                session.transcript.push(Entry::user(format!("prompt {n}")));
+                session.transcript.push(Entry::assistant(
+                    format!(
+                        "a reply to {n} that runs on for a while so that it wraps at eighty or \
+                     ninety columns and takes more than one row of the screen to draw"
+                    ),
+                    Vec::new(),
+                ));
+            }
+            session
+        }
+
+        /// Finding where the rows are is an extra pass over the transcript, on every frame the
+        /// scroller is open. It has to stay in proportion to the drawing the interface already does,
+        /// since the alternative is a mode that gets slower the more there is to read back through.
+        ///
+        /// Drawing wraps every line of the transcript once. The pass is in proportion to that when
+        /// it asks about each line once and wraps only the lines that do not fit on a row, since a
+        /// line that fits is answered from its width. The test counts exactly those two things.
+        /// Elapsed time includes the load on the machine during each pass, so a bound on the ratio
+        /// of two passes fails on a busy machine with code that did no more work.
+        ///
+        /// The rows measured are also held to the rows the drawing counts, since a pass that
+        /// answered without wrapping would pass the counts.
+        #[test]
+        fn measuring_where_the_rows_are_stays_in_proportion_to_drawing_them() {
+            let at_rest = a_long_session();
+            let mut scrolling = a_long_session();
+            scrolling.open_scroller();
+
+            let ((_, plain), idle) = counted::during(|| lay_out(&at_rest, 90, 24));
+            assert_eq!(plain.rows, 0, "the rows were counted with nobody asking");
+            assert_eq!(
+                idle,
+                counted::Work::default(),
+                "a line was measured with nobody asking"
+            );
+
+            let ((lines, laid), work) = counted::during(|| lay_out(&scrolling, 90, 24));
+            let too_wide = lines.iter().filter(|line| line.width() > 90).count();
+            let rows = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(90);
+
+            assert!(rows > 2000, "the transcript is not long: {rows}");
+            assert!(
+                laid.rows > 2000,
+                "the transcript is not long: {}",
+                laid.rows
+            );
+            assert!(
+                too_wide > 0,
+                "no line needs wrapping, so the count of wraps proves nothing"
+            );
+            assert_eq!(
+                usize::from(laid.rows),
+                rows,
+                "the rows measured are not the rows drawn"
+            );
+            assert_eq!(
+                work.asked,
+                lines.len(),
+                "{} lines were measured in a transcript of {}",
+                work.asked,
+                lines.len()
+            );
+            assert_eq!(
+                work.wrapped, too_wide,
+                "{} lines were wrapped to measure them, and {too_wide} do not fit on a row",
+                work.wrapped
+            );
+        }
+
+        /// What a terminal shows after one frame of `session`, as the cells' symbols.
+        fn frame_of(session: &Session, width: u16, height: u16) -> (String, Laid) {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            let mut laid = Laid::default();
+            terminal
+                .draw(|frame| laid = draw(frame, session))
+                .expect("draw succeeds");
+            let drawn = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            (drawn, laid)
+        }
+
+        /// A typed character is drawn without laying the conversation out again. The first frame
+        /// pays for every line; the frame after a keystroke asks about the few lines that are not
+        /// kept (the reply still arriving) and nothing else, however long the transcript is.
+        #[test]
+        fn a_keystroke_is_drawn_without_measuring_the_transcript_again() {
+            let mut session = a_long_session();
+            session.streaming("and a reply still arriving");
+
+            let ((_, laid), first) = counted::during(|| frame_of(&session, 90, 24));
+            assert!(
+                laid.rows > 1000,
+                "the transcript is not long: {}",
+                laid.rows
+            );
+            assert!(
+                first.asked >= 1000,
+                "the first frame measured {} lines, so the count observes nothing",
+                first.asked
+            );
+
+            session.type_char('x');
+            let ((drawn, _), typed) = counted::during(|| frame_of(&session, 90, 24));
+            assert!(drawn.contains("and a reply still arriving"));
+            assert!(
+                typed.asked <= 4,
+                "a keystroke measured {} lines of the transcript",
+                typed.asked
+            );
+        }
+
+        /// A click on a task of the plan goes to the row its turn drew the task on, which is worked
+        /// out from where the lines kept for the last frame say the entry that holds the plan begins
+        /// and the lines of that entry above the task. Rejects: laying every entry above the plan out
+        /// again for each click, which for a long transcript is the whole of a frame's work for one
+        /// press: the click asks about the lines of the one entry and not about a thousand more, and
+        /// the row it names is below all of them.
+        #[test]
+        fn a_click_on_a_task_measures_the_entry_that_holds_the_plan_and_not_the_entries_above() {
+            use bravebot_core::todo::{Item, List, Status};
+            let mut session = a_long_session();
+            let tasks = bravebot_core::todo::rows(&List::new(vec![
+                Item::new("Read the tokenizer", Status::Done),
+                Item::new("Fix it", Status::Done),
+                Item::new("Check it", Status::Done),
+            ]));
+            session
+                .transcript
+                .push(Entry::assistant("the plan", Vec::new()).with_todos(tasks));
+            let (_, laid) = frame_of(&session, 90, 24);
+            assert!(
+                laid.rows > 1000,
+                "the transcript is not long: {}",
+                laid.rows
+            );
+            session.note_layout(laid);
+            assert!(
+                session.plan_entry().is_some(),
+                "the plan is not in the transcript"
+            );
+
+            let (rows, work) = counted::during(|| {
+                (0..3)
+                    .map(|task| plan_item_row(&session, task))
+                    .collect::<Vec<_>>()
+            });
+
+            let rows: Vec<u16> = rows.into_iter().map(|row| row.expect("a row")).collect();
+            assert!(
+                rows.windows(2).all(|pair| pair[0] < pair[1]),
+                "the rows of the tasks do not follow each other: {rows:?}"
+            );
+            assert!(
+                rows[0] > 1000,
+                "the first task is on row {}, not below the transcript above it",
+                rows[0]
+            );
+            assert!(
+                work.asked <= 3 * 12,
+                "three clicks measured {} lines of the transcript",
+                work.asked
+            );
+        }
+
+        /// VIEW-39. Whether the bar is wanted is read by laying the lines out at the width it leaves, and a
+        /// transcript that does not overflow is then laid out again at the full width. One layout is
+        /// kept at a time, so each frame lays out a transcript that fits twice. That costs lines of
+        /// what fits, which is no more than the rows of the pane, and does not grow with the
+        /// conversation: one that is longer overflows and keeps the one layout, which is what the
+        /// keystroke test above measures.
+        #[test]
+        fn a_transcript_that_fits_the_pane_costs_lines_of_no_more_than_the_pane_each_frame() {
+            let mut session = Session::new("kernel-enforced");
+            for n in 0..6 {
+                session
+                    .transcript
+                    .push(Entry::assistant(format!("reply {n}"), Vec::new()));
+            }
+            let _ = frame_of(&session, 90, 24);
+            let ((_, laid), work) = counted::during(|| frame_of(&session, 90, 24));
+            assert!(laid.bar.is_none(), "the transcript does not fit the pane");
+            assert!(
+                laid.rows <= 24 && work.asked <= 2 * usize::from(laid.rows),
+                "{} lines were measured for {} rows",
+                work.asked,
+                laid.rows
+            );
+        }
+
+        /// A transcript of `replies` replies that each hold a fenced block, so that every one has the
+        /// marker that copies the reply and the word that copies the block: cells drawn for a click,
+        /// which a selection's marks leave out and so look for on every line above its ends.
+        fn a_long_session_of_blocks(replies: usize) -> Session {
+            let mut session = Session::new("kernel-enforced");
+            for n in 0..replies {
+                session.transcript.push(Entry::assistant(
+                    format!("Reply {n}:\n```sh\necho {n}\n```"),
+                    Vec::new(),
+                ));
+            }
+            session
+        }
+
+        /// How many rows the transcript comes to and how many places were compared to find the cells
+        /// drawn for a click, in the frame that first marks a selection held near the end of a
+        /// transcript of `replies` replies, with the scroller open or not.
+        fn rows_and_comparisons_to_mark_a_selection(
+            replies: usize,
+            scrolling: bool,
+        ) -> (u16, usize) {
+            let mut session = a_long_session_of_blocks(replies);
+            if scrolling {
+                session.open_scroller();
+            }
+            let (_, laid) = frame_of(&session, 90, 24);
+            session.note_layout(laid);
+            if scrolling {
+                // The scroller opens at the first row, and the selection is wanted at the last.
+                session.scroller_to_last_row();
+                let (_, laid) = frame_of(&session, 90, 24);
+                session.note_layout(laid);
+            }
+            session.begin_selection(12, 4);
+            session.sweep_to(10, 30);
+            assert!(session.selection.is_some_and(|held| held.scrolls()));
+            let ((_, laid), work) = counted::during(|| frame_of(&session, 90, 24));
+            assert!(laid.marks.is_some(), "the frame marked nothing");
+            (laid.rows, work.compared)
+        }
+
+        /// A selection of the transcript is told by the text above each of its ends, which leaves out
+        /// the cells drawn for a click, and finding those on each line was a scan of every one drawn.
+        /// Held in a transcript of twenty thousand rows that was every line against every cell, for the
+        /// frame that first drew the selection. The work of finding them is counted and not timed, and
+        /// has to grow with the transcript and not with its square: four times the replies is not more
+        /// than six times the comparisons, and no row costs more than a bisection of the cells for each
+        /// end.
+        #[test]
+        fn marking_a_selection_in_a_long_transcript_looks_for_each_click_cell_once() {
+            let (small_rows, small) = rows_and_comparisons_to_mark_a_selection(1250, false);
+            let (big_rows, big) = rows_and_comparisons_to_mark_a_selection(5000, false);
+            assert!(
+                big_rows >= 20_000,
+                "the transcript is not long: {big_rows} rows"
+            );
+            assert!(
+                big <= small.max(1) * 6,
+                "{big} comparisons for {big_rows} rows against {small} for {small_rows}"
+            );
+            assert!(
+                big <= usize::from(big_rows) * 64,
+                "{big} comparisons for {big_rows} rows"
+            );
+        }
+
+        /// The same bound in the scroller, where nothing is kept from one frame to the next and the
+        /// cells drawn for a click are found for every line above each end of the selection in every
+        /// frame.
+        #[test]
+        fn marking_a_selection_in_the_scroller_looks_for_each_click_cell_once() {
+            let (small_rows, small) = rows_and_comparisons_to_mark_a_selection(1250, true);
+            let (big_rows, big) = rows_and_comparisons_to_mark_a_selection(5000, true);
+            assert!(
+                big_rows >= 20_000,
+                "the transcript is not long: {big_rows} rows"
+            );
+            assert!(
+                big <= small.max(1) * 6,
+                "{big} comparisons for {big_rows} rows against {small} for {small_rows}"
+            );
+            assert!(
+                big <= usize::from(big_rows) * 64,
+                "{big} comparisons for {big_rows} rows"
+            );
+        }
+
+        /// What the kept lines stand for is the entries, so an entry changed in place is drawn as
+        /// it now reads and not as it did when the lines were kept.
+        #[test]
+        fn an_entry_edited_after_a_frame_is_drawn_as_edited() {
+            let mut session = a_long_session();
+            let _ = frame_of(&session, 90, 24);
+
+            let last = session.transcript.last_mut().expect("an entry");
+            last.text = "REWRITTEN after the frame".to_string();
+
+            let (drawn, _) = frame_of(&session, 90, 24);
+            assert!(drawn.contains("REWRITTEN after the frame"), "{drawn}");
+        }
+
+        /// The width, the trail and the palette each change how an entry is drawn, so each is a
+        /// reason the kept lines no longer answer.
+        #[test]
+        fn a_change_of_width_or_trail_is_not_answered_from_the_lines_kept_before_it() {
+            let mut session = a_long_session();
+            let narrow = frame_of(&session, 40, 24).1;
+            let wide = frame_of(&session, 120, 24).1;
+            assert!(
+                narrow.rows > wide.rows,
+                "{} rows at 40 columns, {} at 120: the lines were not laid out again",
+                narrow.rows,
+                wide.rows
+            );
+
+            let before = frame_of(&session, 90, 24).1.rows;
+            session.transcript.last_mut().expect("an entry").trail.push(
+                bravebot_session::audit::TrailLine {
+                    text: "a gate passed".to_string(),
+                    blocked: false,
+                },
+            );
+            session.show_trail = true;
+            assert_eq!(frame_of(&session, 90, 24).1.rows, before + 1);
+            session.show_trail = false;
+            assert_eq!(frame_of(&session, 90, 24).1.rows, before);
+        }
+
+        /// Drawing only the rows on the screen is the same picture as wrapping the whole
+        /// transcript and scrolling it, from the bottom and from every row held above it, at a
+        /// width where lines wrap and one where they do not. With the mouse captured the last
+        /// column is the scrollbar (VIEW-39), so the picture is the whole transcript wrapped to one
+        /// column fewer, with that column left out.
+        #[test]
+        fn drawing_the_visible_slice_matches_wrapping_the_whole_transcript() {
+            let reference = |session: &Session, width: u16, height: u16| -> String {
+                let (lines, _) = lay_out(session, width, height);
+                let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+                let total = paragraph.line_count(width) as u16;
+                let max = total.saturating_sub(height);
+                let offset = if session.scroll > 0 {
+                    session.top_row().min(max)
+                } else {
+                    max
+                };
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(paragraph.scroll((offset, 0)), frame.area());
+                    })
+                    .expect("draw succeeds");
+                terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect()
+            };
+            for captured in [false, true] {
+                let mut session = a_long_session();
+                session.adopt_mouse(Some(captured));
+                session.streaming("a reply still arriving that is long enough to wrap onto a second row at forty columns");
+                for width in [40u16, 90] {
+                    let height = 12;
+                    let text_width = if captured { width - 1 } else { width };
+                    let area = |session: &Session| {
+                        let mut terminal =
+                            Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                        let mut laid = Laid::default();
+                        terminal
+                            .draw(|frame| laid = draw_transcript(frame, frame.area(), session))
+                            .expect("draw succeeds");
+                        let buffer = terminal.backend().buffer();
+                        let drawn: String = (0..height)
+                            .flat_map(|row| (0..text_width).map(move |column| (row, column)))
+                            .map(|(row, column)| buffer[(column, row)].symbol())
+                            .collect();
+                        (drawn, laid)
+                    };
+                    let (bottom, laid) = area(&session);
+                    assert_eq!(
+                        bottom,
+                        reference(&session, text_width, height),
+                        "at the bottom, captured {captured}"
+                    );
+                    session.note_layout(laid);
+                    for held in [1u16, 2, 3, 7, 40, 301, 999] {
+                        session.scroll = held;
+                        let (drawn, _) = area(&session);
+                        assert_eq!(
+                            drawn,
+                            reference(&session, text_width, height),
+                            "held {held} rows up at {width} columns, captured {captured}"
+                        );
+                    }
+                    session.scroll = 0;
+                }
+            }
+        }
+
+        /// Nothing has been drawn yet, so the width is zero. Laying out against it must not panic.
+        #[test]
+        fn measuring_before_the_first_frame_does_not_panic() {
+            let mut session = Session::new("kernel-enforced");
+            session.transcript.push(Entry::user("anything"));
+            session.open_scroller();
+
+            let _ = as_last_drawn(&session);
+            let _ = as_text(&session);
+        }
+
+        #[test]
+        fn the_scroller_says_it_is_open_and_which_key_closes_it() {
+            let (drawn, _) = screen(&reading());
+
+            assert!(drawn.contains("scroller"), "the mode does not say it is on");
+            assert!(
+                drawn.contains("q closes"),
+                "the way out is not on the screen: {drawn}"
+            );
+        }
+
+        /// A count decides how far the next key goes, and a state deciding what a key does has
+        /// to be on the screen, as the box draws one beside its mode word. It goes first on the
+        /// row, because after a needle it would read as part of what is being looked for.
+        #[test]
+        fn the_footer_draws_a_count_waiting_for_its_key() {
+            let footer = |session: &Session| -> String {
+                let (drawn, _) = screen(session);
+                drawn.chars().skip(90 * 23).collect()
+            };
+
+            let mut session = reading();
+            assert!(session.count_in_the_scroller('1'));
+            assert!(session.count_in_the_scroller('2'));
+            assert!(
+                footer(&session).starts_with("  12  scroller"),
+                "the count is not drawn: {:?}",
+                footer(&session)
+            );
+            session.take_the_scroller_count();
+            assert!(
+                footer(&session).starts_with("  scroller"),
+                "the count outlived the key that took it: {:?}",
+                footer(&session)
+            );
+
+            let mut session = searching("needle");
+            assert!(session.count_in_the_scroller('3'));
+            assert!(
+                footer(&session).starts_with("  3  /needle"),
+                "the count is not drawn beside a standing search: {:?}",
+                footer(&session)
+            );
+        }
+
+        /// The count goes first on the row, so a long one on a narrow terminal would push the key
+        /// that closes the mode off the end. It gives way to the way out rather than the other way
+        /// round, and a count with the room is still drawn.
+        #[test]
+        fn a_count_too_long_for_the_row_leaves_the_way_out_on_it() {
+            let footer = |session: &Session, width: u16| -> String {
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        draw(frame, session);
+                    })
+                    .expect("draw succeeds");
+                let buffer = terminal.backend().buffer();
+                (0..width)
+                    .map(|column| buffer[(column, 23)].symbol())
+                    .collect()
+            };
+            let counting = |mut session: Session, digits: &str| {
+                for c in digits.chars() {
+                    assert!(session.count_in_the_scroller(c));
+                }
+                session
+            };
+            // The longest count there is, which is the thousand a count stops at. The widths are
+            // a column short of drawing it beside the way out, and exactly enough.
+            let long = "99999999999999999999999";
+
+            for (width, session, begins) in [
+                (39, counting(reading(), "12"), "  12  scroller"),
+                (39, counting(reading(), long), "  scroller"),
+                (40, counting(reading(), long), "  1000  scroller"),
+                (49, counting(searching("needle"), "3"), "  3  /needle"),
+                (49, counting(searching("needle"), long), "  /needle"),
+                (50, counting(searching("needle"), long), "  1000  /needle"),
+            ] {
+                let drawn = footer(&session, width);
+                assert!(drawn.starts_with(begins), "{width}: {drawn:?}");
+                assert!(drawn.contains("q closes"), "the way out went: {drawn:?}");
+            }
+        }
+
+        /// The transcript at rest keeps its own line, since the bindings the scroller advertises
+        /// are the ones it has taken.
+        #[test]
+        fn the_usual_hint_comes_back_when_the_scroller_closes() {
+            let mut session = reading();
+            session.close_scroller();
+            let (drawn, _) = screen(&session);
+
+            assert!(!drawn.contains("q closes"));
+            assert!(
+                drawn.contains(SHORTCUTS_HINT),
+                "the usual line did not come back"
+            );
+        }
+
+        /// Draw, and give back what the frame laid the transcript out to.
+        fn drawn_over(session: &Session) -> Laid {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+            let mut laid = Laid::default();
+            terminal
+                .draw(|frame| laid = draw(frame, session))
+                .expect("draw succeeds");
+            laid
+        }
+
+        /// The box, the indicator above it and anything offered beneath it are all things to type
+        /// at, and no key reaches any of them from in here. Drawing them would be rows of the
+        /// screen spent inviting a keystroke that would do nothing, and the transcript is the
+        /// whole of what somebody opened a pager to look at.
+        #[test]
+        fn the_scroller_takes_the_whole_screen_but_its_own_footer() {
+            let mut session = reading();
+            session.status = Status::Working;
+
+            let (drawn, _) = screen(&session);
+            assert!(
+                !drawn.contains('╭'),
+                "the box was drawn under the scroller: {drawn}"
+            );
+            assert!(
+                !drawn.contains(placeholder()),
+                "the box was still inviting a prompt: {drawn}"
+            );
+
+            let open = drawn_over(&session);
+            assert_eq!(
+                open.height, 23,
+                "the transcript did not have every row but the footer"
+            );
+
+            session.close_scroller();
+            let (at_rest, _) = screen(&session);
+            assert!(at_rest.contains('╭'), "the box did not come back");
+            assert!(
+                drawn_over(&session).height < open.height,
+                "the rows the box gave up did not go to the transcript"
+            );
+        }
+
+        /// What is offered beneath the box goes with it: the commands a typed slash lists are drawn
+        /// under the prompt at rest and are not drawn under the scroller, which would otherwise
+        /// leave rows of choices that no key from in here can take.
+        #[test]
+        fn the_scroller_draws_nothing_offered_beneath_the_box() {
+            let mut session = reading();
+            session.close_scroller();
+            session.type_char('/');
+            let (at_rest, _) = screen(&session);
+            assert!(
+                at_rest.contains("/help"),
+                "nothing was offered beneath the box at rest, so the scroller proves nothing: {at_rest}"
+            );
+
+            session.open_scroller();
+            let (drawn, _) = screen(&session);
+            assert!(
+                !drawn.contains("/help"),
+                "a command was still offered under the scroller: {drawn}"
+            );
+            assert_eq!(
+                drawn_over(&session).height,
+                23,
+                "the offer kept rows from the transcript"
+            );
+        }
+
+        /// The indicator went with the box, so the footer is the only thing left that can say a
+        /// turn is still in flight. A person reading back through one that is going wrong is
+        /// reading precisely because it is going wrong, and a screen with nothing moving on it
+        /// says the opposite of what is happening.
+        #[test]
+        fn the_scroller_says_a_turn_is_still_running() {
+            let session = reading();
+            let (idle, _) = screen(&session);
+
+            let mut working = reading();
+            working.status = Status::Working;
+            let verb = working
+                .indicator()
+                .expect("a turn in flight has an indicator")
+                .verb
+                .to_string();
+            let (running, _) = screen(&working);
+
+            assert!(
+                running.contains(&format!("{verb}…")),
+                "the footer did not say the turn was still running: {running}"
+            );
+            assert!(
+                !idle.contains(&format!("{verb}…")),
+                "the footer said a turn was running with nothing in flight: {idle}"
+            );
+        }
+
+        #[test]
+        fn every_match_on_the_screen_is_highlighted() {
+            let (_, marked) = screen(&searching("needle"));
+
+            assert!(
+                marked.contains("needle"),
+                "nothing on the screen was highlighted"
+            );
+            assert_eq!(
+                marked.matches("needle").count(),
+                3,
+                "not every occurrence was marked: {marked:?}"
+            );
+        }
+
+        #[test]
+        fn how_many_matches_there_are_is_drawn() {
+            let (drawn, _) = screen(&searching("needle"));
+
+            assert!(
+                drawn.contains("1 of 3"),
+                "the footer does not say where in the matches the view is: {drawn}"
+            );
+        }
+
+        /// What is counted is matches, not the lines holding one. A person shown `1 of 1` beside
+        /// two highlighted words has been told a number the screen contradicts, and `n` has
+        /// nowhere to take them for the second.
+        #[test]
+        fn a_line_holding_two_matches_is_counted_as_two() {
+            let (drawn, marked) = screen(&searching("there"));
+
+            assert_eq!(
+                marked.matches("there").count(),
+                2,
+                "not every occurrence on the line was marked: {marked:?}"
+            );
+            assert!(
+                drawn.contains("1 of 2"),
+                "the footer counted the line rather than the matches: {drawn}"
+            );
+        }
+
+        /// A count that said `1 of 1` over two highlighted words inside a quarantined block would
+        /// be the interface under-reporting what the content holds, which is the whole of what
+        /// bounds the cost of a search over untrusted bytes: `n` reaches every match and the
+        /// footer says how many there are.
+        #[test]
+        fn two_matches_in_one_quarantined_row_are_counted_as_two() {
+            let mut session = reading_a_block("the haystack holds a haystack");
+            search(&mut session, "haystack");
+            let (drawn, marked) = screen(&session);
+
+            assert_eq!(
+                marked.matches("haystack").count(),
+                2,
+                "not every occurrence in the block was marked: {marked:?}"
+            );
+            assert!(
+                drawn.contains("1 of 2"),
+                "the footer counted the row rather than the matches: {drawn}"
+            );
+        }
+
+        /// The footer is the one row of the screen the interface speaks in its own voice. A
+        /// quotation there is untrusted content drawn outside a marked block, and a line that can
+        /// be quoted is a line that can be written to read like the interface.
+        #[test]
+        fn the_search_footer_never_quotes_what_it_matched() {
+            let (drawn, _) = screen(&searching("needle"));
+
+            let footer = drawn
+                .as_str()
+                .split("/needle")
+                .nth(1)
+                .expect("the footer names what is being looked for");
+            assert!(
+                !footer.contains("haystack"),
+                "the footer quoted the line it matched: {footer}"
+            );
+        }
+
+        /// An interface that shows content and then refuses to let a person find it has protected
+        /// nobody and made the audit worse.
+        #[test]
+        fn a_search_matches_quarantined_content_too() {
+            let (_, marked) = screen(&searching("haystack"));
+
+            assert!(
+                marked.contains("haystack"),
+                "a match in a quarantined block was not highlighted"
+            );
+        }
+
+        /// Highlighting splits the spans a row is already made of, so nothing moves and nothing
+        /// leaves the block it was drawn in: the margin is still in front of the row, and the
+        /// match is still behind it.
+        #[test]
+        fn a_match_inside_a_quarantined_block_stays_inside_it() {
+            let session = searching("haystack");
+            let (lines, _) = lay_out(&session, 90, 24);
+
+            let row = lines
+                .iter()
+                .find(|line| {
+                    let drawn: String = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect();
+                    drawn.contains("haystack")
+                })
+                .expect("the matched row is drawn");
+
+            let drawn: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+            assert!(
+                drawn.starts_with(&format!("  {QUARANTINE_BAR} ")),
+                "the match left the margin behind: {drawn}"
+            );
+            assert!(
+                row.spans
+                    .iter()
+                    .any(|span| span.style.add_modifier.contains(Modifier::REVERSED)),
+                "the match inside the block was not highlighted"
+            );
+        }
+
+        #[test]
+        fn a_quarantined_row_is_marked_in_the_scroller_as_it_is_in_the_transcript() {
+            let searched = searching("haystack");
+            let mut plain = reading();
+            plain.close_scroller();
+
+            let marked_rows = |session: &Session| {
+                let (lines, _) = lay_out(session, 90, 24);
+                lines
+                    .iter()
+                    .filter(|line| {
+                        let drawn: String = line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect();
+                        drawn.starts_with(&format!("  {QUARANTINE_BAR} "))
+                    })
+                    .count()
+            };
+
+            assert_eq!(
+                marked_rows(&searched),
+                marked_rows(&plain),
+                "the block lost or gained a margin under a search"
+            );
+        }
+
+        /// What a needle meets is the glyph the escape was replaced with on its way to the
+        /// screen. The bytes behind it are not there to be found, which is what keeps a match
+        /// from being a thing nobody can see.
+        #[test]
+        fn a_search_matches_what_is_drawn_and_not_the_bytes_behind_it() {
+            let (_, marked) = screen(&searching("\u{1b}[31m"));
+            assert!(
+                marked.is_empty(),
+                "the raw escape was found in the drawn text: {marked:?}"
+            );
+
+            let (_, glyph) = screen(&searching("␛"));
+            assert!(
+                !glyph.is_empty(),
+                "the glyph the escape is drawn as could not be found"
+            );
+        }
+
+        #[test]
+        fn a_search_that_matches_nothing_says_so_and_moves_nothing() {
+            let mut session = reading_over(100);
+            session.scroller_back(30);
+            let looking_at = session.scroll;
+
+            session.begin_search();
+            for c in "nothing at all like this".chars() {
+                session.type_into_search(c);
+            }
+            session.run_search();
+            let found = as_last_drawn(&session);
+            session.land_on_a_match(&found.matches);
+
+            assert_eq!(
+                session.scroll, looking_at,
+                "a search with no answer moved the view"
+            );
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("no matches"),
+                "the footer did not say there were none: {drawn}"
+            );
+        }
+
+        /// The top row of one frame drawn the way the loop draws it.
+        fn a_frame(session: &mut Session) -> String {
+            rows_of_a_frame(session)
+                .into_iter()
+                .next()
+                .expect("a screen has a row")
+        }
+
+        /// Holding the view has to hold it in the frame that draws it, not in the one after. The
+        /// end of the transcript moves with every token, so a frame that counts back from it is
+        /// drawn wherever the rows that arrived since the last frame have pushed the count, and
+        /// somebody trying to read while a turn writes watches the screen slide under them.
+        #[test]
+        fn a_turn_writing_underneath_does_not_slide_the_view_between_frames() {
+            let mut session = Session::new("kernel-enforced");
+            for n in 0..60 {
+                session.transcript.push(Entry::user(format!("prompt {n}")));
+                session
+                    .transcript
+                    .push(Entry::assistant(format!("reply {n}"), Vec::new()));
+            }
+            session.open_scroller();
+
+            a_frame(&mut session);
+            session.scroller_back(40);
+            let reading = a_frame(&mut session);
+            assert!(
+                reading.contains("prompt") || reading.contains("reply"),
+                "the view is not on the transcript: {reading:?}"
+            );
+
+            for n in 0..3 {
+                session
+                    .transcript
+                    .push(Entry::assistant(format!("arriving {n}"), Vec::new()));
+                assert_eq!(
+                    a_frame(&mut session),
+                    reading,
+                    "a row arriving below slid the view"
+                );
+            }
+        }
+
+        /// The view is held, so what arrives goes below it. Somebody reading has to be able to
+        /// tell that there is something they have not read.
+        #[test]
+        fn the_scroller_says_more_has_arrived_below() {
+            let mut session = reading_over(100);
+            session.scroller_back(12);
+
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("12 rows below"),
+                "nothing said there was more underneath: {drawn}"
+            );
+        }
+
+        /// A session reading back off the tail with a turn running underneath it.
+        fn reading_under_a_running_turn() -> Session {
+            let mut session = reading_over(100);
+            session.scroller_back(12);
+            session.status = Status::Working;
+            session
+        }
+
+        /// The word the indicator would have used, which the footer says in its place.
+        fn indicator_verb(session: &Session) -> String {
+            session
+                .indicator()
+                .expect("a turn in flight has an indicator")
+                .verb
+                .to_string()
+        }
+
+        /// A search is how somebody gets back to the part of a turn that went wrong, so it is the
+        /// state they are most likely to be in while one is still running. The indicator went with
+        /// the box and the view is held, so a footer that drops both leaves a screen where nothing
+        /// moves and nothing says a turn is in flight.
+        #[test]
+        fn a_standing_search_says_a_turn_is_running_and_how_much_arrived() {
+            let mut session = reading_under_a_running_turn();
+            search(&mut session, "needle");
+            let verb = indicator_verb(&session);
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains(&format!("{verb}…")),
+                "the footer under a standing search did not say the turn was running: {drawn}"
+            );
+            assert!(
+                drawn.contains("12 rows below"),
+                "the footer under a standing search did not say what had arrived: {drawn}"
+            );
+        }
+
+        /// The keys reach the search rather than the mode while a needle is being typed, so a turn
+        /// underneath goes on for as long as somebody takes over typing one.
+        #[test]
+        fn a_half_typed_search_says_a_turn_is_running_and_how_much_arrived() {
+            let mut session = reading_under_a_running_turn();
+            session.begin_search();
+            for c in "need".chars() {
+                session.type_into_search(c);
+            }
+            let verb = indicator_verb(&session);
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains(&format!("{verb}…")),
+                "the footer under a half-typed search did not say the turn was running: {drawn}"
+            );
+            assert!(
+                drawn.contains("12 rows below"),
+                "the footer under a half-typed search did not say what had arrived: {drawn}"
+            );
+        }
+
+        /// The row cannot hold the whole key list as well as a turn running underneath, and what
+        /// it gives up is the keys `?` lists anyway rather than the one that leaves the mode: a
+        /// footer naming no way out is what makes a mode look like an interface that has stopped.
+        #[test]
+        fn the_search_footer_names_the_way_out_with_a_turn_running_underneath() {
+            let mut session = reading_under_a_running_turn();
+            search(&mut session, "needle");
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains("q closes"),
+                "the footer gave up the way out to make room: {drawn}"
+            );
+        }
+
+        /// A needle is whatever somebody typed, and a long one leaves the row too narrow for the
+        /// match count, the turn and the keys together. What gives is what the turn is saying,
+        /// because `q` is the one thing on the row nobody inside the mode can find out any other
+        /// way.
+        #[test]
+        fn a_long_needle_keeps_the_way_out_and_gives_up_what_the_turn_says() {
+            let mut session = reading_under_a_running_turn();
+            search(&mut session, "a needle long enough to crowd the row");
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains("q closes"),
+                "a long needle cost the way out: {drawn}"
+            );
+            assert!(
+                !drawn.contains("12 rows below"),
+                "the row said more than it had the width for: {drawn}"
+            );
+        }
+
+        /// A needle wider than the whole row is the case the test above does not reach: there is
+        /// no room for the turn, the count or the keys, and the needle alone could fill the row.
+        /// The row has to cut the needle rather than let the right edge cut the way out.
+        #[test]
+        fn a_needle_wider_than_the_row_still_leaves_the_way_out() {
+            let mut session = reading_under_a_running_turn();
+            search(&mut session, &"x".repeat(200));
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains("q closes"),
+                "a needle wider than the row pushed the way out off it: {drawn}"
+            );
+            assert!(
+                drawn.contains('…'),
+                "the cut needle did not say it was cut: {drawn}"
+            );
+        }
+
+        /// The same for a needle still being typed, whose way out is Escape.
+        #[test]
+        fn a_needle_wider_than_the_row_being_typed_still_leaves_the_way_out() {
+            let mut session = reading_under_a_running_turn();
+            session.begin_search();
+            for c in "x".repeat(200).chars() {
+                session.type_into_search(c);
+            }
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains("esc to abandon"),
+                "a needle wider than the row pushed Escape off it: {drawn}"
+            );
+        }
+
+        /// The tail is what is kept, since the end is where the typing is happening.
+        #[test]
+        fn a_cut_needle_keeps_its_end() {
+            assert_eq!(needle_that_fits("abcdefgh", 4), "…fgh");
+            assert_eq!(needle_that_fits("abcd", 4), "abcd");
+            assert_eq!(needle_that_fits("abcd", 0), "");
+        }
+
+        /// The same rule while the needle is still being typed, where the way out is Escape and the
+        /// hint that names it sits at the end of the row.
+        #[test]
+        fn a_long_needle_being_typed_keeps_the_way_out_of_the_search() {
+            let mut session = reading_under_a_running_turn();
+            session.begin_search();
+            for c in "a needle long enough to crowd the row".chars() {
+                session.type_into_search(c);
+            }
+
+            let (drawn, _) = screen(&session);
+
+            assert!(
+                drawn.contains("esc to abandon"),
+                "a long needle being typed cost the way out: {drawn}"
+            );
+        }
+
+        /// The keys that walk the matches are what somebody wants the moment the first match is
+        /// not the one they were after, so a row with the width for them says them.
+        #[test]
+        fn a_search_footer_with_the_room_names_the_keys_that_walk_the_matches() {
+            let (drawn, _) = screen(&searching("needle"));
+
+            assert!(
+                drawn.contains("n next"),
+                "the footer never named the keys that walk the matches: {drawn}"
+            );
+        }
+
+        /// A press spent putting the list away is a press that did not scroll, and a list that
+        /// does not say so is indistinguishable from an interface that ignored the key.
+        #[test]
+        fn the_help_says_that_any_key_puts_it_away() {
+            let mut session = reading();
+            session.toggle_scroller_help();
+
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("any key"),
+                "the list never said what puts it away: {drawn}"
+            );
+            assert!(
+                drawn.contains(t!(scroller_key_close_list)),
+                "nothing said the press closes the list: {drawn}"
+            );
+        }
+
+        /// The list is the one place every key is written down. A key the specification names and
+        /// the list does not is a key nobody can find, and the two the search takes were named
+        /// only in the search's own footer, which is not on the screen while the list is.
+        ///
+        /// What is asked for here is every key docs/specs/scroller.md names, which is what the
+        /// clause holds the list to. A key answered by the code and named in neither is a
+        /// different fault, against the clause saying an unnamed key does nothing.
+        #[test]
+        fn the_help_names_every_key_the_scroller_spec_names() {
+            let mut session = reading();
+            session.toggle_scroller_help();
+
+            let rows = help_rows(&session);
+            // The key column is ` {key:<18}`, so the first nineteen columns of a row are the
+            // keys it is about and the rest is what they do.
+            let keys: Vec<String> = rows
+                .iter()
+                .map(|row| row.chars().take(19).collect::<String>().trim().to_string())
+                .collect();
+
+            // Every key docs/specs/scroller.md names, in the spelling the list gives it. The
+            // wheel is the one thing in that file which is not a key.
+            for spelling in [
+                "up/down, j/k, y/e",
+                "ctrl-y / ctrl-e",
+                "ctrl-p / ctrl-n",
+                "ctrl-u / ctrl-d",
+                "space, f / b",
+                "g / G, < / >",
+                "{ / }",
+                "/ then n/N",
+                "5j, 3}, 2n",
+                "enter / backspace",
+                "x",
+                "v",
+                "?",
+                "any key",
+            ] {
+                assert!(
+                    keys.iter().any(|key| key == spelling),
+                    "the list named no key {spelling:?}: {keys:?}"
+                );
+            }
+
+            // The way out carries whichever chord opened the scroller, so what is asked of it is
+            // the part that does not move.
+            assert!(
+                keys.iter().any(|key| key.starts_with("q / esc / ")),
+                "the list never named the way out: {keys:?}"
+            );
+
+            // A key that is a second spelling of one already listed rides on the description of
+            // the row it shares, which is where u, ctrl-f, home and ctrl-c are.
+            let list = rows.join("\n");
+            for alternate in ["u / d", "ctrl-f / ctrl-b", "home / end", "ctrl-c"] {
+                assert!(
+                    list.contains(alternate),
+                    "the list named no key {alternate:?}: {list}"
+                );
+            }
+        }
+
+        /// The list is the one place the keys are written down, so a key that closes the mode and
+        /// is named nowhere on the screen is a way out a person cannot find.
+        #[test]
+        fn the_help_names_every_key_that_closes_the_scroller() {
+            let mut session = reading();
+            session.toggle_scroller_help();
+
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("q / esc / ctrl-o"),
+                "the way out was not drawn whole: {drawn}"
+            );
+            assert_eq!(
+                drawn.matches("ctrl-c").count(),
+                1,
+                "the row listed ctrl-c more than once: {drawn}"
+            );
+        }
+
+        /// The row names the chord that opened the scroller, so a settings file moving it does not
+        /// leave the way out advertising a key that no longer opens or closes anything.
+        #[test]
+        fn the_help_names_the_chord_the_scroller_was_opened_with() {
+            let mut session = reading();
+            let mut moved = std::collections::BTreeMap::new();
+            moved.insert("scroller".to_string(), "alt-o".to_string());
+            session.adopt_keybindings(&moved);
+            session.toggle_scroller_help();
+
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains("q / esc / alt-o"),
+                "the way out was not drawn whole: {drawn}"
+            );
+            assert!(
+                !drawn.contains("ctrl-o"),
+                "the way out went on naming the chord nothing answers: {drawn}"
+            );
+        }
+
+        /// The list names the key that opens the delegates' views from the scroller, as it is bound,
+        /// so a settings file moving the chord does not leave the list advertising the old one
+        /// (MOUSE-10). The regression it rejects is a row that names a chord by its default.
+        #[test]
+        fn the_help_names_the_watch_chord_as_it_is_bound() {
+            let mut session = reading();
+            session.toggle_scroller_help();
+            let (drawn, _) = screen(&session);
+            assert!(
+                drawn.contains(t!(scroller_key_delegates)) && drawn.contains("ctrl-l"),
+                "{drawn}"
+            );
+
+            let mut moved = std::collections::BTreeMap::new();
+            moved.insert("watch".to_string(), "alt-w".to_string());
+            session.adopt_keybindings(&moved);
+            let (drawn, _) = screen(&session);
+            assert!(drawn.contains("alt-w"), "{drawn}");
+            assert!(!drawn.contains("ctrl-l"), "{drawn}");
+        }
+
+        /// The way out is the one row of a key list that must never be the row that did not fit.
+        #[test]
+        fn the_help_renders_on_a_tiny_terminal() {
+            let mut session = reading();
+            session.toggle_scroller_help();
+
+            for (width, height) in [(90, 24), (40, 8), (20, 4), (10, 3), (30, 2), (30, 1)] {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        draw(frame, &session);
+                    })
+                    .expect("draw succeeds");
+                let drawn: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(
+                    drawn.contains("q / esc"),
+                    "the way out did not fit at {width}x{height}: {drawn}"
+                );
+            }
+        }
+
+        /// What goes to an editor is what the person was looking at, not a second rendering that
+        /// agrees about the words and about nothing else. The margin is how untrusted content is
+        /// marked, so it goes too.
+        #[test]
+        fn what_goes_to_the_editor_is_marked_the_way_the_screen_is() {
+            let session = reading_over(40);
+
+            let text = as_text(&session);
+            let quarantined: Vec<&str> = text
+                .lines()
+                .filter(|line| line.contains("haystack"))
+                .collect();
+
+            assert_eq!(quarantined.len(), 1, "the block is not in the file");
+            assert!(
+                quarantined[0].starts_with(&format!("  {QUARANTINE_BAR} ")),
+                "untrusted content reached the file unmarked: {}",
+                quarantined[0]
+            );
+            assert!(
+                !text.contains('\u{1b}'),
+                "an escape reached the file as an escape"
+            );
+        }
+
+        /// A session at 80 by 24 whose one reply says `copy` in its prose, holds a block and says it
+        /// again after it, drawn once so that the width is the frame's.
+        fn a_reply_saying_copy_around_a_block() -> Session {
+            let mut session = Session::new("kernel-enforced");
+            session.transcript.push(Entry::assistant(
+                "Say copy once.\n```sh\nmake\n```\nand copy again",
+                Vec::new(),
+            ));
+            let (_, laid) = frame_of(&session, 80, 24);
+            session.note_layout(laid);
+            session
+        }
+
+        /// SCROLL-6: the word that copies a block is the interface's own, on the screen to be clicked,
+        /// and what goes to the editor is the transcript and not that word or the blanks that put it
+        /// at the right of the row. The words a reply says itself, `copy` among them, go as they are.
+        #[test]
+        fn what_goes_to_the_editor_leaves_out_the_word_that_copies_a_block() {
+            let session = a_reply_saying_copy_around_a_block();
+            let (drawn, _) = frame_of(&session, 80, 24);
+            assert_eq!(
+                drawn.matches("copy").count(),
+                3,
+                "the frame draws the word beside the two the reply says: {drawn}"
+            );
+
+            let text = as_text(&session);
+            assert_eq!(text.matches("copy").count(), 2, "{text}");
+            assert!(
+                text.lines().any(|line| line == "  sh"),
+                "the header went with the blanks that placed the word: {text:?}"
+            );
+            assert!(text.contains("Say copy once."), "{text}");
+        }
+
+        /// MOUSE-27: a search is for the transcript's text, so it finds the words a reply says and
+        /// neither the word that copies a block nor the blanks before it. The fixtures are searches
+        /// that the word, and a name and the blanks after it, would satisfy.
+        #[test]
+        fn a_search_finds_what_a_reply_says_and_not_the_word_that_copies_its_block() {
+            let found = |needle: &str| {
+                let mut session = a_reply_saying_copy_around_a_block();
+                session.open_scroller();
+                search(&mut session, needle);
+                as_last_drawn(&session).matches.len()
+            };
+            assert_eq!(found("copy"), 2);
+            assert_eq!(found("sh"), 1, "the name the fence gave is text");
+            assert_eq!(found("sh "), 0, "the blanks that place the word are not");
+            assert_eq!(found("   copy"), 0);
+        }
+    }
+
+    mod progress {
+        use super::*;
+        use bravebot_agent::report::Activity;
+
+        fn working() -> Session {
+            let mut session = Session::new("kernel-enforced");
+            session.type_char('a');
+            session.submit();
+            session
+        }
+
+        /// A call has to be legible while it runs, or the transcript is still blank during the
+        /// part of a turn that takes the longest.
+        #[test]
+        fn a_call_in_flight_is_drawn() {
+            let mut session = working();
+            session.start_activity(Activity::running("Read", "src/main.rs"));
+            assert!(rendered(&session).contains("Read(src/main.rs)"));
+        }
+
+        /// A person who pressed Enter has to be able to see that the words went somewhere. The
+        /// line sitting quietly under the box is what this replaced, and it read as a key press
+        /// that had been ignored.
+        #[test]
+        fn a_waiting_prompt_is_shown_as_waiting() {
+            let mut session = working();
+            for c in "do some long task".chars() {
+                session.type_char(c);
+            }
+            assert!(session.queue());
+
+            let output = rendered(&session);
+            assert!(
+                output.contains("do some long task"),
+                "the prompt was not shown"
+            );
+            assert!(output.contains("QUEUED"), "nothing said it was waiting");
+        }
+
+        const SEND_NOW: &str = "ctrl-enter to stop the turn and send now";
+
+        fn waiting_behind_a_turn(lines: &[&str]) -> Session {
+            let mut session = working();
+            session.ctrl_enter_arrives = true;
+            for line in lines {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                assert!(session.queue());
+            }
+            session
+        }
+
+        /// One offer for the whole queue, since the key sends the whole queue, and under the last
+        /// of it, where the eye ends up after reading what is waiting.
+        #[test]
+        fn the_offer_to_send_now_is_drawn_under_the_last_waiting_prompt() {
+            let session = waiting_behind_a_turn(&["do some long task", "and another one"]);
+
+            let output = rendered(&session);
+            assert_eq!(output.matches(SEND_NOW).count(), 1, "{output}");
+            let offer = output.find(SEND_NOW).expect("offered");
+            assert!(
+                offer
+                    > output
+                        .find("and another one")
+                        .expect("the last one is drawn"),
+                "the offer was drawn above the last waiting prompt: {output}"
+            );
+        }
+
+        /// Offered to a terminal that reports Ctrl-Enter as Enter, it would be advice to press a key
+        /// that does something else.
+        #[test]
+        fn the_offer_to_send_now_is_not_drawn_where_the_key_cannot_arrive() {
+            let mut session = waiting_behind_a_turn(&["do some long task"]);
+            session.ctrl_enter_arrives = false;
+
+            let output = rendered(&session);
+            assert!(output.contains("QUEUED"), "nothing said it was waiting");
+            assert!(!output.contains("ctrl-enter"), "{output}");
+        }
+
+        /// Dropped whole where the width will not hold it. Cut off, it would end part way through
+        /// telling somebody what the key does.
+        #[test]
+        fn the_offer_to_send_now_is_dropped_whole_where_it_does_not_fit() {
+            let session = waiting_behind_a_turn(&["do some long task"]);
+
+            let output = rendered_at(&session, 40, 24);
+            assert!(output.contains("QUEUED"), "nothing said it was waiting");
+            assert!(!output.contains("ctrl-enter"), "{output}");
+        }
+
+        /// Nothing is waiting once the queue has been taken back, so nothing under the box may
+        /// go on saying that something is. The rows are the only place a person can see what is
+        /// still going to be sent, and rows left behind would say two prompts were on their way
+        /// while both of them sat in the box.
+        #[test]
+        fn the_waiting_rows_go_when_the_queue_is_taken_back() {
+            let mut session = working();
+            for line in ["do some long task", "and another one"] {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                assert!(session.queue());
+            }
+            assert!(rendered(&session).contains("QUEUED"), "nothing was waiting");
+
+            session.unqueue();
+
+            let output = rendered(&session);
+            assert!(!output.contains("QUEUED"), "still drawn as waiting");
+            assert!(
+                output.contains("do some long task") && output.contains("and another one"),
+                "the prompts left the screen instead of coming back to the box"
+            );
+        }
+
+        /// It stops being drawn the moment its own turn starts, because from then on it is in
+        /// the transcript like any other prompt and two copies is one too many.
+        #[test]
+        fn a_prompt_stops_waiting_once_its_turn_begins() {
+            let mut session = working();
+            for c in "do some long task".chars() {
+                session.type_char(c);
+            }
+            session.queue();
+            session.complete("an answer", Vec::new(), 0);
+            session.send_queued().expect("it went");
+
+            let output = rendered(&session);
+            assert!(!output.contains("QUEUED"), "still drawn as waiting");
+            assert!(
+                output.contains("do some long task"),
+                "it left the screen entirely"
+            );
+        }
+
+        /// And the same the other way it can stop waiting, which is the ordinary way now: the turn
+        /// in flight takes it. It moves from the rows under the box into the transcript, because it
+        /// has been said, and two copies is one too many either way.
+        #[test]
+        fn a_prompt_stops_waiting_once_the_running_turn_takes_it() {
+            let mut session = working();
+            for c in "actually look at b.txt".chars() {
+                session.type_char(c);
+            }
+            session.queue();
+            assert!(rendered(&session).contains("QUEUED"), "nothing was waiting");
+
+            session.interjected();
+
+            let output = rendered(&session);
+            assert!(!output.contains("QUEUED"), "still drawn as waiting");
+            assert!(
+                output.contains("actually look at b.txt"),
+                "it left the screen entirely"
+            );
+        }
+
+        const INTO_THIS_TURN: &str = "into this turn, next round";
+        const ITS_OWN_TURN: &str = "a new turn after this";
+        const INTO_THE_NEXT_TURN: &str = "into the next turn";
+        const CARRIED_OUT: &str = "carried out after this";
+        const RUN: &str = "run in your shell";
+
+        fn queued_behind(mut session: Session, line: &str) -> Session {
+            for c in line.chars() {
+                session.type_char(c);
+            }
+            assert!(session.queue());
+            session
+        }
+
+        /// A correction sent while a turn runs is read by that turn, and a person deciding whether
+        /// to stop the turn over it needs to know that it is about to be.
+        #[test]
+        fn a_prompt_waiting_on_a_running_turn_is_said_to_go_into_it() {
+            let session = queued_behind(working(), "actually look at b.txt");
+
+            let output = rendered(&session);
+            assert!(output.contains(INTO_THIS_TURN), "{output}");
+            assert!(!output.contains(ITS_OWN_TURN), "{output}");
+        }
+
+        /// INPUT-10, RUN-17. A `job_output` wait ends within a tick of a line the turn may take, and
+        /// the turn reads the line at the boundary after it, so the mark is the ordinary one while the
+        /// wait runs. A mark that treated a call in flight as a turn that will not read the line would
+        /// tell the person to stop a turn that is about to answer them.
+        #[test]
+        fn a_prompt_waiting_on_a_job_output_wait_is_said_to_go_into_the_turn() {
+            let mut session = working();
+            session.start_activity(
+                Activity::running("Wait", "job:1")
+                    .of_tool("job_output")
+                    .saying_why("waiting for the build"),
+            );
+            let session = queued_behind(session, "which step is done?");
+
+            let output = rendered(&session);
+            assert!(output.contains("which step is done?"), "{output}");
+            assert!(output.contains(INTO_THIS_TURN), "{output}");
+            assert!(!output.contains(ITS_OWN_TURN), "{output}");
+        }
+
+        /// An aside such as `/compact` is handed a queue of its own and reads nothing sent behind
+        /// it, so the prompt starts a turn when the aside ends. Said to go into what is running, it
+        /// would be a promise that the thing drawing the spinner is about to read it.
+        #[test]
+        fn a_prompt_waiting_on_an_aside_is_said_to_go_as_its_own_turn() {
+            let mut session = Session::new("kernel-enforced");
+            session.begin_aside();
+            let session = queued_behind(session, "actually look at b.txt");
+
+            let output = rendered(&session);
+            assert!(output.contains(ITS_OWN_TURN), "{output}");
+            assert!(!output.contains(INTO_THIS_TURN), "{output}");
+        }
+
+        /// A turn asked to stop takes nothing at the boundary it stops at, so what waits behind it
+        /// goes once it has stopped, as a turn of its own.
+        #[test]
+        fn a_prompt_waiting_on_a_turn_being_stopped_is_said_to_go_as_its_own_turn() {
+            let mut session = queued_behind(working(), "actually look at b.txt");
+            session.stop_asked();
+
+            let output = rendered(&session);
+            assert!(output.contains(ITS_OWN_TURN), "{output}");
+            assert!(!output.contains(INTO_THIS_TURN), "{output}");
+        }
+
+        /// The stop was asked of one turn. The next one takes what is sent behind it like any other,
+        /// and a stop still standing would say every later prompt is going to wait.
+        #[test]
+        fn a_prompt_waiting_on_the_turn_after_a_stop_is_said_to_go_into_it() {
+            let mut session = queued_behind(queued_behind(working(), "one"), "two");
+            session.stop_asked();
+            session.stopped(Some(0));
+            session.restore("a");
+            assert_eq!(session.send_queued().as_deref(), Some("one"));
+
+            let output = rendered(&session);
+            assert!(output.contains(INTO_THIS_TURN), "{output}");
+            assert!(!output.contains(ITS_OWN_TURN), "{output}");
+        }
+
+        /// A stop lands once the worker and every delegate have returned, which can be seconds
+        /// after the press. A screen that stands still that long reads as a press nobody heard,
+        /// and the presses that follow walk toward the two at an empty box that leave.
+        #[test]
+        fn a_turn_asked_to_stop_says_so_until_it_ends() {
+            const STOPPING: &str = "Stopping…";
+            let mut session = working();
+            let output = rendered(&session);
+            assert!(!output.contains(STOPPING), "{output}");
+
+            session.stop_asked();
+            let output = rendered(&session);
+            assert!(output.contains(STOPPING), "{output}");
+
+            session.stopped(Some(0));
+            let output = rendered(&session);
+            assert!(!output.contains(STOPPING), "{output}");
+        }
+
+        /// The wait is on the delegates the turn started, and the row says how many are left, so a
+        /// stop that takes seconds shows the number going down rather than one word standing still.
+        #[test]
+        fn a_stopping_turn_draws_the_delegates_it_waits_on() {
+            let mut session = working();
+            let ids = [1, 2].map(bravebot_agent::report::DelegateId::nth);
+            for id in ids {
+                session.delegate_started(bravebot_agent::report::Delegation {
+                    stop: Default::default(),
+                    id,
+                    kind: "reader".to_string(),
+                    task: "find the parser".to_string(),
+                });
+            }
+            session.stop_asked();
+            let output = rendered(&session);
+            assert!(
+                output.contains("Stopping, waiting on 2 delegates…"),
+                "{output}"
+            );
+
+            session.delegate_finished(ids[0], "stopped".to_string(), true, None);
+            let output = rendered(&session);
+            assert!(
+                output.contains("Stopping, waiting on 1 delegate…"),
+                "{output}"
+            );
+        }
+
+        /// Only the prompt that starts a turn leaves the buffer that turn reads, so the prompts behind
+        /// it go into the turn it starts, a command between them or not. Said to be turns of their
+        /// own, each would promise a turn that never begins. A command ahead of the first is no
+        /// prompt, so the first still starts the turn.
+        #[test]
+        fn the_prompts_behind_the_one_that_starts_a_turn_are_said_to_go_into_it() {
+            let mut session = Session::new("kernel-enforced");
+            session.begin_aside();
+            for line in ["/usage", "read one.txt", "/clear", "read two.txt"] {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                if line.starts_with('/') {
+                    assert!(session.queue_command());
+                } else {
+                    assert!(session.queue());
+                }
+            }
+
+            let output = rendered(&session);
+            let at = |said: &str| {
+                output
+                    .find(said)
+                    .unwrap_or_else(|| panic!("{said:?} is not drawn: {output}"))
+            };
+            let order = [
+                at("/usage"),
+                at(CARRIED_OUT),
+                at("read one.txt"),
+                at(ITS_OWN_TURN),
+                at("/clear"),
+                at("read two.txt"),
+                at(INTO_THE_NEXT_TURN),
+            ];
+            assert!(order.is_sorted(), "{order:?}: {output}");
+            assert_eq!(output.matches(ITS_OWN_TURN).count(), 1, "{output}");
+        }
+
+        /// A command and a command line are carried out rather than sent into the turn, and the row
+        /// is the only thing on screen that says so. Each row says it of its own line, in the order
+        /// they were typed.
+        #[test]
+        fn each_waiting_line_says_where_it_is_going() {
+            let mut session = queued_behind(working(), "look at b.txt");
+            for c in "/clear".chars() {
+                session.type_char(c);
+            }
+            assert!(session.queue_command());
+            session.shell = true;
+            for c in "ls -la".chars() {
+                session.type_char(c);
+            }
+            assert!(session.queue_shell());
+
+            let output = rendered(&session);
+            let at = |said: &str| {
+                output
+                    .find(said)
+                    .unwrap_or_else(|| panic!("{said:?} is not drawn: {output}"))
+            };
+            let order = [
+                at("look at b.txt"),
+                at(INTO_THIS_TURN),
+                at("/clear"),
+                at(CARRIED_OUT),
+                at("! ls -la"),
+                at(RUN),
+            ];
+            assert!(order.is_sorted(), "{order:?}: {output}");
+        }
+
+        /// Cut off, it could stop at "into this" over a prompt that is not going into anything, so
+        /// where the width will not hold it the mark stands alone.
+        #[test]
+        fn where_it_is_going_is_dropped_whole_where_it_does_not_fit() {
+            let session = queued_behind(working(), "do some long task");
+
+            let output = rendered_at(&session, 36, 24);
+            assert!(output.contains("QUEUED"), "nothing said it was waiting");
+            assert!(!output.contains("into"), "{output}");
+        }
+
+        /// The row of the line that follows `line` in `rows`, which is its mark.
+        fn mark_under<'a>(rows: &'a [String], line: &str) -> &'a str {
+            // Without the words at the right of the row that remove the line from the queue.
+            let own = |row: &str| {
+                let row = row.trim();
+                let row = row
+                    .strip_suffix(t!(queued_remove))
+                    .unwrap_or(row)
+                    .trim_end();
+                row.strip_suffix(t!(queued_clear_all))
+                    .unwrap_or(row)
+                    .trim_end()
+                    .to_string()
+            };
+            let at = rows
+                .iter()
+                .position(|row| own(row) == line)
+                .unwrap_or_else(|| panic!("{line:?} is not drawn: {rows:#?}"));
+            &rows[at + 1]
+        }
+
+        /// A command that would have been carried out as it was typed, but waits behind a line ahead
+        /// of it, says which line, so "after this" is not the whole of why it is still there. A
+        /// prompt and a shell line are named by what they are. The regression it rejects is every
+        /// waiting command marked the same, which leaves a person looking at `/rename` under the box
+        /// and unable to tell what holds it.
+        #[test]
+        fn a_command_waiting_behind_a_line_names_that_line_on_its_mark() {
+            let queue_command = |session: &mut Session, line: &str| {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                assert!(session.queue_command());
+            };
+            let mut after_a_command = working();
+            queue_command(&mut after_a_command, "/clear");
+            queue_command(&mut after_a_command, "/rename deploy watch");
+            queue_command(&mut after_a_command, "/note a thought");
+            let mut after_a_prompt = queued_behind(working(), "look at b.txt");
+            queue_command(&mut after_a_prompt, "/effort high");
+            let mut after_a_shell_line = working();
+            after_a_shell_line.shell = true;
+            for c in "ls -la".chars() {
+                after_a_shell_line.type_char(c);
+            }
+            assert!(after_a_shell_line.queue_shell());
+            queue_command(&mut after_a_shell_line, "/forget-trust");
+
+            let rows = rows_at(&after_a_command, 100, 30);
+            assert!(
+                mark_under(&rows, "/rename deploy watch").contains("after /clear"),
+                "{rows:#?}"
+            );
+            assert!(
+                mark_under(&rows, "/note a thought").contains("after /clear"),
+                "{rows:#?}"
+            );
+            let rows = rows_at(&after_a_prompt, 100, 30);
+            assert!(
+                mark_under(&rows, "/effort high").contains("after the prompt before it"),
+                "{rows:#?}"
+            );
+            let rows = rows_at(&after_a_shell_line, 100, 30);
+            assert!(
+                mark_under(&rows, "/forget-trust").contains("after the shell line before it"),
+                "{rows:#?}"
+            );
+        }
+
+        /// A command that waits for the turn on its own account is not held by the lines ahead of
+        /// it: `/clear` waits whatever is typed before it, so its mark does not name a prompt it
+        /// would have waited behind in any case.
+        #[test]
+        fn a_command_that_waits_for_the_turn_does_not_name_the_line_ahead_of_it() {
+            let mut session = queued_behind(working(), "look at b.txt");
+            for c in "/clear".chars() {
+                session.type_char(c);
+            }
+            assert!(session.queue_command());
+
+            let rows = rows_at(&session, 100, 24);
+
+            let mark = mark_under(&rows, "/clear");
+            assert!(mark.contains(CARRIED_OUT), "{rows:#?}");
+            assert!(!mark.contains("after the prompt"), "{rows:#?}");
+        }
+
+        /// During an aside every command queues, so a command can sit ahead of the line that would
+        /// have held it back had it been typed after. Its mark names only what is ahead of it.
+        #[test]
+        fn a_command_does_not_name_a_line_typed_after_it() {
+            let mut session = Session::new("kernel-enforced");
+            session.begin_aside();
+            for line in ["/note a thought", "/clear"] {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                assert!(session.queue_command());
+            }
+
+            let rows = rows_at(&session, 100, 24);
+
+            let mark = mark_under(&rows, "/note a thought");
+            assert!(mark.contains(CARRIED_OUT), "{rows:#?}");
+            assert!(!mark.contains("after /clear"), "{rows:#?}");
+        }
+
+        /// Where the mark has no room for the line a command waits behind, as with a line typed in
+        /// wide characters, it says where the line goes in the plain words. The regression it rejects
+        /// is a mark dropped whole, which leaves a waiting command with no mark at all.
+        #[test]
+        fn a_mark_with_no_room_for_the_line_it_waits_behind_says_where_the_line_goes() {
+            let mut session = working();
+            for line in ["/cd 日本語日本語日本語日本語", "/rename deploy watch"] {
+                for c in line.chars() {
+                    session.type_char(c);
+                }
+                assert!(session.queue_command());
+            }
+
+            let rows = rows_at(&session, 40, 24);
+
+            let at = rows
+                .iter()
+                .position(|row| row.contains("/rename deploy watch"))
+                .unwrap_or_else(|| panic!("/rename is not drawn: {rows:#?}"));
+            assert!(rows[at + 1].contains(CARRIED_OUT), "{rows:#?}");
+            assert!(!rows[at + 1].contains("after /cd"), "{rows:#?}");
+        }
+
+        /// The last row carries both where its line is going and the key that sends the queue now,
+        /// and on an 80-column terminal it holds both whatever that line is. The offer is only made
+        /// while a turn runs and has not been asked to stop, so those three are every line it can
+        /// sit beside.
+        #[test]
+        fn the_offer_to_send_now_fits_beside_where_the_last_line_goes() {
+            let into = waiting_behind_a_turn(&["do some long task"]);
+            let mut command = waiting_behind_a_turn(&[]);
+            for c in "/clear".chars() {
+                command.type_char(c);
+            }
+            assert!(command.queue_command());
+            let mut shell = waiting_behind_a_turn(&[]);
+            shell.shell = true;
+            for c in "ls -la".chars() {
+                shell.type_char(c);
+            }
+            assert!(shell.queue_shell());
+
+            for (session, goes) in [(into, INTO_THIS_TURN), (command, CARRIED_OUT), (shell, RUN)] {
+                let rows = rows_at(&session, 80, 24);
+                assert!(
+                    rows.iter()
+                        .any(|row| row.contains(goes) && row.contains(SEND_NOW)),
+                    "{goes:?} and the offer are not on one row: {rows:#?}"
+                );
+            }
+        }
+
+        /// Narrower than that, the last row keeps the key and drops the words, since the key is the
+        /// one way to hurry what is waiting and the rows above it still say where theirs are going.
+        #[test]
+        fn the_offer_to_send_now_is_kept_over_where_the_last_line_goes() {
+            let session = waiting_behind_a_turn(&["do some long task", "and another one"]);
+
+            let rows = rows_at(&session, 60, 24);
+            let offer = rows
+                .iter()
+                .find(|row| row.contains(SEND_NOW))
+                .unwrap_or_else(|| panic!("the offer was dropped: {rows:#?}"));
+            assert!(!offer.contains(INTO_THIS_TURN), "{rows:#?}");
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.contains(INTO_THIS_TURN))
+                    .count(),
+                1,
+                "the first line no longer says where it is going: {rows:#?}"
+            );
+        }
+
+        /// Nearly every call reads into the planner's context, so a line saying so appeared
+        /// under nearly every call and distinguished nothing. It crowded out the lines that do.
+        #[test]
+        fn the_ordinary_landing_is_not_given_a_line_of_its_own() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Read", "src/main.rs").done("12 lines"));
+            session.landed(bravebot_agent::report::Landing::Context);
+
+            let output = rendered(&session);
+            assert!(
+                output.contains("Read(src/main.rs)"),
+                "the call itself is still drawn"
+            );
+            assert!(
+                !output.contains("planner's context"),
+                "the ordinary case took a row anyway"
+            );
+        }
+
+        /// PROMPT-1: a call about a file whose name ends in a space is drawn with the name
+        /// spelled, so the line is not read as one about the file without the space.
+        #[test]
+        fn a_call_about_a_file_draws_a_name_that_ends_in_a_space_spelled() {
+            let mut session = working();
+            session.finish_activity(
+                Activity::running("Read", "note.md ")
+                    .naming_a_file(true)
+                    .done("3 lines"),
+            );
+
+            let output = rendered(&session);
+            assert!(
+                output.contains("Read(\"note.md\u{2423}\")"),
+                "the name was not spelled: {output}"
+            );
+            assert!(
+                !output.contains("Read(note.md )"),
+                "the name was drawn as written: {output}"
+            );
+        }
+
+        /// What the design turns on is the exception, and dropping the ordinary line is what
+        /// leaves room for it to be noticed.
+        #[test]
+        fn a_result_the_planner_may_not_read_still_says_so() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Read", "notes.md").done("3 lines"));
+            session.landed(bravebot_agent::report::Landing::Quarantined);
+            assert!(rendered(&session).contains("only an isolated processor"));
+
+            let mut named = working();
+            named.finish_activity(Activity::running("List", ".").done("4 files"));
+            named.landed(bravebot_agent::report::Landing::Reserved);
+            assert!(rendered(&named).contains("only its name is known"));
+        }
+
+        /// The longest silence in a turn is the one while the model writes, and it is the one
+        /// with the most to show. A token counter is not what is being written.
+        #[test]
+        fn a_reply_is_drawn_while_it_is_still_arriving() {
+            let mut session = working();
+            session.streaming("Looking at the render code");
+            assert!(
+                rendered(&session).contains("Looking at the render code"),
+                "the reply was invisible until the round was over"
+            );
+        }
+
+        /// The tail and the entry that replaces it are the same words drawn the same way in the
+        /// same place, which is what makes the handover invisible. Drawn differently, a finished
+        /// round would make the screen jump for no reason a reader could name.
+        #[test]
+        fn a_reply_looks_the_same_arriving_as_it_does_arrived() {
+            let mut arriving = working();
+            arriving.streaming("# Heading\n\nSome **bold** prose.");
+
+            let mut arrived = working();
+            arrived.narrate("# Heading\n\nSome **bold** prose.");
+
+            assert_eq!(rendered(&arriving), rendered(&arrived));
+        }
+
+        /// A model with no channel of its own for its working opens the reply with it. Drawn,
+        /// the answer sits under a paragraph nobody asked for, and the tail spends the whole
+        /// round showing a model talking to itself.
+        #[test]
+        fn a_thought_the_model_wrote_into_the_reply_is_not_drawn() {
+            let mut arriving = working();
+            arriving.streaming("<think>they want to know how drawing works");
+            assert!(
+                !rendered(&arriving).contains("they want to know"),
+                "the working was drawn while it was being written"
+            );
+
+            arriving.streaming("</think>Looking at the render code");
+            let output = rendered(&arriving);
+            assert!(output.contains("Looking at the render code"));
+            assert!(
+                !output.contains("they want to know"),
+                "the working was drawn"
+            );
+        }
+
+        /// The model's thinking is drawn only while a person asked to see it, as plain text under a
+        /// heading of its own above the reply, with nothing in it able to act on the terminal, and
+        /// it is gone once the round's words replace the tail.
+        #[test]
+        fn the_models_thinking_is_drawn_only_when_asked_for_and_inert() {
+            let mut arriving = working();
+            arriving.thinking("the user wants **a file**\u{1b}[31m red");
+            arriving.streaming("Looking at it");
+            assert!(
+                !rendered(&arriving).contains("the user wants"),
+                "the thinking was drawn without being asked for"
+            );
+
+            arriving.toggle_thinking();
+            let output = rendered(&arriving);
+            assert!(output.contains("thinking"), "no heading: {output}");
+            assert!(
+                output.contains("the user wants **a file**"),
+                "markdown was read in the thinking: {output}"
+            );
+            assert!(
+                output.contains("\u{241b}[31m"),
+                "an escape reached the screen as one: {output}"
+            );
+            assert!(!output.contains('\u{1b}'));
+            assert!(
+                output.find("the user wants").unwrap() < output.find("Looking at it").unwrap(),
+                "the thinking was not above the reply: {output}"
+            );
+
+            arriving.narrate("Looking at it");
+            let output = rendered(&arriving);
+            assert!(output.contains("Looking at it"));
+            assert!(
+                !output.contains("the user wants"),
+                "the thinking outlived its round: {output}"
+            );
+        }
+
+        #[test]
+        fn a_finished_call_shows_what_came_of_it() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Search", "todo").done("4 matches"));
+
+            let output = rendered(&session);
+            assert!(output.contains("Search(todo)"));
+            assert!(output.contains("4 matches"), "the result was not shown");
+        }
+
+        /// The change is what a user most wants to see after a write, and the counts alone ask
+        /// them to take it on trust.
+        #[test]
+        fn a_write_shows_the_lines_that_changed() {
+            let mut session = working();
+            session.finish_activity(
+                Activity::running("Update", "a.rs")
+                    .done("added 1 line, removed 1 line")
+                    .with_changes(vec![
+                        Change::Removed("was here".into()),
+                        Change::Added("is here now".into()),
+                    ]),
+            );
+
+            let output = rendered(&session);
+            assert!(output.contains("added 1 line, removed 1 line"));
+            assert!(output.contains("is here now"), "the addition is missing");
+            assert!(output.contains("was here"), "the removal is missing");
+        }
+
+        /// A diff that stops without saying so reads as the whole change, which is how a
+        /// reviewer misses half of it.
+        #[test]
+        fn a_long_diff_says_how_much_it_left_out() {
+            let changes: Vec<Change> = (0..MAX_DIFF_LINES + 5)
+                .map(|n| Change::Added(format!("line {n}")))
+                .collect();
+            let lines = diff_lines(&changes, false, false, 80);
+
+            assert_eq!(lines.len(), MAX_DIFF_LINES + 1);
+            let last = lines.last().expect("a line").to_string();
+            assert!(last.contains("5 more"), "the omission is silent: {last}");
+        }
+
+        /// A short diff is shown whole, with nothing appended to suggest otherwise.
+        #[test]
+        fn a_short_diff_is_shown_whole_with_no_note() {
+            let lines = diff_lines(&[Change::Added("only line".into())], false, false, 80);
+            assert_eq!(lines.len(), 1);
+        }
+
+        /// Everything drawn for one call, as one string to look for things in.
+        fn drawn_for(activity: &Activity) -> String {
+            activity_lines(activity, None, false, 80)
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The reason the planner gave is the call's headline, with the call itself under it, while
+        /// it runs and once it is over. The finished line replaces the running one, so a reason
+        /// drawn on only one of them is gone the moment the call ends; and a reason of several
+        /// lines is kept to its first, since the headline is one row and not a paragraph.
+        #[test]
+        fn a_call_is_headed_by_the_reason_it_was_made() {
+            let running = Activity::running("Search", "MAX_STEPS")
+                .saying_why("find where the bound is set\nand then some");
+            for activity in [running.clone(), running.done("4 matches")] {
+                let rows = activity_lines(&activity, None, false, 80);
+                assert!(
+                    rows[0].to_string().ends_with("find where the bound is set"),
+                    "the reason is not the headline: {}",
+                    rows[0]
+                );
+                assert_eq!(rows[1].to_string(), "  ⎿ Search(MAX_STEPS)");
+            }
+        }
+
+        /// The call sits between the headline and what came of it, so the result reads as the
+        /// result of that call rather than of the reason.
+        #[test]
+        fn the_call_comes_before_its_result() {
+            let done = Activity::running("Read", "tests/test_scripts.py")
+                .saying_why("See how profile.json keys are tested")
+                .done("180 lines");
+            let rows: Vec<String> = activity_lines(&done, None, false, 80)
+                .iter()
+                .map(|row| row.to_string())
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    "⏺ See how profile.json keys are tested",
+                    "  ⎿ Read(tests/test_scripts.py)",
+                    "  ⎿ 180 lines",
+                ]
+            );
+        }
+
+        /// A call with no reason is drawn as it was before there was one to give, with nothing
+        /// trailing the call.
+        #[test]
+        fn a_call_with_no_reason_draws_nothing_beside_it() {
+            let head = activity_lines(&Activity::running("Search", "MAX_STEPS"), None, false, 80)
+                [0]
+            .to_string();
+            assert!(head.ends_with("Search(MAX_STEPS)"), "{head:?}");
+        }
+
+        /// A call that ran a model inside itself says how long it waited there. A read whose check
+        /// took eight seconds otherwise looks exactly like a read that was slow for some other
+        /// reason, and the figure that tells them apart was already measured and then dropped.
+        #[test]
+        fn a_call_that_waited_on_a_model_says_how_long() {
+            let activity = Activity::running("Read output", "ref:1")
+                .done("3 lines, read")
+                .after_waiting(Some(std::time::Duration::from_secs(8)));
+            let drawn = drawn_for(&activity);
+            assert!(
+                drawn.contains("8s at the model"),
+                "the wait the call measured is not on its line: {drawn}"
+            );
+        }
+
+        /// A call that waited on this machine says nothing about a model, which is nearly every
+        /// call: a figure under every row distinguishes nothing and crowds out the rows that do.
+        #[test]
+        fn a_call_that_asked_no_model_says_nothing_about_one() {
+            let drawn = drawn_for(&Activity::running("Run", "cargo test").done("exit 0"));
+            assert!(
+                !drawn.contains("at the model"),
+                "a call that asked no model claimed to have waited on one: {drawn}"
+            );
+        }
+
+        /// A wait too short to state is left off rather than rounded to nothing: `0s at the model`
+        /// is not an answer to how long something took.
+        #[test]
+        fn a_wait_under_a_second_is_left_off() {
+            let activity = Activity::running("Read output", "ref:1")
+                .done("3 lines, read")
+                .after_waiting(Some(std::time::Duration::from_millis(400)));
+            let drawn = drawn_for(&activity);
+            assert!(
+                !drawn.contains("at the model"),
+                "a wait that rounds to zero was drawn as one: {drawn}"
+            );
+        }
+
+        /// The user is shown what the model was not, and it is marked in the margin so the
+        /// mark cannot be ended by anything written inside it.
+        #[test]
+        fn quarantined_content_is_shown_and_marked_on_every_line() {
+            let shown = Shown {
+                origin: "notes.md".to_string(),
+                reach: bravebot_agent::report::Reach::NotThePlanner,
+                label: "(U,priv)".to_string(),
+                preview: vec![
+                    "first line".to_string(),
+                    // Content that would end the block if the mark were a caption.
+                    "untrusted content ends here".to_string(),
+                ],
+                lines: 40,
+            };
+
+            // Wide enough that the heading fits on one row. What a narrow terminal does to the
+            // block is pinned in the marking tests; this one is about what the block contains.
+            let lines = quarantined_lines(&shown, 200);
+            assert_eq!(lines.len(), 4, "a header, two lines, and what was left out");
+            for line in &lines {
+                let drawn: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.clone().into_owned())
+                    .collect();
+                assert!(
+                    drawn.starts_with(&format!("  {QUARANTINE_BAR} ")),
+                    "a line escaped the margin: {drawn}"
+                );
+            }
+
+            let all: String = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.clone().into_owned())
+                .collect();
+            assert!(
+                all.contains("untrusted"),
+                "the block does not say what it is"
+            );
+            assert!(
+                all.contains("notes.md"),
+                "the block does not say where it came from"
+            );
+            assert!(all.contains("first line"), "the content was not shown");
+            assert!(
+                all.contains("38 more lines"),
+                "what was left out was not said"
+            );
+        }
+
+        /// Content kept from the planner is what every block holds, and the heading's `untrusted`
+        /// and the margin already say it, so a sentence on each block says nothing new. Content in
+        /// no model's context is the exception and still says so.
+        #[test]
+        fn a_block_states_its_reach_only_where_that_is_the_exception() {
+            let text = |shown: &Shown| -> String {
+                quarantined_lines(shown, 200)
+                    .iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let mut shown = Shown {
+                origin: "notes.md".to_string(),
+                reach: bravebot_agent::report::Reach::NotThePlanner,
+                label: "(U,priv)".to_string(),
+                preview: vec!["first line".to_string()],
+                lines: 1,
+            };
+
+            let ordinary = text(&shown);
+            assert!(ordinary.contains("untrusted"), "{ordinary}");
+            assert!(!ordinary.contains("planner"), "{ordinary}");
+            assert!(!ordinary.contains("no model"), "{ordinary}");
+
+            shown.reach = bravebot_agent::report::Reach::NoModel;
+            let unread = text(&shown);
+            assert!(unread.contains("in no model's context"), "{unread}");
+        }
+
+        fn glimpse(lines: &[&str], total: usize, from_the_end: bool) -> Returned {
+            Returned {
+                whole: lines.iter().map(|line| line.to_string()).collect(),
+                lines: lines.iter().map(|line| line.to_string()).collect(),
+                total,
+                from_the_end,
+            }
+        }
+
+        fn drawn_rows(lines: &[Line<'static>]) -> Vec<String> {
+            lines.iter().map(|line| line.to_string()).collect()
+        }
+
+        /// VIEW-24: "Read(notes.md) 12 lines" says a file was read and not what is in it, which
+        /// is the thing a person watching wants to check.
+        #[test]
+        fn what_the_planner_read_is_drawn_under_its_call() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Read", "notes.md").done("12 lines"));
+            session.landed(Landing::Context);
+            session.returned(glimpse(&["first note", "second note"], 12, false));
+
+            let rows: Vec<String> = transcript_lines(&session, 90, 24)
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            let call = rows
+                .iter()
+                .position(|row| row.contains("Read(notes.md)"))
+                .expect("the call is drawn");
+            let first = rows
+                .iter()
+                .position(|row| row.contains("first note"))
+                .expect("what the planner read is not drawn");
+            assert!(first > call, "the glimpse is not under its call: {rows:#?}");
+            assert!(
+                rows[first + 1].contains("second note"),
+                "the glimpse is out of order: {rows:#?}"
+            );
+            assert!(
+                rows[first + 2].contains("10 more lines"),
+                "what the glimpse left out was not said: {rows:#?}"
+            );
+        }
+
+        /// ASK-13, VIEW-42: a scroll-back view of an `ask_user` call holds each question and what
+        /// became of it, drawn from the picker's own values with no reply from the planner given,
+        /// and the call's line still counts the questions (ASK-10). The regressions it rejects:
+        /// rows that are only drawn once the planner's result arrives, rows lost when the call
+        /// finishes, and the count line replaced by the rows.
+        #[test]
+        fn a_settled_ask_user_call_shows_each_question_and_its_answer_without_a_reply() {
+            use bravebot_core::ask::{Answer, Choice, Question, Series, asking};
+            let mut session = working();
+            session.start_activity(Activity::running("Ask", "which library"));
+            let series = asking(&Series::new(vec![
+                Question::new(
+                    "Library",
+                    "Which library?",
+                    vec![Choice::new("serde", None), Choice::new("miniserde", None)],
+                    false,
+                ),
+                Question::new("Name", "What to call it?", Vec::new(), false),
+            ]));
+            crate::ask::put(&mut session, &series, |_| {
+                vec![Answer::Chosen(vec![1]), Answer::Typed("own words".into())]
+            });
+            session.finish_activity(
+                Activity::running("Ask", "which library").done("2 questions asked"),
+            );
+
+            let rows: Vec<String> = transcript_lines(&session, 90, 24)
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            let at = |needle: &str| {
+                rows.iter()
+                    .position(|row| row.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle:?} is not drawn: {rows:#?}"))
+            };
+            let call = at("Ask(which library)");
+            assert!(rows[call + 1].contains("2 questions asked"), "{rows:#?}");
+            assert!(at("Library: Which library?") > call, "{rows:#?}");
+            assert!(
+                at("chose: miniserde") > at("Library: Which library?"),
+                "{rows:#?}"
+            );
+            assert!(
+                at("Name: What to call it?") > at("chose: miniserde"),
+                "{rows:#?}"
+            );
+            assert!(
+                at("answered: own words") > at("Name: What to call it?"),
+                "{rows:#?}"
+            );
+        }
+
+        /// ASK-13: a series nobody could be asked draws no rows, since "skipped" under each
+        /// question would read as the person's choice. The regression it rejects: rows drawn for
+        /// a reply with no answers in it.
+        #[test]
+        fn a_series_nobody_could_be_asked_draws_no_rows() {
+            use bravebot_core::ask::{Choice, Question, Series, asking};
+            let mut session = working();
+            session.start_activity(Activity::running("Ask", "which library"));
+            let series = asking(&Series::new(vec![Question::new(
+                "Library",
+                "Which library?",
+                vec![Choice::new("serde", None)],
+                false,
+            )]));
+            crate::ask::put(&mut session, &series, |_| Vec::new());
+            session.finish_activity(
+                Activity::running("Ask", "which library").done("1 question asked"),
+            );
+
+            let rows: Vec<String> = transcript_lines(&session, 90, 24)
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            assert!(
+                rows.iter()
+                    .all(|row| !row.contains("Which library?") && !row.contains("skipped")),
+                "{rows:#?}"
+            );
+        }
+
+        /// VIEW-24: the planner read exactly this, so drawing it in the marked block would say the
+        /// opposite of what is true.
+        #[test]
+        fn what_the_planner_read_is_not_drawn_as_quarantined() {
+            let rows = drawn_rows(&returned_lines(&glimpse(&["plain"], 3, false), false, 80));
+            assert_eq!(rows.len(), 2, "a line, and what was left out: {rows:#?}");
+            for row in &rows {
+                assert!(
+                    !row.contains(QUARANTINE_BAR),
+                    "a result the planner read was drawn as quarantined: {row}"
+                );
+            }
+        }
+
+        /// VIEW-24: how a command went is at the end of what it printed, so its glimpse is the last
+        /// lines, and what it left out is said above them.
+        #[test]
+        fn a_glimpse_from_the_end_says_what_came_before_it() {
+            let rows = drawn_rows(&returned_lines(
+                &glimpse(&["step 8", "step 9"], 9, true),
+                false,
+                80,
+            ));
+            assert!(
+                rows[0].contains("7 earlier lines"),
+                "what came before is not said first: {rows:#?}"
+            );
+            assert!(rows[1].contains("step 8") && rows[2].contains("step 9"));
+            assert_eq!(rows.len(), 3, "{rows:#?}");
+        }
+
+        /// VIEW-24: a glimpse is the size it says it is. A minified file is one line, and wrapped
+        /// it would fill the screen the glimpse was meant to leave room on.
+        #[test]
+        fn a_glimpse_line_is_cut_to_one_row() {
+            let long = "x".repeat(200);
+            let rows = drawn_rows(&returned_lines(&glimpse(&[&long], 1, false), false, 40));
+            assert_eq!(rows.len(), 1, "a long line took more than a row: {rows:#?}");
+            assert!(
+                wrap::display_width(&rows[0]) <= 40,
+                "the row is wider than the terminal: {}",
+                rows[0]
+            );
+            assert!(
+                rows[0].ends_with('…'),
+                "nothing says it was cut: {}",
+                rows[0]
+            );
+        }
+
+        /// VIEW-24: an escape takes no column until it is made visible, and one once it is, so a
+        /// line of them is measured as drawn or it slips past the cut and wraps.
+        #[test]
+        fn a_line_of_escapes_is_cut_to_one_row_all_the_same() {
+            let escapes = "\u{1b}".repeat(200);
+            let rows = drawn_rows(&returned_lines(&glimpse(&[&escapes], 1, false), false, 40));
+            assert_eq!(
+                rows.len(),
+                1,
+                "a line of escapes took more than a row: {rows:#?}"
+            );
+            assert!(
+                rows[0].ends_with('…'),
+                "nothing says it was cut: {}",
+                rows[0]
+            );
+        }
+
+        /// SCROLL-10: an expanded result draws every line the agent kept, each behind the plain
+        /// margin, and the collapsed form is still the five-line glimpse.
+        #[test]
+        fn an_expanded_result_shows_every_line_it_kept() {
+            let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let mut returned = glimpse(&refs[..5], 40, false);
+            returned.whole = lines.clone();
+
+            let rows = drawn_rows(&returned_lines(&returned, true, 80));
+            assert_eq!(rows.len(), 40, "{rows:#?}");
+            for (row, line) in rows.iter().zip(&lines) {
+                assert_eq!(row, &format!("    {line}"));
+            }
+            let rows = drawn_rows(&returned_lines(&returned, false, 80));
+            assert_eq!(rows.len(), 6, "five lines and what was left out: {rows:#?}");
+        }
+
+        /// SCROLL-10: lines the agent did not keep are still counted, on the side they were cut from.
+        #[test]
+        fn an_expanded_result_says_how_many_lines_the_bound_cut() {
+            let mut returned = glimpse(&["a"], 50, false);
+            returned.whole = (0..10).map(|n| format!("l{n}")).collect();
+
+            let rows = drawn_rows(&returned_lines(&returned, true, 80));
+            assert_eq!(rows.len(), 11, "{rows:#?}");
+            assert!(rows[10].contains("40 more lines"), "{rows:#?}");
+        }
+
+        /// SCROLL-10: an escape in a late line is drawn inert, as it is in the glimpse.
+        #[test]
+        fn a_late_line_of_an_expanded_result_cannot_draw_its_own_escapes() {
+            let mut returned = glimpse(&["early"], 8, false);
+            returned.whole = (0..7)
+                .map(|n| format!("l{n}"))
+                .chain(["\u{1b}[2Jcleared\u{7}".to_string()])
+                .collect();
+
+            let rows = drawn_rows(&returned_lines(&returned, true, 80));
+            assert_eq!(rows.len(), 8);
+            assert!(
+                !rows.iter().any(|row| row.chars().any(|c| c.is_control())),
+                "a control character reached the screen: {rows:?}"
+            );
+        }
+
+        /// SCROLL-10: an expanded write shows every change and no longer says any were left out.
+        #[test]
+        fn an_expanded_write_shows_past_twelve_lines() {
+            let changes: Vec<Change> = (0..MAX_DIFF_LINES + 5)
+                .map(|n| Change::Added(format!("line {n}")))
+                .collect();
+
+            let lines = diff_lines(&changes, false, true, 80);
+            assert_eq!(lines.len(), MAX_DIFF_LINES + 5);
+            assert!(!lines.last().expect("a line").to_string().contains("more"));
+        }
+
+        /// SCROLL-10: the key expands the call the view is on, and the same key collapses it back to
+        /// the five-line form.
+        #[test]
+        fn the_expand_key_toggles_the_call_the_view_is_on() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Run", "make").done("ok"));
+            session.landed(Landing::Context);
+            let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+            session.returned(Returned {
+                lines: lines[..5].to_vec(),
+                total: 40,
+                from_the_end: false,
+                whole: lines.clone(),
+            });
+            session.open_scroller();
+            session.laid.width = 80;
+            session.laid.height = 10;
+            session.laid = as_last_drawn(&session);
+            let collapsed = as_text(&session);
+
+            session.toggle_expanded(as_last_drawn);
+            let expanded = as_text(&session);
+            assert!(expanded.contains("line 39"), "{expanded}");
+            assert!(!expanded.contains("more lines"), "{expanded}");
+
+            session.laid = as_last_drawn(&session);
+            session.toggle_expanded(as_last_drawn);
+            assert_eq!(as_text(&session), collapsed);
+        }
+
+        /// SCROLL-10: expansion belongs to the scroller, so the transcript at rest is drawn with
+        /// the glimpse again once it closes.
+        #[test]
+        fn a_transcript_at_rest_is_drawn_collapsed_after_the_scroller_closes() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Run", "make").done("ok"));
+            session.landed(Landing::Context);
+            let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+            session.returned(Returned {
+                lines: lines[..5].to_vec(),
+                total: 40,
+                from_the_end: false,
+                whole: lines,
+            });
+            session.open_scroller();
+            session.laid.width = 80;
+            session.laid.height = 10;
+            session.laid = as_last_drawn(&session);
+            session.toggle_expanded(as_last_drawn);
+            assert!(as_text(&session).contains("line 39"));
+
+            session.close_scroller();
+            assert!(!as_text(&session).contains("line 39"));
+        }
+
+        /// SCROLL-10: the key acts on a call on the screen, never on one scrolled out of sight.
+        #[test]
+        fn the_expand_key_leaves_a_call_below_the_screen_alone() {
+            let mut session = working();
+            for n in 0..30 {
+                session.finish_activity(Activity::running("Read", format!("f{n}")).done("1 line"));
+                session.landed(Landing::Context);
+                session.returned(glimpse(&["x"], 1, false));
+            }
+            session.finish_activity(Activity::running("Run", "make").done("ok"));
+            session.landed(Landing::Context);
+            let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+            session.returned(Returned {
+                lines: lines[..5].to_vec(),
+                total: 40,
+                from_the_end: false,
+                whole: lines,
+            });
+            session.open_scroller();
+            session.laid.width = 80;
+            session.laid.height = 10;
+            session.laid = as_last_drawn(&session);
+            session.scroller_to_first_row();
+            let before = as_text(&session);
+
+            session.toggle_expanded(as_last_drawn);
+            assert_eq!(as_text(&session), before);
+        }
+
+        /// SCROLL-10: a call with nothing past its glimpse is not toggled, and the view stays put.
+        #[test]
+        fn the_expand_key_does_nothing_where_a_call_has_no_more() {
+            let mut session = working();
+            session.finish_activity(Activity::running("Read", "a").done("2 lines"));
+            session.landed(Landing::Context);
+            session.returned(glimpse(&["x", "y"], 2, false));
+            session.open_scroller();
+            session.laid.width = 80;
+            session.laid.height = 10;
+            session.laid = as_last_drawn(&session);
+            let before = as_text(&session);
+
+            session.toggle_expanded(as_last_drawn);
+            assert_eq!(as_text(&session), before);
+        }
+
+        /// VIEW-24: a file the planner may read can still hold an escape, and a glimpse of it is
+        /// drawn by this module and not by the file.
+        #[test]
+        fn a_glimpse_cannot_draw_its_own_escapes() {
+            let rows = drawn_rows(&returned_lines(
+                &glimpse(&["\u{1b}[2Jcleared\u{7}"], 1, false),
+                false,
+                80,
+            ));
+            let row = &rows[0];
+            assert!(
+                !row.chars().any(|c| c.is_control()),
+                "a control character reached the screen: {row:?}"
+            );
+            assert!(
+                row.contains('\u{241b}') && row.contains("cleared"),
+                "the escape was dropped rather than shown: {row}"
+            );
+        }
+
+        /// VIEW-30: a command's output the planner read is drawn without its colour codes, and one
+        /// row under the lines says how many there were.
+        #[test]
+        fn a_glimpse_counts_its_colour_codes_and_does_not_draw_them() {
+            let rows = drawn_rows(&returned_lines(
+                &glimpse(
+                    &["\u{1b}[36m├\u{1b}[0m one", "\u{1b}[1mtwo\u{1b}[0m"],
+                    2,
+                    false,
+                ),
+                false,
+                80,
+            ));
+
+            assert_eq!(
+                rows,
+                ["    ├ one", "    two", "    4 colour codes not drawn"]
+            );
+        }
+
+        /// VIEW-30: a line is cut to one row by what it draws as, so the codes it no longer draws
+        /// cannot make a line that fits look too wide.
+        #[test]
+        fn a_glimpse_line_is_measured_without_its_colour_codes() {
+            let words = "x".repeat(30);
+            let line = format!("\u{1b}[1m{words}\u{1b}[0m\u{1b}[1m\u{1b}[0m");
+            let rows = drawn_rows(&returned_lines(&glimpse(&[&line], 1, false), false, 40));
+
+            assert_eq!(rows[0], format!("    {words}"));
+        }
+
+        /// VIEW-30: the count is about the lines above it, so it is the last row even where the
+        /// glimpse was taken from the end and its note about earlier lines is the first.
+        #[test]
+        fn a_glimpse_from_the_end_counts_its_colour_codes_last() {
+            let rows = drawn_rows(&returned_lines(
+                &glimpse(&["\u{1b}[1mfailed\u{1b}[0m"], 5, true),
+                false,
+                80,
+            ));
+
+            assert!(rows[0].contains("earlier"), "{rows:?}");
+            assert_eq!(
+                rows.last().map(String::as_str),
+                Some("    2 colour codes not drawn")
+            );
+        }
+
+        /// VIEW-30: a glimpse with no colour code says nothing about them.
+        #[test]
+        fn a_glimpse_without_colour_codes_says_nothing_about_them() {
+            let rows = drawn_rows(&returned_lines(&glimpse(&["plain"], 1, false), false, 80));
+
+            assert_eq!(rows, ["    plain"]);
+        }
+
+        /// Tool lines come in runs and read as one block. Spacing them apart would double the
+        /// height of every turn that read more than a file or two.
+        #[test]
+        fn tool_lines_are_not_spaced_apart() {
+            let mut session = working();
+            for path in ["a.rs", "b.rs"] {
+                session.finish_activity(Activity::running("Read", path).done("1 line"));
+            }
+
+            let blanks = transcript_lines(&session, 90, 24)
+                .iter()
+                .filter(|line| line.to_string().trim().is_empty())
+                .count();
+            assert_eq!(blanks, 1, "the prompt's own blank line is the only one");
+        }
+    }
+
+    /// The end of a path is the part that names the file, so a row too narrow for the whole thing
+    /// keeps the end. Cutting the other way leaves every attachment in a deep directory reading as
+    /// the same prefix with the filename gone, which is the one thing the row exists to show.
+    #[test]
+    fn a_path_too_long_for_its_row_keeps_the_end_of_it() {
+        let path = "/very/deeply/nested/directory/screenshot.png";
+        let shown = tail_of(path, 20);
+        assert!(shown.chars().count() <= 20, "{shown}");
+        assert!(shown.ends_with("screenshot.png"), "{shown}");
+        assert!(shown.starts_with('…'), "nothing said it was cut: {shown}");
+    }
+
+    #[test]
+    fn a_path_that_fits_is_left_alone() {
+        assert_eq!(tail_of("/tmp/a.png", 40), "/tmp/a.png");
+    }
+
+    /// A row is cut by the columns it draws, and a character two cells wide, an emoji presentation
+    /// sequence and a halfwidth voiced mark each take more than a count of characters says. Rejects:
+    /// a cut by characters, which came to more than the room, so a path in wide characters lost the
+    /// end of its name to the row's edge and a hover line ran past it. The end of a path and the start
+    /// of an address are what is kept, at every room.
+    #[test]
+    fn a_cut_is_made_by_columns_whatever_the_characters_are() {
+        use crate::wrap::display_width;
+        let names = [
+            "/\u{65e5}\u{672c}\u{8a9e}/\u{30d5}\u{30a1}\u{30a4}\u{30eb}\u{540d}/shot.png",
+            "/\u{2764}\u{fe0f}\u{2764}\u{fe0f}\u{2764}\u{fe0f}/\u{2764}\u{fe0f}\u{2764}\u{fe0f}.png",
+            "/\u{ff76}\u{ff9e}\u{ff76}\u{ff9e}\u{ff76}\u{ff9e}/\u{ff76}\u{ff9e}\u{ff76}\u{ff9e}.png",
+            "/e\u{301}e\u{301}e\u{301}e\u{301}/e\u{301}e\u{301}e\u{301}e\u{301}.png",
+        ];
+        for name in names {
+            let end: String = crate::wrap::cluster_strs(name)
+                .last()
+                .map(|(cluster, _)| cluster.to_string())
+                .expect("a cluster");
+            let start: String = crate::wrap::cluster_strs(name)
+                .first()
+                .map(|(cluster, _)| cluster.to_string())
+                .expect("a cluster");
+            for room in 2..=40 {
+                let tail = tail_of(name, room);
+                assert!(display_width(&tail) <= room, "{name:?} in {room}: {tail:?}");
+                let head = head_of(name, room);
+                assert!(display_width(&head) <= room, "{name:?} in {room}: {head:?}");
+                if display_width(name) > room {
+                    assert!(
+                        tail.starts_with('\u{2026}') && tail.ends_with(&end),
+                        "{tail:?}"
+                    );
+                    assert!(
+                        head.ends_with('\u{2026}') && head.starts_with(&start),
+                        "{head:?}"
+                    );
+                } else {
+                    assert_eq!((tail.as_str(), head.as_str()), (name, name));
+                }
+            }
+        }
+    }
+
+    /// A user about to send a file should be able to see which file: `[Image #1]` alone does not
+    /// tell a screenshot from a private key.
+    #[test]
+    fn an_attached_file_is_named_under_the_box() {
+        let directory = crate::testutil::scratch_dir("bravebot-render-attached");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("scratch");
+        std::fs::write(directory.join("shot.png"), [0x89u8, 0x50]).expect("write");
+
+        let mut session = Session::new("none").in_workspace(&directory);
+        session.drop_files(&directory.join("shot.png").to_string_lossy());
+
+        let output = rendered(&session);
+        assert!(output.contains("[Image #1]"), "no marker drawn: {output}");
+        assert!(
+            output.contains("shot.png"),
+            "the file was not named: {output}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// An empty box says nothing about what it takes, and the one thing a person opening this for
+    /// the first time needs to know is that they may simply ask.
+    #[test]
+    fn an_empty_box_says_what_it_is_for() {
+        let session = Session::new("none");
+        assert!(
+            rendered(&session).contains("Ask Brave Bot to do anything"),
+            "the box said nothing"
+        );
+    }
+
+    /// The prompt character stays put and the invitation stands behind it, in the column the first
+    /// character typed lands in. Drawn over the prompt instead, the whole row shifted the moment
+    /// somebody typed, which reads as the box jumping under their hands.
+    #[test]
+    fn the_invitation_stands_where_the_first_character_will() {
+        const WIDTH: u16 = 90;
+
+        let empty = Session::new("none");
+        let invited = rendered_at(&empty, WIDTH, 24)
+            .find("Ask Brave Bot")
+            .expect("the invitation was not drawn");
+
+        let mut typed = Session::new("none");
+        typed.type_char('f');
+        let landed = rendered_at(&typed, WIDTH, 24)
+            .find("> f")
+            .expect("the typed line was not drawn")
+            + "> ".len();
+
+        assert_eq!(
+            invited % WIDTH as usize,
+            landed % WIDTH as usize,
+            "the row moved when the first character was typed"
+        );
+    }
+
+    /// The caret is drawn on the invitation's first character, the cell the first typed character
+    /// will take. Drawn on the prompt character or nowhere, the empty box would show no caret on
+    /// the place a person is about to type.
+    #[test]
+    fn the_caret_sits_on_the_first_character_of_the_invitation() {
+        const WIDTH: u16 = 90;
+
+        let session = Session::new("none");
+        let screen = rendered_at(&session, WIDTH, 24);
+        let invited = screen[..screen
+            .find("Ask Brave Bot")
+            .expect("the invitation was not drawn")]
+            .chars()
+            .count();
+
+        let (column, row, under) = caret_cell(&session, WIDTH, 24).expect("no caret was drawn");
+
+        assert_eq!(
+            under, "A",
+            "the caret is not on the invitation's first character"
+        );
+        assert_eq!(
+            (usize::from(row) * usize::from(WIDTH)) + usize::from(column),
+            invited,
+            "the caret is not where the invitation begins"
+        );
+    }
+
+    /// FILES-9: the files state owns every key, so the box keeps its text and is drawn without a
+    /// caret, whether the line is empty or holds a prompt.
+    #[test]
+    fn the_box_is_drawn_without_its_caret_while_the_state_is_open() {
+        for typed in ["", "half a prompt"] {
+            let mut session = Session::new("none");
+            session.note_layout(crate::state::Laid {
+                columns: 120,
+                ..crate::state::Laid::default()
+            });
+            for c in typed.chars() {
+                session.type_char(c);
+            }
+            let diff = bravebot_agent::diff::Diff::compute("old\n", "new\n");
+            session.transcript.push(crate::state::Entry::tool(
+                bravebot_agent::report::Activity::running("Update", "a.rs")
+                    .of_tool("edit_file")
+                    .with_changes(diff.condensed(3))
+                    .with_written(Some(bravebot_agent::report::Written {
+                        landed: "a.rs".into(),
+                        added: diff.added(),
+                        removed: diff.removed(),
+                        numbers: diff.condensed_numbers(3),
+                    }))
+                    .done("done"),
+            ));
+            assert!(
+                caret_cell(&session, 120, 24).is_some(),
+                "the box had no caret before the state opened: {typed:?}"
+            );
+            session.toggle_files();
+            assert!(session.files_open());
+            assert_eq!(
+                caret_cell(&session, 120, 24),
+                None,
+                "the box drew a caret while the state was open: {typed:?}"
+            );
+            if !typed.is_empty() {
+                assert!(rendered_at(&session, 120, 24).contains(typed));
+            }
+        }
+    }
+
+    /// It stands in for the line rather than being part of it, so the first character typed takes
+    /// its place. Left drawn, it would read as text the person now has to delete.
+    #[test]
+    fn the_invitation_goes_the_moment_anything_is_typed() {
+        let mut session = Session::new("none");
+        session.type_char('h');
+
+        let output = rendered(&session);
+        assert!(
+            !output.contains("Ask Brave Bot"),
+            "the invitation outstayed the empty line: {output}"
+        );
+        assert!(output.contains('h'), "the character was not drawn");
+    }
+
+    /// And it comes back when the line goes, since the box is empty again and says so again.
+    #[test]
+    fn the_invitation_comes_back_when_the_line_does_not() {
+        let mut session = Session::new("none");
+        session.type_char('h');
+        session.clear_input();
+
+        assert!(rendered(&session).contains("Ask Brave Bot to do anything"));
+    }
+
+    /// Shell mode has its own prompt, its own colour and its own hint line, all saying the line
+    /// goes to a shell. An invitation to ask a question would contradict every one of them.
+    #[test]
+    fn the_invitation_is_not_offered_where_the_line_is_a_command() {
+        let mut session = Session::new("none");
+        session.type_char('!');
+        assert!(session.shell, "shell mode was not armed");
+
+        let output = rendered(&session);
+        assert!(
+            !output.contains("Ask Brave Bot"),
+            "offered in shell mode: {output}"
+        );
+    }
+
+    /// A key pressed to stop something emptied the box and said nothing, and the same key pressed
+    /// again ends the session. The line under the box is where that is said, because it is where a
+    /// person is already looking when the words they were writing vanish.
+    #[test]
+    fn the_way_out_is_offered_where_the_line_went() {
+        let mut session = Session::new("none");
+        session.type_char('x');
+        assert!(
+            !rendered(&session).contains("ctrl-c again"),
+            "offered before anything was cleared"
+        );
+
+        session.clear_input();
+        session.cleared_by_interrupt = true;
+
+        let hint = hint_row_at(&session, 90, 24);
+        assert!(hint.contains("ctrl-c again to exit"), "{hint}");
+    }
+
+    /// A person who typed `exit` to leave is looking at a turn starting, and nothing on the screen
+    /// says the line went to the model as a prompt. The row under the box is where they are already
+    /// looking, and it names the keys that stop the turn and leave, for as long as that turn runs.
+    #[test]
+    fn the_row_under_the_box_says_a_sent_leave_word_went_to_the_model_as_a_prompt() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let said = "Sent as a prompt; ctrl-c stops it, /exit leaves";
+        let mut session = typed("exit");
+        let before = hint_row_at(&session, 90, 24);
+        assert!(!before.contains(said), "said before any Enter: {before}");
+
+        crate::app::handle_key(
+            &mut session,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(session.a_turn_is_running(), "the line did not start a turn");
+        let sent = hint_row_at(&session, 90, 24);
+        assert!(sent.contains(said), "{sent}");
+
+        session.complete("done", Vec::new(), 0);
+        let after = hint_row_at(&session, 90, 24);
+        assert!(!after.contains(said), "left up after the turn: {after}");
+    }
+
+    /// The note is about a lone `exit` or `quit` and no other line: a prompt that merely contains
+    /// the word is a question like any other, and a note saying it was a leave word would be wrong.
+    #[test]
+    fn the_row_under_the_box_says_nothing_of_a_prompt_that_is_more_than_a_leave_word() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut session = typed("how do I exit");
+        crate::app::handle_key(
+            &mut session,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(session.a_turn_is_running(), "the line did not start a turn");
+
+        let hint = hint_row_at(&session, 90, 24);
+        assert!(!hint.contains("Sent as a prompt"), "{hint}");
+    }
+
+    /// The note takes its room ahead of the parts of the line, and the permission mode is the part
+    /// given up last because it decides whether the next write stops to ask. A note too wide for
+    /// eighty columns clears the whole left side, so the person reading it is told how to leave and
+    /// not told that every write is going through.
+    #[test]
+    fn the_note_on_a_sent_leave_word_leaves_the_permission_mode_on_an_eighty_column_row() {
+        use bravebot_agent::PermissionMode;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (mode, vi) in [
+            (PermissionMode::Bypass, false),
+            (PermissionMode::AcceptEdits, true),
+            (PermissionMode::Plan, true),
+        ] {
+            let mut session = Session::new("kernel-enforced").starting_in_bypass();
+            while session.permission_mode() != mode {
+                session.cycle_permission_mode();
+            }
+            if vi {
+                session.choose_editing(crate::vim::Editing::Vi);
+            }
+            for c in "exit".chars() {
+                session.type_char(c);
+            }
+            crate::app::handle_key(
+                &mut session,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            assert!(session.a_turn_is_running(), "the line did not start a turn");
+
+            let hint = hint_row_at(&session, 80, 24);
+            assert!(
+                hint.contains("Sent as a prompt; ctrl-c stops it, /exit leaves"),
+                "{mode:?}: {hint}"
+            );
+            let named =
+                crate::status::named_mode(mode, true).expect("every mode but asking is named");
+            assert!(
+                hint.contains(named),
+                "{mode:?} (vi: {vi}) was cleared by the note: {hint}"
+            );
+            if vi {
+                assert!(hint.contains("INSERT"), "{mode:?} lost the vi mode: {hint}");
+            }
+        }
+    }
+
+    /// Rubbing the marker out is the only way a person has to change their mind about a file, and
+    /// the row under the box is the only place they can see whether it worked. Left drawn, it says
+    /// a file is going that is not.
+    #[test]
+    fn deleting_the_marker_takes_the_row_out_from_under_the_box() {
+        let directory = crate::testutil::scratch_dir("bravebot-render-attached-deleted");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("scratch");
+        std::fs::write(directory.join("shot.png"), [0x89u8, 0x50]).expect("write");
+
+        let mut session = Session::new("none").in_workspace(&directory);
+        session.drop_files(&directory.join("shot.png").to_string_lossy());
+        assert!(
+            rendered(&session).contains("shot.png"),
+            "the file was never named"
+        );
+
+        while !session.input().is_empty() {
+            session.backspace();
+        }
+        for c in "what is in the directory?".chars() {
+            session.type_char(c);
+        }
+
+        let output = rendered(&session);
+        assert!(
+            !output.contains("shot.png"),
+            "the attachment was still drawn: {output}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// An attachment belongs to the line still in the box, and a queued prompt has already gone.
+    /// Drawn the other way round, a file staged during a turn sat under prompts it was no part
+    /// of, which reads as though it went with one of them.
+    #[test]
+    fn what_is_attached_is_drawn_above_what_is_waiting() {
+        let directory = crate::testutil::scratch_dir("bravebot-render-attached-order");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("scratch");
+        std::fs::write(directory.join("shot.png"), [0x89u8, 0x50]).expect("write");
+
+        let mut session = Session::new("none").in_workspace(&directory);
+        session.type_char('a');
+        session.submit();
+        for c in "the waiting prompt".chars() {
+            session.type_char(c);
+        }
+        assert!(session.queue(), "nothing was queued");
+        session.drop_files(&directory.join("shot.png").to_string_lossy());
+
+        let output = rendered(&session);
+        let attached = output.find("shot.png").expect("the file was not named");
+        let waiting = output.find("QUEUED").expect("nothing said it was waiting");
+        assert!(
+            attached < waiting,
+            "the attachment was drawn under the queue: {output}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// What the half-typed line could still become is drawn last. A prompt already queued is
+    /// something the person believes they have sent, and a list opened by typing `?` over it must
+    /// not push it out of sight.
+    #[test]
+    fn what_is_waiting_is_drawn_above_what_the_half_typed_line_could_become() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        for c in "the waiting prompt".chars() {
+            session.type_char(c);
+        }
+        assert!(session.queue(), "nothing was queued");
+        session.type_char('?');
+
+        let output = rendered_at(&session, 120, 40);
+        let waiting = output.find("QUEUED").expect("nothing said it was waiting");
+        let offered = output
+            .find("run a shell command")
+            .expect("the shortcut list was not offered");
+        assert!(
+            waiting < offered,
+            "the queue was drawn under the list the line could become: {output}"
+        );
+    }
+
+    /// The key took a line off the screen, so something has to say where it went. Without the row,
+    /// a press that emptied the box is indistinguishable from one that threw the words away, and the
+    /// only way to find out which it was is to press again and hope.
+    #[test]
+    fn a_stashed_line_is_named_under_the_box() {
+        let mut session = Session::new("none");
+        for c in "the thought I put away".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+
+        let output = rendered(&session);
+        assert!(
+            output.contains("the thought I put away"),
+            "the line went nowhere anybody could see: {output}"
+        );
+        assert!(
+            output.contains("ctrl-s"),
+            "nothing said which key brings it back: {output}"
+        );
+    }
+
+    /// The row goes when the line comes back, because the line is in the box and the row would be
+    /// saying a second copy is waiting somewhere.
+    #[test]
+    fn the_row_goes_when_the_stashed_line_comes_back() {
+        let mut session = Session::new("none");
+        for c in "a thought".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+        session.stash();
+
+        let output = rendered(&session);
+        assert!(
+            !output.contains("stashed"),
+            "the row outlived the stash: {output}"
+        );
+    }
+
+    /// A paragraph put away is one row here. It is a reminder that something is waiting rather than
+    /// the line itself, and drawn whole it would push the transcript off the screen to say so.
+    #[test]
+    fn a_stashed_paragraph_is_one_row() {
+        let mut session = Session::new("none");
+        session.paste_text("first line\nsecond line\nthird line");
+        session.stash();
+
+        assert_eq!(
+            stashed_lines(&session, 90).len(),
+            1,
+            "a paragraph took more than its row"
+        );
+    }
+
+    /// No row may be wider than the terminal. One that is wraps, which takes a row the layout did not
+    /// reserve and pushes the hint line off the screen. Swept across every width down to nothing,
+    /// since the arithmetic that drops the reminder to keep the words is where this would go wrong.
+    #[test]
+    fn no_stashed_row_runs_past_the_edge() {
+        let mut session = Session::new("none");
+        for c in "rewrite the parser to use the new lexer entirely".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+
+        for width in 0..=200u16 {
+            for line in stashed_lines(&session, width) {
+                let drawn = line.to_string();
+                assert!(
+                    drawn.chars().count() <= width as usize,
+                    "a row ran past {width}: {drawn}"
+                );
+            }
+        }
+    }
+
+    /// Which line is waiting is the part only this row can say, and the key is in the list `?` puts
+    /// up as well. So where the two cannot both fit the words stay: cut to `ctrl-s to bring i`, the
+    /// reminder is worse than absent.
+    #[test]
+    fn a_narrow_terminal_keeps_the_words_and_drops_the_reminder() {
+        let mut session = Session::new("none");
+        for c in "rewrite the parser".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+
+        let narrow = stashed_lines(&session, 30)
+            .first()
+            .expect("no row was drawn")
+            .to_string();
+        assert!(
+            narrow.contains("rewrite"),
+            "the line was crushed out of its own row: {narrow}"
+        );
+        assert!(
+            !narrow.contains("ctrl-s to bring i"),
+            "the reminder was drawn cut off: {narrow}"
+        );
+    }
+
+    /// The row belongs to the box: it is what the next press of one key puts back into it. Above the
+    /// queue, whose prompts have gone, and below the attachments, which belong to the line in the
+    /// box now.
+    #[test]
+    fn what_is_stashed_is_drawn_between_the_attachments_and_the_queue() {
+        let directory = crate::testutil::scratch_dir("bravebot-render-stash-order");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("scratch");
+        std::fs::write(directory.join("shot.png"), [0x89u8, 0x50]).expect("write");
+
+        let mut session = Session::new("none").in_workspace(&directory);
+        session.type_char('a');
+        session.submit();
+        for c in "the waiting prompt".chars() {
+            session.type_char(c);
+        }
+        assert!(session.queue(), "nothing was queued");
+        for c in "the stashed thought".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+        session.drop_files(&directory.join("shot.png").to_string_lossy());
+
+        let output = rendered(&session);
+        let attached = output.find("shot.png").expect("the file was not named");
+        let stashed = output
+            .find("the stashed thought")
+            .expect("the stashed line was not named");
+        let waiting = output.find("QUEUED").expect("nothing said it was waiting");
+        assert!(
+            attached < stashed && stashed < waiting,
+            "the rows beneath the box were out of order: {output}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The whole point of folding a paste is the screen: a stack trace in the box pushes off the
+    /// reply it was pasted to ask about, so the box shows the marker and none of the lines.
+    #[test]
+    fn a_folded_paste_keeps_its_lines_off_the_screen() {
+        let mut session = Session::new("none");
+        session.paste_text("first\nsecond\nthird\nfourth\n");
+
+        let output = rendered(&session);
+        assert!(
+            output.contains("[Pasted text #1 +4 lines]"),
+            "no marker drawn: {output}"
+        );
+        assert!(
+            !output.contains("second"),
+            "the paste took the screen: {output}"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_shows_a_greeting_and_hint() {
+        let session = Session::new("kernel-enforced");
+        let output = rendered(&session);
+        assert!(output.contains("Ask a question"), "no hint shown");
+        assert!(output.contains("bravebot"));
+    }
+
+    /// The trust answer is noted before the first frame is drawn, so by the time anyone sees the
+    /// opening screen the transcript is not empty. Testing for an empty one meant the mark was
+    /// never drawn in a real session at all, only in tests that forgot to note anything.
+    #[test]
+    fn the_mark_survives_the_note_that_starting_up_leaves() {
+        let mut session = Session::new("kernel-enforced");
+        session.note("trusting /tmp/x");
+
+        let output = rendered(&session);
+        assert!(output.contains('█'), "the mark was not drawn: {output}");
+        assert!(output.contains("trusting /tmp/x"), "the note was lost");
+        assert!(output.contains("Ask a question"), "no hint shown");
+    }
+
+    /// And it gives way the moment there is a conversation to read instead.
+    #[test]
+    fn the_mark_goes_when_the_first_prompt_is_sent() {
+        let mut session = Session::new("kernel-enforced");
+        session.note("trusting /tmp/x");
+        for character in "hello".chars() {
+            session.type_char(character);
+        }
+        session.submit();
+
+        let output = rendered(&session);
+        assert!(!output.contains('█'), "the mark outstayed its welcome");
+        assert!(
+            !output.contains("Ask a question"),
+            "the hint outstayed its welcome"
+        );
+    }
+
+    /// Confinement belongs on screen at all times, not only in doctor.
+    /// A copy is otherwise silent, and a clipboard that may or may not have taken something is
+    /// worse than none: the user pastes somewhere to find out whether it worked.
+    #[test]
+    fn a_copy_says_how_much_it_took() {
+        let mut session = Session::new("kernel-enforced");
+        session.copied = Some(106);
+        assert!(
+            rendered(&session).contains("106 chars to clipboard"),
+            "the copy was not reported"
+        );
+    }
+
+    /// MOUSE-39: a copy from the panel, the box, the status line, what is offered under the box or the
+    /// footer says where it came from after the count, and one from the transcript, or from a view
+    /// that is the transcript's, does not.
+    #[test]
+    fn a_copy_names_the_pane_it_came_from_unless_that_is_the_transcript() {
+        use crate::select::Pane;
+        for (pane, said) in [
+            (Pane::Panel, "106 chars to clipboard, from the panel"),
+            (Pane::Input, "106 chars to clipboard, from the box"),
+            (Pane::Status, "106 chars to clipboard, from the status line"),
+            (
+                Pane::Offered,
+                "106 chars to clipboard, from the list under the box",
+            ),
+            (Pane::Hint, "106 chars to clipboard, from the footer"),
+        ] {
+            let mut session = Session::new("kernel-enforced");
+            session.note_copied_from(106, pane);
+            assert!(rendered(&session).contains(said), "{pane:?}");
+        }
+        for pane in [Pane::Transcript, Pane::Screen] {
+            let mut session = Session::new("kernel-enforced");
+            session.note_copied_from(106, pane);
+            let drawn = rendered(&session);
+            assert!(drawn.contains("106 chars to clipboard"), "{pane:?}");
+            assert!(!drawn.contains("from the"), "{pane:?}: {drawn}");
+        }
+    }
+
+    /// MOUSE-39: the count reads as it does everywhere, "1 char" and not "1 chars", with the pane
+    /// named after it.
+    #[test]
+    fn a_copy_of_one_character_from_a_named_pane_reads_naturally() {
+        let mut session = Session::new("kernel-enforced");
+        session.note_copied_from(1, crate::select::Pane::Panel);
+        assert!(rendered(&session).contains("1 char to clipboard, from the panel"));
+    }
+
+    /// Nobody presses a chord nothing mentions, and Command-V is the one the fingers already know:
+    /// it reaches the terminal, not this process, and quietly drops the picture. Saying so before
+    /// they try it is the only moment that helps.
+    #[test]
+    fn a_picture_on_the_clipboard_says_which_key_carries_it() {
+        let mut session = Session::new("kernel-enforced");
+        session.image_on_clipboard = true;
+        let output = rendered(&session);
+        assert!(output.contains("image on clipboard"), "no hint shown");
+        assert!(output.contains("ctrl-v"), "the hint did not name the key");
+
+        // The key it names is the one that carries a picture here, which a settings file can move.
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("paste".to_string(), "alt-v".to_string());
+        session.adopt_keybindings(&moved);
+        let output = rendered(&session);
+        assert!(output.contains("alt-v"), "the hint named the old key");
+    }
+
+    /// One line, two things that want it. What a copy took is the answer to something the user did
+    /// a moment ago, and the hint is standing advice, so the answer wins.
+    #[test]
+    fn a_copy_is_reported_over_the_clipboard_hint() {
+        let mut session = Session::new("kernel-enforced");
+        session.image_on_clipboard = true;
+        session.copied = Some(12);
+        let output = rendered(&session);
+        assert!(output.contains("12 chars to clipboard"));
+        assert!(
+            !output.contains("image on clipboard"),
+            "both were drawn at once"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_one_character_reads_naturally() {
+        let mut session = Session::new("kernel-enforced");
+        session.copied = Some(1);
+        assert!(rendered(&session).contains("1 char to clipboard"));
+    }
+
+    /// The highlight is painted over the finished frame, so what is drawn under it keeps its own
+    /// colours and only the background says what is selected.
+    #[test]
+    fn a_selection_is_drawn_over_whatever_it_covers() {
+        let _held = theme::exclusive();
+        let mut session = Session::new("kernel-enforced");
+        session.begin_selection(0, 0);
+        session.extend_selection(0, 5);
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, &session);
+            })
+            .expect("draw succeeds");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer.cell((0, 0)).expect("cell").bg,
+            theme::brand_primary()
+        );
+        assert_ne!(
+            buffer.cell((6, 0)).expect("cell").bg,
+            theme::brand_primary()
+        );
+    }
+
+    /// The way to the bindings sits at the end of the line, so it is the first thing a narrow
+    /// terminal cuts off. Asserted at a width an ordinary terminal actually has, against that row
+    /// alone. Widening this to make it pass would be hiding the truncation, and so would asserting
+    /// against the whole screen.
+    #[test]
+    fn the_hint_line_says_how_to_find_the_bindings() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 120, 24);
+        assert!(hint.contains(SHORTCUTS_HINT), "{hint}");
+    }
+
+    /// The confinement is settled by the platform before the session opens and cannot change
+    /// while it runs, so a permanent readout of it is a row of the screen spent on a constant.
+    /// The mark says it once at startup and `/status` answers for it on request.
+    #[test]
+    fn the_hint_line_does_not_report_the_confinement() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 120, 24);
+        assert!(
+            !hint.contains("confinement"),
+            "the hint line is still reporting the confinement: {hint}"
+        );
+    }
+
+    /// The row that names this key belongs to a turn in flight, and a delegate is most worth
+    /// opening once the turn is over: what it left behind is one sentence about work nobody has
+    /// read.
+    #[test]
+    fn the_hint_line_names_the_delegate_key_once_one_has_run() {
+        let mut session = Session::new("kernel-enforced");
+        assert!(
+            !hint_row_at(&session, 120, 24).contains("ctrl-l"),
+            "a session with nothing to open offered the key anyway"
+        );
+
+        let id = bravebot_agent::report::DelegateId::nth(1);
+        session.delegate_started(bravebot_agent::report::Delegation {
+            stop: Default::default(),
+            id,
+            kind: "reader".to_string(),
+            task: "find the parser".to_string(),
+        });
+        session.delegate_finished(id, "answered".to_string(), false, None);
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("ctrl-l") && hint.contains("1 to open"),
+            "the hint line does not say a delegate can be opened: {hint}"
+        );
+    }
+
+    /// WATCH-11: shell mode has its own line, and it names the way into what a command printed and
+    /// counts it as the ordinary line does, since the view holds the same things in either mode.
+    #[test]
+    fn the_shell_hint_line_names_the_view_key_once_something_can_be_opened() {
+        let mut session = Session::new("kernel-enforced");
+        session.shell = true;
+        assert!(
+            !hint_row_at(&session, 120, 24).contains("/outputs"),
+            "a shell line with nothing to open offered the entry anyway"
+        );
+
+        session.command_printed(bravebot_agent::report::Printed {
+            command: "cargo test".to_string(),
+            lines: vec!["first".to_string()],
+            total: 1,
+            read_by_the_planner: false,
+            outcome: bravebot_agent::report::Outcome::Succeeded,
+            job: None,
+        });
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("! ") && hint.contains("alt-l or /outputs 1 to open"),
+            "the shell line does not say the view can be opened: {hint}"
+        );
+        assert!(
+            !hint.contains("ctrl-l"),
+            "the shell line offered the agents key for a command: {hint}"
+        );
+    }
+
+    /// Named for as long as a press would move the command, and gone the moment it would not: a
+    /// key offered after the command ended, or after it was moved, is one that does nothing. The
+    /// chord a settings file moved it to is the one named.
+    #[test]
+    fn the_hint_line_offers_the_move_only_while_a_command_can_be_moved() {
+        let mut session = Session::new("kernel-enforced");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        assert!(
+            !hint_row_at(&session, 120, 24).contains("to background"),
+            "the move was offered with no command running"
+        );
+
+        session.movable(bravebot_core::cancel::Handoff::new());
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("ctrl-b to background"), "{hint}");
+
+        session.move_to_background();
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            !hint.contains("to background"),
+            "the move was still offered after it was asked for: {hint}"
+        );
+
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("background".to_string(), "alt-b".to_string());
+        session.adopt_keybindings(&moved);
+        session.movable(bravebot_core::cancel::Handoff::new());
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("alt-b to background"), "{hint}");
+    }
+
+    /// WATCH-11. Each way into the view is named with the count of what it opens: the watch key
+    /// counts the agents and the outputs entry counts what commands printed. One figure for both
+    /// would name a key and count rows it does not open.
+    #[test]
+    fn the_hint_line_counts_what_each_way_into_the_view_opens() {
+        let mut session = Session::new("kernel-enforced");
+        session.command_printed(bravebot_agent::report::Printed {
+            command: "cargo test".to_string(),
+            lines: vec!["first".to_string()],
+            total: 1,
+            read_by_the_planner: false,
+            outcome: bravebot_agent::report::Outcome::Succeeded,
+            job: None,
+        });
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("alt-l or /outputs 1 to open"),
+            "a command this session ran was not counted under its entry: {hint}"
+        );
+        assert!(
+            !hint.contains("ctrl-l"),
+            "the agents key was offered with no agent to open: {hint}"
+        );
+
+        let id = bravebot_agent::report::DelegateId::nth(1);
+        session.delegate_started(bravebot_agent::report::Delegation {
+            stop: Default::default(),
+            id,
+            kind: "reader".to_string(),
+            task: "find the parser".to_string(),
+        });
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("ctrl-l 1 to open") && hint.contains("alt-l or /outputs 1 to open"),
+            "each way in was not counted by what it opens: {hint}"
+        );
+    }
+
+    /// The mode in force, under the box, for as long as it holds. It decides whether the next write
+    /// stops to ask, so it is the fact on this line somebody most needs to catch without looking for
+    /// it, and it leads for the reason the bindings went to the end: what a narrow terminal cuts is
+    /// the end.
+    #[test]
+    fn the_hint_line_names_a_mode_that_is_not_asking() {
+        use bravebot_agent::PermissionMode;
+        for mode in [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Bypass,
+        ] {
+            let mut session = Session::new("kernel-enforced").starting_in_bypass();
+            while session.permission_mode() != mode {
+                session.cycle_permission_mode();
+            }
+            let hint = hint_row_at(&session, 120, 24);
+            let named =
+                crate::status::named_mode(mode, true).expect("every mode but asking is named");
+            assert!(hint.contains(named), "{mode:?} was not drawn: {hint}");
+        }
+    }
+
+    /// Asking is what a session without the flag has always done, so it takes none of this line: a
+    /// marker standing there permanently is one people stop seeing, and being noticed is the
+    /// marker's whole job.
+    #[test]
+    fn the_hint_line_says_nothing_about_the_ordinary_mode() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 120, 24);
+        // The markers, which are what a reader recognises before any words.
+        assert!(!hint.contains('⏵') && !hint.contains('⏸'), "{hint}");
+        let asking = crate::status::named_mode(bravebot_agent::PermissionMode::Ask, true)
+            .expect("asking after the flag has a name");
+        assert!(!hint.contains(asking), "{hint}");
+    }
+
+    /// A session started with `--dangerously-skip-permissions` begins in bypass. Once the key moves
+    /// it off, a blank line reads the same as a session that never skipped permissions, so the line
+    /// says the session is asking.
+    #[test]
+    fn the_hint_line_names_asking_after_a_session_leaves_bypass() {
+        use bravebot_agent::PermissionMode;
+        let mut session = Session::new("kernel-enforced").starting_in_bypass();
+        while session.permission_mode() != PermissionMode::Ask {
+            session.cycle_permission_mode();
+        }
+        let asking = crate::status::named_mode(PermissionMode::Ask, true)
+            .expect("asking after the flag has a name");
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains(asking), "asking was not drawn: {hint}");
+    }
+
+    /// Which vi mode the box is in decides whether the next letter is a letter, so it is drawn where
+    /// the other fact of that kind is drawn. Somebody who cannot see they are in NORMAL mode is
+    /// looking at a box that has apparently stopped taking what they type.
+    #[test]
+    fn the_hint_line_says_which_vi_mode_the_box_is_in() {
+        let mut session = Session::new("kernel-enforced");
+        session.choose_editing(crate::vim::Editing::Vi);
+        assert!(
+            hint_row_at(&session, 120, 24).contains("INSERT"),
+            "{}",
+            hint_row_at(&session, 120, 24)
+        );
+
+        session.enter_vi_normal();
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("NORMAL"), "{hint}");
+        assert!(!hint.contains("INSERT"), "both modes were drawn: {hint}");
+
+        session.type_char('R');
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("REPLACE"), "{hint}");
+        assert!(!hint.contains("NORMAL"), "both modes were drawn: {hint}");
+    }
+
+    /// A `d` waiting for its stretch decides what the next letter does as much as the mode does, so
+    /// the keys of an instruction still waiting are drawn beside the mode, as vi's `showcmd` draws
+    /// them, and go once it is whole or abandoned.
+    #[test]
+    fn the_hint_line_draws_an_instruction_still_waiting_beside_the_mode() {
+        let mut session = Session::new("kernel-enforced");
+        session.choose_editing(crate::vim::Editing::Vi);
+        for c in "one two".chars() {
+            session.type_char(c);
+        }
+        session.enter_vi_normal();
+        session.type_char('0');
+
+        session.type_char('d');
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("NORMAL d"), "{hint}");
+        session.type_char('i');
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("NORMAL di"), "{hint}");
+
+        session.type_char('w');
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("NORMAL") && !hint.contains("NORMAL d"),
+            "a whole instruction was still drawn as waiting: {hint}"
+        );
+
+        session.type_char('g');
+        assert!(hint_row_at(&session, 120, 24).contains("NORMAL g"));
+        session.abandon_half_typed();
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("NORMAL") && !hint.contains("NORMAL g"),
+            "an abandoned instruction was still drawn as waiting: {hint}"
+        );
+    }
+
+    /// A count is the front of an instruction still being assembled, so it is drawn for the reason
+    /// the rest of one is: `2` has decided what the next letter does as much as a `d` has. Read
+    /// from the wait alone, the digits would be three presses the screen said nothing about, and a
+    /// person who had typed one by accident would find out from what the next letter did.
+    #[test]
+    fn the_hint_line_draws_the_count_in_front_of_an_instruction() {
+        let mut session = Session::new("kernel-enforced");
+        session.choose_editing(crate::vim::Editing::Vi);
+        for c in "one two three four five six seven".chars() {
+            session.type_char(c);
+        }
+        session.enter_vi_normal();
+        session.type_char('0');
+
+        for (c, drawn) in [('2', "NORMAL 2"), ('d', "NORMAL 2d"), ('3', "NORMAL 2d3")] {
+            session.type_char(c);
+            let hint = hint_row_at(&session, 120, 24);
+            assert!(hint.contains(drawn), "{hint}");
+        }
+
+        session.type_char('w');
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains("NORMAL") && !hint.contains("NORMAL 2"),
+            "a whole instruction was still drawn as waiting: {hint}"
+        );
+    }
+
+    /// The box everybody else has is in no mode, and a word standing there for somebody who never
+    /// asked for vi editing is a word they cannot account for.
+    #[test]
+    fn the_hint_line_says_nothing_about_a_box_that_edits_the_ordinary_way() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 120, 24);
+        assert!(
+            !hint.contains("INSERT") && !hint.contains("NORMAL"),
+            "{hint}"
+        );
+    }
+
+    /// The mode survives a terminal too narrow for everything, and the way to the bindings is what is
+    /// given up: of the two, one changes what the next keystroke does and the other is a thing
+    /// somebody learns once and can find again with `?`.
+    #[test]
+    fn a_narrow_terminal_gives_up_the_bindings_rather_than_the_mode() {
+        let session = Session::new("kernel").starting_in_bypass();
+        assert_eq!(
+            session.permission_mode(),
+            bravebot_agent::PermissionMode::Bypass
+        );
+        // Narrow enough that the two cannot both fit, which is the case worth pinning.
+        let hint = hint_row_at(&session, 30, 24);
+        assert!(hint.contains("⏵⏵ bypass permissions on"), "{hint}");
+        assert!(
+            !hint.contains(SHORTCUTS_HINT),
+            "nothing was given up: {hint}"
+        );
+    }
+
+    /// Whole parts, at a separator. Left to the terminal the last one is cut wherever the final
+    /// column falls, which put "? fo" under the box: half a word reads as a rendering bug, where a
+    /// part that is simply absent reads as a line that had no room.
+    #[test]
+    fn what_does_not_fit_is_dropped_whole_rather_than_cut_mid_word() {
+        // The second of them has a loop running, whose first tick is still in flight: that is the
+        // state the part says one word in, so the whole of it is a fixed string rather than a
+        // countdown moving while the test reads it.
+        let mut looping = Session::new("kernel").starting_in_bypass();
+        looping.start_loop(
+            crate::loops::request("5m check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        // The third is between ticks, where the part is at its longest: the countdown is the widest
+        // thing this row ever has to fit, so a sweep that only ever saw the bare word would pass
+        // while the form people spend most of a loop looking at was cut in half. Two days out, so
+        // `1d 23h` is what it says for the hour after this line rather than something that moves.
+        let mut counting_down = Session::new("kernel").starting_in_bypass();
+        counting_down.start_loop(
+            crate::loops::request("2d check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        counting_down.complete("done", Vec::new(), 0);
+        counting_down.loop_turn_ended(None);
+        let counting = t!(loop_hint_next, next = "1d 23h");
+        assert!(
+            hint_row_at(&counting_down, 120, 24).contains(&counting),
+            "the sweep never sees the countdown: {}",
+            hint_row_at(&counting_down, 120, 24)
+        );
+
+        let word = t!(loop_hint).to_string();
+        let info = t!(panel_hint, chord = "ctrl-x").to_string();
+        for session in [
+            Session::new("kernel").starting_in_bypass(),
+            looping,
+            counting_down,
+        ] {
+            for width in 20..=120 {
+                let hint = hint_row_at(&session, width, 24);
+                let drawn = hint.trim_end();
+                // Every fragment that survives is a whole part or nothing. The narrowest widths
+                // cannot hold even the mode, and dropping it whole is the same rule rather than an
+                // exception.
+                for part in drawn.split("  ·  ").map(str::trim) {
+                    if part.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        part == "⏵⏵ bypass permissions on"
+                            || part == "ctrl-t show trail"
+                            || part == UNMEASURED_CONTEXT
+                            || part == SHORTCUTS_HINT
+                            || part == word
+                            || part == counting
+                            || part == info,
+                        "at width {width} a part was cut: {part:?} in {drawn:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Between ticks a loop is invisible. The note that announced it has scrolled away, the next
+    /// tick has not happened, and everything else on the screen is a record of what already has: a
+    /// session quietly spending a turn every five minutes says so here or nowhere.
+    #[test]
+    fn the_hint_line_says_a_loop_is_live() {
+        let mut session = Session::new("kernel-enforced");
+        session.start_loop(
+            crate::loops::request("5m check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let word = t!(loop_hint).to_string();
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains(&word), "{hint}");
+
+        // Once the tick is over there is a moment to name, which is the question somebody looking
+        // at a live loop is asking.
+        session.complete("done", Vec::new(), 0);
+        session.loop_turn_ended(None);
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains(t!(loop_hint_next, next = "").trim()),
+            "{hint}"
+        );
+    }
+
+    /// A line held by `/after` is not a loop, and the row under the box must not call it one. A wrong
+    /// implementation shares the loop's wording, which tells somebody a one-shot is repeating.
+    #[test]
+    fn the_hint_line_says_a_held_after_line_is_sending_later_and_not_looping() {
+        let mut session = Session::new("kernel-enforced");
+        session.start_after(
+            crate::loops::request_after("5m check the deploy"),
+            std::time::Instant::now(),
+        );
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains(t!(after_hint_next, next = "").trim()),
+            "{hint}"
+        );
+        assert!(!hint.contains(&t!(loop_hint).to_string()), "{hint}");
+    }
+
+    /// With a loop and an `/after` line both held, the row counts the loop and not the line that is
+    /// sent once. A wrong implementation counts both, and says two loops are repeating.
+    #[test]
+    fn the_hint_line_counts_loops_and_not_a_held_after_line() {
+        let mut session = Session::new("kernel-enforced");
+        session.start_loop(
+            crate::loops::request("1h check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        session.complete("done", Vec::new(), 0);
+        session.loop_turn_ended(None);
+        session.start_after(
+            crate::loops::request_after("5m tail the log"),
+            std::time::Instant::now(),
+        );
+        assert_eq!(session.loops().len(), 2);
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(
+            hint.contains(t!(loop_hint_next, next = "").trim()),
+            "{hint}"
+        );
+        assert!(
+            !hint.contains(t!(loop_hint_several, count = 2).trim()),
+            "{hint}"
+        );
+    }
+
+    /// A word about a loop standing there in a session with none is a word nobody can account for,
+    /// and this line is read at a glance.
+    #[test]
+    fn the_hint_line_says_nothing_about_a_loop_in_a_session_with_none() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 120, 24);
+        assert!(!hint.contains(&t!(loop_hint).to_string()), "{hint}");
+    }
+
+    /// Shell mode replaces this row rather than adding to it, and a loop goes on spending turns
+    /// while somebody works in a shell. It is the mode where a live loop is easiest to forget about,
+    /// so it is the one where saying nothing costs the most.
+    #[test]
+    fn the_hint_line_says_a_loop_is_live_in_shell_mode_too() {
+        let mut session = Session::new("kernel-enforced");
+        session.shell = true;
+        session.start_loop(
+            crate::loops::request("5m check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains(&t!(loop_hint).to_string()), "{hint}");
+        assert!(
+            hint.contains("esc to cancel"),
+            "this is not the shell row: {hint}"
+        );
+
+        // And nothing where there is no loop, down to the separator that would introduce it: a row
+        // ending in a lone dot reads as a part the terminal cut off.
+        let mut quiet = Session::new("kernel-enforced");
+        quiet.shell = true;
+        let hint = hint_row_at(&quiet, 120, 24);
+        assert!(!hint.contains(&t!(loop_hint).to_string()), "{hint}");
+        assert!(
+            !hint.trim_end().ends_with('·'),
+            "a separator with nothing after it: {hint}"
+        );
+    }
+
+    fn job_event(session: &mut Session, event: bravebot_agent::report::JobEvent) {
+        session.job(event);
+    }
+
+    fn started(name: &str) -> bravebot_agent::report::JobEvent {
+        bravebot_agent::report::JobEvent::Started {
+            name: name.to_string(),
+            line: "sleep 600".to_string(),
+            moved_after: None,
+            stop: bravebot_core::cancel::JobStop::new(),
+        }
+    }
+
+    /// Once the block that started a job has scrolled away, nothing else on the screen says it
+    /// runs; and a count still standing after the last one ended is a job nobody can find.
+    #[test]
+    fn the_hint_line_counts_the_jobs_running() {
+        let mut session = Session::new("kernel-enforced");
+        assert!(
+            !hint_row_at(&session, 120, 24).contains("in the background"),
+            "a session with no jobs counted one"
+        );
+
+        job_event(&mut session, started("job:1"));
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("1 in the background"), "{hint}");
+
+        job_event(&mut session, started("job:2"));
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("2 in the background"), "{hint}");
+
+        for name in ["job:1", "job:2"] {
+            job_event(
+                &mut session,
+                bravebot_agent::report::JobEvent::Ended {
+                    name: name.to_string(),
+                    outcome: bravebot_agent::report::Outcome::Succeeded,
+                },
+            );
+        }
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(!hint.contains("in the background"), "{hint}");
+    }
+
+    /// Shell mode draws its own row, and a job goes on running while somebody types into it.
+    #[test]
+    fn the_hint_line_counts_the_jobs_running_in_shell_mode_too() {
+        let mut session = Session::new("kernel-enforced");
+        session.shell = true;
+        job_event(&mut session, started("job:1"));
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("1 in the background"), "{hint}");
+        assert!(
+            hint.contains("esc to cancel"),
+            "this is not the shell row: {hint}"
+        );
+    }
+
+    /// The jobs go just before the loop, for the loop's reason: both spend something while nobody
+    /// watches, where a reading or an offer of a key can be had again.
+    #[test]
+    fn a_narrow_terminal_gives_up_a_reading_before_the_jobs_and_the_jobs_before_the_loop() {
+        let mut session = Session::new("kernel").starting_in_bypass();
+        session.start_loop(
+            crate::loops::request("5m check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        job_event(&mut session, started("job:1"));
+        let word = t!(loop_hint).to_string();
+
+        let hint = hint_row_at(&session, 80, 24);
+        assert!(hint.contains("1 in the background"), "{hint}");
+        assert!(
+            !hint.contains(UNMEASURED_CONTEXT),
+            "nothing was given up: {hint}"
+        );
+
+        let hint = hint_row_at(&session, 50, 24);
+        assert!(hint.contains(&word), "the loop went first: {hint}");
+        assert!(
+            !hint.contains("in the background"),
+            "the jobs outlasted the loop: {hint}"
+        );
+    }
+
+    /// The three states a live loop is in, in the words this row says them in. The moment already
+    /// gone is the one worth pinning: that is a loop whose tick is waiting on a turn or on a queued
+    /// line, and a row counting down to `next in 0s` and staying there reads as one that has stalled.
+    #[test]
+    fn the_loop_part_names_a_moment_only_while_one_is_still_ahead() {
+        let word = t!(loop_hint).to_string();
+        assert_eq!(loop_part(1, None), word, "a tick in flight names no moment");
+        assert_eq!(
+            loop_part(1, Some(std::time::Duration::ZERO)),
+            word,
+            "a tick already due names no moment"
+        );
+        assert_eq!(
+            loop_part(1, Some(std::time::Duration::from_millis(999))),
+            word,
+            "anything under a second is spelled 0s, which is that same nothing"
+        );
+        assert_eq!(
+            loop_part(1, Some(std::time::Duration::from_secs(90))),
+            t!(loop_hint_next, next = "1m 30s")
+        );
+    }
+
+    /// LOOP-13: with several live the row counts them and counts down to the soonest.
+    #[test]
+    fn the_loop_part_counts_the_loops_where_several_are_live() {
+        assert_eq!(loop_part(3, None), t!(loop_hint_several, count = 3));
+        assert_eq!(
+            loop_part(3, Some(std::time::Duration::from_secs(90))),
+            t!(loop_hint_several_next, count = 3, next = "1m 30s")
+        );
+        assert_eq!(
+            loop_part(2, Some(std::time::Duration::ZERO)),
+            t!(loop_hint_several, count = 2),
+            "a moment already gone is not spelled"
+        );
+    }
+
+    /// The loop is the last part this line gives up, because it is the only one spending anything
+    /// while nobody watches. It is given up in the end rather than held: a part nothing may drop
+    /// makes a narrow terminal clear the whole row, which would take the mode with it, and a loop
+    /// is still there to be found with `/loop` where a mode nobody can read is not.
+    #[test]
+    fn a_narrow_terminal_gives_up_a_reading_before_the_loop_and_the_loop_before_the_mode() {
+        let mut session = Session::new("kernel").starting_in_bypass();
+        session.start_loop(
+            crate::loops::request("5m check the deploy"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let word = t!(loop_hint).to_string();
+
+        // Room for the mode and the loop and not for the reading beside them.
+        let hint = hint_row_at(&session, 60, 24);
+        assert!(hint.contains(&word), "the loop went first: {hint}");
+        assert!(
+            !hint.contains(UNMEASURED_CONTEXT),
+            "nothing was given up: {hint}"
+        );
+
+        // Narrower than the mode and the loop together, where the mode is what survives.
+        let hint = hint_row_at(&session, 30, 24);
+        assert!(hint.contains("⏵⏵ bypass permissions on"), "{hint}");
+        assert!(!hint.contains(&word), "the mode went first: {hint}");
+    }
+
+    /// The point of moving the bindings off the hint line: it has to fit where it used to be cut,
+    /// which is the narrow terminal somebody is actually working in.
+    #[test]
+    fn the_hint_line_fits_a_narrow_terminal_whole() {
+        let hint = hint_row_at(&Session::new("kernel-enforced"), 80, 24);
+        assert!(
+            hint.contains(SHORTCUTS_HINT),
+            "the line is still cut: {hint}"
+        );
+    }
+
+    /// A `?` answers what the keys are, which is what the hint line stopped listing.
+    #[test]
+    fn a_question_mark_lists_every_shortcut() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let output = rendered_at(&session, 120, 40);
+
+        for (key, meaning) in shortcuts(
+            session.editing(),
+            session.bindings(),
+            PointerKeys::of(&session),
+        ) {
+            assert!(output.contains(&key), "{key} missing");
+            assert!(output.contains(meaning), "{key} has no meaning on screen");
+        }
+    }
+
+    /// Walking the array the list is drawn from pins that the list is drawn, never that it is
+    /// complete. The chord that opens the scroller was named only inside the scroller, which is a
+    /// place reachable only by somebody who already knew the key.
+    #[test]
+    fn the_list_names_the_chord_that_opens_the_scroller() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let output = rendered_at(&session, 120, 40);
+
+        assert!(
+            output.contains("ctrl-o"),
+            "the one place the keys are written down left out ctrl-o: {output}"
+        );
+    }
+
+    /// The same for the chord that sends what is waiting, which is drawn next to the queue only
+    /// while something is queued, so the list is where somebody learns it exists before then.
+    #[test]
+    fn the_list_names_the_chord_that_sends_what_is_queued() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let output = rendered_at(&session, 120, 40);
+
+        assert!(
+            output.contains("ctrl-enter"),
+            "the one place the keys are written down left out ctrl-enter: {output}"
+        );
+    }
+
+    /// The list is the one place a binding's meaning is written down, so it cannot go on saying that
+    /// Escape clears the line to somebody whose Escape takes the letters as commands, and it has to
+    /// say that the press after that one is the stop. A list advertising a binding that does
+    /// something else is worse than no list.
+    #[test]
+    fn the_key_list_says_what_escape_does_in_the_box_it_is_drawn_over() {
+        let mut ordinary = Session::new("none");
+        ordinary.type_char('?');
+        let drawn = rendered_at(&ordinary, 120, 40);
+        assert!(drawn.contains("clear the line"), "{drawn}");
+
+        let mut vi = Session::new("none");
+        vi.choose_editing(crate::vim::Editing::Vi);
+        vi.type_char('?');
+        let drawn = rendered_at(&vi, 120, 40);
+        assert!(
+            !drawn.contains("clear the line"),
+            "the list told a vi box that escape clears the line: {drawn}"
+        );
+        assert!(drawn.contains("letters as commands, then stop"), "{drawn}");
+    }
+
+    /// The moment a person hunts for a key is the moment a turn is going somewhere they did not
+    /// want, and the hint line goes on offering the list on every frame of one. The press used to
+    /// set the flag with nowhere for the list to be drawn, so it appeared unasked when the turn
+    /// ended.
+    #[test]
+    fn a_question_mark_lists_every_shortcut_while_a_turn_runs() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        assert_eq!(session.status, Status::Working);
+
+        session.type_char('?');
+        let output = rendered_at(&session, 120, 40);
+
+        for (key, meaning) in shortcuts(
+            session.editing(),
+            session.bindings(),
+            PointerKeys::of(&session),
+        ) {
+            assert!(output.contains(&key), "{key} missing");
+            assert!(output.contains(meaning), "{key} has no meaning on screen");
+        }
+    }
+
+    /// The row of the list that names `word`, the last one drawn since a waiting line is drawn above
+    /// it, so a label is read from the row it is drawn on.
+    fn row_for(output: &str, width: usize, word: &str) -> String {
+        let cells: Vec<char> = output.chars().collect();
+        cells
+            .chunks(width)
+            .map(|row| row.iter().collect::<String>())
+            .rfind(|row| row.contains(word))
+            .unwrap_or_else(|| panic!("{word} has no row"))
+    }
+
+    fn labelled(row: &str, label: &str) -> bool {
+        row.contains(&format!("  {label}  "))
+    }
+
+    /// Rejects: a label taken from somewhere other than the command's own column of the table, or
+    /// one shared by every row, either of which tells a person `/compact` runs now when it waits.
+    #[test]
+    fn each_command_row_says_whether_it_runs_now_or_waits_while_a_turn_runs() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        session.type_char('/');
+
+        let output = rendered_at(&session, 120, 40);
+
+        assert!(labelled(&row_for(&output, 120, "/cost"), "now"));
+        assert!(labelled(&row_for(&output, 120, "/compact"), "queued"));
+        assert!(labelled(&row_for(&output, 120, "/model"), "now/queued"));
+        assert!(labelled(&row_for(&output, 120, "/theme [name]"), "now"));
+    }
+
+    /// Rejects: a `now` label on a command that Enter would queue, because a line of the same
+    /// command already waits ahead of it.
+    #[test]
+    fn a_row_reads_queued_while_a_line_of_its_command_waits() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        for c in "/cost".chars() {
+            session.type_char(c);
+        }
+        assert!(session.queue_command(), "the command did not wait");
+        session.type_char('/');
+
+        let output = rendered_at(&session, 120, 40);
+
+        assert!(labelled(&row_for(&output, 120, "/cost"), "queued"));
+        assert!(labelled(&row_for(&output, 120, "/status"), "now"));
+    }
+
+    /// Rejects: a label that is drawn at rest, where there is no turn to wait for and nothing to
+    /// tell apart.
+    #[test]
+    fn the_rows_carry_no_label_when_nothing_is_running() {
+        let mut session = Session::new("none");
+        session.type_char('/');
+
+        let row = row_for(&rendered_at(&session, 120, 40), 120, "/cost");
+
+        for label in ["now", "queued", "now/queued"] {
+            assert!(!labelled(&row, label), "{label} drawn at rest");
+        }
+    }
+
+    /// Rejects: marking `/cost` as running now during a compaction or an aside, where every
+    /// command waits whatever the table says of one typed during a turn.
+    #[test]
+    fn every_row_is_queued_during_an_aside() {
+        let mut session = Session::new("none");
+        session.begin_aside();
+        session.type_char('/');
+
+        let output = rendered_at(&session, 120, 40);
+
+        assert!(labelled(&row_for(&output, 120, "/cost"), "queued"));
+        assert!(!labelled(&row_for(&output, 120, "/cost"), "now"));
+    }
+
+    /// A command carried out mid-turn answers into a list the transcript does not hold until the
+    /// turn ends (CMD-8), so the screen has to draw that list itself: otherwise `/loop stop` typed
+    /// during a turn would stop the loop and say so to nobody.
+    #[test]
+    fn what_a_command_answered_mid_turn_is_drawn_under_the_turn() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        session.answer_while_working(|session| session.note("no loop is running"));
+
+        let output = rendered_at(&session, 120, 40);
+        assert!(
+            output.contains("no loop is running"),
+            "the answer was not drawn: {output}"
+        );
+    }
+
+    /// A picker opened while a turn runs is drawn over the frame, with the turn still drawn behind
+    /// it, and only while it is open.
+    #[test]
+    fn a_picker_opened_mid_turn_is_drawn_over_the_turn() {
+        let mut session = Session::new("none");
+        for c in "refactor the parser".chars() {
+            session.type_char(c);
+        }
+        session.submit().expect("the prompt is sent");
+        let title = t!(effort_picker_title);
+        assert!(!rendered_at(&session, 120, 40).contains(title));
+
+        session.open_picking(crate::picking::Picking::Effort(
+            crate::effort_prompt::Picker::new(None),
+        ));
+
+        let output = rendered_at(&session, 120, 40);
+        assert!(output.contains(title), "the picker was not drawn: {output}");
+        assert!(
+            output.contains("refactor the parser"),
+            "the turn was not drawn behind it: {output}"
+        );
+    }
+
+    /// The theme picker opened mid-turn is a panel over the session, and the session behind it is
+    /// drawn again, in the theme under the cursor, each time the cursor moves (VIEW-12). The
+    /// regressions it rejects are a picker that blanks the transcript while it is open and one that
+    /// leaves the transcript painted in the theme the picker opened on.
+    #[test]
+    fn moving_the_theme_cursor_repaints_the_session_behind_the_panel() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let _held = crate::theme::exclusive();
+        crate::theme::apply_brave();
+
+        let mut session = Session::new("none");
+        for c in "refactor the parser".chars() {
+            session.type_char(c);
+        }
+        session.submit().expect("the prompt is sent");
+        session.open_picking(crate::picking::Picking::Theme(crate::theme_prompt::opened(
+            crate::theme::builtins(),
+            crate::theme::BRAVE,
+        )));
+
+        // The cell of the first letter of the prompt, found in the frame rather than assumed.
+        let ink_of_the_prompt = |session: &Session| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+            let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            assert!(
+                text.contains("refactor the parser"),
+                "the session was not drawn behind the panel: {text}"
+            );
+            assert!(text.contains(t!(theme_picker_title)), "{text}");
+            let at = buffer
+                .content()
+                .iter()
+                .position(|cell| cell.symbol() == "r")
+                .expect("the prompt is on screen");
+            buffer.content()[at].fg
+        };
+
+        let before = ink_of_the_prompt(&session);
+        session.press_in_picking(KeyCode::Down, KeyModifiers::NONE);
+        let after = ink_of_the_prompt(&session);
+        crate::theme::apply_brave();
+
+        assert_ne!(
+            before, after,
+            "the transcript was not repainted in the theme under the cursor"
+        );
+    }
+
+    /// When keybindings are customized, the shortcut list reflects the configured chords rather
+    /// than the defaults.
+    #[test]
+    fn the_shortcut_list_reflects_custom_keybindings() {
+        let mut session = Session::new("none");
+        let mut custom = std::collections::BTreeMap::new();
+        custom.insert("scroller".to_string(), "ctrl-u".to_string());
+        custom.insert("stash".to_string(), "alt-x".to_string());
+        session.adopt_keybindings(&custom);
+
+        session.type_char('?');
+        let output = rendered_at(&session, 120, 40);
+        assert!(
+            output.contains("ctrl-u"),
+            "custom scroller chord missing: {output}"
+        );
+        assert!(
+            output.contains("alt-x"),
+            "custom stash chord missing: {output}"
+        );
+        assert!(
+            !output.contains("ctrl-o"),
+            "default scroller chord should not be displayed: {output}"
+        );
+        assert!(
+            !output.contains("ctrl-s"),
+            "default stash chord should not be displayed: {output}"
+        );
+    }
+
+    /// The `?` list has a row for the key that prints the whole plan, on its default and on a moved
+    /// chord, so the key is written down in the one place that lists the keys (INPUT-13).
+    #[test]
+    fn the_shortcut_list_names_the_todos_chord() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("alt-a"), "{listed}");
+        assert!(listed.contains("print the whole plan"), "{listed}");
+
+        let mut session = Session::new("none");
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("todos".to_string(), "alt-y".to_string());
+        session.adopt_keybindings(&moved);
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("alt-y"), "{listed}");
+        assert!(!listed.contains("alt-a"), "{listed}");
+    }
+
+    /// The `?` list has a row for the scope switch, on its default and on a moved chord, so the key
+    /// is written down in the one place that lists the keys.
+    #[test]
+    fn the_shortcut_list_names_the_scope_chord() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("ctrl-n"), "{listed}");
+
+        let mut session = Session::new("none");
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("scope".to_string(), "alt-n".to_string());
+        session.adopt_keybindings(&moved);
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("alt-n"), "{listed}");
+        assert!(!listed.contains("ctrl-n"), "{listed}");
+    }
+
+    /// The `?` list has a row for the key that stops the session, on its default and on a moved
+    /// chord, so the key is written down in the one place that lists the keys (INPUT-47).
+    #[cfg(unix)]
+    #[test]
+    fn the_shortcut_list_names_the_suspend_chord() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("ctrl-z"), "{listed}");
+        assert!(listed.contains("suspend to the shell"), "{listed}");
+
+        let mut session = Session::new("none");
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("suspend".to_string(), "alt-z".to_string());
+        session.adopt_keybindings(&moved);
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("alt-z"), "{listed}");
+        assert!(!listed.contains("ctrl-z"), "{listed}");
+    }
+
+    /// When stash is customized, the stashed line reminder names the customized chord.
+    #[test]
+    fn the_stashed_line_names_the_custom_stash_chord() {
+        let mut session = Session::new("none");
+        let mut custom = std::collections::BTreeMap::new();
+        custom.insert("stash".to_string(), "alt-x".to_string());
+        session.adopt_keybindings(&custom);
+
+        for c in "hold this for later".chars() {
+            session.type_char(c);
+        }
+        session.stash();
+        assert!(session.stashed().is_some());
+
+        let lines = stashed_lines(&session, 80);
+        assert_eq!(lines.len(), 1);
+        let rendered = lines[0].to_string();
+        assert!(
+            rendered.contains("alt-x to bring it back"),
+            "custom stash chord missing from stashed line: {rendered}"
+        );
+        assert!(
+            !rendered.contains("ctrl-s"),
+            "default stash chord should not appear in stashed line: {rendered}"
+        );
+    }
+
+    /// The transcript stays behind the search, because a prompt is recognised by what it was asked
+    /// about: a list of prompts on an empty screen is a list of sentences out of context.
+    #[test]
+    fn the_prompt_search_is_drawn_over_the_transcript_rather_than_instead_of_it() {
+        let mut session = Session::new("none");
+        for c in "why is the picker slow?".chars() {
+            session.type_char(c);
+        }
+        session.submit().expect("the prompt is sent");
+        session.complete("because it wraps every line", Vec::new(), 0);
+        assert!(session.open_history_search());
+
+        let output = rendered_at(&session, 100, 24);
+        assert!(
+            output.contains("because it wraps every line"),
+            "the transcript went: {output}"
+        );
+        assert!(output.contains(t!(history_search_title)), "{output}");
+    }
+
+    /// A search nobody can find is a search nobody has. Both places somebody looks say it: the key
+    /// list, and the border of the box at the moment they have shown they want an older prompt by
+    /// walking back to one. The border names both ways in, since from there the two are one key
+    /// apart and only the border says which is which.
+    #[test]
+    fn how_to_search_the_prompts_is_said_where_somebody_would_look() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        session.complete("ok", Vec::new(), 0);
+
+        session.type_char('?');
+        let listed = rendered_at(&session, 120, 40);
+        assert!(listed.contains("ctrl-r"), "{listed}");
+        session.clear_input();
+
+        session.recall_older();
+        let browsing = rendered_at(&session, 120, 40);
+        for named in [
+            t!(input_history_search, chord = "ctrl-r"),
+            t!(input_history_scope, chord = "ctrl-s"),
+        ] {
+            assert!(browsing.contains(&named), "{named} is unsaid: {browsing}");
+        }
+
+        // And it says the keys in force rather than the keys it shipped with, since a border naming
+        // a chord that no longer answers is worse than a border naming none.
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("history".to_string(), "alt-r".to_string());
+        moved.insert("stash".to_string(), "alt-s".to_string());
+        session.adopt_keybindings(&moved);
+        let browsing = rendered_at(&session, 120, 40);
+        for named in [
+            t!(input_history_search, chord = "alt-r"),
+            t!(input_history_scope, chord = "alt-s"),
+        ] {
+            assert!(browsing.contains(&named), "{named} is unsaid: {browsing}");
+        }
+    }
+
+    /// Which prompt is being shown is what only this row says, so the ways in are what a border with
+    /// no room for everything gives up, the narrower scope first. Drawn anyway, the right-hand title
+    /// lands on top of the position and cuts it mid-word, which reads as a rendering fault rather
+    /// than as a row with no room.
+    #[test]
+    fn a_border_gives_up_the_ways_in_one_at_a_time() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("the prompt is sent");
+        session.complete("ok", Vec::new(), 0);
+        session.recall_older();
+        session.cycle_history_scope();
+        let position = t!(
+            input_history_position,
+            scope = t!(input_history_this_session),
+            index = 1,
+            total = 1
+        );
+
+        let some_room = rendered_at(&session, 40, 12);
+        assert!(some_room.contains(&position), "{some_room}");
+        assert!(some_room.contains("ctrl-r"), "{some_room}");
+        assert!(!some_room.contains("ctrl-s"), "{some_room}");
+
+        // Far below any width these strings could be shortened to, so a translation cannot decide
+        // whether this half of the test is testing anything.
+        let none = rendered_at(&session, 30, 12);
+        assert!(none.contains(&position), "{none}");
+        assert!(!none.contains("ctrl-r"), "{none}");
+    }
+
+    /// The border says which scope Up is walking and the key that changes it, and offers the key
+    /// only where it does something: never before this session has sent a prompt.
+    #[test]
+    fn the_border_names_the_scope_and_offers_the_switch_only_where_it_works() {
+        let mut session = Session::new("none");
+        session.history =
+            crate::history::History::from_entries(vec![bravebot_session::store::Entry::sent(
+                "old one", None,
+            )]);
+        session.recall_older();
+        let none_sent = rendered_at(&session, 120, 12);
+        assert!(none_sent.contains("All 1/1"), "{none_sent}");
+        assert!(!none_sent.contains("ctrl-n"), "{none_sent}");
+
+        session.history.leave();
+        session.type_char('x');
+        session.submit().expect("the prompt is sent");
+        session.complete("ok", Vec::new(), 0);
+        session.recall_older();
+        let wide = rendered_at(&session, 120, 12);
+        assert!(wide.contains("All 2/2"), "{wide}");
+        assert!(
+            wide.contains(&t!(input_history_narrow, chord = "ctrl-n")),
+            "{wide}"
+        );
+
+        session.cycle_history_scope();
+        let narrow = rendered_at(&session, 120, 12);
+        assert!(narrow.contains("This session 1/1"), "{narrow}");
+        assert!(
+            narrow.contains(&t!(input_history_widen, chord = "ctrl-n")),
+            "{narrow}"
+        );
+    }
+
+    /// All, This project and This session each name themselves in the border with the position,
+    /// and the chord names the scope it moves to next.
+    #[test]
+    fn the_border_names_all_three_scopes_and_the_one_the_chord_moves_to() {
+        let mut session = Session::new("none").in_workspace("/work/here");
+        session.history = crate::history::History::from_entries(vec![
+            bravebot_session::store::Entry::sent("elsewhere", Some("/work/elsewhere".to_string())),
+            bravebot_session::store::Entry::sent("here", Some("/work/here".to_string())),
+        ]);
+        session.history.set_project(Some("/work/here".to_string()));
+        session.type_char('x');
+        session.submit().expect("the prompt is sent");
+        session.complete("ok", Vec::new(), 0);
+        session.recall_older();
+
+        let all = rendered_at(&session, 140, 12);
+        assert!(all.contains("All 3/3"), "{all}");
+        assert!(
+            all.contains(&t!(input_history_project, chord = "ctrl-n")),
+            "{all}"
+        );
+
+        session.cycle_history_scope();
+        let project = rendered_at(&session, 140, 12);
+        assert!(project.contains("This project 2/2"), "{project}");
+        assert!(
+            project.contains(&t!(input_history_narrow, chord = "ctrl-n")),
+            "{project}"
+        );
+
+        session.cycle_history_scope();
+        let this_session = rendered_at(&session, 140, 12);
+        assert!(this_session.contains("This session 1/1"), "{this_session}");
+        assert!(
+            this_session.contains(&t!(input_history_widen, chord = "ctrl-n")),
+            "{this_session}"
+        );
+    }
+
+    /// The scope key is a setting, so the border names the key a settings file moved it to rather
+    /// than the default, or it would advertise a key that does nothing.
+    #[test]
+    fn the_border_names_the_scope_chord_a_settings_file_moved() {
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("scope".to_string(), "alt-n".to_string());
+
+        let mut session = Session::new("none");
+        session.adopt_keybindings(&moved);
+        session.history =
+            crate::history::History::from_entries(vec![bravebot_session::store::Entry::sent(
+                "old one", None,
+            )]);
+        session.type_char('x');
+        session.submit().expect("the prompt is sent");
+        session.complete("ok", Vec::new(), 0);
+        session.recall_older();
+        let wide = rendered_at(&session, 120, 12);
+        assert!(
+            wide.contains(&t!(input_history_narrow, chord = "alt-n")),
+            "{wide}"
+        );
+        assert!(!wide.contains("ctrl-n"), "{wide}");
+
+        session.cycle_history_scope();
+        let narrow = rendered_at(&session, 120, 12);
+        assert!(
+            narrow.contains(&t!(input_history_widen, chord = "alt-n")),
+            "{narrow}"
+        );
+    }
+
+    /// MOUSE-4: the list names the modifier that gives a drag back to the terminal, since capturing
+    /// the mouse took its own selection away.
+    #[test]
+    fn the_shortcuts_name_the_terminals_own_selection() {
+        let listed = shortcuts(
+            crate::vim::Editing::Ordinary,
+            &Keybindings::default(),
+            PointerKeys::Captured,
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|(key, meaning)| key == "shift-drag" && meaning.contains("terminal")),
+            "no row names the bypass modifier"
+        );
+    }
+
+    /// MOUSE-4, MOUSE-52: the list names what the mouse does where the mouse is reported, and the
+    /// modifier for the terminal's own selection of the terminals that give it by Shift and of those
+    /// that give it by Option. With capture off the terminal's selection needs no modifier and the
+    /// session reads no drag, so no row names either, and a right click is named only where it opens
+    /// the menu. Rejects: rows for a drag and a bypass that do nothing under `tui.mouse` false, a
+    /// right click named where `tui.contextMenu` is false, and the macOS modifier left out.
+    #[test]
+    fn the_key_list_names_the_mouse_only_where_it_is_reported() {
+        let named = |pointer| -> Vec<String> {
+            shortcuts(
+                crate::vim::Editing::Ordinary,
+                &Keybindings::default(),
+                pointer,
+            )
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.contains("drag") || key.contains("click"))
+            .collect()
+        };
+        assert_eq!(named(PointerKeys::Uncaptured), Vec::<String>::new());
+        assert_eq!(
+            named(PointerKeys::Captured),
+            ["drag", "shift-drag", "option-drag"]
+        );
+        assert_eq!(
+            named(PointerKeys::CapturedWithMenu),
+            ["drag", "shift-drag", "option-drag", "right-click"]
+        );
+
+        let on_the_screen = |mouse: Option<bool>, menu: Option<bool>| {
+            let mut session = Session::new("none");
+            session.adopt_mouse(mouse);
+            session.adopt_context_menu(menu);
+            session.type_char('?');
+            rendered_at(&session, 120, 40)
+        };
+        let by_default = on_the_screen(None, None);
+        for key in ["shift-drag", "option-drag", "right-click"] {
+            assert!(
+                by_default.contains(key),
+                "{key} is not listed: {by_default}"
+            );
+        }
+        let uncaptured = on_the_screen(Some(false), None);
+        assert!(
+            !uncaptured.contains("drag") && !uncaptured.contains("right-click"),
+            "{uncaptured}"
+        );
+        assert!(
+            uncaptured.contains("this list"),
+            "the list is not drawn: {uncaptured}"
+        );
+        let without_the_menu = on_the_screen(None, Some(false));
+        assert!(
+            without_the_menu.contains("shift-drag") && !without_the_menu.contains("right-click"),
+            "{without_the_menu}"
+        );
+    }
+
+    /// INPUT-48: the list names the chord that rewrites the line, and the one a settings file moved
+    /// it to, so the only place that says what the key does cannot go on naming a key that is dead.
+    #[test]
+    fn the_shortcuts_name_the_enhance_chord_in_force() {
+        let named = |bindings: &Keybindings| {
+            shortcuts(
+                crate::vim::Editing::Ordinary,
+                bindings,
+                PointerKeys::Uncaptured,
+            )
+            .into_iter()
+            .find(|(_, meaning)| meaning.contains("more specific"))
+            .map(|(key, _)| key)
+        };
+        assert_eq!(named(&Keybindings::default()).as_deref(), Some("ctrl-p"));
+
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("enhance".to_string(), "alt-e".to_string());
+        assert_eq!(
+            named(&Keybindings::from_map(&moved)).as_deref(),
+            Some("alt-e")
+        );
+    }
+
+    /// The list folds into columns, so it does not push the transcript off a short terminal the way
+    /// one row per binding would.
+    #[test]
+    fn the_shortcuts_use_fewer_rows_where_the_width_allows() {
+        let bindings = Keybindings::default();
+        for editing in crate::vim::Editing::ALL {
+            let wide = shortcut_lines(editing, &bindings, PointerKeys::CapturedWithMenu, 200).len();
+            let narrow =
+                shortcut_lines(editing, &bindings, PointerKeys::CapturedWithMenu, 40).len();
+            assert!(wide < narrow, "{wide} rows wide, {narrow} narrow");
+            assert_eq!(
+                narrow,
+                shortcuts(editing, &bindings, PointerKeys::CapturedWithMenu).len(),
+                "a narrow terminal cut a binding"
+            );
+        }
+    }
+
+    /// No row may be wider than the terminal. A row that is wraps, which puts the list a row over
+    /// the height the layout reserved for it and pushes the hint line off the screen. Swept across
+    /// every width down to nothing, since the arithmetic that fits the columns is where this would
+    /// go wrong.
+    #[test]
+    fn no_shortcut_row_runs_past_the_edge() {
+        // Including a settings file's chords, which are the longest names the list ever holds and so
+        // are what the arithmetic fitting the columns has to be measured against.
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("scroller".to_string(), "ctrl-alt-pgdn".to_string());
+        moved.insert("stash".to_string(), "ctrl-alt-f12".to_string());
+        for bindings in [Keybindings::default(), Keybindings::from_map(&moved)] {
+            for editing in crate::vim::Editing::ALL {
+                for width in 0..=200u16 {
+                    for line in
+                        shortcut_lines(editing, &bindings, PointerKeys::CapturedWithMenu, width)
+                    {
+                        let drawn = line.to_string();
+                        assert!(
+                            drawn.chars().count() <= width as usize,
+                            "a row ran past {width} editing {editing:?}: {drawn}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nothing to choose among them, so the keys that walk a list keep their usual meanings: Tab
+    /// completing here would rewrite the line, and Up would stop reaching the history.
+    #[test]
+    fn the_shortcuts_are_not_something_to_complete() {
+        let mut session = Session::new("none");
+        session.type_char('?');
+        assert!(!session.is_completing());
+        assert!(!session.completion_would_change_the_line());
+    }
+
+    /// The hint line names the key that opens the list, and the list names it too. They are separate
+    /// strings, so this is what keeps them from disagreeing about which key to press.
+    #[test]
+    fn the_hint_and_the_list_name_the_same_key() {
+        let key = shortcuts(
+            crate::vim::Editing::Ordinary,
+            &Keybindings::default(),
+            PointerKeys::CapturedWithMenu,
+        )
+        .into_iter()
+        .find(|(_, meaning)| *meaning == "this list")
+        .map(|(key, _)| key)
+        .expect("the list lists itself");
+        let key = key.as_str();
+        assert!(
+            SHORTCUTS_HINT.starts_with(key),
+            "the hint says {SHORTCUTS_HINT:?} and the list says {key:?}"
+        );
+
+        // And it is the key that actually opens it, rather than one the list merely claims.
+        let mut session = Session::new("none");
+        for c in key.chars() {
+            session.type_char(c);
+        }
+        assert!(session.shortcuts, "{key:?} did not open the list");
+    }
+
+    /// Typing a slash offers every command with what it does, which is the thing the hint line
+    /// stopped listing.
+    #[test]
+    fn a_slash_offers_every_command_and_what_it_does() {
+        let mut session = Session::new("none");
+        session.type_char('/');
+        // Tall enough for the whole list. A screen with no room for it drops rows from the
+        // bottom, so a fixed height would turn this into a test of how many commands fit on a
+        // terminal of that size.
+        let height = crate::command_table::commands().len() as u16 + 6;
+        let output = rendered_at(&session, 120, height);
+
+        for command in crate::command_table::commands() {
+            assert!(output.contains(command.name), "{} missing", command.name);
+            assert!(
+                output.contains(command.description),
+                "{} has no description on screen",
+                command.name
+            );
+        }
+    }
+
+    /// SKILL-21. The mode in force is named on the box for as long as it is in force, and the box
+    /// of a session in none says nothing of one.
+    #[test]
+    fn the_box_names_the_mode_while_one_is_in_force() {
+        let mut session = Session::new("none");
+        assert!(!rendered_at(&session, 100, 24).contains("mode: "));
+        session.choose_skill_mode(Some("tdd-playbook".to_string()));
+        assert!(rendered_at(&session, 100, 24).contains("mode: tdd-playbook"));
+        session.choose_skill_mode(None);
+        assert!(!rendered_at(&session, 100, 24).contains("mode: "));
+    }
+
+    /// A skill row says where the skill was found. Nothing below the box wraps, so a description
+    /// too long for the screen is cut short of the edge, which keeps that on the row, and one the
+    /// file wrapped or put an escape in is still one row of plain text.
+    #[test]
+    fn a_skill_row_says_where_it_came_from_within_the_width() {
+        use bravebot_agent::skills::Source;
+        let mut session = Session::new("none");
+        for c in "this is /rel".chars() {
+            session.type_char(c);
+        }
+        session.settle_skills(|| {
+            vec![
+                crate::skills::Skill {
+                    name: "release-notes".to_string(),
+                    description: "Draft the notes\nfrom the \u{1b}[31mchangelog, ".repeat(8),
+                    argument_hint: None,
+                    source: Source::Workspace.into(),
+                    person_only: false,
+                },
+                crate::skills::Skill {
+                    name: "release-check".to_string(),
+                    description: "Check a tag".to_string(),
+                    argument_hint: None,
+                    source: Source::Home.into(),
+                    person_only: false,
+                },
+            ]
+        });
+
+        let width = 120;
+        let rows: Vec<String> = lines_beneath_the_box(&session, width, &session.offered())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("  ❯ /release-check"), "{rows:?}");
+        assert!(rows[0].ends_with("Check a tag (user)"), "{rows:?}");
+        assert!(rows[1].starts_with("    /release-notes"), "{rows:?}");
+        assert!(rows[1].ends_with("… (project)"), "{rows:?}");
+        assert_eq!(rows[1].chars().count(), usize::from(width), "{rows:?}");
+        assert!(
+            rows[1].contains("Draft the notes from the ␛[31mchangelog, Draft"),
+            "the file's line break was not read as a space: {rows:?}"
+        );
+        assert!(
+            !rows[1].contains(['\u{1b}', '\n']),
+            "an escape or a line break reached the row: {rows:?}"
+        );
+    }
+
+    /// The rows the box offers when a session holds a server with a prompt, settled for `line`.
+    fn typed_with_prompts(line: &str) -> Session {
+        let held = crate::mcp_command::tests::holding_a_server_with_prompts();
+        let rows = crate::skills::from_servers(held.servers.session.as_ref());
+        let mut session = typed(line);
+        session.settle_skills(|| rows);
+        session
+    }
+
+    /// A prompt's row names the server it came from and what the server said about it, within the
+    /// width, and what it takes is drawn after the word once the word is typed in full (CMD-26).
+    #[test]
+    fn a_servers_prompt_row_names_its_server_and_what_it_takes() {
+        let session = typed_with_prompts("/mcp__w");
+        let rows: Vec<String> = lines_beneath_the_box(&session, 100, &session.offered())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let [row] = rows.as_slice() else {
+            panic!("{rows:?}");
+        };
+        assert!(
+            row.starts_with("  ❯ /mcp__weather__summarise_diff"),
+            "{row}"
+        );
+        assert!(
+            row.ends_with("Summarise the staged diff. (MCP weather)"),
+            "{row}"
+        );
+
+        let finished = typed_with_prompts("/mcp__weather__summarise_diff ");
+        assert!(
+            input_row(&finished, 90).ends_with("file=<value> style=<value> [depth=<value>]"),
+            "{}",
+            input_row(&finished, 90)
+        );
+    }
+
+    /// A prompt's word is drawn as recognised where it begins the line and nowhere else, since that
+    /// is the one place a line runs it. A skill's name is recognised anywhere.
+    #[test]
+    fn a_servers_prompt_is_drawn_as_recognised_only_from_the_first_word() {
+        for (line, recognised) in [
+            (
+                "/mcp__weather__summarise_diff",
+                "/mcp__weather__summarise_diff",
+            ),
+            (
+                "/mcp__weather__summarise_diff file=a.rs",
+                "/mcp__weather__summarise_diff",
+            ),
+            ("see /mcp__weather__summarise_diff now", ""),
+            ("/mcp__weather__summarise", ""),
+        ] {
+            assert_eq!(
+                recognised_in_the_box(&typed_with_prompts(line)),
+                recognised,
+                "{line:?}"
+            );
+        }
+    }
+
+    /// A skill its file keeps from the planner is drawn with that said beside where it was found, so a
+    /// person choosing one to name knows only they can have it loaded (SKILL-20). The ordinary skill
+    /// beside it is the control: a mark on every row says nothing about either.
+    #[test]
+    fn a_skill_row_says_when_only_the_person_can_have_it_loaded() {
+        use bravebot_agent::skills::Source;
+        let mut session = Session::new("none");
+        for c in "/ship".chars() {
+            session.type_char(c);
+        }
+        session.settle_skills(|| {
+            ["ship-it", "ship-notes"]
+                .map(|name| crate::skills::Skill {
+                    name: name.to_string(),
+                    description: "Put it live".to_string(),
+                    argument_hint: None,
+                    person_only: name == "ship-it",
+                    source: Source::Workspace.into(),
+                })
+                .to_vec()
+        });
+
+        let rows: Vec<String> = lines_beneath_the_box(&session, 120, &session.offered())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].contains("/ship-it"), "{rows:?}");
+        assert!(
+            rows[0].ends_with("Put it live (project) (only you)"),
+            "{rows:?}"
+        );
+        assert!(rows[1].contains("/ship-notes"), "{rows:?}");
+        assert!(rows[1].ends_with("Put it live (project)"), "{rows:?}");
+    }
+
+    /// The first row of the box after its border and prompt, one cell to an entry with the colour
+    /// it is drawn in.
+    fn input_cells_at(session: &Session, width: u16, height: u16) -> Vec<(String, Color)> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer();
+        let row = (0..height)
+            .find(|&row| {
+                buffer.cell((0, row)).expect("cell").symbol() == "│"
+                    && matches!(buffer.cell((1, row)).expect("cell").symbol(), ">" | "!")
+            })
+            .expect("the box has a first row");
+        (3..width - 1)
+            .map(|column| {
+                let cell = buffer.cell((column, row)).expect("cell");
+                (cell.symbol().to_string(), cell.fg)
+            })
+            .collect()
+    }
+
+    fn input_row(session: &Session, width: u16) -> String {
+        input_cells_at(session, width, 24)
+            .iter()
+            .map(|(symbol, _)| symbol.as_str())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// The characters of the box drawn as a recognised word, in the order they appear. The caret
+    /// is a coloured space, so spaces are left out.
+    fn recognised_in_the_box(session: &Session) -> String {
+        let _held = theme::exclusive();
+        input_cells_at(session, 90, 24)
+            .into_iter()
+            .filter(|(symbol, colour)| symbol != " " && *colour == theme::brand_primary())
+            .map(|(symbol, _)| symbol)
+            .collect()
+    }
+
+    fn skills_taking_arguments() -> Vec<crate::skills::Skill> {
+        use bravebot_agent::skills::Source;
+        [
+            ("code-review", Some("[low|high] [--fix] [<pr#>|<path>]")),
+            ("release-notes", None),
+        ]
+        .into_iter()
+        .map(|(name, hint)| crate::skills::Skill {
+            name: name.to_string(),
+            description: format!("what {name} is for"),
+            argument_hint: hint.map(str::to_string),
+            source: Source::Home.into(),
+            person_only: false,
+        })
+        .collect()
+    }
+
+    fn typed_with_skills(line: &str) -> Session {
+        let mut session = typed(line);
+        session.settle_skills(skills_taking_arguments);
+        session
+    }
+
+    /// The box says what a command takes once the command is typed and a space is after it, and
+    /// takes it back as soon as anything else is. The list beneath the box names the argument at
+    /// every stage, so the row of the box itself is what is read.
+    #[test]
+    fn a_command_shows_what_it_takes_once_it_is_typed() {
+        let hint = "[[interval] <prompt> | stop]";
+        assert!(input_row(&typed_with_skills("/loop "), 90).ends_with(hint));
+        assert!(
+            !input_row(&typed_with_skills("/loop"), 90).contains(hint),
+            "shown before the word was finished"
+        );
+        assert!(
+            !input_row(&typed_with_skills("/loop 5m"), 90).contains(hint),
+            "shown after the argument was begun"
+        );
+        assert!(
+            !input_row(&typed_with_skills("/loop  5m"), 90).contains(hint),
+            "shown over an argument after two spaces"
+        );
+        assert_eq!(
+            input_row(&typed_with_skills("/undo "), 90),
+            "/undo",
+            "a command with nothing to take showed something"
+        );
+        assert_eq!(
+            input_row(&typed_with_skills("/nosuch "), 90),
+            "/nosuch",
+            "a word that is no command showed a hint"
+        );
+    }
+
+    /// A skill's hint is the one its file gave, only at the start of the line where a command's
+    /// would be, and a skill whose file gave none shows nothing.
+    #[test]
+    fn a_skill_shows_the_hint_its_file_gave() {
+        let hint = "[low|high] [--fix] [<pr#>|<path>]";
+        assert!(input_row(&typed_with_skills("/code-review "), 90).ends_with(hint));
+        assert!(!input_row(&typed_with_skills("/code-review x"), 90).contains(hint));
+        assert!(
+            !input_row(&typed_with_skills("see /code-review "), 90).contains(hint),
+            "shown mid-sentence, where the word is not the whole line"
+        );
+        assert_eq!(
+            input_row(&typed_with_skills("/release-notes "), 90),
+            "/release-notes"
+        );
+    }
+
+    /// A turn starts from a line that held a slash word, and the loop that lets the skills go is
+    /// not reached again until the turn ends. A skill typed meanwhile is neither drawn as
+    /// recognised nor given its hint, while a command still is.
+    #[test]
+    fn a_turn_running_draws_no_skill_as_recognised() {
+        let mut session = typed_with_skills("use /code-review please");
+        assert_eq!(recognised_in_the_box(&session), "/code-review");
+        session.submit().expect("the line is sent");
+        assert_eq!(session.status, Status::Working);
+
+        for c in "/code-review ".chars() {
+            session.type_char(c);
+        }
+        assert_eq!(recognised_in_the_box(&session), "");
+        assert_eq!(input_row(&session, 90), "/code-review");
+
+        let mut command = Session::new("test");
+        command.type_char('a');
+        command.submit().expect("the line is sent");
+        for c in "/loop ".chars() {
+            command.type_char(c);
+        }
+        assert_eq!(recognised_in_the_box(&command), "/loop");
+    }
+
+    /// `/compact` takes an optional focus, so the table names it and the box says so once the word
+    /// is typed. A bare word with no space after it is not yet asking for an argument.
+    #[test]
+    fn the_compact_command_offers_a_focus_after_its_word() {
+        let row = input_row(&typed("/compact "), 90);
+        assert!(row.ends_with("/compact  [focus]"), "{row}");
+        assert!(!input_row(&typed("/compact"), 90).contains("[focus]"));
+    }
+
+    /// `/effort` spells out the levels it takes once the word is typed, while the completion list
+    /// keeps `[level]` so its description column does not move.
+    #[test]
+    fn the_effort_command_offers_its_levels_after_its_word() {
+        let row = input_row(&typed("/effort "), 90);
+        assert!(
+            row.ends_with("/effort  [low | medium | high | xhigh | max]"),
+            "{row}"
+        );
+    }
+
+    /// `/sandbox` spells out the modes it takes once the word is typed.
+    #[test]
+    fn the_sandbox_command_offers_its_modes_after_its_word() {
+        let row = input_row(&typed("/sandbox "), 90);
+        assert!(
+            row.ends_with("/sandbox  [strict | read-only | workspace-write | off]"),
+            "{row}"
+        );
+    }
+
+    /// The hint is one row however narrow the terminal is, cut where it reaches the edge with an
+    /// ellipsis, and a file's own escape in it is drawn as a glyph.
+    #[test]
+    fn a_hint_is_cut_to_the_row_and_holds_no_escape() {
+        let narrow = input_row(&typed_with_skills("/loop "), 24);
+        assert!(narrow.starts_with("/loop  [[interval]"), "{narrow}");
+        assert!(narrow.ends_with('…'), "{narrow}");
+
+        let mut session = typed("/code-review ");
+        session.settle_skills(|| {
+            vec![crate::skills::Skill {
+                argument_hint: Some("<a\u{1b}[31mb>".to_string()),
+                person_only: false,
+                ..skills_taking_arguments().remove(0)
+            }]
+        });
+        let row = input_row(&session, 90);
+        assert!(row.ends_with("<a␛[31mb>"), "{row}");
+    }
+
+    /// A word that names a command or a skill is drawn in the colour of the prompt, and a word
+    /// that only looks like one is not: the colour is a claim that the word is recognised.
+    #[test]
+    fn a_word_that_names_a_command_or_skill_is_drawn_in_its_own_colour() {
+        for (line, recognised) in [
+            ("/loop 5m check", "/loop"),
+            ("/loop", "/loop"),
+            ("/code-review", "/code-review"),
+            ("see /code-review now", "/code-review"),
+            (
+                "/release-notes and /code-review",
+                "/release-notes/code-review",
+            ),
+            ("/undo the last change", ""),
+            ("see /code-rev now", ""),
+            ("/nosuch", ""),
+            ("/btw see /code-review", "/btw"),
+            ("/renamed it", ""),
+        ] {
+            assert_eq!(
+                recognised_in_the_box(&typed_with_skills(line)),
+                recognised,
+                "{line:?}"
+            );
+        }
+    }
+
+    /// The last turn's cache read as a share of its prompt tokens, matching Pi's footer. A rate
+    /// built from the cache counts alone would include writes in the denominator and understate the
+    /// hit, so the fixture keeps those values distinct.
+    #[test]
+    fn the_hint_line_shows_the_last_turns_cache_hit_rate() {
+        let mut session = Session::new("none");
+        session.served_from_cache(
+            bravebot_aichat::protocol::Cached {
+                read_tokens: 41_200,
+                written_tokens: 1_800,
+            },
+            50_000,
+        );
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains("cache 82.4%"), "{hint}");
+    }
+
+    /// A turn that only writes a cache entry has no read hit to report. The status panel still
+    /// reports the write, while a zero-percent footer rate would claim the read was measured as a
+    /// miss.
+    #[test]
+    fn the_hint_line_says_nothing_for_a_write_only_cache_turn() {
+        let mut session = Session::new("none");
+        session.served_from_cache(
+            bravebot_aichat::protocol::Cached {
+                read_tokens: 0,
+                written_tokens: 1_800,
+            },
+            50_000,
+        );
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(!hint.contains("cache "), "{hint}");
+    }
+
+    /// A backend saying nothing about its cache supplies two zeroes. Drawing a zero-percent hit
+    /// from those would turn absence of a measurement into a measured miss.
+    #[test]
+    fn the_hint_line_says_nothing_where_the_backend_reported_nothing() {
+        let mut session = Session::new("none");
+        session.served_from_cache(Default::default(), 50_000);
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(!hint.contains("cache "), "{hint}");
+    }
+
+    /// A line in shell mode is a command line, where a slash begins a path.
+    #[test]
+    fn nothing_is_drawn_as_recognised_in_shell_mode() {
+        let mut session = typed_with_skills("/loop 5m");
+        session.shell = true;
+        assert_eq!(recognised_in_the_box(&session), "");
+        let mut session = typed_with_skills("/loop ");
+        session.shell = true;
+        assert_eq!(input_row(&session, 90), "/loop");
+    }
+
+    /// The figure a person needs to decide whether to compact by hand, on the line they already
+    /// read for the state of the session.
+    #[test]
+    fn the_hint_line_says_how_full_the_context_is() {
+        let mut session = Session::new("none");
+        session.measured(62_000, 100_000, false);
+        let output = rendered_at(&session, 120, 24);
+
+        assert!(output.contains("context 62%"), "{output}");
+    }
+
+    #[test]
+    fn the_hint_line_marks_a_guessed_budget() {
+        let mut session = Session::new("none");
+        session.measured(62_000, 100_000, true);
+        let output = rendered_at(&session, 120, 24);
+
+        assert!(output.contains("context ~62%"), "{output}");
+    }
+
+    /// A session that has measured nothing says so rather than drawing nothing. A blank is also
+    /// what a terminal with no room for the figure looks like and what the reading looks like once
+    /// it has stopped working, so an absence leaves a person guessing which of the three it is. No
+    /// figure is claimed either: a gauge at zero would be a claim about a context nobody counted.
+    #[test]
+    fn the_hint_line_says_an_unmeasured_context_has_not_been_measured() {
+        let hint = hint_row_at(&Session::new("none"), 120, 24);
+        assert!(hint.contains(UNMEASURED_CONTEXT), "{hint}");
+        assert!(
+            !hint.contains('%'),
+            "a figure was drawn for a context nobody counted: {hint}"
+        );
+    }
+
+    /// A count that arrived with no budget to divide it by yields no percentage, which left the
+    /// line blank for a second reason and gave a person no way to tell the two apart. The session
+    /// knows no more about how full the context is than one that has measured nothing, so it reads
+    /// the same.
+    #[test]
+    fn a_measurement_with_no_budget_to_state_it_against_reads_as_unmeasured() {
+        let mut session = Session::new("none");
+        session.measured(62_000, 0, false);
+        assert_eq!(
+            session.fullness(),
+            None,
+            "a percentage was formed after all"
+        );
+
+        let hint = hint_row_at(&session, 120, 24);
+        assert!(hint.contains(UNMEASURED_CONTEXT), "{hint}");
+        assert!(
+            !hint.contains('%'),
+            "a figure was drawn against no budget: {hint}"
+        );
+    }
+
+    /// The readings are given up after the bindings because a figure is the one thing on this line
+    /// nothing else can tell somebody. A sentence saying there is no figure yet is not that, so it
+    /// goes first: holding the room against two working keys is the trade the wrong way round.
+    #[test]
+    fn a_reading_with_no_figure_in_it_is_given_up_before_a_binding() {
+        let session = turn_that_left_a_trail();
+        assert_eq!(session.occupancy(), crate::state::Occupancy::Unmeasured);
+
+        // Narrow enough that the reading and the two bindings cannot all fit, which is the case
+        // worth pinning.
+        let hint = hint_row_at(&session, 45, 24);
+        assert!(hint.contains("ctrl-t show trail"), "{hint}");
+        assert!(hint.contains(SHORTCUTS_HINT), "{hint}");
+        assert!(
+            !hint.contains(UNMEASURED_CONTEXT),
+            "the reading was kept over a working key: {hint}"
+        );
+    }
+
+    /// A note about what a press just did is drawn over the right of the hint row, so the parts are
+    /// fitted against the width it leaves rather than the whole of it. Fitted against the whole,
+    /// the last part that fits is one the note writes over the middle of, and half a word under the
+    /// box reads as a rendering fault.
+    #[test]
+    fn a_note_at_the_right_takes_its_room_from_the_parts_rather_than_over_them() {
+        let mut session = turn_that_left_a_trail();
+        session.copied = Some(12);
+
+        let hint = hint_row_at(&session, 80, 24);
+        assert!(hint.contains("12 chars to clipboard"), "{hint}");
+        assert!(hint.contains(SHORTCUTS_HINT), "the line was cut: {hint}");
+    }
+
+    /// In shell mode the line is fitted like the ordinary one: a part is given up whole, so a
+    /// narrow terminal never shows half of one cut at the final column.
+    #[test]
+    fn the_shell_hint_line_drops_whole_parts_rather_than_cutting_one() {
+        let mut session = Session::new("none");
+        session.shell = true;
+
+        let wide = hint_row_at(&session, 120, 24);
+        assert!(wide.contains("output goes to the model"), "{wide}");
+        assert!(wide.contains("esc to cancel"), "{wide}");
+
+        // Room for the shell and the escape, but not for the sentence after them.
+        let shell = format!("! {}", bravebot_agent::shell::shell());
+        let width = u16::try_from(2 + shell.chars().count() + 5 + "esc to cancel".len() + 12)
+            .expect("small");
+        let narrow = hint_row_at(&session, width, 24);
+        assert!(narrow.contains("esc to cancel"), "{narrow}");
+        assert!(
+            !narrow.contains("output"),
+            "a part was cut rather than dropped: {narrow}"
+        );
+    }
+
+    /// The parts below the accent count draw as one accented span and the rest as one dim span, with
+    /// the line's own two spaces before the first drawn part and `  ·  ` between. The faults it
+    /// rejects are an accent on a part past the boundary and a dim span opening on a separator
+    /// with nothing before it.
+    #[test]
+    fn the_hint_spans_split_at_the_accent_count_and_join_with_separators() {
+        let parts: Vec<String> = ["one", "two", "three", "four"].map(String::from).to_vec();
+        let text = |spans: &[ratatui::text::Span<'_>]| -> Vec<String> {
+            spans.iter().map(|span| span.content.to_string()).collect()
+        };
+
+        let both = hint::hint_spans(&parts, &[0, 1, 3], 2);
+        assert_eq!(text(&both), ["  one  ·  two", "  ·  four"]);
+        assert_eq!(both[0].style.fg, Some(theme::accent()));
+        assert_ne!(both[1].style.fg, Some(theme::accent()));
+
+        let rest_only = hint::hint_spans(&parts, &[2, 3], 2);
+        assert_eq!(text(&rest_only), ["  three  ·  four"]);
+        assert!(hint::hint_spans(&parts, &[], 2).is_empty());
+    }
+
+    /// After compaction the line reports that the context was compacted.
+    #[test]
+    fn the_hint_line_reports_a_compacted_context() {
+        let mut session = Session::new("none");
+        session.compacted(36_000, 100_000);
+        let output = rendered_at(&session, 120, 24);
+
+        assert!(output.contains(COMPACTED_CONTEXT), "{output}");
+    }
+
+    /// Having just shortened a conversation, what a person wants to know is how much room that
+    /// won back, and the moment they want it is the one moment the figure is guaranteed absent:
+    /// nothing counts the shortened conversation until the next request. The compaction's own
+    /// reply is where the figure comes from, and it is a fraction of the budget like the reading
+    /// that replaces it a turn later.
+    #[test]
+    fn the_hint_line_says_how_much_room_a_compaction_won_back() {
+        let mut session = Session::new("none");
+        session.compacted(36_000, 100_000);
+        // Eighty columns, because the reading is only worth stating on a line that still fits the
+        // terminal somebody is working in: a part too long for it is one the width rule drops.
+        let hint = hint_row_at(&session, 80, 24);
+
+        assert!(hint.contains("context compacted, ~36% won back"), "{hint}");
+        assert!(hint.contains(SHORTCUTS_HINT), "the line was cut: {hint}");
+    }
+
+    /// A server that reported no usage leaves nothing to state, and `~0% won back` would claim a
+    /// measurement where the measurement is what is missing. The conversation was still
+    /// shortened, and that much the session does know.
+    #[test]
+    fn a_compaction_with_no_figure_to_give_still_says_the_conversation_was_compacted() {
+        let mut session = Session::new("none");
+        session.compacted(0, 100_000);
+        let hint = hint_row_at(&session, 120, 24);
+
+        assert!(hint.contains(COMPACTED_CONTEXT), "{hint}");
+        assert!(
+            !hint.contains('%'),
+            "a figure was drawn for a compaction nobody measured: {hint}"
+        );
+    }
+
+    /// Narrowing shows only what still matches, so the list answers what the half-typed word could
+    /// become rather than repeating the whole set.
+    #[test]
+    fn a_narrowed_list_offers_only_what_still_matches() {
+        let mut session = Session::new("none");
+        for c in "/cl".chars() {
+            session.type_char(c);
+        }
+        let output = rendered_at(&session, 120, 24);
+
+        assert!(output.contains("/clear"), "{output}");
+        assert!(
+            !output.contains("/model"),
+            "a command that cannot match was offered"
+        );
+        assert!(
+            !output.contains("/rename"),
+            "a command that cannot match was offered"
+        );
+    }
+
+    /// The descriptions line up in one column, and stay there as the list narrows. Measured from
+    /// every command rather than the visible ones, or they would slide sideways with each letter.
+    #[test]
+    fn the_descriptions_share_a_column_however_far_the_list_narrows() {
+        // Read off the buffer by cell, since a rendered row is one cell per column and a symbol
+        // may be more than one byte.
+        let column_of = |line: &str| -> usize {
+            let mut session = Session::new("none");
+            for c in line.chars() {
+                session.type_char(c);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(96, 15)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer();
+            for row in 0..15u16 {
+                let text: String = (0..96u16)
+                    .map(|column| buffer.cell((column, row)).expect("cell").symbol())
+                    .collect();
+                if let Some(at) = text.find("Call this conversation") {
+                    // The row is ASCII up to the description apart from the marker, so a character
+                    // count to that point is the column it sits in.
+                    return text[..at].chars().count();
+                }
+            }
+            panic!("the /rename row was not on screen");
+        };
+
+        assert_eq!(
+            column_of("/"),
+            column_of("/rename"),
+            "the description moved as the list narrowed"
+        );
+    }
+
+    /// With nothing being typed the rows go, giving the height back to the transcript rather than
+    /// leaving a gap where the list was.
+    #[test]
+    fn an_ordinary_prompt_offers_nothing() {
+        let mut session = Session::new("none");
+        for c in "what does this do".chars() {
+            session.type_char(c);
+        }
+        let output = rendered_at(&session, 120, 24);
+        assert!(!output.contains("Choose which model"), "{output}");
+    }
+
+    #[test]
+    fn a_working_session_shows_the_indicator() {
+        let mut session = Session::new("partial");
+        session.type_char('a');
+        session.submit();
+        let output = rendered(&session);
+
+        let indicator = session.indicator().expect("a turn is in flight");
+        assert!(
+            output.contains(indicator.verb.as_ref()),
+            "the indicator's word is missing: {output}"
+        );
+        assert!(
+            output.contains(indicator.glyph),
+            "the spinner glyph is missing: {output}"
+        );
+        // Shown from the start, so a slow first response still reads as alive.
+        assert!(output.contains("0s"), "no elapsed time: {output}");
+    }
+
+    /// Tokens accumulated earlier in the session appear once there are some to report.
+    #[test]
+    fn the_indicator_reports_accumulated_tokens() {
+        let mut session = Session::new("partial");
+        session.type_char('a');
+        session.submit();
+        session.complete("first reply", Vec::new(), 38_300);
+        session.type_char('b');
+        session.submit();
+
+        let output = rendered(&session);
+        assert!(output.contains("38.3k tokens"), "no token count: {output}");
+    }
+
+    /// An idle session shows no indicator at all.
+    #[test]
+    fn an_idle_session_shows_no_indicator() {
+        let session = Session::new("partial");
+        assert!(session.indicator().is_none());
+    }
+
+    /// The turn this exists for: the reply asked for no tool, so the turn is over. The spinner
+    /// going out used to be the only thing that said so, and a person reads that as a hang.
+    #[test]
+    fn a_finished_turn_says_so_rather_than_leaving_an_empty_line() {
+        let mut session = Session::new("partial");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "Now let me look at how the command dispatch works",
+            Vec::new(),
+            4_200,
+        );
+
+        let output = rendered(&session);
+        assert!(
+            output.contains("turn 1 done"),
+            "the turn's end was not reported: {output}"
+        );
+        assert!(
+            output.contains("4.2k"),
+            "what the turn cost was not reported: {output}"
+        );
+    }
+
+    /// VIEW-13: a finished turn's row carries what it cost and how long it took, and the other two
+    /// endings carry neither, since they produced no answer to price.
+    #[test]
+    fn only_a_finished_turns_row_carries_its_cost_and_duration() {
+        let ended = |ending| {
+            let mut session = Session::new("partial");
+            session.type_char('a');
+            session.submit();
+            session.complete("done", Vec::new(), 0);
+            session.finished = Some(crate::state::Finished {
+                turn: 1,
+                tokens: 4_200,
+                took: std::time::Duration::from_secs(75),
+                ending,
+            });
+            rendered(&session)
+        };
+
+        let done = ended(bravebot_agent::Ending::Done);
+        assert!(done.contains("turn 1 done"), "{done}");
+        assert!(done.contains("4.2k"), "no cost: {done}");
+        assert!(done.contains("1m 15s"), "no duration: {done}");
+
+        for (word, ending) in [
+            (
+                "turn 1 cancelled",
+                bravebot_agent::Ending::Stopped { attempts: None },
+            ),
+            (
+                "turn 1 failed",
+                bravebot_agent::Ending::Failed(bravebot_agent::Diagnosis::of(
+                    bravebot_agent::Category::Transport,
+                )),
+            ),
+        ] {
+            let row = ended(ending);
+            assert!(row.contains(word), "{word} not reported: {row}");
+            assert!(
+                !row.contains("4.2k") && !row.contains("1m 15s"),
+                "{word} carried a cost or a duration: {row}"
+            );
+        }
+    }
+
+    /// A tick beside a turn that did not finish would say the wrong thing about it.
+    #[test]
+    fn a_failed_turn_is_not_drawn_as_a_finished_one() {
+        let mut session = Session::new("partial");
+        session.type_char('a');
+        session.submit();
+        session.fail(
+            "the model could not be reached",
+            bravebot_agent::Ending::Failed(bravebot_agent::Diagnosis::of(
+                bravebot_agent::Category::Transport,
+            )),
+        );
+
+        let output = rendered(&session);
+        assert!(
+            output.contains("turn 1 failed"),
+            "the failure was not reported: {output}"
+        );
+        assert!(
+            !output.contains("turn 1 done"),
+            "a failed turn was drawn as done: {output}"
+        );
+    }
+
+    /// Before the first turn there is nothing to report, so the line stays out of the way.
+    #[test]
+    fn a_session_that_has_not_run_a_turn_reports_nothing() {
+        let output = rendered(&Session::new("partial"));
+        assert!(
+            !output.contains("done"),
+            "a turn was reported before one ran: {output}"
+        );
+    }
+
+    #[test]
+    fn the_transcript_distinguishes_speakers() {
+        let mut session = Session::new("none");
+        for c in "what is this".chars() {
+            session.type_char(c);
+        }
+        session.submit();
+        session.complete("it is a project", Vec::new(), 0);
+
+        let output = rendered(&session);
+        assert!(output.contains("what is this"), "the prompt is not echoed");
+        assert!(output.contains("it is a project"));
+        // The user's line is prefixed, the assistant's is marked.
+        assert!(output.contains("> what is this"));
+        assert!(output.contains(TURN_MARKER));
+    }
+
+    /// Markdown markers belong to the model's formatting, not to what it said.
+    #[test]
+    fn a_reply_is_shown_as_markdown_rather_than_its_markers() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete("edit **main.rs** now", Vec::new(), 0);
+
+        let output = rendered(&session);
+        assert!(output.contains("edit main.rs now"), "not styled: {output}");
+        assert!(
+            !output.contains("**"),
+            "the markers are still shown: {output}"
+        );
+    }
+
+    /// A table shown as its source is the one markdown form that reads worse than prose, since
+    /// the cells are not as wide as their headings and nothing lines up.
+    #[test]
+    fn a_reply_containing_a_table_is_drawn_as_one() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "| gate | answer |\n| --- | --- |\n| edit_file | refuses |",
+            Vec::new(),
+            0,
+        );
+
+        let output = rendered_at(&session, 90, 24);
+        assert!(output.contains("refuses"), "not drawn: {output}");
+        assert!(
+            output.contains('\u{2500}'),
+            "no rule under the header: {output}"
+        );
+        assert!(!output.contains('|'), "the pipes are still shown: {output}");
+    }
+
+    /// Refusing is a supported outcome, not a failure. The reader gets the model's own
+    /// characters, which is what they got before tables were drawn at all.
+    #[test]
+    fn a_table_too_wide_for_the_terminal_falls_back_to_its_source() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "| a | b | c | d | e | f |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 | 5 | 6 |",
+            Vec::new(),
+            0,
+        );
+
+        let output = rendered_at(&session, 20, 24);
+        assert!(output.contains('|'), "the source was not shown: {output}");
+    }
+
+    /// A table is a block in the middle of a reply, not the whole of it, so the prose either
+    /// side of one has to survive being skipped over.
+    #[test]
+    fn prose_around_a_table_is_still_prose() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "before the table\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nafter the table",
+            Vec::new(),
+            0,
+        );
+
+        let output = rendered_at(&session, 90, 24);
+        assert!(
+            output.contains("before the table"),
+            "lost the lead-in: {output}"
+        );
+        assert!(
+            output.contains("after the table"),
+            "lost the follow-on: {output}"
+        );
+        assert!(output.contains(TURN_MARKER));
+    }
+
+    /// The common false positive: a vertical bar in a sentence is punctuation, and rearranging
+    /// the sentence into columns because of it would lose what the model said.
+    #[test]
+    fn a_pipe_in_a_sentence_is_still_a_pipe() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete("choose one | or the other", Vec::new(), 0);
+
+        assert!(rendered_at(&session, 90, 24).contains("choose one | or the other"));
+    }
+
+    /// Untrusted content is drawn raw behind the bar. Columns inside a marked block are
+    /// structure the content chose for itself, and the margin is the one thing it may not
+    /// imitate.
+    #[test]
+    fn a_quarantined_preview_is_never_drawn_as_a_table() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete("read it", Vec::new(), 0);
+        session.transcript.last_mut().expect("an entry").shown = Some(Shown {
+            origin: "notes.md".into(),
+            reach: bravebot_agent::report::Reach::NotThePlanner,
+            label: "(U,priv)".to_string(),
+            preview: vec![
+                "| a | b |".into(),
+                "| --- | --- |".into(),
+                "| 1 | 2 |".into(),
+            ],
+            lines: 3,
+        });
+
+        // Wide enough that the heading fits on one row, since the count below is of the block's
+        // lines rather than of the rows a narrow terminal breaks them into.
+        let lines = transcript_lines(&session, 200, 24);
+        let marked: Vec<String> = lines
+            .iter()
+            .map(|line| line.to_string())
+            .filter(|line| line.contains(QUARANTINE_BAR))
+            .collect();
+        assert_eq!(marked.len(), 4, "the block lost a line: {marked:?}");
+        for line in &marked {
+            assert!(
+                line.starts_with(&format!("  {QUARANTINE_BAR} ")),
+                "unmarked: {line}"
+            );
+        }
+        assert!(
+            marked.iter().any(|line| line.contains("---")),
+            "the preview was reshaped: {marked:?}"
+        );
+    }
+
+    /// `LEAD` is the width a table is budgeted against. If the marker were wider than it, the
+    /// first row would overflow and the paragraph would wrap the columns it just aligned.
+    #[test]
+    fn the_lead_is_as_wide_as_the_marker_it_stands_for() {
+        assert_eq!(crate::wrap::display_width(TURN_MARKER) + 1, LEAD);
+    }
+
+    /// The trail is hidden until asked for, so ordinary use is not noisy.
+    #[test]
+    fn the_trail_is_hidden_by_default() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "reply",
+            vec![bravebot_session::audit::as_line(
+                &Event::Observed {
+                    capability: Capability::FileRead,
+                    label: Label::untrusted_private(),
+                },
+                None,
+            )],
+            0,
+        );
+
+        assert!(!rendered(&session).contains("(U,priv)"));
+        session.toggle_trail();
+        assert!(
+            rendered(&session).contains("(U,priv)"),
+            "the trail did not appear"
+        );
+    }
+
+    /// A call read back off disk is drawn, where before it was dropped and a resumed transcript
+    /// said the model answered without saying it had read anything.
+    #[test]
+    fn a_recalled_call_is_shown() {
+        let mut session = Session::new("none");
+        session
+            .transcript
+            .push(crate::state::Entry::recalled_tool("Read(src/main.rs)", ""));
+
+        assert!(rendered(&session).contains("Read(src/main.rs)"));
+    }
+
+    /// A resumed session is read for what was done and why, so a call read back off disk keeps
+    /// the reason it was made with.
+    #[test]
+    fn a_recalled_call_is_shown_with_its_reason() {
+        let mut session = Session::new("none");
+        session.transcript.push(crate::state::Entry::recalled_tool(
+            "Read(src/main.rs)",
+            "see the entry point",
+        ));
+
+        let drawn = rendered(&session);
+        let reason = drawn.find("see the entry point");
+        let call = drawn.find("Read(src/main.rs)");
+        assert!(
+            reason.is_some() && call.is_some() && reason < call,
+            "the reason should head the call: {drawn}"
+        );
+    }
+
+    /// A resumed session draws a call to a server's tool with the server, the tool and what it
+    /// sent, as the live call was drawn. A call no prompt was put for showed its arguments
+    /// nowhere else, and the record is all a resumed transcript has to draw it from.
+    #[test]
+    fn a_resumed_call_to_a_servers_tool_shows_what_it_sent() {
+        use bravebot_aichat::protocol::{Message, ToolCallRequest, ToolCallRequestFunction};
+
+        let mut conversation = bravebot_agent::Conversation::new();
+        conversation.push(Message::user("the forecast for Lyon"));
+        conversation.push(Message::assistant_calling(
+            "",
+            vec![ToolCallRequest {
+                id: "call-1".to_string(),
+                kind: "function".to_string(),
+                function: ToolCallRequestFunction {
+                    name: "mcp__weather__get_forecast".to_string(),
+                    arguments: r#"{"city":"Lyon"}"#.to_string(),
+                },
+                extra_content: None,
+            }],
+        ));
+        let mut session = Session::new("none");
+        session.replay(&conversation, "a title", &Default::default());
+
+        let drawn = rendered(&session);
+        assert!(
+            drawn.contains(r#"MCP(weather:get_forecast {"city":"Lyon"})"#),
+            "the resumed call does not show what it sent: {drawn}"
+        );
+    }
+
+    /// And drawn without the marker a live call earns. Green says the call finished cleanly, and
+    /// nothing in the record says that: what it holds is that the call was made.
+    #[test]
+    fn a_recalled_call_does_not_claim_an_outcome() {
+        // Reads a colour, so it holds the theme for the duration: a test putting one in force
+        // beside this one would otherwise decide what this draws in.
+        let _held = crate::theme::exclusive();
+
+        let mut session = Session::new("none");
+        session
+            .transcript
+            .push(crate::state::Entry::recalled_tool("Read(src/main.rs)", ""));
+        let recalled = marker_style(&session);
+
+        let mut session = Session::new("none");
+        session.start_activity(Activity::running("Read", "src/main.rs").done("12 lines"));
+        assert_ne!(
+            recalled,
+            marker_style(&session),
+            "a recalled call was drawn as one that finished cleanly"
+        );
+        assert_eq!(recalled, dim());
+    }
+
+    /// The style of the marker on the first drawn line.
+    fn marker_style(session: &Session) -> Style {
+        transcript_lines(session, 90, 24)
+            .first()
+            .and_then(|line| line.spans.first())
+            .map(|span| span.style)
+            .expect("something was drawn")
+    }
+
+    #[test]
+    fn the_hint_reflects_the_trail_state() {
+        let mut session = turn_that_left_a_trail();
+        assert!(rendered(&session).contains("show trail"));
+        session.toggle_trail();
+        assert!(rendered(&session).contains("hide trail"));
+    }
+
+    /// The hint line used to name the key from the first frame, before any turn had left anything
+    /// for it to reveal. Pressing it then toggled a flag and changed nothing on screen, which
+    /// teaches a person that the key is broken.
+    #[test]
+    fn the_hint_names_the_trail_key_only_once_there_is_a_trail() {
+        let mut session = Session::new("none");
+        assert!(!rendered(&session).contains("trail"), "nothing to show yet");
+
+        // Nor part way through the first turn, which is where the trail has still to be recorded.
+        session.type_char('a');
+        session.submit();
+        assert!(!rendered(&session).contains("trail"), "the turn is running");
+
+        session.complete(
+            "reply",
+            vec![bravebot_session::audit::as_line(
+                &Event::Observed {
+                    capability: Capability::FileRead,
+                    label: Label::untrusted_private(),
+                },
+                None,
+            )],
+            0,
+        );
+        assert!(
+            rendered(&session).contains("ctrl-t show trail"),
+            "the finished turn left a trail the hint did not offer"
+        );
+    }
+
+    /// A finished turn with a trail on it, which is what makes the key worth offering.
+    fn turn_that_left_a_trail() -> Session {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "reply",
+            vec![bravebot_session::audit::as_line(
+                &Event::Observed {
+                    capability: Capability::FileRead,
+                    label: Label::untrusted_private(),
+                },
+                None,
+            )],
+            0,
+        );
+        session
+    }
+
+    /// A refusal must be visible, since it is the most important thing on screen.
+    #[test]
+    fn a_blocked_gate_is_shown_in_the_trail() {
+        let mut session = Session::new("none");
+        session.toggle_trail();
+        session.type_char('a');
+        session.submit();
+        session.complete(
+            "refused",
+            vec![bravebot_session::audit::as_line(
+                &Event::GateBlocked {
+                    gate: "action",
+                    detail: String::new(),
+                    reason: "injection blocked".into(),
+                    principle: bravebot_core::event::Principle::IntegrityGate,
+                },
+                None,
+            )],
+            0,
+        );
+
+        assert!(rendered(&session).contains("injection blocked"));
+    }
+
+    #[test]
+    fn a_system_note_is_shown() {
+        let mut session = Session::new("none");
+        session.note("confinement unavailable");
+        assert!(rendered(&session).contains("confinement unavailable"));
+    }
+
+    /// Yellow is spoken for: a call still running, and the margin down every block of content the
+    /// planner may not read. A note the interface makes about the session is neither, and drawing
+    /// it in the same ink said that the trust answer was quarantined content.
+    #[test]
+    fn a_system_note_is_not_drawn_in_the_ink_that_marks_untrusted_content() {
+        let _held = theme::exclusive();
+        let mut session = Session::new("none");
+        session.note("trusting /tmp/x");
+
+        let inks = inks_on_row_containing(&session, "trusting");
+        assert!(
+            inks.iter().all(|ink| *ink == theme::note()),
+            "the note was not drawn in one ink of its own: {inks:?}"
+        );
+        assert!(
+            !inks.contains(&theme::running()),
+            "the note is still yellow"
+        );
+    }
+
+    /// VIEW-8: a note of something done is drawn in the ink for finished and a note of something
+    /// refused in the ink for failed, and an ordinary note keeps the ink every other note shares.
+    /// None of the three is the ink that marks untrusted content.
+    ///
+    /// The failures this rejects are a renderer that does not read the tone, which draws every
+    /// note in the one shared ink and so a success as an error, the two inks swapped, and a tone
+    /// drawn in yellow, which says the note is quarantined.
+    #[test]
+    fn a_note_of_something_done_or_refused_is_not_drawn_in_the_ink_every_note_shares() {
+        let _held = theme::exclusive();
+        theme::apply_brave();
+        let mut session = Session::new("none");
+        session.note("trusting /tmp/x");
+        session.note_done("added /tmp/y");
+        session.note_refused("could not add /tmp/z");
+
+        for (needle, ink) in [
+            ("trusting", theme::note()),
+            ("added", theme::ok()),
+            ("could not add", theme::fail()),
+        ] {
+            let inks = inks_on_row_containing(&session, needle);
+            assert!(
+                inks.iter().all(|drawn| *drawn == ink),
+                "{needle} was not drawn in {ink:?}: {inks:?}"
+            );
+            assert!(
+                !inks.contains(&theme::running()),
+                "{needle} is drawn in the ink that marks untrusted content"
+            );
+        }
+        assert_ne!(theme::ok(), theme::note(), "a success reads as the note");
+        assert_ne!(theme::fail(), theme::note(), "a refusal reads as the note");
+        assert_ne!(theme::ok(), theme::fail());
+    }
+
+    /// The word that names the mode carries meaning, so it is a shade this interface mixes rather
+    /// than one of the sixteen slots a terminal repaints. Cyan is not one of the three slots whose
+    /// meaning is the terminal's own, so a scheme that remapped it decided how this row read, and
+    /// a person who chose a theme was not drawn in it at all.
+    #[test]
+    fn the_scroller_names_the_mode_in_a_shade_and_not_a_slot() {
+        let _held = theme::exclusive();
+        theme::apply_brave();
+
+        let mut session = Session::new("none");
+        session.note_layout(crate::state::Laid {
+            width: 120,
+            height: 24,
+            rows: 24,
+            ..crate::state::Laid::default()
+        });
+        session.open_scroller();
+
+        let inks = inks_on_row_containing(&session, "scroller");
+        assert!(
+            inks.contains(&theme::brand_primary()),
+            "the mode is not named in the interface's own ink: {inks:?}"
+        );
+        assert!(
+            !inks.contains(&Color::Cyan),
+            "a slot the terminal repaints is still carrying it: {inks:?}"
+        );
+    }
+
+    /// Shell mode is told from ordinary mode by the colour of the line being typed, its border and
+    /// the row under it, so that colour carries a meaning this interface owns rather than one the
+    /// terminal owns. Magenta is a slot a scheme repaints, and it is not one of the three whose
+    /// meaning belongs to the terminal, so what the distinction looked like was somebody else's
+    /// choice: a scheme painting slot 5 near its brand primary collapsed it altogether.
+    #[test]
+    fn shell_mode_is_marked_in_a_shade_and_not_a_slot() {
+        let _held = theme::exclusive();
+        theme::apply_brave();
+
+        let mut session = Session::new("none");
+        session.shell = true;
+
+        let inks = inks_on_row_containing(&session, "esc to cancel");
+        assert!(
+            inks.contains(&theme::accent()),
+            "shell mode is not marked in the interface's own ink: {inks:?}"
+        );
+        assert!(
+            matches!(theme::accent(), Color::Rgb(..)),
+            "shell mode is marked in a named colour, which the terminal chooses: {:?}",
+            theme::accent()
+        );
+        assert!(
+            !inks.contains(&Color::Magenta),
+            "a slot the terminal repaints is still carrying it: {inks:?}"
+        );
+    }
+
+    /// Starting up leaves several notes at once, and a blank between each of them presents one
+    /// report as three separate turns. The run still has to end where the session starts saying
+    /// something else, so the blank goes after the last of them rather than between each.
+    #[test]
+    fn a_run_of_notes_is_not_spaced_apart() {
+        let mut session = Session::new("none");
+        session.note("compacting above 131072 tokens");
+        session.note("trusting /tmp/x");
+        session.note("theme catppuccin");
+
+        let lines: Vec<String> = transcript_lines(&session, 90, 24)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        let first = lines
+            .iter()
+            .position(|line| line.contains("compacting"))
+            .expect("the first note was not drawn");
+        assert!(
+            lines[first + 1].contains("trusting") && lines[first + 2].contains("theme"),
+            "the notes were spaced apart: {lines:?}"
+        );
+        assert!(
+            lines[first + 3].trim().is_empty(),
+            "the run did not end where the notes did: {lines:?}"
+        );
+    }
+
+    /// VIEW-19: a note longer than the window continues under the column its first row starts in,
+    /// so a long trust line or skill list does not leave a ragged left edge. The faults it
+    /// rejects: leaving the break to the paragraph, which continues a row at column 0; wrapping
+    /// to the whole width, so the margin pushes a row past the edge; dropping or reordering
+    /// words at a break; and one of a note's lines taking the margin of the others only when it
+    /// fits. Every tone is covered, since the ink is the tone's and a wrapped row keeps it. A
+    /// note's words are drawn as they are, with no `printable` pass, like a refusal's.
+    #[test]
+    fn a_note_that_wraps_continues_under_the_column_its_first_row_starts_in() {
+        let _held = crate::theme::exclusive();
+        let words = "trusts /Users/someone/projects/a-directory-with-a-rather-long-name/and/more \
+                     then twelve skills are listed here one two three four five six seven";
+        for width in [8u16, 20, 33, 60] {
+            let mut session = Session::new("none");
+            session.note(format!("{words}\nsecond line of the same note"));
+            session.note_done(words);
+            session.note_refused(words);
+
+            let lines = transcript_lines(&session, width, 40);
+            let noted: Vec<&Line<'_>> = lines
+                .iter()
+                .skip_while(|line| !line.to_string().contains("trusts"))
+                .take_while(|line| !line.to_string().trim().is_empty())
+                .collect();
+            let lead = " ".repeat(LEAD);
+            assert!(
+                noted.len() > 3,
+                "the notes did not wrap at {width}: {lines:?}"
+            );
+            for line in &noted {
+                let drawn = line.to_string();
+                assert!(
+                    drawn.starts_with(&lead),
+                    "row at column 0 at {width}: {drawn:?}"
+                );
+                assert!(
+                    !drawn[LEAD..].starts_with(' '),
+                    "a row begins with the break's space at {width}: {drawn:?}"
+                );
+                assert!(
+                    drawn.chars().count() <= usize::from(width).max(LEAD + 8),
+                    "a row is wider than the window at {width}: {drawn:?}"
+                );
+                assert_eq!(line.spans.len(), 1, "{line:?}");
+                assert_eq!(
+                    super::transcript::rows_of(line, width.max(LEAD as u16 + 8)),
+                    1
+                );
+            }
+            let joined: Vec<String> = noted
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let expected: Vec<String> =
+                format!("{words} second line of the same note {words} {words}")
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+            let long_word = |words: &[String]| words.join("");
+            assert_eq!(long_word(&joined), long_word(&expected), "at {width}");
+        }
+    }
+
+    /// A note that wraps carries the ink of its tone on every row (VIEW-8), one span to a row.
+    #[test]
+    fn every_row_of_a_wrapped_note_carries_the_ink_of_its_tone() {
+        let _held = crate::theme::exclusive();
+        let said = "one two three four five six seven eight nine ten eleven twelve thirteen";
+        for (tone, ink) in [
+            (0, crate::theme::note()),
+            (1, crate::theme::ok()),
+            (2, crate::theme::fail()),
+        ] {
+            let mut session = Session::new("none");
+            match tone {
+                0 => session.note(said),
+                1 => session.note_done(said),
+                _ => session.note_refused(said),
+            }
+            let lines = transcript_lines(&session, 24, 40);
+            let rows: Vec<&Line<'_>> = lines
+                .iter()
+                .skip_while(|line| !line.to_string().starts_with("  one"))
+                .take_while(|line| !line.to_string().trim().is_empty())
+                .collect();
+            assert!(rows.len() > 2, "{lines:?}");
+            for row in rows {
+                assert_eq!(row.spans.len(), 1, "{row:?}");
+                assert_eq!(row.spans[0].style, Style::default().fg(ink), "{row:?}");
+            }
+        }
+    }
+
+    /// The detail marker says the line belongs to the entry above it, and a note belongs to no
+    /// entry at all: the ones starting up leaves are drawn before there is anything above them.
+    #[test]
+    fn a_note_is_not_drawn_as_a_detail_of_the_line_above_it() {
+        let mut session = Session::new("none");
+        session.note("trusting /tmp/x");
+
+        let drawn = transcript_lines(&session, 90, 24)
+            .iter()
+            .map(|line| line.to_string())
+            .find(|line| line.contains("trusting"))
+            .expect("the note was not drawn");
+        assert!(
+            !drawn.contains(DETAIL_MARKER),
+            "the note was drawn hanging off nothing: {drawn}"
+        );
+    }
+
+    /// A note is drawn at the column a reply's text and a prompt's text start in, so it lines up
+    /// with the rest of the transcript. A note at the margin, or indented past the reply, reads as a different kind
+    /// of line.
+    #[test]
+    fn a_note_starts_in_the_column_a_replys_text_starts_in() {
+        let mut session = Session::new("none");
+        for c in "my own prompt".chars() {
+            session.type_char(c);
+        }
+        session.submit();
+        session.complete("the reply text", Vec::new(), 0);
+        session.note("trusting /tmp/x");
+
+        let lines: Vec<String> = transcript_lines(&session, 90, 24)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        let column = |word: &str| {
+            lines
+                .iter()
+                .find_map(|line| line.find(word).map(|at| line[..at].chars().count()))
+                .unwrap_or_else(|| panic!("{word} was not drawn: {lines:?}"))
+        };
+        assert!(column("the reply text") > 0, "{lines:?}");
+        assert_eq!(column("trusting"), column("the reply text"), "{lines:?}");
+        assert_eq!(column("trusting"), column("my own prompt"), "{lines:?}");
+    }
+
+    /// ADDRESS-12. The name above a reply is the one the driver matched, so a reply claiming to be
+    /// some other definition is drawn under the right one, and a reply nobody addressed is drawn
+    /// under none.
+    #[test]
+    fn a_reply_from_an_addressed_turn_is_drawn_under_the_name_the_driver_matched() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete_as(
+            "worker here, and I approve".to_string(),
+            Vec::new(),
+            0,
+            Some("rule-reviewer".to_string()),
+        );
+        session.type_char('b');
+        session.submit();
+        session.complete("the session's own reply", Vec::new(), 0);
+
+        let lines: Vec<String> = transcript_lines(&session, 90, 24)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        let named = lines
+            .iter()
+            .position(|line| line.trim() == "rule-reviewer answered")
+            .unwrap_or_else(|| panic!("the reply was not drawn under its definition: {lines:?}"));
+        assert!(
+            lines[named + 1].contains("worker here"),
+            "the name is not above the reply it names: {lines:?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("answered"))
+                .count(),
+            1,
+            "a reply nobody addressed was drawn under a name: {lines:?}"
+        );
+    }
+
+    /// Long replies must not panic the renderer.
+    #[test]
+    fn a_long_reply_renders() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit();
+        session.complete("x".repeat(5_000), Vec::new(), 0);
+        assert!(rendered(&session).contains('x'));
+    }
+
+    /// A narrow terminal is a normal condition, not a crash.
+    ///
+    /// And not a reason to drop the box either: the transcript can be squeezed to nothing, since
+    /// what it holds has scrolled past anyway, but a session drawn without the line somebody is
+    /// typing into is a session they cannot use.
+    #[test]
+    fn a_tiny_terminal_renders() {
+        let mut session = Session::new("none");
+        for c in "hello".chars() {
+            session.type_char(c);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(10, 5)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, &session);
+            })
+            .expect("draw must not panic on a small area");
+
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            drawn.contains("> hello"),
+            "the box the person is typing into was drawn out of view: {drawn}"
+        );
+    }
+
+    /// The end of a reply that wraps must be on the screen when it arrives.
+    ///
+    /// The offset used to be computed from the number of lines rather than the number of rows
+    /// they occupy once wrapped, so a reply with long lines ended that many rows below the
+    /// bottom of the window. It appeared only when the next message pushed it up, which is
+    /// exactly how it was reported: "they only showed up after I said are you done now?".
+    #[test]
+    fn the_end_of_a_wrapped_reply_is_visible_when_it_arrives() {
+        let mut session = Session::new("test");
+        // Enough turns to fill the window, each reply long enough to wrap several times: the
+        // gap between lines and rows is what used to push the end off the bottom.
+        for turn in 0..6 {
+            session.type_char('x');
+            session.submit();
+            session.complete(
+                format!("reply {turn}: {}", "wrapping words ".repeat(12)),
+                Vec::new(),
+                0,
+            );
+        }
+        session.type_char('x');
+        session.submit();
+        session.complete(
+            format!("{}\nTHE LAST LINE", "more wrapping words ".repeat(12)),
+            Vec::new(),
+            0,
+        );
+
+        let drawn = rendered_at(&session, 60, 20);
+        assert!(
+            drawn.contains("THE LAST LINE"),
+            "the end of the reply was below the window: {drawn}"
+        );
+    }
+
+    /// Scrolling back must actually change what is shown, or the binding is decorative.
+    #[test]
+    fn scrolling_back_changes_the_view() {
+        let mut session = Session::new("none");
+        for turn in 0..40 {
+            session.type_char('q');
+            session.submit();
+            session.complete(format!("reply number {turn}"), Vec::new(), 0);
+        }
+
+        let bottom = rendered(&session);
+        assert!(bottom.contains("reply number 39"), "latest reply not shown");
+
+        // A modest scroll moves into the middle of the history, not to its start: each
+        // turn occupies several lines.
+        session.scroll_up(60);
+        let scrolled = rendered(&session);
+        assert_ne!(bottom, scrolled, "scrolling had no effect");
+        assert!(
+            !scrolled.contains("reply number 39"),
+            "the latest reply is still shown after scrolling back"
+        );
+
+        // Scrolling far past the top clamps to the first entry rather than blanking.
+        session.scroll_up(u16::MAX);
+        let top = rendered(&session);
+        assert!(
+            top.contains("reply number 0"),
+            "scrolling to the top did not reach the first reply"
+        );
+
+        // And coming back down returns to the latest output.
+        session.scroll_down(u16::MAX);
+        assert!(
+            rendered(&session).contains("reply number 39"),
+            "scrolling back down did not return to the latest reply"
+        );
+    }
+
+    /// A view scrolled back has to survive the reply being written under it, which is the only
+    /// time holding it is hard. A chunk lands several times a second for as long as the model
+    /// writes, so a view taken back to the tail for one is taken again before its reader has
+    /// finished the line they scrolled to, and scrolling back stops being something they can do.
+    #[test]
+    fn a_reply_arriving_does_not_drag_a_scrolled_back_view_to_the_tail() {
+        let mut session = Session::new("none");
+        for turn in 0..40 {
+            session.type_char('q');
+            session.submit();
+            session.complete(format!("reply number {turn}"), Vec::new(), 0);
+        }
+
+        // Laid out once first: the offset is measured against the screen of the previous frame,
+        // and a session that has never been told one counts back from nothing. This frame is at
+        // the tail, so it also fixes what being dragged back there looks like.
+        let tail = rows_of_a_frame(&mut session).join("\n");
+        assert!(
+            tail.contains("reply number 39"),
+            "the tail does not show the last reply, so its absence proves nothing: {tail}"
+        );
+
+        session.scroll_up(60);
+        let reading = rows_of_a_frame(&mut session).join("\n");
+        assert!(
+            !reading.contains("reply number 39"),
+            "the view never left the tail, so there is nothing here to hold: {reading}"
+        );
+
+        session.streaming("a chunk of the next reply");
+
+        let arriving = rows_of_a_frame(&mut session).join("\n");
+        assert!(
+            !arriving.contains("reply number 39"),
+            "a chunk of the reply dragged the view back to the tail: {arriving}"
+        );
+    }
+
+    /// The view is held where it was scrolled to, so the one place that can say so, and how much
+    /// has arrived below, is the hint line. It goes when the view reaches the tail.
+    #[test]
+    fn a_held_view_says_how_many_rows_arrived_below_and_the_key_back() {
+        let mut session = Session::new("none");
+        for turn in 0..40 {
+            session.type_char('q');
+            session.submit();
+            session.complete(format!("reply number {turn}"), Vec::new(), 0);
+        }
+        let hint = |session: &mut Session| rows_of_a_frame(session).pop().expect("a last row");
+
+        let tail = hint(&mut session);
+        assert!(
+            !tail.contains("below"),
+            "a view at the tail was said to be held: {tail}"
+        );
+
+        session.scroll_up(60);
+        let held = hint(&mut session);
+        assert!(held.contains("held"), "{held}");
+        assert!(held.contains("ctrl-end to return"), "{held}");
+        let before = session.rows_below();
+        assert!(
+            before > 0 && held.contains(&format!("{before} rows below")),
+            "{held}"
+        );
+
+        session.streaming("a long chunk\n\n\n\nof the next reply");
+        // The first frame lays the new rows out and the second draws against what it measured.
+        hint(&mut session);
+        let arrived = hint(&mut session);
+        let after = session.rows_below();
+        assert!(after > before, "{before} -> {after}");
+        assert!(
+            arrived.contains(&format!("{after} rows below")),
+            "{arrived}"
+        );
+
+        session.scroll_down(u16::MAX);
+        let back = hint(&mut session);
+        assert!(!back.contains("below") && !back.contains("held"), "{back}");
+    }
+
+    /// The cue reminds a person that the view is held while the turn goes on, and it sits on the
+    /// line whose accent is kept for the parts that change what a key does. Drawn in the accent it
+    /// reads as one of them (VIEW-27). Read from the cells of the whole cue, from `held` to
+    /// `return`.
+    #[test]
+    fn the_held_cue_is_drawn_dim() {
+        let _held = theme::exclusive();
+        theme::apply_brave();
+        let mut session = Session::new("none");
+        for turn in 0..40 {
+            session.type_char('q');
+            session.submit();
+            session.complete(format!("reply number {turn}"), Vec::new(), 0);
+        }
+        rows_of_a_frame(&mut session);
+        session.scroll_up(60);
+        assert!(session.rows_below() > 0, "the view was not held");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, &session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer();
+        let hint_row = buffer.area().height - 1;
+        let symbols: Vec<&str> = (0..buffer.area().width)
+            .map(|column| buffer.cell((column, hint_row)).expect("cell").symbol())
+            .collect();
+        let from = (0..symbols.len())
+            .find(|at| symbols[*at..].concat().starts_with("held"))
+            .expect("the cue was not drawn");
+        let through = (from..symbols.len())
+            .find(|at| symbols[*at..].concat().starts_with("return"))
+            .expect("the cue did not name the key back")
+            + "return".len();
+
+        assert_ne!(theme::muted(), theme::accent());
+        for column in (from..through).filter(|column| symbols[*column] != " ") {
+            let ink = buffer.cell((column as u16, hint_row)).expect("cell").fg;
+            assert_eq!(ink, theme::muted(), "column {column} of the cue");
+        }
+    }
+
+    /// The cue is the first of the things the hint line keeps for its own sake to go, so a terminal
+    /// with no room for it loses the cue and keeps the mode, in the ordinary line and the shell
+    /// line. Left out of either order, the line would be cleared whole and the mode with it.
+    #[test]
+    fn a_held_view_on_a_narrow_terminal_drops_the_cue_and_keeps_the_mode() {
+        let mut session = Session::new("none").starting_in_bypass();
+        while session.permission_mode() != bravebot_agent::PermissionMode::AcceptEdits {
+            session.cycle_permission_mode();
+        }
+        for turn in 0..40 {
+            session.type_char('q');
+            session.submit();
+            session.complete(format!("reply number {turn}"), Vec::new(), 0);
+        }
+        let hint_at = |session: &mut Session, width: u16| {
+            // The first frame lays the transcript out at this width and the second draws against it.
+            rows_of_a_frame_at(session, width, 24);
+            rows_of_a_frame_at(session, width, 24)
+                .pop()
+                .expect("a last row")
+        };
+        let mode =
+            crate::status::named_mode(session.permission_mode(), true).expect("a named mode");
+
+        session.scroll_up(60);
+        let roomy = hint_at(&mut session, 90);
+        assert!(
+            roomy.contains("rows below") && roomy.contains(mode),
+            "the cue was not drawn where it fits, so its absence below proves nothing: {roomy}"
+        );
+
+        let narrow = hint_at(&mut session, 40);
+        assert!(session.rows_below() > 0, "the view left the held position");
+        assert!(
+            narrow.contains(mode),
+            "the mode went with the cue: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains("held") && !narrow.contains("below"),
+            "a cue with no room was drawn: {narrow:?}"
+        );
+
+        session.shell = true;
+        let roomy = hint_at(&mut session, 120);
+        assert!(
+            roomy.contains("rows below"),
+            "the shell line did not draw the cue where it fits: {roomy}"
+        );
+        let narrow = hint_at(&mut session, 40);
+        assert!(session.rows_below() > 0, "the view left the held position");
+        assert!(
+            narrow.trim_start().starts_with("! "),
+            "the shell went with the cue: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains("held") && !narrow.contains("below"),
+            "a cue with no room was drawn in shell mode: {narrow:?}"
+        );
+    }
+
+    /// Draw one frame the way the loop draws it, tell the session what the frame laid out, and give
+    /// back the rows of the screen.
+    ///
+    /// [`rendered`] cannot answer a question about a held view: it never reports the layout, so the
+    /// offset stays measured against a screen the session has not seen.
+    fn rows_of_a_frame(session: &mut Session) -> Vec<String> {
+        rows_of_a_frame_at(session, 90, 24)
+    }
+
+    /// [`rows_of_a_frame`] at a chosen size.
+    fn rows_of_a_frame_at(session: &mut Session, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let mut laid = crate::state::Laid::default();
+        terminal
+            .draw(|frame| laid = draw(frame, session))
+            .expect("draw succeeds");
+        session.note_layout(laid);
+
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Each row of the screen at a chosen size, for what has to be on one row together.
+    fn rows_at(session: &Session, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| buffer.cell((column, row)).expect("cell").symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Render at a chosen size, since wrapping depends on width.
+    fn rendered_at(session: &Session, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// The hint line alone, which is the last row of the screen.
+    ///
+    /// Needed because the heading carries the confinement too: searching the whole screen for it
+    /// cannot tell a hint line that still fits from one that has been cut off.
+    fn hint_row_at(session: &Session, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        (0..width)
+            .map(|column| buffer[(column, height - 1)].symbol())
+            .collect()
+    }
+
+    /// LINK-4: the line under the box names the link while its words are there, and says how many
+    /// there are and to review them once there are more than the box shows. Without the long form a
+    /// thousand-character prompt looks like the three lines of it that fit.
+    #[test]
+    fn the_hint_line_names_the_link_and_gives_the_length_of_a_long_prompt() {
+        let mut session = Session::new("none");
+        session.prefill_from_link("fix the test");
+        let short = hint_row_at(&session, 120, 24);
+        assert!(short.contains("external link"), "{short}");
+        assert!(!short.contains("characters"), "{short}");
+
+        let mut session = Session::new("none");
+        session.prefill_from_link(&"a".repeat(1500));
+        let long = hint_row_at(&session, 140, 24);
+        assert!(long.contains("1500 characters"), "{long}");
+        assert!(long.contains("review"), "{long}");
+
+        let mut session = Session::new("none");
+        session.prefill_from_link(&"a".repeat(1000));
+        assert!(
+            !hint_row_at(&session, 140, 24).contains("characters"),
+            "1000 is not over the line"
+        );
+
+        let plain = Session::new("none");
+        assert!(!hint_row_at(&plain, 120, 24).contains("external link"));
+    }
+
+    /// The frame drawn after the terminal changed size is the one a terminal of that size would
+    /// have drawn from the start: the hint row sits on the new bottom row and is fitted to the new
+    /// width, nothing left from the old layout. Both directions, since a narrowing leaves a row too
+    /// wide behind and a widening leaves one too short.
+    ///
+    /// The opening screen draws a face that blinks on the process clock, so the face is held still:
+    /// a blink between two draws would differ in the eye cells and say nothing about the layout.
+    #[test]
+    fn a_frame_drawn_after_a_resize_is_the_frame_of_a_terminal_that_size_from_the_start() {
+        let session = typed("a line in the box");
+        crate::avatar::with_face_held(crate::avatar::Look::default(), || {
+            for (from, to) in [((100, 30), (40, 12)), ((40, 12), (100, 30))] {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(from.0, from.1)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        draw(frame, &session);
+                    })
+                    .expect("first draw succeeds");
+                terminal.backend_mut().resize(to.0, to.1);
+                terminal
+                    .draw(|frame| {
+                        draw(frame, &session);
+                    })
+                    .expect("draw after the resize succeeds");
+
+                let mut fresh = Terminal::new(TestBackend::new(to.0, to.1)).expect("terminal");
+                fresh
+                    .draw(|frame| {
+                        draw(frame, &session);
+                    })
+                    .expect("fresh draw succeeds");
+                assert_eq!(
+                    terminal.backend().buffer(),
+                    fresh.backend().buffer(),
+                    "{from:?} to {to:?} left the old layout on the screen"
+                );
+            }
+        });
+    }
+
+    fn typed(text: &str) -> Session {
+        let mut session = Session::new("test");
+        for c in text.chars() {
+            session.type_char(c);
+        }
+        session
+    }
+
+    /// Where the caret is on screen, and what it is drawn over.
+    ///
+    /// Found by the reversed cell rather than by a glyph, because the caret is a style over a
+    /// character the user typed: there is nothing in the text to search for.
+    fn caret_cell(session: &Session, width: u16, height: u16) -> Option<(u16, u16, String)> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .flat_map(|row| (0..width).map(move |column| (column, row)))
+            .find(|at| buffer[*at].modifier.contains(Modifier::REVERSED))
+            .map(|(column, row)| (column, row, buffer[(column, row)].symbol().to_string()))
+    }
+
+    /// Every cell the caret covers, in reading order.
+    ///
+    /// Read off the screen the same way [`caret_cell`] reads one, because what the caret covers is
+    /// a style over text the user can see and there is nothing else to search for.
+    fn caret_cells(session: &Session, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .flat_map(|row| (0..width).map(move |column| (column, row)))
+            .filter(|at| buffer[*at].modifier.contains(Modifier::REVERSED))
+            .map(|at| buffer[at].symbol().to_string())
+            .collect()
+    }
+
+    fn picture() -> crate::clipboard::Image {
+        crate::clipboard::Image {
+            media_type: "image/png",
+            bytes: b"pixels".to_vec(),
+        }
+    }
+
+    /// The caret crosses a marker in one press, so it has to be drawn over the whole of one:
+    /// a block on the opening bracket alone says the next press takes a bracket.
+    #[test]
+    fn the_caret_covers_a_whole_marker() {
+        let mut session = typed("look at ");
+        session.attach(picture());
+        session.move_left();
+
+        assert_eq!(caret_cells(&session, 40, 12), "[Image #1]");
+    }
+
+    /// A marker is a span of the line rather than of the row it landed on, and a narrow box puts
+    /// a long one across two rows. Covering only the row the caret is on would show half of it
+    /// highlighted and leave the rest looking like ordinary words.
+    #[test]
+    fn a_marker_the_wrap_split_is_covered_on_both_rows() {
+        let mut session = Session::new("test");
+        session.paste_text("one\ntwo\nthree\nfour");
+        session.move_left();
+
+        assert_eq!(caret_cells(&session, 22, 12), "[Pasted text #1 +4 lines]");
+    }
+
+    /// A selection nobody can see is the failure this mode has: the next key acts on a stretch, and a
+    /// person who cannot see which one is guessing. The whole of it is drawn rather than the caret
+    /// within it, which inside a reversed block would say nothing.
+    #[test]
+    fn the_selection_is_drawn_over_the_whole_stretch() {
+        let mut session = Session::new("test");
+        session.choose_editing(crate::vim::Editing::Vi);
+        for c in "one two".chars() {
+            session.type_char(c);
+        }
+        session.enter_vi_normal();
+        session.type_char('0');
+        session.type_char('v');
+        session.type_char('w');
+
+        assert_eq!(caret_cells(&session, 40, 12), "one t");
+    }
+
+    /// A selection over a paragraph is what the line-wise mode is for, so every row it crosses is
+    /// covered: one row highlighted and the rest looking like ordinary words would say the stretch
+    /// stopped where the wrap did.
+    #[test]
+    fn a_selection_across_rows_is_drawn_on_all_of_them() {
+        let mut session = Session::new("test");
+        session.choose_editing(crate::vim::Editing::Vi);
+        session.paste_text("one\ntwo");
+        session.enter_vi_normal();
+        session.type_char('g');
+        session.type_char('g');
+        session.type_char('V');
+        session.type_char('G');
+
+        assert_eq!(caret_cells(&session, 40, 12), "onetwo");
+    }
+
+    /// The box everybody else has marks nothing out, so nothing is drawn reversed but the caret.
+    #[test]
+    fn the_ordinary_box_draws_no_selection() {
+        let mut session = Session::new("test");
+        for c in "one two".chars() {
+            session.type_char(c);
+        }
+
+        assert_eq!(caret_cells(&session, 40, 12), " ");
+    }
+
+    /// The bug: a key VISUAL mode does not claim reached the box and shortened the line under the
+    /// selection, and the next frame read the stretch off the line that was no longer there. Seven
+    /// keystrokes from a clean prompt took the session down in raw mode, since the draw is what
+    /// panicked and nothing catches it.
+    #[test]
+    fn an_edit_under_a_selection_still_draws() {
+        let mut session = Session::new("test");
+        session.choose_editing(crate::vim::Editing::Vi);
+        for c in "hello".chars() {
+            session.type_char(c);
+        }
+        session.enter_vi_normal();
+        session.type_char('v');
+        session.type_char('h');
+        session.backspace();
+        session.backspace();
+
+        // The stretch is gone with the line it was marked on, so the caret is drawn where it always
+        // is outside VISUAL mode: on one character, which here is the `l` it is left on.
+        assert_eq!(caret_cells(&session, 40, 12), "l");
+    }
+
+    /// The bug: text past the right edge used to be clipped, cursor included, which looked like
+    /// the program had stopped taking keys.
+    #[test]
+    fn typing_past_the_edge_stays_visible() {
+        let text = format!("{}TAIL", "abcdefghij ".repeat(9));
+        let output = rendered_at(&typed(&text), 50, 14);
+
+        assert!(
+            output.contains("TAIL"),
+            "the end of the input was clipped: {output}"
+        );
+        assert!(
+            caret_cell(&typed(&text), 50, 14).is_some(),
+            "the cursor was clipped: {output}"
+        );
+    }
+
+    /// The caret sits on the character the next keystroke will land before, which need not be the
+    /// end of the line: a caret that stayed at the end would point at the wrong place after every
+    /// Left press.
+    #[test]
+    fn the_caret_is_drawn_where_it_sits() {
+        let mut session = typed("abcd");
+        session.move_left();
+        session.move_left();
+
+        let (_, _, on) = caret_cell(&session, 40, 12).expect("the caret was not drawn");
+        assert_eq!(on, "c", "the caret was not on the character it precedes");
+    }
+
+    /// The bug this replaced a glyph to fix: a caret inserted between two characters pushed
+    /// everything after it along, so the text shifted left and right as the caret moved.
+    #[test]
+    fn the_caret_does_not_move_the_text_it_passes_over() {
+        let mut session = typed("abcd");
+        let settled = rendered_at(&session, 40, 12);
+
+        for _ in 0..4 {
+            session.move_left();
+            assert_eq!(
+                rendered_at(&session, 40, 12),
+                settled,
+                "the text moved under the caret"
+            );
+        }
+    }
+
+    /// Past the end of the line the caret has no character to sit on, so it is drawn as a
+    /// highlighted space rather than vanishing at the one moment typing is about to happen.
+    #[test]
+    fn the_caret_past_the_end_of_the_line_is_a_block() {
+        let (_, _, on) = caret_cell(&typed("abc"), 40, 12).expect("the caret was not drawn");
+        assert_eq!(on, " ");
+    }
+
+    /// The row is measured with a column spare for the caret past the end of it, so a full row
+    /// keeps every character it was given.
+    #[test]
+    fn a_full_row_is_not_clipped() {
+        let width = 24u16;
+        let session = typed(&"x".repeat(input_text_width(width)));
+        let output = rendered_at(&session, width, 12);
+
+        assert_eq!(
+            output.matches('x').count(),
+            input_text_width(width),
+            "a character was pushed off the edge: {output}"
+        );
+    }
+
+    /// The box grows with the text rather than staying one line.
+    #[test]
+    fn the_input_box_grows_with_the_text() {
+        let short = input_height(&typed("hi"), 50, 24);
+        let long = input_height(&typed(&"word ".repeat(30)), 50, 24);
+        assert!(
+            long > short,
+            "the box did not grow: {short} then {long} rows"
+        );
+    }
+
+    /// But not without limit, or a long paste would push the transcript off screen.
+    #[test]
+    fn the_input_box_stops_growing_at_the_cap() {
+        let huge = input_height(&typed(&"word ".repeat(500)), 50, 40);
+        assert_eq!(huge as usize, wrap::MAX_ROWS + 2, "the cap was not applied");
+    }
+
+    /// The line being composed is the one thing a person must always be able to see, and the cap
+    /// is what leaves the transcript the majority of a standard terminal. A cap compared with the
+    /// constant that sets it passes at any value, so the ten rows are written as ten (INPUT-1).
+    #[test]
+    fn the_input_box_holds_ten_rows_of_text_and_no_more() {
+        let width = 50u16;
+        let row = "Ω".repeat(input_text_width(width));
+        for (written, shown) in [(9, 9), (10, 10), (11, 10), (40, 10)] {
+            let session = typed(&row.repeat(written));
+            assert_eq!(
+                input_height(&session, width, 60),
+                shown + 2,
+                "{written} rows of text"
+            );
+            let drawn = rendered_at(&session, width, 60);
+            assert_eq!(
+                drawn.matches('Ω').count(),
+                shown as usize * input_text_width(width),
+                "{written} rows of text: {drawn}"
+            );
+        }
+    }
+
+    /// Past the cap the view follows the cursor, so typing at the end stays visible.
+    #[test]
+    fn a_very_long_input_scrolls_to_the_cursor() {
+        let text = format!("{}TAIL", "word ".repeat(90));
+        let output = rendered_at(&typed(&text), 40, 20);
+        assert!(
+            output.contains("TAIL"),
+            "the cursor's row scrolled away: {output}"
+        );
+        assert!(caret_cell(&typed(&text), 40, 20).is_some());
+    }
+
+    /// A short terminal must still show some transcript and the hint line.
+    #[test]
+    fn the_input_leaves_room_on_a_short_terminal() {
+        let session = typed(&"word ".repeat(200));
+        let height = 8;
+        let used = input_height(&session, 40, height);
+        assert!(
+            used < height - 1,
+            "the input took {used} of {height} rows, leaving nothing for the transcript"
+        );
+    }
+
+    /// Only the first row carries the prompt; continuations align beneath it.
+    #[test]
+    fn continuation_rows_are_indented_not_prompted() {
+        let output = rendered_at(&typed(&"abcdefghij ".repeat(6)), 40, 14);
+        assert_eq!(
+            output.matches("> ").count(),
+            1,
+            "more than one prompt marker was drawn: {output}"
+        );
+    }
+
+    /// The bug: the indicator was drawn in place of the box, so a prompt typed during a turn went
+    /// somewhere the person typing it could not see. The turn is slow and the next prompt is
+    /// thought of while it runs, so the box has to stay.
+    #[test]
+    fn a_prompt_typed_during_a_turn_is_visible() {
+        let mut session = typed("first");
+        session.submit().expect("submitted");
+        for c in "SECOND".chars() {
+            session.type_char(c);
+        }
+
+        let output = rendered_at(&session, 60, 16);
+        assert!(
+            output.contains("SECOND"),
+            "the line typed mid-turn was not drawn: {output}"
+        );
+        assert!(
+            output.contains("…"),
+            "the indicator went missing with the box: {output}"
+        );
+        assert!(
+            caret_cell(&session, 60, 16).is_some(),
+            "there is no caret to type at"
+        );
+    }
+
+    /// And it grows with the text like any other, since a paragraph can be written mid-turn.
+    #[test]
+    fn the_box_grows_mid_turn_too() {
+        let mut session = typed("first");
+        session.submit().expect("submitted");
+        let bare = input_height(&session, 50, 24);
+        for c in "word ".repeat(30).chars() {
+            session.type_char(c);
+        }
+
+        assert!(
+            input_height(&session, 50, 24) > bare,
+            "the box did not grow while a turn ran"
+        );
+    }
+
+    /// Nothing is running, so nothing is said about it and the whole height goes to the rest.
+    #[test]
+    fn an_idle_session_shows_no_indicator_row() {
+        assert_eq!(status_height(&typed("hi"), 80, 24), 0);
+    }
+    /// The position belongs in the border, where it labels the box without costing a row.
+    #[test]
+    fn browsing_history_shows_the_position_in_the_border() {
+        let mut session = Session::new("none");
+        for n in 1..=83 {
+            for c in format!("prompt {n}").chars() {
+                session.type_char(c);
+            }
+            session.submit().expect("submitted");
+            session.complete("ok", Vec::new(), 0);
+        }
+        for _ in 0..6 {
+            session.recall_older();
+        }
+
+        let output = rendered_at(&session, 60, 10);
+        assert!(
+            output.contains("All 78/83"),
+            "the position is not shown: {output}"
+        );
+        assert!(
+            output.contains("prompt 78"),
+            "the recalled prompt is not shown: {output}"
+        );
+    }
+
+    mod previews {
+        use super::*;
+        use ratatui_image::picker::Picker;
+
+        fn thumb() -> crate::preview::Thumb {
+            crate::preview::thumbnail_with(
+                &Picker::halfblocks(),
+                &crate::preview::tests::png(600, 300),
+                crate::preview::Fit::Thumbnail,
+            )
+            .expect("a PNG decodes")
+        }
+
+        /// Rows holding a half-block that the same screen without the thumbnail does not have.
+        ///
+        /// Compared with a drawing of the same line and no thumbnail, because the interface draws
+        /// half-blocks of its own (the banner), and only the difference is the picture.
+        fn picture_rows(session: &Session, without: &Session, width: u16, height: u16) -> Vec<u16> {
+            let draw_rows = |session: &Session| {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        draw(frame, session);
+                    })
+                    .expect("draw succeeds");
+                let buffer = terminal.backend().buffer().clone();
+                (0..height)
+                    .map(|y| {
+                        (0..width)
+                            .filter(|&x| buffer[(x, y)].symbol() == "\u{2580}")
+                            .count()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (with, base) = (draw_rows(session), draw_rows(without));
+            (0..height)
+                .filter(|&y| with[usize::from(y)] > base[usize::from(y)])
+                .collect()
+        }
+
+        #[test]
+        fn a_staged_picture_is_drawn_under_the_box_while_the_line_names_it() {
+            let mut session = typed("what is wrong here [Image #1]");
+            session.stage_preview("[Image #1]", thumb());
+            let plain = typed("what is wrong here [Image #1]");
+            let rows = picture_rows(&session, &plain, 80, 24);
+            assert!(!rows.is_empty(), "no thumbnail was drawn");
+            assert!(
+                rows.len() <= usize::from(crate::preview::ROWS),
+                "the thumbnail is taller than its allowance: {rows:?}"
+            );
+            // Under the input box and above the hint line.
+            assert!(rows.iter().all(|&row| row < 23), "{rows:?}");
+        }
+
+        #[test]
+        fn rubbing_out_the_marker_takes_the_thumbnail_with_it() {
+            let mut unmarked = typed("what is wrong here");
+            unmarked.stage_preview("[Image #1]", thumb());
+            let plain = typed("what is wrong here");
+            assert!(
+                picture_rows(&unmarked, &plain, 80, 24).is_empty(),
+                "a thumbnail outlived the marker that named it"
+            );
+        }
+
+        #[test]
+        fn a_short_screen_gives_up_the_thumbnail_before_the_transcript() {
+            let mut session = typed("[Image #1]");
+            session.stage_preview("[Image #1]", thumb());
+            let plain = typed("[Image #1]");
+            assert!(
+                picture_rows(&session, &plain, 60, 7).len() < usize::from(crate::preview::ROWS),
+                "the thumbnail was not shortened for a small screen"
+            );
+        }
+    }
+
+    mod todos {
+        use super::*;
+        use bravebot_core::todo::{Item, List, Status, rows};
+
+        fn list(entries: &[(&str, Status)]) -> Vec<bravebot_core::todo::Row> {
+            rows(&List::new(
+                entries
+                    .iter()
+                    .map(|(content, status)| Item::new(*content, *status))
+                    .collect(),
+            ))
+        }
+
+        fn three() -> Vec<bravebot_core::todo::Row> {
+            list(&[
+                ("Escape cancels a turn", Status::Done),
+                ("Add prompt history", Status::Active),
+                ("Persist it across sessions", Status::Pending),
+            ])
+        }
+
+        fn working_with(todos: Vec<bravebot_core::todo::Row>) -> Session {
+            let mut session = Session::new("test");
+            session.type_char('a');
+            session.submit();
+            session.set_todos(todos);
+            session
+        }
+
+        /// The whole list is on screen while the turn runs, which is the point of the feature:
+        /// what is done, what is being worked on, and what is left.
+        #[test]
+        fn a_running_turn_shows_the_whole_list() {
+            let output = rendered_at(&working_with(three()), 60, 16);
+            for task in [
+                "Escape cancels a turn",
+                "Add prompt history",
+                "Persist it across sessions",
+            ] {
+                assert!(output.contains(task), "'{task}' is missing: {output}");
+            }
+        }
+
+        /// The indicator's area has to grow, or the list would be drawn over the box or clipped
+        /// away.
+        #[test]
+        fn the_indicator_area_grows_to_hold_the_list() {
+            let bare = status_height(&working_with(Vec::new()), 80, 24);
+            let with_list = status_height(&working_with(three()), 80, 24);
+            assert_eq!(
+                with_list as usize,
+                bare as usize + 3,
+                "the area did not grow by one row per task"
+            );
+        }
+
+        /// A long list on a short terminal must not squeeze the transcript and the box out
+        /// entirely: a list nobody can type underneath is worse than a shorter list.
+        #[test]
+        fn a_long_list_leaves_room_for_the_box_and_the_transcript() {
+            let many: Vec<_> = (0..40)
+                .map(|n| (format!("task {n}"), Status::Pending))
+                .collect();
+            let borrowed: Vec<_> = many.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+            let session = working_with(list(&borrowed));
+            let height = 10;
+            let status = status_height(&session, 80, height);
+            let input = input_height(&session, 60, height - status);
+            assert!(
+                status + input < height - 1,
+                "the list and the box took {status} and {input} of {height} rows, leaving nothing for the transcript"
+            );
+        }
+
+        /// The box is still there under the list, and still takes what is typed into it.
+        #[test]
+        fn the_box_stays_beneath_the_list() {
+            let mut session = working_with(three());
+            for c in "MID".chars() {
+                session.type_char(c);
+            }
+
+            let output = rendered_at(&session, 60, 16);
+            assert!(
+                output.contains("MID"),
+                "the box was drawn over by the list: {output}"
+            );
+        }
+
+        /// And it must not panic when the box is smaller than the list.
+        #[test]
+        fn a_list_taller_than_the_terminal_renders() {
+            let many: Vec<_> = (0..60)
+                .map(|n| (format!("task {n}"), Status::Active))
+                .collect();
+            let borrowed: Vec<_> = many.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+            rendered_at(&working_with(list(&borrowed)), 30, 8);
+        }
+
+        /// Finished work is struck through: that is what makes the list readable at a glance,
+        /// and a marker alone would not show it.
+        #[test]
+        fn a_finished_task_is_drawn_struck_through() {
+            let session = working_with(three());
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &session);
+                })
+                .expect("draw succeeds");
+
+            // Found by content rather than position, so the assertion survives a layout change.
+            let buffer = terminal.backend().buffer().clone();
+            let struck = buffer
+                .content()
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::CROSSED_OUT));
+            assert!(struck, "no cell was drawn struck through");
+        }
+
+        /// Outstanding work must not be struck through, or every task would look finished.
+        #[test]
+        fn outstanding_tasks_are_not_struck_through() {
+            let session = working_with(list(&[("still to do", Status::Pending)]));
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &session);
+                })
+                .expect("draw succeeds");
+
+            let buffer = terminal.backend().buffer().clone();
+            let struck = buffer
+                .content()
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::CROSSED_OUT));
+            assert!(!struck, "an unfinished task was drawn struck through");
+        }
+
+        /// TODO-3. A dropped task is struck, because it is no longer outstanding, and neither its
+        /// marker nor its colour is the one finished work gets: those two are the whole of what
+        /// the states can be told apart by on a terminal.
+        #[test]
+        fn a_cancelled_task_is_struck_without_the_finished_colour() {
+            let drawn = |status| {
+                let session = working_with(list(&[("rewrite the parser", status)]));
+                let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        draw(frame, &session);
+                    })
+                    .expect("draw succeeds");
+                let buffer = terminal.backend().buffer().clone();
+                let struck = buffer
+                    .content()
+                    .iter()
+                    .any(|cell| cell.modifier.contains(Modifier::CROSSED_OUT));
+                // The marker is the cell before the task's text on the row the task is drawn on.
+                let width = buffer.area.width as usize;
+                let row: Vec<_> = buffer
+                    .content()
+                    .chunks(width)
+                    .find(|row| {
+                        row.iter()
+                            .map(|cell| cell.symbol())
+                            .collect::<String>()
+                            .contains("rewrite the parser")
+                    })
+                    .expect("the task was drawn")
+                    .to_vec();
+                let text_at = row
+                    .iter()
+                    .position(|cell| cell.symbol() == "r")
+                    .expect("the text starts somewhere");
+                let marker = &row[text_at - 2];
+                (struck, marker.symbol().to_string(), marker.fg)
+            };
+
+            let (done_struck, done_marker, done_colour) = drawn(Status::Done);
+            let (gone_struck, gone_marker, gone_colour) = drawn(Status::Cancelled);
+
+            assert!(done_struck, "a finished task was not struck through");
+            assert!(gone_struck, "a cancelled task was not struck through");
+            assert_ne!(
+                gone_marker, done_marker,
+                "a cancelled task carries the marker finished work gets"
+            );
+            assert_ne!(
+                gone_colour, done_colour,
+                "a cancelled task was drawn in the colour finished work gets"
+            );
+        }
+
+        /// A row left neither finished nor dropped must not go on reading as work being done
+        /// once the turn that reported it has ended, or an answer that says the turn is done
+        /// sits over a mark its own progress used for work still going on (#2897).
+        ///
+        /// Asserted against the same rows drawn while their turn runs, rather than against a
+        /// marker or colour named here, so a theme change that keeps the two apart does not fail
+        /// it. Finished and dropped rows are drawn the same either way, since neither reads as
+        /// ongoing work in the first place.
+        #[test]
+        fn a_turn_that_has_ended_draws_its_open_tasks_left_open() {
+            let tasks = list(&[
+                ("finished it", Status::Done),
+                ("dropped it", Status::Cancelled),
+                ("working on it", Status::Active),
+                ("still to do", Status::Pending),
+            ]);
+
+            let running = todo_lines(&tasks, false);
+            let ended = todo_lines(&tasks, true);
+
+            for index in [2, 3] {
+                let (live, left) = (&running[index], &ended[index]);
+                assert_ne!(
+                    left.spans[1].content, live.spans[1].content,
+                    "row {index} keeps the mark of work being done once its turn has ended"
+                );
+                assert_ne!(
+                    left.spans[1].style.fg, live.spans[1].style.fg,
+                    "row {index} keeps the ink of work being done once its turn has ended"
+                );
+                assert_ne!(
+                    left.spans[2].style, live.spans[2].style,
+                    "row {index} keeps the text styled as work being done once its turn has ended"
+                );
+                assert!(
+                    !left.spans[2]
+                        .style
+                        .add_modifier
+                        .contains(Modifier::CROSSED_OUT),
+                    "row {index} is struck through, so it reads as no longer outstanding"
+                );
+            }
+            for index in [0, 1] {
+                assert_eq!(
+                    ended[index], running[index],
+                    "row {index} was drawn differently once the turn ended"
+                );
+            }
+        }
+
+        /// The list stays visible after the turn, attached to the reply it belongs to.
+        #[test]
+        fn a_finished_turn_still_shows_its_list() {
+            let mut session = working_with(three());
+            session.complete("all done", Vec::new(), 0);
+
+            let output = rendered_at(&session, 60, 20);
+            assert!(output.contains("all done"));
+            assert!(
+                output.contains("Add prompt history"),
+                "the list vanished when the turn ended: {output}"
+            );
+        }
+
+        /// A turn that never calls the tool must look exactly as it did before.
+        #[test]
+        fn a_turn_without_a_list_is_unchanged() {
+            let mut with = Session::new("test");
+            with.type_char('a');
+            with.submit();
+            let before = rendered_at(&with, 60, 16);
+
+            with.set_todos(Vec::new());
+            assert_eq!(before, rendered_at(&with, 60, 16));
+        }
+    }
+
+    /// And it is absent when not browsing, so the border is not permanently labelled.
+    #[test]
+    fn an_unbrowsed_input_has_no_position_in_the_border() {
+        let mut session = Session::new("none");
+        session.type_char('a');
+        session.submit().expect("submitted");
+        session.complete("ok", Vec::new(), 0);
+
+        let output = rendered_at(&session, 60, 10);
+        assert!(
+            !output.contains("History"),
+            "the border was labelled: {output}"
+        );
+    }
+
+    /// NAME-10: a session row says what the session is beside its reference, because an id is
+    /// nothing a person chooses by, and a file row says nothing beside its path.
+    #[test]
+    fn a_session_row_carries_its_title_and_a_file_row_does_not() {
+        let session = Session::new("none");
+        let rows = [
+            bravebot_mentions::Entry {
+                path: "README.md".to_string(),
+                kind: bravebot_mentions::Kind::File,
+                is_directory: false,
+                note: None,
+                title: None,
+            },
+            bravebot_mentions::session_entry(
+                "abc-123",
+                "fix the build",
+                "2 days ago · up to 8000 characters · fix the build".to_string(),
+            ),
+        ];
+        let drawn: Vec<String> = entry_lines(&session, &rows)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(drawn[0].trim(), "README.md");
+        assert_eq!(
+            drawn[1].trim(),
+            "session:abc-123  2 days ago · up to 8000 characters · fix the build"
+        );
+    }
+
+    fn drawn(session: &Session) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, session);
+            })
+            .expect("draw succeeds");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// INPUT-43: a suggestion takes the invitation's place in the empty box, and the invitation
+    /// comes back when it goes.
+    #[test]
+    fn a_suggestion_is_drawn_in_the_empty_box_in_place_of_the_invitation() {
+        let mut session = Session::new("none");
+        session.adopt_suggestions(true);
+        assert!(drawn(&session).contains(placeholder()));
+
+        session.offer_suggestion("run the tests again".to_string());
+        let with = drawn(&session);
+        assert!(with.contains("run the tests again"), "{with}");
+        assert!(!with.contains(placeholder()), "{with}");
+
+        session.dismiss_suggestion();
+        assert!(drawn(&session).contains(placeholder()));
+    }
+
+    /// The suggestion is dimmed as the invitation is: the cell after the first character wears the
+    /// style the invitation's does, and the first one is the caret's block.
+    #[test]
+    fn a_suggestion_is_dimmed_as_the_invitation_is() {
+        let mut session = Session::new("none");
+        session.adopt_suggestions(true);
+        let styles = |session: &Session| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, session);
+                })
+                .expect("draw succeeds");
+            let buffer = terminal.backend().buffer().clone();
+            let row = (0..buffer.area.height)
+                .find(|&y| buffer[(0, y)].symbol() == "│")
+                .expect("the box has a row");
+            (buffer[(3, row)].style(), buffer[(4, row)].style())
+        };
+        let (invited_first, invited_rest) = styles(&session);
+        session.offer_suggestion("run the tests again".to_string());
+        let (offered_first, offered_rest) = styles(&session);
+        assert_eq!(offered_first, invited_first);
+        assert_eq!(offered_rest, invited_rest);
+        assert_ne!(offered_first, offered_rest);
+    }
+
+    /// A word wider than the row is laid out in time that grows with its length. Cutting a row
+    /// off it and measuring what is left, over and over, grows with the square of the length: at
+    /// five thousand characters in a one-column row that takes seconds, where this takes
+    /// milliseconds, and a draw lays out the same words again every time it is made. Every row
+    /// keeps the margin and the rows hold the word whole.
+    #[test]
+    fn a_word_far_wider_than_the_row_is_laid_out_in_time_that_grows_with_its_length() {
+        let word = "a".repeat(5_000);
+        let started = std::time::Instant::now();
+        let rows = marked_rows(&Span::raw("┃ "), &[Span::raw(word.clone())], 3);
+        let took = started.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "{} characters took {took:?}",
+            word.len()
+        );
+        let drawn: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        assert_eq!(drawn.len(), word.len());
+        assert!(
+            drawn.iter().all(|row| row == "┃ a"),
+            "a row lost its margin"
+        );
+    }
+
+    /// The rows a word is cut into hold a cluster at least each, so a cluster wider than the row
+    /// has a row of its own, and a row fills by columns and not by characters. What is left is
+    /// the last row when it fits, for the words after it to share.
+    #[test]
+    fn a_word_is_cut_into_rows_of_the_width_and_a_wide_cluster_has_a_row_of_its_own() {
+        assert_eq!(cut_to_width("abcdefg", 3), (vec!["abc", "def"], "g"));
+        assert_eq!(cut_to_width("abc", 3), (vec![], "abc"));
+        assert_eq!(cut_to_width("", 3), (vec![], ""));
+        assert_eq!(cut_to_width("漢字漢", 4), (vec!["漢字"], "漢"));
+        assert_eq!(cut_to_width("a漢b", 1), (vec!["a", "漢"], "b"));
+        assert_eq!(cut_to_width("ab漢", 1), (vec!["a", "b", "漢"], ""));
+        assert_eq!(cut_to_width("漢", 1), (vec!["漢"], ""));
+
+        let rows = marked_rows(&Span::raw("┃ "), &[Span::raw("ab漢")], 3);
+        let drawn: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        assert_eq!(drawn, ["┃ a", "┃ b", "┃ 漢", "┃ "]);
+    }
+}

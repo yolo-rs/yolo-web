@@ -1,0 +1,1315 @@
+//! Write-once quarantined storage.
+//!
+//! Untrusted content lands in a slot and stays there. Slots are written exactly
+//! once, so content cannot be laundered by overwriting, and the content leaves a slot only
+//! still labelled, through [`SlotStore::take_for_effect`], to be handed to an effect.
+//!
+//! Two structural guarantees, both enforced by the type system rather than by
+//! runtime checks:
+//!
+//! - **Write-once**: [`SlotWriter::write`] consumes the writer, so a second write
+//!   does not compile.
+//! - **Label floor**: the writer's label is fixed when the writer is minted, by the
+//!   policy layer, never chosen by the code doing the writing.
+//!
+//! A slot may also be **deferred**: it names a file it has not read, and the bytes arrive when
+//! something finally needs them. What is deferred is only the reading. The slot is spoken for
+//! from the moment it is deferred, its label is decided then rather than by whatever turns up,
+//! and the reading is a single filling that cannot be repeated. Nothing may read a deferred
+//! slot in the meantime: [`SlotStore::take_for_effect`] refuses it by name rather than
+//! returning nothing, so a consumer that forgot to ask for the file is an error and never an
+//! empty document.
+
+use crate::label::Label;
+use crate::policy::PathAuthority;
+use crate::value::Labelled;
+use std::collections::HashMap;
+use std::fmt;
+
+/// Identifier for a slot. Trusted metadata: slot ids are chosen by the planner from
+/// trusted input, never derived from content.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SlotId(String);
+
+impl SlotId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SlotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SlotError {
+    /// Something wanted the bytes of a slot whose file has not been read yet.
+    Unread(SlotId),
+    /// A slot was written twice. Reaching this at runtime means something bypassed
+    /// the consuming [`SlotWriter`].
+    AlreadyWritten(SlotId),
+    /// Read of a slot that has not been written yet.
+    NotWritten(SlotId),
+    /// Something that writes or hands on a slot's text asked for a slot whose text is a decoding.
+    Decoded(SlotId),
+    /// A choice was asked for under a name that holds none.
+    NotAChoice(SlotId),
+    /// A choice was asked for after a call used it.
+    ChoiceSpent(SlotId),
+}
+
+impl fmt::Display for SlotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unread(s) => write!(
+                f,
+                "slot '{s}' names a file that has not been read yet, so it has no bytes to give"
+            ),
+            Self::AlreadyWritten(s) => write!(f, "slot '{s}' has already been written"),
+            Self::NotWritten(s) => write!(f, "slot '{s}' has not been written yet"),
+            Self::Decoded(s) => write!(
+                f,
+                "slot '{s}' holds a file in another encoding as the text it decodes to, which is \
+                 not the file's own bytes, so it cannot be written or handed to a program"
+            ),
+            Self::NotAChoice(s) => write!(f, "slot '{s}' holds no choice a processor made"),
+            Self::ChoiceSpent(s) => write!(
+                f,
+                "the choice in slot '{s}' has filled a call already, and a choice fills one"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SlotError {}
+
+/// A slot that names a file it has not read.
+///
+/// The path is not always routing. Where the planner named it, it was checked `(T,pub)` before
+/// the slot was deferred; where [`crate::policy::Policy::defer_entries`] made the entry, it is a
+/// filename out of a quarantined listing, which is untrusted content the planner is never shown.
+/// So the whole of this type stays inside the kernel, and a decision taken from the path is one
+/// taken from untrusted bytes.
+///
+/// The label is what the trust map said when the promise was made, and it is a ceiling rather
+/// than a promise in its own right: [`crate::policy::Policy::materialise`] takes the meet with
+/// what the map says when the file is actually read, so a path that stopped being trusted in
+/// between cannot be read back as though it had not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Deferred {
+    path: String,
+    label: Label,
+    directory: bool,
+}
+
+impl Deferred {
+    /// The file this slot will hold.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The label recorded when the read was deferred.
+    pub(crate) fn label(&self) -> Label {
+        self.label
+    }
+
+    /// Whether the path is a directory a listing stopped at rather than a file in it.
+    pub(crate) fn is_a_directory(&self) -> bool {
+        self.directory
+    }
+}
+
+/// Where the contents of a slot may be written.
+///
+/// A processor produces one document however many it was given, and nothing used to say which
+/// file that document was for. A planner that gave one processor two files, ran it twice, and
+/// assumed the second answer was about the second file wrote eleven kilobytes of HTML into a
+/// Python script, and every gate passed: the destination was a path the planner named and a
+/// person approved, and the body was a slot it was entitled to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Home {
+    /// No constraint. Content that a processor did not produce: a file read, a listing, the
+    /// planner's own words.
+    Anywhere,
+    /// The answer is for this file and may be written to no other.
+    ///
+    /// The slot is carried alongside the path because the two have different audiences. The path
+    /// is what the write is checked against; the slot is what a refusal may say back to the
+    /// planner, which must not be told a filename it was never shown.
+    Only { path: String, named_by: SlotId },
+    /// The answer is for references that are no file: a fetched page, a run's output, or an
+    /// answer made from those. It has no document to replace, so it may become a new file in the
+    /// session's scratch directory and no other file.
+    ///
+    /// A file that already exists is never replaced by such an answer, and the file it becomes is
+    /// recorded as untrusted when it is written.
+    Scratch,
+    /// Nothing said which document the answer is for: the processor was given more than one
+    /// document, or a document beside something else. It may be written nowhere until something
+    /// says which.
+    Unsaid,
+}
+
+/// What a slot holds: the bytes, or the promise of them.
+///
+/// A slot that came from a file keeps the path either way. That is what lets a reference be an
+/// address as well as a document: the planner can name the slot as somewhere to read from or
+/// write to without ever being told what the file is called, which is the only way to work in a
+/// directory whose filenames are themselves untrusted.
+#[derive(Debug, Clone)]
+enum Entry {
+    Read {
+        value: Labelled<String>,
+        /// The file it was read from, where it was read from one.
+        path: Option<String>,
+        /// The file these bytes *are*, byte for byte, where they are a file's own contents.
+        ///
+        /// Set when a slot is filled from disk, and carried over when a processor answers that a
+        /// document should not change. It is what lets a write that would put a file back exactly
+        /// as it is be recognised as changing nothing, from bookkeeping rather than by comparing
+        /// bytes: the driver never reads either side.
+        ///
+        /// With the file authority's [`Stamp`](crate::file_authority::Stamp) for that path as it
+        /// stood when the file was read: the path's revision and the number of `run` lines started.
+        /// The file is a copy of the slot only while both are still what they were: a write to the
+        /// file moves the revision, a program started since may have rewritten it without anybody
+        /// being told, and then the slot says nothing of what the file holds.
+        verbatim: Option<Box<(String, crate::file_authority::Stamp)>>,
+        /// Where an answer produced by a processor may be written.
+        home: Home,
+        /// What produced this, where it was a program: the command as the user approved it.
+        ///
+        /// `None` for everything else. Only such a slot may be offered to the user for reading. A
+        /// file's trust is the trust map's business, and promoting a file's contents here would be
+        /// a second route to a decision that already has one.
+        ///
+        /// The string is the driver's own rendering of an argv a person endorsed, never anything a
+        /// program printed, so it is safe to put back on a screen beside the output.
+        from_command: Option<String>,
+        /// The media type, where this slot holds a picture rather than text.
+        ///
+        /// `Some` means the content is a `data:` URI and belongs in a request as a part rather
+        /// than in a message body. Chosen from a closed table, never taken from a filename and never
+        /// as a string a server or a file wrote: for a file the table is of extensions, and for a
+        /// picture a server's tool result carried it is the four media types the transport selects
+        /// from by comparing the `mimeType` the server wrote, which is the eighth Known cost of
+        /// labels.md. A slot cannot become a picture by containing something that looks like one.
+        picture: Option<String>,
+        /// Where these bytes came from, as the driver described them when it quarantined them:
+        /// a path, a URL, a command, a processor. Or the address a deferred read was reserved
+        /// against, which is the same thing said as a path.
+        ///
+        /// Kept because the reference carrying it is handed to the planner and gone, while a
+        /// prompt drawn later still has to be able to say what the person is looking at. `ref:1`
+        /// means something to the planner and nothing at all to somebody being asked about it.
+        ///
+        /// Never the content of this slot. The address of a deferred read is untrusted where
+        /// [`Deferred`] says it is, so this is read through [`SlotStore::origin_of`] and under
+        /// the same witness, and what it is for is putting a line in front of a person.
+        origin: Option<String>,
+        /// What the processor that produced this document said about it, where it said anything.
+        ///
+        /// Content, and kept labelled for that reason: unlike `from_command`, which is the
+        /// driver's own rendering of an argv, this is text a model wrote over bytes nobody
+        /// vouched for. It is held beside the document so that the approval the document is put
+        /// to can show the claim made about it, and it is released for a screen and nowhere
+        /// else.
+        remark: Option<Labelled<String>>,
+        /// Set when the text is a reading of a file in another encoding rather than the file's own
+        /// bytes: UTF-16 or UTF-32 with a byte order mark, or bytes that are not UTF-8 shown as
+        /// U+FFFD. Chosen by the driver from the shape of the first bytes, the class of decision
+        /// the seventh entry under Known costs in `docs/specs/labels.md` lists, and never from
+        /// anything the planner said.
+        ///
+        /// What a slot holds is written to a file or handed to a program as the file, and a
+        /// decoding would write U+FFFD over the byte it replaced or UTF-8 over a UTF-16 file. So
+        /// [`SlotStore::take_for_effect`] refuses such a slot and only
+        /// [`SlotStore::take_for_reading`] returns it.
+        decoded: bool,
+    },
+    Unread(Deferred),
+}
+
+impl Entry {
+    fn label(&self) -> Label {
+        match self {
+            Self::Read { value, .. } => value.label(),
+            Self::Unread(deferred) => deferred.label,
+        }
+    }
+
+    fn path(&self) -> Option<&str> {
+        match self {
+            Self::Read { path, .. } => path.as_deref(),
+            Self::Unread(deferred) => Some(&deferred.path),
+        }
+    }
+
+    fn verbatim(&self) -> Option<(&str, crate::file_authority::Stamp)> {
+        match self {
+            Self::Read { verbatim, .. } => {
+                verbatim.as_deref().map(|(path, at)| (path.as_str(), *at))
+            }
+            // Nothing has been read, so nothing is a copy of anything.
+            Self::Unread(_) => None,
+        }
+    }
+
+    fn home(&self) -> Home {
+        match self {
+            Self::Read { home, .. } => home.clone(),
+            // A file that has not been read is not an answer to anything.
+            Self::Unread(_) => Home::Anywhere,
+        }
+    }
+
+    fn printed_by(&self) -> Option<&str> {
+        match self {
+            Self::Read { from_command, .. } => from_command.as_deref(),
+            // Nothing has run, so nothing printed this.
+            Self::Unread(_) => None,
+        }
+    }
+
+    fn picture(&self) -> Option<&str> {
+        match self {
+            Self::Read { picture, .. } => picture.as_deref(),
+            // Nothing has been read, so nothing is known about what it holds.
+            Self::Unread(_) => None,
+        }
+    }
+
+    fn origin(&self) -> Option<&str> {
+        match self {
+            Self::Read { origin, .. } => origin.as_deref(),
+            // Nothing has been read, so the path is the whole of what there is to say.
+            Self::Unread(deferred) => Some(&deferred.path),
+        }
+    }
+
+    fn decoded(&self) -> bool {
+        match self {
+            Self::Read { decoded, .. } => *decoded,
+            // Nothing has been read, so there is no text to be a decoding of anything.
+            Self::Unread(_) => false,
+        }
+    }
+
+    fn remark(&self) -> Option<&Labelled<String>> {
+        match self {
+            Self::Read { remark, .. } => remark.as_ref(),
+            // Nothing has produced this yet, so nothing has been said about it.
+            Self::Unread(_) => None,
+        }
+    }
+}
+
+/// What a deferred read produced: the text for the slot, and whether that text is a decoding of a
+/// file in another encoding rather than the file's own bytes.
+///
+/// A plain `String` converts to one that is not a decoding, so a read of anything but a file
+/// keeps returning the text alone.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fill {
+    pub text: String,
+    pub decoded: bool,
+}
+
+impl Fill {
+    /// Text that is a decoding of a file in another encoding.
+    pub fn decoded(text: String) -> Self {
+        Self {
+            text,
+            decoded: true,
+        }
+    }
+}
+
+impl From<String> for Fill {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            decoded: false,
+        }
+    }
+}
+
+/// Quarantined storage for one run.
+///
+/// Holds `Labelled<String>` because slot content is always opaque text as far as the
+/// kernel is concerned; interpreting it is the job of whatever declassifies it.
+#[derive(Debug, Default)]
+pub struct SlotStore {
+    slots: HashMap<SlotId, Entry>,
+    /// The numbers processors chose, each under a name of its own.
+    ///
+    /// Not an [`Entry`]: a choice is no text, so it is in none of the places text is. The accessors
+    /// that return a slot's label, bytes or address find nothing under a choice's name, and a
+    /// consumer that asks for a choice as it would for text is refused as it is for a name nothing
+    /// holds. Only [`SlotStore::store_choice`] puts one here, and a name is taken for good, by text
+    /// or by a choice.
+    choices: HashMap<SlotId, Choice>,
+}
+
+/// A number a processor chose, and whether a call has used it.
+///
+/// Spent by the one gate that carries it into a call, so a choice fills one call and a second
+/// call that names it is refused.
+#[derive(Debug)]
+struct Choice {
+    number: Labelled<u8>,
+    spent: bool,
+}
+
+impl SlotStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether this name is taken, by text or by a choice.
+    ///
+    /// A choice is counted here so that a name that holds one can neither be written nor deferred
+    /// as text. It is not found by any other accessor.
+    pub fn is_written(&self, id: &SlotId) -> bool {
+        self.slots.contains_key(id) || self.choices.contains_key(id)
+    }
+
+    /// Whether this name holds text. Metadata about a name: a yes or a no, never a byte of what a
+    /// slot holds. A choice is not text, so a tool that reads text finds nothing under its name.
+    pub fn holds_text(&self, id: &SlotId) -> bool {
+        self.slots.contains_key(id)
+    }
+
+    /// The names of the slots holding text, in the order they were minted.
+    ///
+    /// Metadata: the names are the driver's own (`ref:N`), never a byte of what a slot holds or
+    /// of a file name. A choice is left out because no tool reads it as text. Ordered by length and
+    /// then by spelling, which is numeric order for names of one prefix.
+    pub fn text_names(&self) -> Vec<SlotId> {
+        let mut names: Vec<SlotId> = self.slots.keys().cloned().collect();
+        names.sort_by(|a, b| {
+            a.as_str()
+                .len()
+                .cmp(&b.as_str().len())
+                .then_with(|| a.cmp(b))
+        });
+        names
+    }
+
+    /// The names of the choices a processor made, ordered as [`SlotStore::text_names`] is.
+    ///
+    /// Metadata like [`SlotStore::text_names`]: the driver's own `ref:N` names and no digit of
+    /// any choice.
+    pub fn choice_names(&self) -> Vec<SlotId> {
+        let mut names: Vec<SlotId> = self.choices.keys().cloned().collect();
+        names.sort_by(|a, b| {
+            a.as_str()
+                .len()
+                .cmp(&b.as_str().len())
+                .then_with(|| a.cmp(b))
+        });
+        names
+    }
+
+    pub fn label_of(&self, id: &SlotId) -> Option<Label> {
+        self.slots.get(id).map(Entry::label)
+    }
+
+    /// The file a slot names, whether or not it has been read.
+    ///
+    /// The path itself, which for an entry out of a quarantined listing is untrusted content:
+    /// only the policy layer may ask, and only through the gates that decide what a name may
+    /// become. Kept after the bytes arrive, so processing a file does not lose the address it
+    /// came from.
+    ///
+    /// The witness is what holds that, rather than the sentence above:
+    /// [`crate::policy::PathAuthority`] is minted inside the policy module and nowhere else, so
+    /// a decision relocated into another module of this crate cannot reach these bytes at all.
+    pub(crate) fn path_of(&self, id: &SlotId, _authority: &PathAuthority) -> Option<&str> {
+        self.slots.get(id).and_then(Entry::path)
+    }
+
+    /// The file a slot's bytes are a copy of, where they are one.
+    ///
+    /// Only the policy layer may ask, held by the witness [`SlotStore::path_of`] takes and for
+    /// the same reason: what it is for is recognising a write that would put a file back exactly
+    /// as it is, and that is a decision. Returned with the revision of the path when the bytes
+    /// were read, which the caller compares with the path's revision now.
+    pub(crate) fn verbatim_of(
+        &self,
+        id: &SlotId,
+        _authority: &PathAuthority,
+    ) -> Option<(&str, crate::file_authority::Stamp)> {
+        self.slots.get(id).and_then(Entry::verbatim)
+    }
+
+    /// Where the contents of a slot may be written.
+    ///
+    /// Carries the same filename through [`Home::Only`], so it takes the same witness.
+    pub(crate) fn home_of(&self, id: &SlotId, _authority: &PathAuthority) -> Home {
+        self.slots
+            .get(id)
+            .map(Entry::home)
+            .unwrap_or(Home::Anywhere)
+    }
+
+    /// Say where an answer may be written.
+    pub(crate) fn set_home(&mut self, id: &SlotId, home: Home) {
+        if let Some(Entry::Read { home: slot, .. }) = self.slots.get_mut(id) {
+            *slot = home;
+        }
+    }
+
+    /// Record where a slot's bytes came from, in the driver's own words.
+    pub(crate) fn set_origin(&mut self, id: &SlotId, origin: &str) {
+        if let Some(Entry::Read { origin: slot, .. }) = self.slots.get_mut(id) {
+            *slot = Some(origin.to_string());
+        }
+    }
+
+    /// Where a slot's bytes came from, where the driver said.
+    ///
+    /// The driver's own sentence for a slot that has been read, and the file's own name for one
+    /// still waiting on it, which for an entry out of a quarantined listing is the same untrusted
+    /// content [`SlotStore::path_of`] returns. So it takes the same witness, and what it is for
+    /// is putting a line in front of a person, which is a release either way.
+    pub(crate) fn origin_of(&self, id: &SlotId, _authority: &PathAuthority) -> Option<&str> {
+        self.slots.get(id).and_then(Entry::origin)
+    }
+
+    /// Record that a slot holds what this command printed.
+    pub(crate) fn mark_from_command(&mut self, id: &SlotId, command: &str) {
+        if let Some(Entry::Read { from_command, .. }) = self.slots.get_mut(id) {
+            *from_command = Some(command.to_string());
+        }
+    }
+
+    /// Whether this slot holds what a program printed.
+    pub fn is_from_command(&self, id: &SlotId) -> bool {
+        self.command_of(id).is_some()
+    }
+
+    /// The command that printed this, where one did.
+    ///
+    /// Metadata, like everything else a caller may ask a slot store: this is the driver's own
+    /// rendering of an argv a person endorsed, never a byte of what the program printed.
+    pub fn command_of(&self, id: &SlotId) -> Option<&str> {
+        self.slots.get(id).and_then(Entry::printed_by)
+    }
+
+    /// Record that a slot holds a picture of this media type.
+    pub(crate) fn mark_picture(&mut self, id: &SlotId, media: &str) {
+        if let Some(Entry::Read { picture, .. }) = self.slots.get_mut(id) {
+            *picture = Some(media.to_string());
+        }
+    }
+
+    /// The media type of the picture this slot holds, where it holds one.
+    ///
+    /// Metadata, and the driver's own: it comes from a closed table of extensions rather than from
+    /// the file, so asking this tells a caller nothing about the bytes beyond what kind of thing
+    /// the driver decided to read them as.
+    pub fn picture_of(&self, id: &SlotId) -> Option<&str> {
+        self.slots.get(id).and_then(Entry::picture)
+    }
+
+    /// Whether this slot holds a picture rather than text.
+    pub fn is_a_picture(&self, id: &SlotId) -> bool {
+        self.picture_of(id).is_some()
+    }
+
+    /// Record what the processor that produced this document said about it.
+    pub(crate) fn mark_remark(&mut self, id: &SlotId, said: Labelled<String>) {
+        if let Some(Entry::Read { remark, .. }) = self.slots.get_mut(id) {
+            *remark = Some(said);
+        }
+    }
+
+    /// What was said about the document this slot holds, still labelled.
+    ///
+    /// Only the policy layer may ask, and it comes back wrapped: this is a model's words about
+    /// bytes nobody vouched for, so nothing outside the gates gets to read it.
+    pub(crate) fn remark_of(&self, id: &SlotId) -> Option<&Labelled<String>> {
+        self.slots.get(id).and_then(Entry::remark)
+    }
+
+    /// Whether this slot is waiting on a file it has not read.
+    ///
+    /// Metadata: a yes or a no, and no part of the name the slot is waiting on. This is what a
+    /// caller outside the kernel gets, since the only thing one has ever wanted to know is
+    /// whether asking for the bytes will open a file.
+    pub fn is_unread(&self, id: &SlotId) -> bool {
+        matches!(self.slots.get(id), Some(Entry::Unread(_)))
+    }
+
+    /// Whether this slot is neither a file's contents nor an answer about one: what a fetch gave,
+    /// what a program printed, or an answer made only from those.
+    ///
+    /// Metadata: a yes or a no, and no part of any name the slot is tied to. A slot read from a
+    /// file keeps its path and an answer about a file or about nothing in particular keeps that
+    /// home, so neither is one. It decides where an answer about this slot may be written
+    /// ([`Home::Scratch`]).
+    pub fn is_no_file(&self, id: &SlotId) -> bool {
+        match self.slots.get(id) {
+            Some(Entry::Read { path, home, .. }) => {
+                path.is_none() && matches!(home, Home::Anywhere | Home::Scratch)
+            }
+            _ => false,
+        }
+    }
+
+    /// The file a slot is waiting on, where it is waiting on one.
+    ///
+    /// A path and a label. The path is the same untrusted content [`SlotStore::path_of`] returns
+    /// wherever [`crate::policy::Policy::defer_entries`] made the entry, since the planner is
+    /// never told that name, so this takes the same witness. Outside the kernel only
+    /// [`SlotStore::is_unread`] is offered, which names nothing.
+    pub(crate) fn deferred(&self, id: &SlotId, _authority: &PathAuthority) -> Option<&Deferred> {
+        match self.slots.get(id) {
+            Some(Entry::Unread(deferred)) => Some(deferred),
+            _ => None,
+        }
+    }
+
+    /// Metadata for every slot: id, whether written, and label. Never contents, so
+    /// this is safe to surface in an audit trail or a UI.
+    pub fn inventory(&self) -> Vec<(SlotId, Label)> {
+        let mut items: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.label()))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
+    }
+
+    /// Hand a slot's content to an effect, still labelled.
+    ///
+    /// For the case where the planner named a reference and the kernel is carrying out what it
+    /// asked. The value stays wrapped, so a caller can pass it to a write but not read it.
+    ///
+    /// Nobody sees these bytes; they travel from the slot to the effect, and the label travels
+    /// with them. A slot still waiting on its file refuses by name. Returning nothing would read
+    /// as an empty document, and an effect would carry out the emptiness.
+    ///
+    /// A slot whose text is a decoding of a file in another encoding is refused by name, since an
+    /// effect writes the text to a file or hands it to a program as the file. A consumer that only
+    /// reads the text asks [`SlotStore::take_for_reading`].
+    pub fn take_for_effect(&self, id: &SlotId) -> Result<Labelled<String>, SlotError> {
+        match self.slots.get(id) {
+            Some(Entry::Read { decoded: true, .. }) => Err(SlotError::Decoded(id.clone())),
+            Some(Entry::Read { value, .. }) => Ok(value.clone()),
+            Some(Entry::Unread(_)) => Err(SlotError::Unread(id.clone())),
+            None => Err(SlotError::NotWritten(id.clone())),
+        }
+    }
+
+    /// Hand a slot's content to a consumer that only reads it, still labelled.
+    ///
+    /// The same as [`SlotStore::take_for_effect`], except that a slot whose text is a decoding is
+    /// returned. For a processor's input, which is read and never written back as the file.
+    pub fn take_for_reading(&self, id: &SlotId) -> Result<Labelled<String>, SlotError> {
+        match self.slots.get(id) {
+            Some(Entry::Read { value, .. }) => Ok(value.clone()),
+            Some(Entry::Unread(_)) => Err(SlotError::Unread(id.clone())),
+            None => Err(SlotError::NotWritten(id.clone())),
+        }
+    }
+
+    /// Whether this slot holds text of 0 bytes.
+    ///
+    /// Metadata: a yes or a no, and no part of the text. It is the one figure of
+    /// [`Measured`] that decides anything, because a slot that states 0 bytes has nothing for a
+    /// check to read or for a person to be shown, and the planner is told the size of any slot it
+    /// may not read. A slot still waiting on its file, and a name that holds nothing, are not
+    /// empty.
+    pub fn holds_no_bytes(&self, id: &SlotId) -> bool {
+        matches!(
+            self.slots.get(id),
+            Some(Entry::Read { value, .. }) if value.shape().bytes == 0
+        )
+    }
+
+    /// Whether this slot's text is a decoding of a file in another encoding.
+    ///
+    /// Metadata, and the driver's own: a yes or a no, and no part of the text.
+    pub fn is_decoded(&self, id: &SlotId) -> bool {
+        self.slots.get(id).is_some_and(Entry::decoded)
+    }
+
+    /// Record that a slot will hold `path`, without reading it.
+    ///
+    /// Only the policy layer defers, for the same reason only the policy layer mints a writer:
+    /// the label is decided here and not by whatever eventually turns up in the file.
+    pub(crate) fn defer(
+        &mut self,
+        id: SlotId,
+        path: impl Into<String>,
+        label: Label,
+    ) -> Result<(), SlotError> {
+        self.defer_entry(id, path, label, false)
+    }
+
+    /// Record that a slot stands for a directory a listing stopped at.
+    ///
+    /// The name is kept exactly as a file's is, because the trail is read by the person whose
+    /// directory it is. What differs is that nothing may resolve it as somewhere to read from or
+    /// write to, which [`crate::policy::Policy::promote_reference_for_read`] and
+    /// [`crate::policy::Policy::destination_from_reference`] are what enforce.
+    pub(crate) fn defer_directory(
+        &mut self,
+        id: SlotId,
+        path: impl Into<String>,
+        label: Label,
+    ) -> Result<(), SlotError> {
+        self.defer_entry(id, path, label, true)
+    }
+
+    fn defer_entry(
+        &mut self,
+        id: SlotId,
+        path: impl Into<String>,
+        label: Label,
+        directory: bool,
+    ) -> Result<(), SlotError> {
+        if self.is_written(&id) {
+            return Err(SlotError::AlreadyWritten(id));
+        }
+        self.slots.insert(
+            id,
+            Entry::Unread(Deferred {
+                path: path.into(),
+                label,
+                directory,
+            }),
+        );
+        Ok(())
+    }
+
+    /// Whether a slot stands for a directory a listing stopped at rather than a file.
+    ///
+    /// False for a slot holding content and for one nothing has deferred, which is the answer
+    /// either way: neither is a directory, and what each of those is instead is refused by
+    /// whoever asked for a path.
+    pub(crate) fn names_a_directory(&self, id: &SlotId) -> bool {
+        matches!(self.slots.get(id), Some(Entry::Unread(deferred)) if deferred.is_a_directory())
+    }
+
+    /// Put the bytes into a slot that was waiting for them.
+    ///
+    /// The single write that a deferred slot gets: an entry already holding content is refused,
+    /// so a file cannot be read twice into one slot and the second reading cannot be the one
+    /// that counts.
+    pub(crate) fn fill(
+        &mut self,
+        id: &SlotId,
+        content: Labelled<String>,
+        revision: crate::file_authority::Stamp,
+        decoded: bool,
+    ) -> Result<Measured, SlotError> {
+        let deferred = match self.slots.get(id) {
+            Some(Entry::Unread(deferred)) => deferred.clone(),
+            Some(Entry::Read { .. }) => return Err(SlotError::AlreadyWritten(id.clone())),
+            None => return Err(SlotError::NotWritten(id.clone())),
+        };
+
+        // The recorded label is a ceiling, so a file read back out of a path that lost its
+        // trust in the meantime lands untrusted rather than at the label it was promised.
+        let label = crate::label::taint_all([deferred.label, content.label()]);
+
+        // Measuring, not reading: `Labelled::shape` counts without letting the bytes out, so
+        // nothing here holds the content and no witness is minted for it. The store is not the
+        // policy layer and must not be able to mint one.
+        let measured = Measured::of(&content);
+
+        // The path stays with the slot now that the bytes are here. A reference that stopped
+        // being an address the moment it was read could not be written back to.
+        //
+        // It stays as the origin too, which is what an unread entry answers with already: being
+        // read is not a change in where the bytes came from, and a slot that forgot leaves
+        // whoever has to say so with nothing but the slot's own name, which means nothing to the
+        // person being asked about it.
+        self.slots.insert(
+            id.clone(),
+            Entry::Read {
+                value: taint(content, label),
+                // A decoding is not a copy of the file, so a write of it back is not a write of
+                // the file as it is.
+                verbatim: (!decoded).then(|| Box::new((deferred.path.clone(), revision))),
+                origin: Some(deferred.path.clone()),
+                path: Some(deferred.path),
+                home: Home::Anywhere,
+                from_command: None,
+                picture: None,
+                remark: None,
+                decoded,
+            },
+        );
+        Ok(measured)
+    }
+
+    /// Keep the number a processor chose under a name of its own.
+    ///
+    /// Only the policy layer stores one, for the same reason only it mints a writer: the label is
+    /// the one the number was read at and not whatever the caller prefers. The name is taken at
+    /// once, and a name that holds text or a choice already is refused, so a choice cannot replace
+    /// anything and nothing can replace it.
+    pub(crate) fn store_choice(
+        &mut self,
+        id: SlotId,
+        chosen: Labelled<u8>,
+    ) -> Result<(), SlotError> {
+        if self.is_written(&id) {
+            return Err(SlotError::AlreadyWritten(id));
+        }
+        self.choices.insert(
+            id,
+            Choice {
+                number: chosen,
+                spent: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// The number kept under `id` as a choice, where no call has used it.
+    ///
+    /// For the gate that draws the number to the person who is asked about the call it will fill.
+    /// The choice stays unspent. Nothing else asks: the number is not text and no accessor of text
+    /// returns it.
+    pub(crate) fn take_choice(&self, id: &SlotId) -> Result<Labelled<u8>, SlotError> {
+        match self.choices.get(id) {
+            None => Err(SlotError::NotAChoice(id.clone())),
+            Some(choice) if choice.spent => Err(SlotError::ChoiceSpent(id.clone())),
+            Some(choice) => Ok(choice.number.clone()),
+        }
+    }
+
+    /// The number kept under `id` as a choice, marked as used by a call.
+    ///
+    /// For the gate that carries the number into the one call it fills. A name that holds no
+    /// choice, or one a call used already, is refused and nothing is marked.
+    pub(crate) fn spend_choice(&mut self, id: &SlotId) -> Result<Labelled<u8>, SlotError> {
+        match self.choices.get_mut(id) {
+            None => Err(SlotError::NotAChoice(id.clone())),
+            Some(choice) if choice.spent => Err(SlotError::ChoiceSpent(id.clone())),
+            Some(choice) => {
+                choice.spent = true;
+                Ok(choice.number.clone())
+            }
+        }
+    }
+
+    /// Mint a single-use write capability with a fixed label.
+    ///
+    /// The label is supplied by the caller minting the writer, the policy layer,
+    /// not by the code that later writes. `SlotWriter` cannot change it.
+    pub fn writer_for(&mut self, id: SlotId, label: Label) -> Result<SlotWriter<'_>, SlotError> {
+        if self.is_written(&id) {
+            return Err(SlotError::AlreadyWritten(id));
+        }
+        Ok(SlotWriter {
+            store: self,
+            id,
+            label,
+        })
+    }
+}
+
+/// A single-use write capability for one slot at one label.
+///
+/// [`SlotWriter::write`] takes `self` by value, so write-once is a compile-time
+/// property: a second write has no writer left to call.
+#[derive(Debug)]
+pub struct SlotWriter<'a> {
+    store: &'a mut SlotStore,
+    id: SlotId,
+    label: Label,
+}
+
+impl SlotWriter<'_> {
+    /// The label this writer will apply. Fixed at mint time.
+    pub fn label(&self) -> Label {
+        self.label
+    }
+
+    /// Write the slot, consuming the capability.
+    pub fn write(self, content: impl Into<String>) -> Result<(), SlotError> {
+        if self.store.is_written(&self.id) {
+            return Err(SlotError::AlreadyWritten(self.id));
+        }
+        self.store.slots.insert(
+            self.id,
+            Entry::Read {
+                value: Labelled::new(content.into(), self.label),
+                path: None,
+                verbatim: None,
+                home: Home::Anywhere,
+                from_command: None,
+                picture: None,
+                origin: None,
+                remark: None,
+                decoded: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Write an already-labelled value, returning its measurements.
+    ///
+    /// The measuring happens here because the shape of untrusted content is the only thing
+    /// anyone outside is allowed to learn about it. Measuring elsewhere would mean the caller
+    /// holding the bytes, which is the thing quarantine exists to prevent.
+    ///
+    /// The value's own label is kept rather than the writer's when the value is *more*
+    /// restricted, so quarantining cannot raise integrity or lower confidentiality by accident.
+    pub fn write_measured(self, content: Labelled<String>) -> Result<Measured, SlotError> {
+        if self.store.is_written(&self.id) {
+            return Err(SlotError::AlreadyWritten(self.id));
+        }
+
+        let label = crate::label::taint_all([self.label, content.label()]);
+
+        // Measured rather than read, for the reason `fill` gives: the counts leave here as
+        // numbers and the bytes never leave the value at all.
+        let measured = Measured::of(&content);
+
+        self.store.slots.insert(
+            self.id,
+            Entry::Read {
+                value: taint(content, label),
+                path: None,
+                verbatim: None,
+                home: Home::Anywhere,
+                from_command: None,
+                picture: None,
+                origin: None,
+                remark: None,
+                decoded: false,
+            },
+        );
+        Ok(measured)
+    }
+}
+
+/// The shape of quarantined content: everything anyone outside the slot store may know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Measured {
+    pub lines: usize,
+    pub bytes: usize,
+}
+
+impl Measured {
+    /// Measure content without reading it.
+    pub(crate) fn of(content: &Labelled<String>) -> Self {
+        let shape = content.shape();
+        Self {
+            lines: shape.lines,
+            bytes: shape.bytes,
+        }
+    }
+}
+
+/// Lower a value to the label the store recorded for it, keeping the bytes inside the value.
+///
+/// Relabelling rather than rebuilding is what keeps the content from passing through a bare
+/// `String` here: the store is not the policy layer, so it has no witness to read one with and
+/// must not be able to mint one. The label always reaches, because `taint_all` only ever
+/// degrades on each axis and a label degrades to its own taint with anything, which is
+/// `bravebot_core::label::top_of_taint_degrades_from_everything`.
+fn taint(content: Labelled<String>, label: Label) -> Labelled<String> {
+    content
+        .relabel(label)
+        .expect("a label degrades to its taint with any other")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sid(s: &str) -> SlotId {
+        SlotId::new(s)
+    }
+
+    /// A slot waiting on its file must say so rather than hand back nothing. An effect given
+    /// nothing would carry out the emptiness: a write would truncate the file it was meant to
+    /// change.
+    #[test]
+    fn a_slot_that_has_not_read_its_file_refuses_to_give_bytes() {
+        let mut store = SlotStore::new();
+        store
+            .defer(sid("ref:0"), "notes.md", Label::untrusted_private())
+            .unwrap();
+
+        assert_eq!(
+            store.take_for_effect(&sid("ref:0")).unwrap_err(),
+            SlotError::Unread(sid("ref:0"))
+        );
+    }
+
+    /// Deferring reserves the slot. A second slot of the same name would mean two files behind
+    /// one reference, and the reference the planner holds would name whichever won.
+    #[test]
+    fn a_reserved_slot_cannot_be_reserved_or_written_again() {
+        let mut store = SlotStore::new();
+        store
+            .defer(sid("ref:0"), "notes.md", Label::untrusted_private())
+            .unwrap();
+
+        assert_eq!(
+            store.defer(sid("ref:0"), "other.md", Label::untrusted_private()),
+            Err(SlotError::AlreadyWritten(sid("ref:0")))
+        );
+        assert!(
+            store
+                .writer_for(sid("ref:0"), Label::untrusted_private())
+                .is_err()
+        );
+    }
+
+    /// What a caller outside the kernel is told about a deferred slot is whether asking for the
+    /// bytes will open a file, and nothing else. A slot nothing has reserved opens no file, and
+    /// neither does one whose bytes are already here, so answering yes to either would report a
+    /// read that is not going to happen against a person's workspace.
+    #[test]
+    fn a_slot_is_unread_only_while_it_is_waiting_on_its_file() {
+        let mut store = SlotStore::new();
+        assert!(!store.is_unread(&sid("ref:0")));
+
+        store
+            .defer(sid("ref:0"), "notes.md", Label::untrusted_private())
+            .unwrap();
+        assert!(store.is_unread(&sid("ref:0")));
+
+        store
+            .fill(
+                &sid("ref:0"),
+                Labelled::new("one\ntwo".to_string(), Label::untrusted_private()),
+                Default::default(),
+                false,
+            )
+            .expect("the first reading fills it");
+        assert!(!store.is_unread(&sid("ref:0")));
+    }
+
+    /// A slot nothing reserved holds no bytes. An effect given one would carry out the
+    /// emptiness, and a fill would invent a slot that no reservation, and so no label ceiling,
+    /// stands behind.
+    #[test]
+    fn a_slot_nothing_reserved_has_no_bytes_to_give_and_none_to_fill() {
+        let mut store = SlotStore::new();
+
+        assert_eq!(
+            store.take_for_effect(&sid("ghost")).unwrap_err(),
+            SlotError::NotWritten(sid("ghost"))
+        );
+        assert_eq!(
+            store.fill(
+                &sid("ghost"),
+                Labelled::new("x".to_string(), Label::untrusted_private()),
+                Default::default(),
+                false
+            ),
+            Err(SlotError::NotWritten(sid("ghost")))
+        );
+    }
+
+    /// Reading the file is the slot's single write, so a second reading has nowhere to go.
+    #[test]
+    fn a_file_is_read_into_its_slot_once() {
+        let mut store = SlotStore::new();
+        store
+            .defer(sid("ref:0"), "notes.md", Label::untrusted_private())
+            .unwrap();
+
+        let measured = store
+            .fill(
+                &sid("ref:0"),
+                Labelled::new("one\ntwo".to_string(), Label::untrusted_private()),
+                Default::default(),
+                false,
+            )
+            .expect("the first reading fills it");
+        assert_eq!(measured.lines, 2);
+
+        assert_eq!(
+            store.fill(
+                &sid("ref:0"),
+                Labelled::new("something else".to_string(), Label::untrusted_private()),
+                Default::default(),
+                false
+            ),
+            Err(SlotError::AlreadyWritten(sid("ref:0")))
+        );
+    }
+
+    /// A slot filled from a decoding of another encoding is text for reading only: handing it to an
+    /// effect would write the decoding as the file, and a write of it back would pass for putting
+    /// the file back as it is.
+    #[test]
+    fn a_slot_holding_a_decoding_is_read_but_never_given_to_an_effect() {
+        let mut store = SlotStore::new();
+        for (id, decoded) in [("ref:0", true), ("ref:1", false)] {
+            store
+                .defer(sid(id), "notes.md", Label::untrusted_private())
+                .unwrap();
+            store
+                .fill(
+                    &sid(id),
+                    Labelled::new("one\ntwo".to_string(), Label::untrusted_private()),
+                    Default::default(),
+                    decoded,
+                )
+                .unwrap();
+        }
+
+        assert!(store.is_decoded(&sid("ref:0")));
+        assert!(!store.is_decoded(&sid("ref:1")));
+        assert_eq!(
+            store.take_for_effect(&sid("ref:0")).unwrap_err(),
+            SlotError::Decoded(sid("ref:0"))
+        );
+        assert!(store.take_for_reading(&sid("ref:0")).is_ok());
+        assert!(store.take_for_effect(&sid("ref:1")).is_ok());
+    }
+
+    /// The label recorded when the slot was reserved is a ceiling, never a promise: content that
+    /// arrives worse than the reservation keeps its own label.
+    #[test]
+    fn filling_a_slot_cannot_raise_the_label_it_was_reserved_at() {
+        let mut store = SlotStore::new();
+        store
+            .defer(sid("ref:0"), "notes.md", Label::untrusted_private())
+            .unwrap();
+        store
+            .fill(
+                &sid("ref:0"),
+                Labelled::new("payload".to_string(), Label::trusted_public()),
+                Default::default(),
+                false,
+            )
+            .unwrap();
+
+        let label = store.label_of(&sid("ref:0")).unwrap();
+        assert!(
+            !label.is_trusted(),
+            "the reservation was untrusted: {label}"
+        );
+    }
+
+    /// A number a processor chose is kept under a name of its own, and nothing that returns text,
+    /// a label or an address finds it there. A choice stored as a text slot would be handed to a
+    /// processor as a document, written to a file, or named as a path.
+    #[test]
+    fn a_choice_is_kept_apart_from_text_and_no_text_accessor_returns_it() {
+        let mut store = SlotStore::new();
+        store
+            .store_choice(sid("ref:7"), Labelled::new(3u8, Label::untrusted_private()))
+            .expect("a first choice");
+
+        let id = sid("ref:7");
+        assert_eq!(store.label_of(&id), None);
+        assert_eq!(
+            store.take_for_effect(&id).unwrap_err(),
+            SlotError::NotWritten(sid("ref:7"))
+        );
+        assert_eq!(
+            store.take_for_reading(&id).unwrap_err(),
+            SlotError::NotWritten(sid("ref:7"))
+        );
+        assert!(!store.is_unread(&id));
+        assert!(!store.is_decoded(&id));
+        assert!(!store.is_a_picture(&id));
+        assert!(!store.is_from_command(&id));
+        assert!(!store.names_a_directory(&id));
+        assert!(
+            store.inventory().is_empty(),
+            "a choice was listed with the text slots"
+        );
+
+        // The name is taken, so text cannot be put under it and neither can a second choice.
+        assert!(store.is_written(&id));
+        assert!(
+            store
+                .writer_for(sid("ref:7"), Label::untrusted_private())
+                .is_err(),
+            "text was written under the name of a choice"
+        );
+        assert_eq!(
+            store.defer(sid("ref:7"), "notes.md", Label::untrusted_private()),
+            Err(SlotError::AlreadyWritten(sid("ref:7")))
+        );
+        assert_eq!(
+            store.store_choice(sid("ref:7"), Labelled::new(4u8, Label::untrusted_private())),
+            Err(SlotError::AlreadyWritten(sid("ref:7")))
+        );
+
+        // And the other way: a choice cannot be put under the name of text.
+        store
+            .writer_for(sid("ref:8"), Label::untrusted_public())
+            .unwrap()
+            .write("text")
+            .unwrap();
+        assert_eq!(
+            store.store_choice(sid("ref:8"), Labelled::new(1u8, Label::untrusted_public())),
+            Err(SlotError::AlreadyWritten(sid("ref:8")))
+        );
+        assert_eq!(
+            store.take_for_effect(&sid("ref:8")).unwrap().label(),
+            Label::untrusted_public()
+        );
+    }
+
+    /// Reading a choice uses nothing, and spending it uses it once. A read that spent would leave
+    /// the call the person was asked about with no number; a spend that did not mark would let one
+    /// choice fill every call that names it. A name that holds text, or nothing, is no choice to
+    /// either, and neither marks anything.
+    #[test]
+    fn a_choice_is_read_without_being_used_and_used_once() {
+        let mut store = SlotStore::new();
+        store
+            .store_choice(sid("ref:7"), Labelled::new(3u8, Label::untrusted_private()))
+            .expect("a choice");
+        store
+            .writer_for(sid("ref:8"), Label::untrusted_public())
+            .unwrap()
+            .write("text")
+            .unwrap();
+        let id = sid("ref:7");
+
+        for _ in 0..2 {
+            let read = store.take_choice(&id).expect("an unused choice");
+            assert_eq!(read.label(), Label::untrusted_private());
+        }
+        let spent = store.spend_choice(&id).expect("an unused choice");
+        assert_eq!(spent.label(), Label::untrusted_private());
+
+        assert_eq!(
+            store.take_choice(&id).unwrap_err(),
+            SlotError::ChoiceSpent(sid("ref:7"))
+        );
+        assert_eq!(
+            store.spend_choice(&id).unwrap_err(),
+            SlotError::ChoiceSpent(sid("ref:7"))
+        );
+        // Used, the name is still taken: it neither holds a second choice nor takes text.
+        assert!(store.is_written(&id));
+        assert_eq!(
+            store.store_choice(sid("ref:7"), Labelled::new(4u8, Label::untrusted_private())),
+            Err(SlotError::AlreadyWritten(sid("ref:7")))
+        );
+
+        for named in ["ref:8", "ref:99"] {
+            let named = sid(named);
+            assert_eq!(
+                store.take_choice(&named).unwrap_err(),
+                SlotError::NotAChoice(named.clone())
+            );
+            assert_eq!(
+                store.spend_choice(&named).unwrap_err(),
+                SlotError::NotAChoice(named.clone())
+            );
+        }
+        // The text under ref:8 is as it was.
+        assert_eq!(
+            store.take_for_effect(&sid("ref:8")).unwrap().label(),
+            Label::untrusted_public()
+        );
+    }
+
+    #[test]
+    fn write_then_read_preserves_the_label() {
+        let mut store = SlotStore::new();
+        store
+            .writer_for(sid("page"), Label::untrusted_public())
+            .unwrap()
+            .write("hello")
+            .unwrap();
+
+        let value = store.take_for_effect(&sid("page")).unwrap();
+        assert_eq!(value.label(), Label::untrusted_public());
+    }
+
+    /// Write-once is primarily a compile-time property, since `write` consumes the
+    /// writer. This covers the runtime backstop: minting a second writer fails.
+    #[test]
+    fn a_slot_cannot_be_written_twice() {
+        let mut store = SlotStore::new();
+        store
+            .writer_for(sid("page"), Label::untrusted_public())
+            .unwrap()
+            .write("first")
+            .unwrap();
+
+        let err = store
+            .writer_for(sid("page"), Label::untrusted_public())
+            .expect_err("second writer must be refused");
+        assert_eq!(err, SlotError::AlreadyWritten(sid("page")));
+    }
+
+    /// The point of write-once: untrusted content cannot be replaced with a
+    /// differently-labelled value.
+    #[test]
+    fn overwriting_cannot_launder_a_label() {
+        let mut store = SlotStore::new();
+        store
+            .writer_for(sid("page"), Label::untrusted_public())
+            .unwrap()
+            .write("injected")
+            .unwrap();
+
+        assert!(
+            store
+                .writer_for(sid("page"), Label::trusted_public())
+                .is_err()
+        );
+        assert_eq!(
+            store.label_of(&sid("page")),
+            Some(Label::untrusted_public())
+        );
+    }
+
+    #[test]
+    fn a_writer_cannot_choose_its_own_label() {
+        let mut store = SlotStore::new();
+        let writer = store
+            .writer_for(sid("s"), Label::untrusted_private())
+            .unwrap();
+        // The only label available is the one minted; there is no setter.
+        assert_eq!(writer.label(), Label::untrusted_private());
+        writer.write("x").unwrap();
+        assert_eq!(store.label_of(&sid("s")), Some(Label::untrusted_private()));
+    }
+
+    #[test]
+    fn inventory_reports_metadata_without_contents() {
+        let mut store = SlotStore::new();
+        store
+            .writer_for(sid("b"), Label::untrusted_private())
+            .unwrap()
+            .write("secret-content")
+            .unwrap();
+        store
+            .writer_for(sid("a"), Label::untrusted_public())
+            .unwrap()
+            .write("public-content")
+            .unwrap();
+
+        let inventory = store.inventory();
+        assert_eq!(
+            inventory,
+            vec![
+                (sid("a"), Label::untrusted_public()),
+                (sid("b"), Label::untrusted_private()),
+            ]
+        );
+        let rendered = format!("{inventory:?}");
+        assert!(!rendered.contains("secret-content"));
+    }
+}

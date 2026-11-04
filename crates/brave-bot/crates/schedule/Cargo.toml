@@ -1,0 +1,27 @@
+[package]
+name = "bravebot-schedule"
+description = "The scheduled runs a person registers with the system scheduler, as functions that return their text"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+# Where the entries are kept, through the state directory's helpers.
+bravebot-agent = { path = "../agent" }
+# A directory drawn in a listing, as every other crate draws a name a checkout chose (LAYER-3).
+bravebot-approval = { path = "../approval" }
+# The credentials a scheduled run's helper programs are started without.
+bravebot-config = { path = "../config" }
+bravebot-core = { path = "../core" }
+# The words of every line a subcommand returns.
+bravebot-i18n = { path = "../i18n" }
+# Finding and starting the scheduler's own programs under the spawn gate.
+bravebot-sandbox = { path = "../sandbox" }
+# The search index a recorded run is written to, and the sessions an entry resumes.
+bravebot-session = { path = "../session" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

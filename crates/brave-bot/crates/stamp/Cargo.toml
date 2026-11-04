@@ -1,0 +1,11 @@
+[package]
+name = "bravebot-stamp"
+description = "Which build this is: the version, the commit, and whether the tree was modified"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]

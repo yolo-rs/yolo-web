@@ -1,0 +1,883 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+use std::collections::VecDeque;
+
+use cookie::{Cookie, SameSite};
+use dom_struct::dom_struct;
+use hyper_serde::Serde;
+use itertools::Itertools;
+use js::context::JSContext;
+use js::jsval::NullValue;
+use net_traits::CookieSource::NonHTTP;
+use net_traits::{CookieAsyncResponse, CookieData, CoreResourceMsg};
+use script_bindings::cell::DomRefCell;
+use script_bindings::codegen::GenericBindings::CookieStoreBinding::CookieSameSite;
+use script_bindings::reflector::reflect_dom_object;
+use servo_base::generic_channel::{GenericCallback, GenericSend, GenericSender};
+use servo_base::id::CookieStoreId;
+use servo_url::ServoUrl;
+use style::str::starts_with_ignore_ascii_case;
+use time::OffsetDateTime;
+
+use crate::dom::bindings::codegen::Bindings::CookieStoreBinding::{
+    CookieInit, CookieListItem, CookieStoreDeleteOptions, CookieStoreGetOptions, CookieStoreMethods,
+};
+use crate::dom::bindings::error::Error;
+use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::USVString;
+use crate::dom::document::get_registrable_domain_suffix_of_or_is_equal_to;
+use crate::dom::eventtarget::EventTarget;
+use crate::dom::globalscope::GlobalScope;
+use crate::dom::promise::Promise;
+use crate::dom::window::Window;
+use crate::dom::{RootedPromise, TracedPromise};
+use crate::tasks::task_source::SendableTaskSource;
+
+#[derive(JSTraceable, MallocSizeOf)]
+struct DroppableCookieStore {
+    // Store an id so that we can send it with requests and the resource thread knows who to respond to
+    #[no_trace]
+    store_id: CookieStoreId,
+    #[no_trace]
+    unregister_channel: GenericSender<CoreResourceMsg>,
+}
+
+impl Drop for DroppableCookieStore {
+    fn drop(&mut self) {
+        let res = self
+            .unregister_channel
+            .send(CoreResourceMsg::RemoveCookieListener(self.store_id));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        }
+    }
+}
+
+/// <https://cookiestore.spec.whatwg.org/>
+/// CookieStore provides an async API for pages and service workers to access and modify cookies.
+/// This requires setting up communication with resource thread's cookie storage that allows for
+/// the page to have multiple cookie storage promises in flight at the same time.
+#[dom_struct]
+pub(crate) struct CookieStore {
+    eventtarget: EventTarget,
+    in_flight: DomRefCell<VecDeque<TracedPromise>>,
+    droppable: DroppableCookieStore,
+}
+
+struct CookieListener {
+    // TODO:(whatwg/cookiestore#239) The spec is missing details for what task source to use
+    task_source: SendableTaskSource,
+    context: Trusted<CookieStore>,
+}
+
+impl CookieListener {
+    pub(crate) fn handle(&self, message: CookieAsyncResponse) {
+        let context = self.context.clone();
+        self.task_source.queue(task!(cookie_message: move |cx| {
+            let Some(promise) = context.root().in_flight.safe_borrow_mut(cx.no_gc()).pop_front().map(|promise| promise.root(cx)) else {
+                warn!("No promise exists for cookie store response");
+                return;
+            };
+            match message.data {
+                CookieData::Get(cookie) => {
+                    // If list is failure, then reject p with a TypeError and abort these steps.
+                    // (There is currently no way for list to result in failure)
+                    if let Some(cookie) = cookie {
+                        // Otherwise, resolve p with the first item of list.
+                        promise.resolve_native(cx, &cookie_to_list_item(cookie.into_inner()));
+                    } else {
+                        // If list is empty, then resolve p with null.
+                        promise.resolve_native(cx, &NullValue());
+                    }
+                },
+                CookieData::GetAll(cookies) => {
+                    // If list is failure, then reject p with a TypeError and abort these steps.
+                    promise.resolve_native(cx,
+                        &cookies
+                        .into_iter()
+                        .map(|cookie| cookie_to_list_item(cookie.0))
+                        .collect_vec(),);
+                },
+                CookieData::Change(_) | CookieData::Set(_) => {
+                    promise.resolve_native(cx, &());
+                }
+            }
+        }));
+    }
+}
+
+impl CookieStore {
+    fn new_inherited(unregister_channel: GenericSender<CoreResourceMsg>) -> CookieStore {
+        CookieStore {
+            eventtarget: EventTarget::new_inherited(),
+            in_flight: Default::default(),
+            droppable: DroppableCookieStore {
+                store_id: CookieStoreId::new(),
+                unregister_channel,
+            },
+        }
+    }
+
+    pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<CookieStore> {
+        let store = reflect_dom_object(
+            cx,
+            Box::new(CookieStore::new_inherited(
+                global.resource_threads().core_thread.clone(),
+            )),
+            global,
+        );
+        store.setup_route();
+        store
+    }
+
+    fn setup_route(&self) {
+        let context = Trusted::new(self);
+        let cs_listener = CookieListener {
+            task_source: self
+                .global()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
+            context,
+        };
+
+        let callback = GenericCallback::new(move |message| match message {
+            Ok(msg) => cs_listener.handle(msg),
+            Err(err) => warn!("Error receiving a CookieStore message: {:?}", err),
+        })
+        .expect("Could not create cookie store callback");
+
+        let res = self
+            .global()
+            .resource_threads()
+            .send(CoreResourceMsg::NewCookieListener(
+                self.droppable.store_id,
+                callback,
+                self.global().creation_url(),
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        }
+    }
+}
+
+/// <https://cookiestore.spec.whatwg.org/#create-a-cookielistitem>
+fn cookie_to_list_item(cookie: Cookie) -> CookieListItem {
+    // TODO: Investigate if we need to explicitly UTF-8 decode without BOM here or if thats
+    // already being done by cookie-rs or implicitly by using rust strings
+    CookieListItem {
+        // Let name be the result of running UTF-8 decode without BOM on cookie’s name.
+        name: Some(cookie.name().to_string().into()),
+
+        // Let value be the result of running UTF-8 decode without BOM on cookie’s value.
+        value: Some(cookie.value().to_string().into()),
+    }
+}
+
+impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-get>
+    fn Get(&self, cx: &mut JSContext, name: USVString) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        let name = CookieStore::normalize(&name);
+
+        // 6. Run the following steps in parallel:
+        let res = self
+            .global()
+            .resource_threads()
+            .send(CoreResourceMsg::GetCookieDataForUrlAsync(
+                self.droppable.store_id,
+                creation_url,
+                Some(name),
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p.
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-get-options>
+    fn Get_(&self, cx: &mut JSContext, options: &CookieStoreGetOptions) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 7. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // 5. If options is empty, then return a promise rejected with a TypeError.
+        // "is empty" is not strictly defined anywhere in the spec but the only value we require here is "url"
+        if options.url.is_none() && options.name.is_none() {
+            p.reject_error(cx, Error::Type(c"Options cannot be empty".to_owned()));
+            return p;
+        }
+
+        let mut final_url = creation_url.clone();
+
+        // 6. If options["url"] is present, then run these steps:
+        if let Some(get_url) = &options.url {
+            // 6.1. Let parsed be the result of parsing options["url"] with settings’s API base URL.
+            let parsed_url = ServoUrl::parse_with_base(Some(&global.api_base_url()), get_url);
+
+            // 6.2. If this’s relevant global object is a Window object and parsed does not equal url with exclude fragments set to true,
+            // then return a promise rejected with a TypeError.
+            if let Some(_window) = DomRoot::downcast::<Window>(self.global()) &&
+                parsed_url
+                    .as_ref()
+                    .is_ok_and(|parsed| !parsed.is_equal_excluding_fragments(&creation_url))
+            {
+                p.reject_error(cx, Error::Type(c"URL does not match context".to_owned()));
+                return p;
+            }
+
+            // 6.3. If parsed’s origin and url’s origin are not the same origin,
+            // then return a promise rejected with a TypeError.
+            if parsed_url
+                .as_ref()
+                .is_ok_and(|parsed| creation_url.origin() != parsed.origin())
+            {
+                p.reject_error(cx, Error::Type(c"Not same origin".to_owned()));
+                return p;
+            }
+
+            // 6.4. Set url to parsed.
+            if let Ok(url) = parsed_url {
+                final_url = url;
+            }
+        }
+
+        // 6. Run the following steps in parallel:
+        let res = self
+            .global()
+            .resource_threads()
+            .send(CoreResourceMsg::GetCookieDataForUrlAsync(
+                self.droppable.store_id,
+                final_url,
+                options.name.clone().map(|val| CookieStore::normalize(&val)),
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-getall>
+    fn GetAll(&self, cx: &mut JSContext, name: USVString) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // Normalize name here rather than passing the un-nomarlized name around to the resource thread and back
+        let name = CookieStore::normalize(&name);
+
+        // 6. Run the following steps in parallel:
+        let res =
+            self.global()
+                .resource_threads()
+                .send(CoreResourceMsg::GetAllCookieDataForUrlAsync(
+                    self.droppable.store_id,
+                    creation_url,
+                    Some(name),
+                ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p.
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-getall-options>
+    fn GetAll_(&self, cx: &mut JSContext, options: &CookieStoreGetOptions) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 6. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        let mut final_url = creation_url.clone();
+
+        // 5. If options["url"] is present, then run these steps:
+        if let Some(get_url) = &options.url {
+            // 5.1. Let parsed be the result of parsing options["url"] with settings’s API base URL.
+            let parsed_url = ServoUrl::parse_with_base(Some(&global.api_base_url()), get_url);
+
+            // If this’s relevant global object is a Window object and parsed does not equal url with exclude fragments set to true,
+            // then return a promise rejected with a TypeError.
+            if let Some(_window) = DomRoot::downcast::<Window>(self.global()) &&
+                parsed_url
+                    .as_ref()
+                    .is_ok_and(|parsed| !parsed.is_equal_excluding_fragments(&creation_url))
+            {
+                p.reject_error(cx, Error::Type(c"URL does not match context".to_owned()));
+                return p;
+            }
+
+            // 5.3. If parsed’s origin and url’s origin are not the same origin,
+            // then return a promise rejected with a TypeError.
+            if parsed_url
+                .as_ref()
+                .is_ok_and(|parsed| creation_url.origin() != parsed.origin())
+            {
+                p.reject_error(cx, Error::Type(c"Not same origin".to_owned()));
+                return p;
+            }
+
+            // 5.4. Set url to parsed.
+            if let Ok(url) = parsed_url {
+                final_url = url;
+            }
+        }
+
+        // 7. Run the following steps in parallel:
+        let res =
+            self.global()
+                .resource_threads()
+                .send(CoreResourceMsg::GetAllCookieDataForUrlAsync(
+                    self.droppable.store_id,
+                    final_url,
+                    options.name.clone().map(|val| CookieStore::normalize(&val)),
+                ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 8. Return p
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-set>
+    fn Set(&self, cx: &mut JSContext, name: USVString, value: USVString) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // 6.1 Let r be the result of running set a cookie with url, name, value, null, null, "/", "strict", false, and null.
+        let properties = CookieInit {
+            name,
+            value,
+            expires: None,
+            domain: None,
+            path: USVString(String::from("/")),
+            sameSite: CookieSameSite::Strict,
+            partitioned: false,
+            maxAge: None,
+        };
+        let Some(cookie) = CookieStore::set_a_cookie(&creation_url, &properties) else {
+            // 6.2. If r is failure, then reject p with a TypeError and abort these steps.
+            p.reject_error(cx, Error::Type(c"Invalid cookie".to_owned()));
+            return p;
+        };
+
+        // 6. Run the following steps in parallel:
+        let res = self
+            .global()
+            .resource_threads()
+            .send(CoreResourceMsg::SetCookieForUrlAsync(
+                self.droppable.store_id,
+                creation_url.clone(),
+                Serde(cookie),
+                NonHTTP,
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p.
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-set-options>
+    fn Set_(&self, cx: &mut JSContext, options: &CookieInit) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // 6.1. Let r be the result of running set a cookie with url, options["name"], options["value"],
+        // options["expires"], options["domain"], options["path"], options["sameSite"], options["partitioned"],
+        // and options["maxAge"].
+        let Some(cookie) = CookieStore::set_a_cookie(&creation_url, options) else {
+            // 6.2. If r is failure, then reject p with a TypeError and abort these steps.
+            p.reject_error(cx, Error::Type(c"Invalid cookie".to_owned()));
+            return p;
+        };
+
+        // 6. Run the following steps in parallel:
+        let res = self
+            .global()
+            .resource_threads()
+            .send(CoreResourceMsg::SetCookieForUrlAsync(
+                self.droppable.store_id,
+                creation_url.clone(),
+                Serde(cookie),
+                NonHTTP,
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-delete>
+    fn Delete(&self, cx: &mut JSContext, name: USVString) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // 6.1. Let r be the result of running delete a cookie with url, name, null, "/", and true.
+        let options = CookieStoreDeleteOptions {
+            name,
+            domain: None,
+            path: USVString(String::from("/")),
+            partitioned: true,
+        };
+        let Some(cookie) = CookieStore::delete_a_cookie(&creation_url, &options) else {
+            // 6.2. If r is failure, then reject p with a TypeError and abort these steps.
+            p.reject_error(cx, Error::Type(c"Invalid cookie".to_owned()));
+            return p;
+        };
+
+        // 6. Run the following steps in parallel:
+        let res = global
+            .resource_threads()
+            .send(CoreResourceMsg::SetCookieForUrlAsync(
+                self.droppable.store_id,
+                creation_url.clone(),
+                Serde(cookie),
+                NonHTTP,
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p.
+        p
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#dom-cookiestore-delete-options>
+    fn Delete_(&self, cx: &mut JSContext, options: &CookieStoreDeleteOptions) -> RootedPromise {
+        // 1. Let settings be this’s relevant settings object.
+        let global = self.global();
+
+        // 2. Let origin be settings’s origin.
+        let origin = global.origin();
+
+        // 5. Let p be a new promise.
+        let p = Promise::new(cx, &global);
+
+        // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
+        if !origin.is_tuple() {
+            p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+
+        // 4. Let url be settings’s creation URL.
+        let creation_url = global.creation_url();
+
+        // 6.1. Let r be the result of running delete a cookie with url, options["name"],
+        // options["domain"], options["path"], and options["partitioned"].
+        let Some(cookie) = CookieStore::delete_a_cookie(&creation_url, options) else {
+            // 6.2. If r is failure, then reject p with a TypeError and abort these steps.
+            p.reject_error(cx, Error::Type(c"Invalid cookie".to_owned()));
+            return p;
+        };
+
+        // 6. Run the following steps in parallel:
+        let res = global
+            .resource_threads()
+            .send(CoreResourceMsg::SetCookieForUrlAsync(
+                self.droppable.store_id,
+                creation_url.clone(),
+                Serde(cookie),
+                NonHTTP,
+            ));
+        if res.is_err() {
+            error!("Failed to send cookiestore message to resource threads");
+        } else {
+            self.in_flight
+                .safe_borrow_mut(cx.no_gc())
+                .push_back(p.to_traced());
+        }
+
+        // 7. Return p.
+        p
+    }
+}
+
+impl CookieStore {
+    /// <https://cookiestore.spec.whatwg.org/#normalize-a-cookie-name-or-value>
+    pub(crate) fn normalize(value: &USVString) -> String {
+        value.trim_matches([' ', '\t']).into()
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#set-cookie-algorithm>
+    fn set_a_cookie(url: &ServoUrl, properties: &CookieInit) -> Option<Cookie<'static>> {
+        // 1. Normalize name.
+        let name = CookieStore::normalize(&properties.name);
+
+        // 2. Normalize value.
+        let value = CookieStore::normalize(&properties.value);
+
+        // 3. If name or value contain U+003B (;), any C0 control character except U+0009 TAB, or U+007F DELETE, then return failure.
+        if CookieStore::contains_control_characters(&name) ||
+            CookieStore::contains_control_characters(&value)
+        {
+            return None;
+        }
+
+        // 4. If name contains U+003D (=), then return failure.
+        if name.contains('=') {
+            return None;
+        }
+
+        // 5. If name’s length is 0:
+        if name.is_empty() {
+            // 5.1 If value contains U+003D (=), then return failure.
+            // 5.2 If value’s length is 0, then return failure.
+            if value.contains('=') || value.is_empty() {
+                return None;
+            }
+
+            // 5.3 If value, byte-lowercased, starts with `__host-`, `__host-http-`, `__http-`, or `__secure-`, then return failure.
+            if ["__host-", "__host-http-", "__http-", "__secure-"]
+                .into_iter()
+                .any(|prefix| starts_with_ignore_ascii_case(&value, prefix))
+            {
+                return None;
+            }
+        }
+
+        // 6. If name, byte-lowercased, starts with `__host-http-` or `__http-`, then return failure.
+        if ["__host-http-", "__http-"]
+            .into_iter()
+            .any(|prefix| starts_with_ignore_ascii_case(&name, prefix))
+        {
+            return None;
+        }
+        let name_starts_with_host = starts_with_ignore_ascii_case(&name, "__host-");
+
+        // 7. Let encodedName be the result of UTF-8 encoding name.
+        //
+        // Note: name is already UTF-8 encoded
+
+        // 8. Let encodedValue be the result of UTF-8 encoding value.
+        //
+        // Note: value is already UTF-8 encoded
+
+        // 9. If the byte sequence length of encodedName plus the byte sequence length of encodedValue is greater than the maximum name/value pair size, then return failure.
+        if name.len() + value.len() > 4096 {
+            return None;
+        }
+
+        // 10. Let host be url’s host
+        let host = url.host().map(|host| host.to_owned());
+
+        // 11. Let attributes be « ».
+        let mut cookie = Cookie::build((name, value));
+
+        // 12. If domain is non-null:
+        if let Some(domain) = &properties.domain {
+            // 12.1 If domain starts with U+002E (.), then return failure.
+            if domain.starts_with('.') {
+                return None;
+            }
+
+            // 12.2 If name, byte-lowercased, starts with `__host-`, then return failure.
+            if name_starts_with_host {
+                return None;
+            }
+
+            // 12.3 If domain is not a registrable domain suffix of and is not equal to host, then return failure.
+            // 12.4 Let parsedDomain be the result of host parsing domain.
+            // 12.5 Assert: parsedDomain is not failure.
+            // Note: this function parses the host and returns the parsed host on success
+            let domain = get_registrable_domain_suffix_of_or_is_equal_to(domain, host?)?;
+
+            // 12.6 Let encodedDomain be the result of UTF-8 encoding parsedDomain.
+            let domain = domain.to_string();
+
+            // 12.7 If the byte sequence length of encodedDomain is greater than the maximum attribute value size, then return failure.
+            if domain.len() > 1024 {
+                return None;
+            }
+
+            // 12.8 Append (`Domain`, encodedDomain) to attributes.
+            cookie.inner_mut().set_domain(domain);
+        }
+
+        // 13. If expires is non-null:
+        if let Some(expiry) = properties.expires {
+            // 13.1 If maxAge is non-null, then return failure.
+            if properties.maxAge.is_some() {
+                return None;
+            }
+
+            // 13.2 Append (`Expires`, expires (date serialized)) to attributes.
+            cookie.inner_mut().set_expires(
+                OffsetDateTime::from_unix_timestamp((*expiry / 1000.0) as i64)
+                    .expect("cookie expiry out of range"),
+            );
+        }
+        // 14. Otherwise, if maxAge is non-null, then append (`Max-Age`, ToString(maxAge)) to attributes.
+        else if let Some(max_age) = properties.maxAge {
+            cookie
+                .inner_mut()
+                .set_max_age(time::Duration::seconds(max_age));
+        }
+
+        // 15. If path is the empty string, then set path to the serialized cookie default path of url.
+        let path = if properties.path.is_empty() {
+            CookieStore::serialized_cookie_default_path(url)
+        } else {
+            properties.path.to_string()
+        };
+
+        // 16. If path does not start with U+002F (/), then return failure.
+        if !path.starts_with('/') {
+            return None;
+        }
+
+        // 17. If path is not U+002F (/), and name, byte-lowercased, starts with `__host-`, then return failure.
+        if path != "/" && name_starts_with_host {
+            return None;
+        }
+
+        // 18. Let encodedPath be the result of UTF-8 encoding path.
+        //
+        // Note: path is already UTF-8 encoded
+
+        // 19. If the byte sequence length of encodedPath is greater than the maximum attribute value size, then return failure.
+        if path.len() > 1024 {
+            return None;
+        }
+
+        // 20. Append (`Path`, encodedPath) to attributes.
+        cookie.inner_mut().set_path(path);
+
+        // 21. Append (`Secure`, ``) to attributes.
+        cookie.inner_mut().set_secure(true);
+
+        // 22. Switch on sameSite:
+        cookie.inner_mut().set_same_site(match properties.sameSite {
+            CookieSameSite::None => SameSite::None,
+            CookieSameSite::Strict => SameSite::Strict,
+            CookieSameSite::Lax => SameSite::Lax,
+        });
+
+        // 23. If partitioned is true, Append (`Partitioned`, ``) to attributes.
+        cookie.inner_mut().set_partitioned(properties.partitioned);
+
+        // 24. Perform the steps defined in Cookies § Storage Model for when the user agent
+        // "receives a cookie" with url as request-uri, encodedName as cookie-name, encodedValue as
+        // cookie-value, and attributes as cookie-attribute-list.
+        //
+        // Note: This is done by the caller sending `CoreResourceMsg::SetCookieForUrlAsync`.
+
+        // 25. Return success.
+        Some(cookie.build())
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#delete-a-cookie>
+    fn delete_a_cookie(
+        url: &ServoUrl,
+        options: &CookieStoreDeleteOptions,
+    ) -> Option<Cookie<'static>> {
+        // 1. Normalize name.
+        let name = CookieStore::normalize(&options.name);
+
+        // 2. Let value be the empty string.
+        // 3. If name’s length is 0, then set value to any non-empty implementation-defined string.
+        let value = if name.is_empty() { "servo" } else { "" };
+
+        // 4. Return the results of running set a cookie with url, name, value, null, domain, path,
+        // "strict", partitioned, and 0.
+        let properties = CookieInit {
+            name: USVString(name),
+            value: USVString(value.to_owned()),
+            expires: None,
+            domain: options.domain.clone(),
+            path: options.path.clone(),
+            sameSite: CookieSameSite::Strict,
+            partitioned: options.partitioned,
+            maxAge: Some(0),
+        };
+        CookieStore::set_a_cookie(url, &properties)
+    }
+
+    /// <https://cookiestore.spec.whatwg.org/#set-cookie-algorithm>
+    fn contains_control_characters(val: &str) -> bool {
+        // If name or value contain U+003B (;), any C0 control character except U+0009 TAB, or U+007F DELETE, then return failure.
+        val.contains(
+            |v| matches!(v, '\u{0000}'..='\u{0008}' | '\u{000a}'..='\u{001f}' | '\u{007f}' | ';'),
+        )
+    }
+
+    /// <https://fetch.spec.whatwg.org/#serialized-cookie-default-path>
+    fn serialized_cookie_default_path(url: &ServoUrl) -> String {
+        // 1. Let cloneURL be a clone of url.
+        let mut cloned_url = url.clone();
+
+        // 2. Set cloneURL’s path to the cookie default path of cloneURL’s path.
+        let path = cloned_url
+            .path_segments()
+            .expect("document creation url cannot be a base")
+            .map(String::from)
+            .collect();
+        let path = CookieStore::cookie_default_path(path);
+        cloned_url
+            .as_mut_url()
+            .set_path(&format!("/{}", path.join("/")));
+
+        // 3. Return the URL path serialization of cloneURL.
+        cloned_url.path().to_owned()
+    }
+
+    /// <https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-layered-cookies#name-cookie-default-path>
+    fn cookie_default_path(mut path: Vec<String>) -> Vec<String> {
+        // 1. Assert: path is a non-empty list.
+        assert!(!path.is_empty());
+
+        // 2. If path's size is greater than 1, then remove path's last item.
+        if path.len() > 1 {
+            path.pop();
+        }
+        // 3. Otherwise, set path[0] to the empty string.
+        else {
+            path[0] = String::new();
+        }
+
+        // 4. Return path.
+        path
+    }
+}

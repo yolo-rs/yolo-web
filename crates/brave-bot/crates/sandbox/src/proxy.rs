@@ -1,0 +1,1196 @@
+//! The proxy a session runs so a confined program with egress reaches only the hosts a list
+//! names.
+//!
+//! The confinement backends filter by address and port, so a stage is told the one loopback port
+//! to reach and this proxy decides on the host name. It decides from the destination named in a
+//! `CONNECT` request line and the addresses that name resolves to, and from nothing else: not a
+//! header, not a reply, not a byte of what the tunnel carries. TLS is not terminated, so an
+//! allowed tunnel is two byte streams copied into each other without being read, and a request
+//! that is not a `CONNECT` is refused.
+//! `docs/specs/sandboxing.md` ([SANDBOX-24]) decides the rest.
+//!
+//! [SANDBOX-24]: ../../../docs/specs/sandboxing.md
+
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::{
+    os::unix::fs::DirBuilderExt,
+    os::unix::net::{UnixListener, UnixStream},
+    path::{Path, PathBuf},
+};
+
+use crate::address::is_public;
+use crate::hosts::{HostList, Refusal, Verdict, normalise, recordable};
+
+/// The ports a tunnel may be opened to unless a caller says otherwise.
+pub const DEFAULT_PORTS: &[u16] = &[443, 80];
+
+/// The longest request head read. A client that has not finished its head by then is dropped.
+const MAX_HEAD: usize = 8 * 1024;
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a refused tunnel is answered with. It is the same for every host and every reason, so a
+/// program learns nothing from it and the planner is handed nothing a program chose.
+const REFUSAL: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\
+Content-Length: 43\r\nConnection: close\r\n\r\n\
+refused by the session's allowed-hosts list";
+const NOT_A_TUNNEL: &[u8] = b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\
+Connection: close\r\n\r\n";
+const UNREACHABLE: &[u8] =
+    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// The most decisions a proxy holds before they are taken. A program can ask for as many hosts as
+/// it likes, so what is kept is bounded and the rest are counted.
+pub const MAX_KEPT: usize = 256;
+
+/// One decision the proxy took: the host a request named and what the list said of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    /// The name as [`recordable`] allows it, or `None` where the request named something that is
+    /// neither a host name nor an address. The decision itself was taken on the raw name.
+    pub host: Option<String>,
+    pub verdict: Verdict,
+}
+
+/// What [`Proxy::take_decisions`] hands over.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Taken {
+    pub decisions: Vec<Decision>,
+    /// How many further decisions were taken and not kept, because [`MAX_KEPT`] was reached.
+    pub dropped: usize,
+}
+
+#[derive(Debug, Default)]
+struct Log {
+    kept: Vec<Decision>,
+    dropped: usize,
+}
+
+/// What a proxy is started with.
+#[derive(Debug, Clone)]
+pub struct ProxyConfig {
+    pub list: HostList,
+    /// The ports a tunnel may be opened to.
+    pub ports: Vec<u16>,
+}
+
+impl ProxyConfig {
+    pub fn new(list: HostList) -> Self {
+        Self {
+            list,
+            ports: DEFAULT_PORTS.to_vec(),
+        }
+    }
+}
+
+/// A running proxy. It listens on a loopback port until it is dropped.
+pub struct Proxy {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    decisions: Arc<Mutex<Log>>,
+    accept: Option<JoinHandle<()>>,
+    #[cfg(target_os = "linux")]
+    socket: Option<UnixSocket>,
+}
+
+/// The unix socket a proxy also listens on, in a directory of its own that only this account can
+/// enter, and the thread accepting on it.
+#[cfg(target_os = "linux")]
+struct UnixSocket {
+    directory: PathBuf,
+    path: PathBuf,
+    accept: Option<JoinHandle<()>>,
+}
+
+impl Proxy {
+    /// Starts listening on a loopback port the system chooses.
+    pub fn start(config: ProxyConfig) -> io::Result<Self> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr = listener.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let decisions = Arc::new(Mutex::new(Log::default()));
+        let shared = Arc::new(config);
+        #[cfg(target_os = "linux")]
+        let socket = {
+            // The socket is made in a directory of its own under one of these, created fresh and
+            // private to this account. Creating it fails where anything is already at the path,
+            // so nothing another user planted is followed.
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            let parents = socket_parents(std::env::var_os("XDG_RUNTIME_DIR"), std::env::temp_dir());
+            UnixSocket::bind(&parents, &stop, &shared, &decisions)
+        };
+        let accept = {
+            let (stop, decisions) = (stop.clone(), decisions.clone());
+            thread::Builder::new()
+                .name("allowed-hosts-proxy".into())
+                .spawn(move || accept_on(listener.incoming(), &stop, &shared, &decisions))?
+        };
+        Ok(Self {
+            addr,
+            stop,
+            decisions,
+            accept: Some(accept),
+            #[cfg(target_os = "linux")]
+            socket,
+        })
+    }
+
+    /// The unix socket the proxy also listens on, where it could be made. A backend that runs a
+    /// stage in a network of its own reaches the proxy through it, since its loopback port is not
+    /// in that network. `None` leaves such a backend unable to hold a stage to the proxy.
+    #[cfg(target_os = "linux")]
+    pub fn socket_path(&self) -> Option<&Path> {
+        self.socket.as_ref().map(|socket| socket.path.as_path())
+    }
+
+    /// The loopback address a stage is allowed to reach.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The variables that point a program at this proxy, upper and lower case. The caller sets
+    /// them after the person's own environment is applied, so an assignment a model wrote cannot
+    /// point a stage elsewhere.
+    pub fn environment(&self) -> Vec<(String, String)> {
+        let url = format!("http://{}", self.addr);
+        ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+            .into_iter()
+            .flat_map(|name| [name.to_string(), name.to_ascii_lowercase()])
+            .map(|name| (name, url.clone()))
+            .collect()
+    }
+
+    /// Every decision kept and not yet taken, oldest first.
+    pub fn decisions(&self) -> Vec<Decision> {
+        self.decisions
+            .lock()
+            .map(|log| log.kept.clone())
+            .unwrap_or_default()
+    }
+
+    /// Hands over the decisions kept since the last call and forgets them, so each is recorded
+    /// once and the proxy holds only what has not been.
+    pub fn take_decisions(&self) -> Taken {
+        self.decisions
+            .lock()
+            .map(|mut log| Taken {
+                decisions: std::mem::take(&mut log.kept),
+                dropped: std::mem::take(&mut log.dropped),
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // A blocked `accept` only returns for a connection, so make one.
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+        #[cfg(target_os = "linux")]
+        if let Some(socket) = self.socket.take() {
+            socket.close();
+        }
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+    }
+}
+
+/// The pause after the first `accept` that fails in a row, and the longest one.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(5);
+const ACCEPT_PAUSE_MAX: Duration = Duration::from_secs(1);
+
+/// Serves each connection `incoming` yields, on a thread of its own, until `stop` is set.
+///
+/// An `accept` that fails for want of a descriptor leaves the connection queued, so the next one
+/// fails at once and a loop that only retried would spin a core until a descriptor came free. Each
+/// failure in a row therefore waits twice as long as the last, up to [`ACCEPT_PAUSE_MAX`], and a
+/// connection accepted starts the count again. A connection its client abandoned before it was
+/// accepted is not such a failure and is passed over at once: a stage that resets connections at
+/// will would otherwise slow the proxy for every stage that shares it.
+fn accept_on<S: Peer>(
+    incoming: impl Iterator<Item = io::Result<S>>,
+    stop: &AtomicBool,
+    config: &Arc<ProxyConfig>,
+    decisions: &Arc<Mutex<Log>>,
+) {
+    let mut pause = ACCEPT_PAUSE;
+    for stream in incoming {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                thread::sleep(pause);
+                pause = (pause * 2).min(ACCEPT_PAUSE_MAX);
+                continue;
+            }
+        };
+        pause = ACCEPT_PAUSE;
+        let (config, decisions) = (config.clone(), decisions.clone());
+        let _ = thread::Builder::new()
+            .name("allowed-hosts-tunnel".into())
+            .spawn(move || {
+                let _ = serve(stream, &config, &decisions, resolve);
+            });
+    }
+}
+
+/// The directories a proxy's socket may be made under, in the order they are tried: the
+/// account's runtime directory, then the temporary directory.
+///
+/// A stage's write rows include the temporary directory and not the runtime directory, so a
+/// socket under the temporary one is a name the stage can unlink and replace, and a socket under
+/// the runtime one is not. A runtime directory that is the temporary directory or inside it is
+/// no different from it, and is left out, as is one that is not an absolute path. Where the
+/// account has no runtime directory, or it cannot be written, the temporary directory is used,
+/// and the forwarder's check of the listener it reaches ([`crate::netns`]) is what holds.
+#[cfg(target_os = "linux")]
+fn socket_parents(runtime: Option<std::ffi::OsString>, temporary: PathBuf) -> Vec<PathBuf> {
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let inside_temporary = |path: &Path| resolved(path).starts_with(resolved(&temporary));
+    let runtime = runtime
+        .map(PathBuf::from)
+        .filter(|runtime| runtime.is_absolute() && !inside_temporary(runtime));
+    runtime.into_iter().chain([temporary]).collect()
+}
+
+#[cfg(target_os = "linux")]
+impl UnixSocket {
+    /// Binds a socket in a new directory under the first of `parents` where that can be done, or
+    /// `None` where it can be done under none of them, such as a directory whose path is too long
+    /// for a socket address.
+    fn bind(
+        parents: &[PathBuf],
+        stop: &Arc<AtomicBool>,
+        config: &Arc<ProxyConfig>,
+        decisions: &Arc<Mutex<Log>>,
+    ) -> Option<Self> {
+        parents
+            .iter()
+            .find_map(|parent| Self::bind_under(parent, stop, config, decisions))
+    }
+
+    /// Wakes the thread accepting on the socket, waits for it, and removes the socket and its
+    /// directory. The caller has set the flag that thread reads.
+    fn close(mut self) {
+        // A blocked `accept` only returns for a connection, so make one.
+        let _ = UnixStream::connect(&self.path);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+
+    fn bind_under(
+        parent: &Path,
+        stop: &Arc<AtomicBool>,
+        config: &Arc<ProxyConfig>,
+        decisions: &Arc<Mutex<Log>>,
+    ) -> Option<Self> {
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        // The directory is created fresh and private to this account, and creating it fails where
+        // anything is already at the path, so nothing another user planted is followed.
+        let directory = parent.join(format!(
+            "bravebot-proxy-{}-{}",
+            std::process::id(),
+            COUNT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .ok()?;
+        let path = directory.join("proxy.sock");
+        let Ok(listener) = UnixListener::bind(&path) else {
+            let _ = std::fs::remove_dir(&directory);
+            return None;
+        };
+        let (stop, config, decisions) = (stop.clone(), config.clone(), decisions.clone());
+        let accept = thread::Builder::new()
+            .name("allowed-hosts-proxy-socket".into())
+            .spawn(move || accept_on(listener.incoming(), &stop, &config, &decisions))
+            .ok();
+        if accept.is_none() {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&directory);
+            return None;
+        }
+        Some(Self {
+            directory,
+            path,
+            accept,
+        })
+    }
+}
+
+/// What a connection to the proxy has to do, so a loopback connection and a unix one are served
+/// by the same code.
+trait Peer: Read + Write + Send + Sized + 'static {
+    fn set_read_limit(&self, limit: Option<Duration>) -> io::Result<()>;
+    fn duplicate(&self) -> io::Result<Self>;
+    fn finish_writing(&self);
+}
+
+impl Peer for TcpStream {
+    fn set_read_limit(&self, limit: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(limit)
+    }
+    fn duplicate(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn finish_writing(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Peer for UnixStream {
+    fn set_read_limit(&self, limit: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(limit)
+    }
+    fn duplicate(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn finish_writing(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+fn serve<C: Peer>(
+    mut client: C,
+    config: &ProxyConfig,
+    decisions: &Mutex<Log>,
+    resolve: impl FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>>,
+) -> io::Result<()> {
+    client.set_read_limit(Some(HEAD_TIMEOUT))?;
+    let (head, rest) = read_head(&mut client)?;
+    let Some((host, port)) = connect_target(&head) else {
+        return client.write_all(NOT_A_TUNNEL);
+    };
+    let (verdict, addresses) = decide(config, &host, port, resolve);
+    if let Ok(mut log) = decisions.lock() {
+        match log.kept.len() < MAX_KEPT {
+            true => log.kept.push(Decision {
+                host: recordable(&host),
+                verdict: verdict.clone(),
+            }),
+            false => log.dropped += 1,
+        }
+    }
+    if !verdict.is_allowed() {
+        return client.write_all(REFUSAL);
+    }
+    let Some(upstream) = addresses
+        .iter()
+        .find_map(|address| TcpStream::connect_timeout(address, CONNECT_TIMEOUT).ok())
+    else {
+        return client.write_all(UNREACHABLE);
+    };
+    client.set_read_limit(None)?;
+    client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    tunnel(client, upstream, &rest)
+}
+
+/// Reads up to the blank line ending a request head. Returns the head and any bytes that arrived
+/// after it, which belong to the tunnel.
+fn read_head(client: &mut impl Read) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let rest = buffer.split_off(end + 4);
+            return Ok((buffer, rest));
+        }
+        if buffer.len() > MAX_HEAD {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "head too long"));
+        }
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// The host and port of a `CONNECT host:port HTTP/1.x` request line, or `None` for any other
+/// request. Only the request line is read: a header cannot name a different destination.
+fn connect_target(head: &[u8]) -> Option<(String, u16)> {
+    let line = std::str::from_utf8(head).ok()?.lines().next()?;
+    let mut parts = line.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    if method != "CONNECT" || !version.starts_with("HTTP/1.") || parts.next().is_some() {
+        return None;
+    }
+    let (host, port) = target.rsplit_once(':')?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let port = port.parse().ok()?;
+    (!host.is_empty()).then(|| (host.to_string(), port))
+}
+
+/// What the list decides for a tunnel to `host` on `port`, and the addresses it may be opened to.
+///
+/// A name the list allows is resolved once, and the addresses returned are the ones that lookup
+/// gave, so the addresses checked are the addresses connected to. An answer holding any address
+/// that is not public is refused unless an exact entry names that address: the public half of a
+/// mixed answer is trusted only as far as the server that wrote the other half. A request naming
+/// an address that is not public and that no entry covers is refused as not public rather than as
+/// not listed, so it is never put to the person. The address is read from the host as the list
+/// compares it, since a trailing dot or a space would otherwise leave the request not listed and
+/// recorded as the bare address, and a yes to that would list it.
+fn decide(
+    config: &ProxyConfig,
+    host: &str,
+    port: u16,
+    resolve: impl FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>>,
+) -> (Verdict, Vec<SocketAddr>) {
+    let refused = |refusal| (Verdict::Refused(refusal), Vec::new());
+    let admitted = |address: IpAddr| is_public(address) || config.list.names_address(address);
+    match config.list.decide(host) {
+        Verdict::Refused(Refusal::NotListed)
+            if normalise(host)
+                .parse::<IpAddr>()
+                .is_ok_and(|address| !is_public(address)) =>
+        {
+            refused(Refusal::NotPublic)
+        }
+        Verdict::Allowed(_) if !config.ports.contains(&port) => refused(Refusal::Port),
+        Verdict::Allowed(rule) => match resolve(host, port) {
+            Ok(addresses) if !addresses.iter().all(|address| admitted(address.ip())) => {
+                refused(Refusal::NotPublic)
+            }
+            Ok(addresses) => (Verdict::Allowed(rule), addresses),
+            Err(_) => (Verdict::Allowed(rule), Vec::new()),
+        },
+        verdict => (verdict, Vec::new()),
+    }
+}
+
+/// The addresses the system resolver gives for `host`.
+fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// Copies each stream into the other until both have finished. Nothing is parsed.
+fn tunnel<C: Peer>(client: C, upstream: TcpStream, first: &[u8]) -> io::Result<()> {
+    let mut upstream_writer = upstream.try_clone()?;
+    upstream_writer.write_all(first)?;
+    let mut client_reader = client.duplicate()?;
+    let outbound = thread::spawn(move || {
+        let _ = io::copy(&mut client_reader, &mut upstream_writer);
+        let _ = upstream_writer.shutdown(Shutdown::Write);
+    });
+    let (mut upstream_reader, mut client_writer) = (upstream, client);
+    let _ = io::copy(&mut upstream_reader, &mut client_writer);
+    client_writer.finish_writing();
+    let _ = outbound.join();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `accept` that keeps failing, as one does with no descriptor left, is retried after a
+    /// pause that doubles each time rather than at once. The regression it rejects is a loop that
+    /// retries immediately and holds a core for as long as the descriptors stay spent.
+    #[test]
+    fn a_failing_accept_is_retried_after_a_pause_that_doubles() {
+        let failures = 3;
+        let mut asked = Vec::new();
+        let incoming = (0..=failures).map_while(|n| {
+            asked.push(std::time::Instant::now());
+            (n < failures).then(|| Err::<TcpStream, _>(io::Error::other("no descriptor left")))
+        });
+        accept_on(
+            incoming,
+            &AtomicBool::new(false),
+            &Arc::new(ProxyConfig::new(HostList::default())),
+            &Arc::new(Mutex::new(Log::default())),
+        );
+
+        let gaps: Vec<Duration> = asked.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(gaps.len(), failures);
+        for (gap, least) in gaps.iter().zip([1, 2, 4].map(|n| ACCEPT_PAUSE * n)) {
+            assert!(
+                *gap >= least,
+                "a retry came sooner than {least:?}: {gaps:?}"
+            );
+        }
+    }
+
+    /// A connection its client abandoned before it was accepted is passed over with no pause, so
+    /// a stage that resets connections at will cannot hold every stage sharing the proxy to a
+    /// second between accepts. The regression it rejects is the pause applied to every error.
+    #[test]
+    fn a_connection_abandoned_before_it_was_accepted_is_passed_over_at_once() {
+        let abandoned = 10;
+        let started = std::time::Instant::now();
+        accept_on(
+            (0..abandoned).map(|_| Err::<TcpStream, _>(io::ErrorKind::ConnectionAborted.into())),
+            &AtomicBool::new(false),
+            &Arc::new(ProxyConfig::new(HostList::default())),
+            &Arc::new(Mutex::new(Log::default())),
+        );
+        // Paused after each, the ten would take more than three seconds.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The unix socket a Linux stage reaches the proxy by is served by the same code as the
+    /// loopback port, and is gone with the proxy. The regressions it rejects: a socket nobody
+    /// accepts on, one that decides differently from the port, and one left on disk.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_unix_socket_is_served_like_the_port_and_removed_with_the_proxy() {
+        let proxy = Proxy::start(ProxyConfig::new(HostList::default())).unwrap();
+        let path = proxy.socket_path().expect("a unix socket").to_path_buf();
+        let mut stream = UnixStream::connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"CONNECT unlisted.example:443 HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+        assert_eq!(
+            proxy
+                .decisions()
+                .into_iter()
+                .filter_map(|decision| decision.host)
+                .collect::<Vec<_>>(),
+            ["unlisted.example"]
+        );
+
+        drop(proxy);
+        assert!(!path.exists(), "the socket outlived the proxy");
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the directory outlived the proxy"
+        );
+    }
+
+    /// A proxy's socket is made under the account's runtime directory where it has one, and under
+    /// the temporary directory where it has none, has a relative one, has one that is the
+    /// temporary directory or inside it, or has one that cannot be written.
+    ///
+    /// The regression it rejects: a socket under the temporary directory whatever the account has.
+    /// That directory is a write row of every stage, so a stage could unlink the socket and put
+    /// a link in its place, and the runtime directory is in no stage's rows unless the person
+    /// names it. A runtime directory inside the temporary one, reached by a link as well as by
+    /// name, is that same write row. The other regression is a socket made under the runtime
+    /// directory or nowhere, which leaves a session whose runtime directory cannot be written
+    /// without a proxy for any stage.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_socket_is_made_under_the_runtime_directory_and_the_temporary_one_is_the_fallback() {
+        use crate::testutil::a_directory_for_sockets;
+
+        let runtime = a_directory_for_sockets(&[]);
+        let temporary = a_directory_for_sockets(&["inside"]);
+        let linked = runtime.join("linked");
+        std::os::unix::fs::symlink(temporary.join("inside"), &linked).expect("a link");
+
+        assert_eq!(
+            socket_parents(Some(runtime.clone().into()), temporary.clone()),
+            vec![runtime.clone(), temporary.clone()]
+        );
+        for (runtime, why) in [
+            (None, "no runtime directory"),
+            (
+                Some("relative/run".into()),
+                "a path that depends on the cwd",
+            ),
+            (
+                Some(temporary.clone().into()),
+                "the temporary directory itself",
+            ),
+            (
+                Some(temporary.join("inside").into()),
+                "a directory inside it",
+            ),
+            (Some(linked.into()), "a link to a directory inside it"),
+        ] {
+            assert_eq!(
+                socket_parents(runtime, temporary.clone()),
+                vec![temporary.clone()],
+                "{why}"
+            );
+        }
+
+        let made_under = |parents: &[PathBuf]| {
+            let stop = Arc::new(AtomicBool::new(false));
+            let config = Arc::new(ProxyConfig::new(HostList::default()));
+            let decisions = Arc::new(Mutex::new(Log::default()));
+            let socket = UnixSocket::bind(parents, &stop, &config, &decisions).expect("a socket");
+            let path = socket.path.clone();
+            stop.store(true, Ordering::SeqCst);
+            socket.close();
+            path
+        };
+        let preferred = made_under(&[runtime.clone(), temporary.clone()]);
+        let fallen_back = made_under(&[runtime.join("missing"), temporary.clone()]);
+        let _ = std::fs::remove_dir_all(&runtime);
+        let _ = std::fs::remove_dir_all(&temporary);
+
+        assert!(preferred.starts_with(&runtime), "{preferred:?}");
+        assert!(fallen_back.starts_with(&temporary), "{fallen_back:?}");
+    }
+
+    /// A runtime directory is compared with the temporary directory by the bytes of their names. A
+    /// directory whose name is the replacement-character rendering of the temporary directory's
+    /// name, which is not UTF-8, is another directory and is kept, and a directory inside the
+    /// temporary one is left out whatever its name is spelled with.
+    ///
+    /// The regression it rejects: a comparison through a lossy rendering, which reads the two
+    /// names as one and so drops a runtime directory a stage has no write row over, and which
+    /// would take one directory for the other wherever the names differ only in the bytes that
+    /// rendering replaces. The names are built in memory, so nothing here needs a file system that
+    /// can hold them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_runtime_directory_is_told_from_the_temporary_one_by_the_bytes_of_its_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temporary = PathBuf::from(OsStr::from_bytes(b"/bb-no-such-dir/tmp-\xff"));
+        let lookalike = PathBuf::from("/bb-no-such-dir/tmp-\u{FFFD}");
+        let inside = temporary.join(OsStr::from_bytes(b"run-\xff"));
+
+        assert_eq!(
+            socket_parents(Some(lookalike.clone().into()), temporary.clone()),
+            vec![lookalike, temporary.clone()],
+            "the lookalike was taken for the temporary directory"
+        );
+        assert_eq!(
+            socket_parents(Some(inside.into()), temporary.clone()),
+            vec![temporary],
+            "a directory inside a temporary directory whose name is not UTF-8 was kept"
+        );
+    }
+
+    use std::io::BufRead;
+
+    /// A server that echoes what its first connection sends.
+    fn echo_server() -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 256];
+                while let Ok(read) = stream.read(&mut buffer) {
+                    if read == 0 || stream.write_all(&buffer[..read]).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    fn proxy_for(allowed: &[&str], denied: &[&str], ports: Vec<u16>) -> Proxy {
+        let (list, invalid) = HostList::parse(allowed.iter().copied(), denied.iter().copied());
+        assert!(invalid.is_empty());
+        Proxy::start(ProxyConfig { list, ports }).unwrap()
+    }
+
+    /// Sends a `CONNECT` and returns the status line and the stream, read up to the end of the
+    /// reply head.
+    fn connect(proxy: &Proxy, target: &str) -> (String, io::BufReader<TcpStream>) {
+        request(TcpStream::connect(proxy.addr()).unwrap(), target)
+    }
+
+    fn request(mut stream: TcpStream, target: &str) -> (String, io::BufReader<TcpStream>) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"
+        )
+        .unwrap();
+        let mut reader = io::BufReader::new(stream);
+        let mut status = String::new();
+        reader.read_line(&mut status).unwrap();
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+            line.clear();
+        }
+        (status.trim().to_string(), reader)
+    }
+
+    #[test]
+    fn a_listed_host_is_tunnelled_and_an_unlisted_one_is_refused() {
+        let (server, _handle) = echo_server();
+        let proxy = proxy_for(&["127.0.0.1"], &[], vec![server.port()]);
+
+        const PAYLOAD: &[u8] = b"\x16\x03\x01 not parsed";
+        let (status, mut stream) = connect(&proxy, &format!("127.0.0.1:{}", server.port()));
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        stream.get_mut().write_all(PAYLOAD).unwrap();
+        let mut echoed = vec![0u8; PAYLOAD.len()];
+        stream.read_exact(&mut echoed).unwrap();
+        assert_eq!(echoed, PAYLOAD);
+
+        let (status, _) = connect(&proxy, "evil.example:443");
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+    }
+
+    #[test]
+    fn a_denied_host_is_refused_although_an_allowed_entry_covers_it() {
+        let (server, _handle) = echo_server();
+        let proxy = proxy_for(&["127.0.0.1"], &["127.0.0.1"], vec![server.port()]);
+        let (status, _) = connect(&proxy, &format!("127.0.0.1:{}", server.port()));
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+    }
+
+    fn config_for(allowed: &[&str]) -> ProxyConfig {
+        let (list, invalid) = HostList::parse(allowed.iter().copied(), []);
+        assert!(invalid.is_empty());
+        ProxyConfig {
+            list,
+            ports: vec![443],
+        }
+    }
+
+    /// A resolver that gives `addresses` for any name.
+    fn answering(
+        addresses: &[&str],
+    ) -> impl FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + use<> {
+        let addresses = addresses
+            .iter()
+            .map(|text| text.parse().expect("a socket address"))
+            .collect();
+        move |_, _| Ok(addresses)
+    }
+
+    /// Serves one `CONNECT` for `target` with `resolve` answering in place of the system resolver,
+    /// and returns the status line, the stream and the decisions taken.
+    fn serve_resolving(
+        config: ProxyConfig,
+        target: &str,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
+    ) -> (String, io::BufReader<TcpStream>, Vec<Decision>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let log = Arc::new(Mutex::new(Log::default()));
+        let shared = log.clone();
+        thread::spawn(move || serve(server, &config, &shared, resolve));
+        let (status, stream) = request(client, target);
+        let kept = log.lock().unwrap().kept.clone();
+        (status, stream, kept)
+    }
+
+    /// A listed name that the system resolves to loopback is refused, with the bytes every refusal
+    /// is, although a server listens on the port asked for. The regression it rejects is the
+    /// proxy connecting to whatever a listed name resolves to.
+    #[test]
+    fn a_listed_name_that_resolves_to_loopback_is_refused() {
+        let (server, _handle) = echo_server();
+        let proxy = proxy_for(&["localhost"], &[], vec![server.port()]);
+        let (status, _) = connect(&proxy, &format!("localhost:{}", server.port()));
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+        assert_eq!(
+            proxy.decisions()[0].verdict,
+            Verdict::Refused(Refusal::NotPublic)
+        );
+    }
+
+    /// A name a wildcard allows is refused when its server answers with an address that is not
+    /// public, in each class: loopback, link-local with the metadata address, private,
+    /// unique-local, and an IPv4 address inside an IPv6 one. A public answer is kept. The
+    /// regressions it rejects: no check of the answer, a check that misses a class or reads a
+    /// mapped address as IPv6, and one that refuses every answer.
+    #[test]
+    fn a_name_the_list_allows_is_refused_when_it_resolves_to_an_address_that_is_not_public() {
+        let config = config_for(&["*.github.io"]);
+        for answer in [
+            "127.0.0.1:443",
+            "[::1]:443",
+            "169.254.169.254:443",
+            "[fe80::1]:443",
+            "10.0.0.1:443",
+            "172.16.0.1:443",
+            "192.168.1.1:443",
+            "[fd00::1]:443",
+            "[::ffff:127.0.0.1]:443",
+            "[::ffff:169.254.169.254]:443",
+            "[::ffff:10.0.0.1]:443",
+        ] {
+            assert_eq!(
+                decide(&config, "attacker.github.io", 443, answering(&[answer])),
+                (Verdict::Refused(Refusal::NotPublic), Vec::new()),
+                "{answer}"
+            );
+        }
+        let (verdict, addresses) = decide(
+            &config,
+            "pages.github.io",
+            443,
+            answering(&["185.199.108.153:443"]),
+        );
+        assert!(verdict.is_allowed());
+        assert_eq!(addresses, ["185.199.108.153:443".parse().unwrap()]);
+    }
+
+    /// An answer that mixes public addresses with one that is not public refuses the name. The
+    /// regression it rejects is a proxy that drops the address that is not public and connects to
+    /// the rest, trusting the server that wrote both.
+    #[test]
+    fn one_address_that_is_not_public_among_public_ones_refuses_the_name() {
+        let config = config_for(&["*.github.io"]);
+        let mixed = answering(&["185.199.108.153:443", "169.254.169.254:443"]);
+        assert_eq!(
+            decide(&config, "attacker.github.io", 443, mixed),
+            (Verdict::Refused(Refusal::NotPublic), Vec::new())
+        );
+    }
+
+    /// An address that is not public is reached when an exact entry names it, by a name resolving
+    /// to it or by the address itself, and not when only a wildcard covers its text. The
+    /// regressions it rejects: refusing every address that is not public, which takes away the
+    /// local service a person listed, and a wildcard such as `*.0.0.1` counting as a listing.
+    #[test]
+    fn an_address_an_exact_entry_names_is_reached_although_it_is_not_public() {
+        let listed = config_for(&["*.github.io", "127.0.0.1"]);
+        for answer in ["127.0.0.1:443", "[::ffff:127.0.0.1]:443"] {
+            let (verdict, addresses) =
+                decide(&listed, "pages.github.io", 443, answering(&[answer]));
+            assert!(verdict.is_allowed(), "{answer}");
+            assert_eq!(addresses, [answer.parse().unwrap()]);
+        }
+        assert!(decide(&listed, "127.0.0.1", 443, resolve).0.is_allowed());
+        assert_eq!(
+            decide(
+                &listed,
+                "pages.github.io",
+                443,
+                answering(&["127.0.0.2:443"])
+            )
+            .0,
+            Verdict::Refused(Refusal::NotPublic)
+        );
+
+        let wildcard = config_for(&["*.0.0.1"]);
+        assert_eq!(
+            decide(&wildcard, "127.0.0.1", 443, resolve).0,
+            Verdict::Refused(Refusal::NotPublic)
+        );
+    }
+
+    /// A request naming an address that is not public, which no entry covers, is refused as not
+    /// public and not as not listed, so `onUnlisted: ask` never puts it to the person, however the
+    /// address is spelled for the list to read it; a public one is still not listed. Neither is
+    /// resolved. The regression it rejects is a program asking for the metadata address, plainly or
+    /// with a trailing dot, and a yes to the prompt making it reachable.
+    #[test]
+    fn a_request_naming_an_address_that_is_not_public_is_refused_as_not_public() {
+        let config = config_for(&["a.example"]);
+        let unasked = |_: &str, _: u16| -> io::Result<Vec<SocketAddr>> {
+            panic!("a refused host was resolved")
+        };
+        for host in [
+            "169.254.169.254",
+            "169.254.169.254.",
+            "\t10.0.0.1",
+            "127.0.0.1",
+            "::1",
+            "fd00::1",
+        ] {
+            assert_eq!(
+                decide(&config, host, 443, unasked),
+                (Verdict::Refused(Refusal::NotPublic), Vec::new()),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            decide(&config, "8.8.8.8", 443, unasked).0,
+            Verdict::Refused(Refusal::NotListed)
+        );
+    }
+
+    /// The tunnel is opened to the address the one lookup gave and was checked, which here is the
+    /// only place the name leads, and a listing that stops naming that address refuses it. The
+    /// regressions it rejects: a second lookup between the check and the connection, which an
+    /// answer that changes would pass, and a refusal `serve` does not act on.
+    #[test]
+    fn the_tunnel_is_opened_to_the_address_that_was_checked() {
+        let (server, _handle) = echo_server();
+        let answer = server.to_string();
+
+        let (status, mut stream, decisions) = serve_resolving(
+            config_for(&["*.github.io", "127.0.0.1"]),
+            "pages.github.io:443",
+            answering(&[&answer]),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert!(decisions[0].verdict.is_allowed());
+        stream.get_mut().write_all(b"through").unwrap();
+        let mut echoed = [0u8; 7];
+        stream.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"through");
+
+        let (status, _, decisions) = serve_resolving(
+            config_for(&["*.github.io"]),
+            "pages.github.io:443",
+            answering(&[&answer]),
+        );
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+        assert_eq!(decisions[0].verdict, Verdict::Refused(Refusal::NotPublic));
+    }
+
+    #[test]
+    fn a_listed_host_is_refused_on_a_port_the_proxy_does_not_carry() {
+        let (server, _handle) = echo_server();
+        let proxy = proxy_for(&["127.0.0.1"], &[], vec![443]);
+        let (status, _) = connect(&proxy, &format!("127.0.0.1:{}", server.port()));
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+        assert_eq!(
+            proxy.decisions().last().unwrap().verdict,
+            Verdict::Refused(Refusal::Port)
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_the_same_bytes_whatever_host_was_asked_for() {
+        let proxy = proxy_for(&["listed.example"], &["denied.example"], vec![443]);
+        let mut bodies = Vec::new();
+        for target in ["a.example:443", "denied.example:443", "listed.example:8080"] {
+            let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+            write!(stream, "CONNECT {target} HTTP/1.1\r\n\r\n").unwrap();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).unwrap();
+            bodies.push(body);
+        }
+        let reasons: Vec<_> = proxy.decisions().into_iter().map(|d| d.verdict).collect();
+        assert!(matches!(
+            reasons.as_slice(),
+            [
+                Verdict::Refused(Refusal::NotListed),
+                Verdict::Refused(Refusal::Denied(_)),
+                Verdict::Refused(Refusal::Port)
+            ]
+        ));
+        assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
+        let text = String::from_utf8(bodies.remove(0)).unwrap();
+        assert!(text.starts_with("HTTP/1.1 403"));
+        for target in ["example", "denied", "8080"] {
+            assert!(!text.contains(target), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_declares_the_length_of_the_body_it_carries() {
+        let text = std::str::from_utf8(REFUSAL).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        let declared: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(declared, body.len());
+    }
+
+    #[test]
+    fn a_default_config_carries_tunnels_to_ports_443_and_80_only() {
+        let config = ProxyConfig::new(HostList::default());
+        assert_eq!(config.ports, vec![443, 80]);
+    }
+
+    #[test]
+    fn the_host_is_read_from_the_request_line_and_not_from_a_header() {
+        let proxy = proxy_for(&["allowed.example"], &[], vec![443]);
+        let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+        stream
+            .write_all(b"CONNECT evil.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n")
+            .unwrap();
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+        assert!(reply.starts_with(b"HTTP/1.1 403"));
+        assert_eq!(proxy.decisions()[0].host.as_deref(), Some("evil.example"));
+    }
+
+    #[test]
+    fn a_request_that_is_not_a_connect_is_refused_without_a_decision() {
+        let proxy = proxy_for(&["example.com"], &[], vec![80]);
+        for request in [
+            "GET http://example.com/ HTTP/1.1\r\n\r\n",
+            "CONNECT example.com HTTP/1.1\r\n\r\n",
+            "CONNECT example.com:443 HTTP/1.1 extra\r\n\r\n",
+        ] {
+            let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            assert!(reply.starts_with(b"HTTP/1.1 405"), "{request:?}");
+        }
+        assert!(proxy.decisions().is_empty());
+    }
+
+    #[test]
+    fn every_decision_is_recorded_with_the_host_and_the_rule_that_decided_it() {
+        let (server, _handle) = echo_server();
+        let proxy = proxy_for(
+            &["*.example.com", "127.0.0.1"],
+            &["bad.example.com"],
+            vec![server.port()],
+        );
+        let _ = connect(&proxy, &format!("127.0.0.1:{}", server.port()));
+        let _ = connect(&proxy, "bad.example.com:443");
+        let _ = connect(&proxy, "other.example:443");
+        let decisions = proxy.decisions();
+        let hosts: Vec<_> = decisions.iter().map(|d| d.host.as_deref()).collect();
+        assert_eq!(
+            hosts,
+            [
+                Some("127.0.0.1"),
+                Some("bad.example.com"),
+                Some("other.example")
+            ]
+        );
+        assert!(
+            matches!(&decisions[0].verdict, Verdict::Allowed(rule) if rule.spelling() == "127.0.0.1")
+        );
+        assert!(
+            matches!(&decisions[1].verdict, Verdict::Refused(Refusal::Denied(rule)) if rule.spelling() == "bad.example.com")
+        );
+        assert_eq!(decisions[2].verdict, Verdict::Refused(Refusal::NotListed));
+    }
+
+    fn ask(proxy: &Proxy, target: &str) {
+        let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+        write!(stream, "CONNECT {target} HTTP/1.1\r\n\r\n").unwrap();
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+    }
+
+    /// Taking the decisions hands each over once. A recorder that read them without taking them
+    /// would write the same refusal into the trail again at the end of every later line.
+    #[test]
+    fn a_decision_is_handed_over_once() {
+        let proxy = proxy_for(&["listed.example"], &[], vec![443]);
+        ask(&proxy, "a.example:443");
+        ask(&proxy, "listed.example:8080");
+        let first = proxy.take_decisions();
+        assert_eq!(first.decisions.len(), 2);
+        assert_eq!(first.dropped, 0);
+        assert_eq!(proxy.take_decisions(), Taken::default());
+        ask(&proxy, "b.example:443");
+        let later = proxy.take_decisions();
+        assert_eq!(later.decisions.len(), 1);
+        assert_eq!(later.decisions[0].host.as_deref(), Some("b.example"));
+    }
+
+    /// A program can ask for any number of hosts. The proxy keeps [`MAX_KEPT`] of them and counts
+    /// the rest, so a loop of requests cannot grow what the session holds without bound.
+    #[test]
+    fn decisions_beyond_the_cap_are_counted_and_not_kept() {
+        let proxy = proxy_for(&[], &[], vec![443]);
+        for at in 0..MAX_KEPT + 3 {
+            ask(&proxy, &format!("h{at}.example:443"));
+        }
+        let taken = proxy.take_decisions();
+        assert_eq!(taken.decisions.len(), MAX_KEPT);
+        assert_eq!(taken.dropped, 3);
+        assert_eq!(proxy.take_decisions(), Taken::default());
+    }
+
+    /// A name that is neither a host name nor an address is decided on, and recorded as no name.
+    /// The regression it rejects is a program putting its own bytes, an escape sequence or a line
+    /// break among them, into a record a person reads.
+    #[test]
+    fn a_request_for_something_that_is_not_a_host_name_is_recorded_without_it() {
+        let proxy = proxy_for(&["listed.example"], &[], vec![443]);
+        for target in [
+            "x\u{1b}[2J.example:443",
+            "bad!name.example:443",
+            "[::1]:443",
+        ] {
+            ask(&proxy, target);
+        }
+        let hosts: Vec<_> = proxy
+            .take_decisions()
+            .decisions
+            .into_iter()
+            .map(|decision| decision.host)
+            .collect();
+        assert_eq!(hosts, [None, None, Some("::1".to_string())]);
+    }
+
+    #[test]
+    fn the_environment_points_every_proxy_variable_at_the_loopback_port() {
+        let proxy = proxy_for(&[], &[], vec![443]);
+        let environment = proxy.environment();
+        let url = format!("http://127.0.0.1:{}", proxy.addr().port());
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                environment.contains(&(name.to_string(), url.clone())),
+                "{name}"
+            );
+        }
+        assert!(proxy.addr().ip().is_loopback());
+    }
+
+    #[test]
+    fn dropping_the_proxy_stops_it_listening() {
+        let proxy = proxy_for(&[], &[], vec![443]);
+        let addr = proxy.addr();
+        drop(proxy);
+        assert!(TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn a_request_line_is_read_as_a_host_and_a_port() {
+        for (head, expected) in [
+            (
+                "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
+                Some(("github.com", 443)),
+            ),
+            ("CONNECT [::1]:443 HTTP/1.0\r\n\r\n", Some(("::1", 443))),
+            ("CONNECT github.com:99999 HTTP/1.1\r\n\r\n", None),
+            ("CONNECT :443 HTTP/1.1\r\n\r\n", None),
+            ("connect github.com:443 HTTP/1.1\r\n\r\n", None),
+            ("CONNECT github.com:443 SPDY/3\r\n\r\n", None),
+        ] {
+            assert_eq!(
+                connect_target(head.as_bytes()),
+                expected.map(|(host, port)| (host.to_string(), port)),
+                "{head:?}"
+            );
+        }
+    }
+}

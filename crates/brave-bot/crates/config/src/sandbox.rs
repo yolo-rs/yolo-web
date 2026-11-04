@@ -1,0 +1,337 @@
+//! Which sandbox mode a session runs its programs under, and who said so (SANDBOX-22).
+//!
+//! Three places can name one: the command line, the person's own settings file and the managed
+//! file. The checkout's two files may only ask for `strict`. A mode is a bundle of what a program
+//! `run` starts may reach, so a line in a checkout that could pick `read-only`, `workspace-write` or
+//! `off` would let whoever wrote the checkout loosen what the person who cloned it is held to.
+//! Asking for `strict` takes nothing from that person, on the footing of the `permissions` keys that
+//! only refuse ([`crate::Narrowing`]), except where their file or the managed file chose
+//! `read-only`: `strict` writes the session's directories and `read-only` does not, so there the
+//! checkout is not obeyed.
+//!
+//! The managed file is a floor and not a default: nothing the command line or a settings file says
+//! may be looser than it, and a setting that is refuses the session before it starts, naming the
+//! file, rather than being read as the pin.
+
+use bravebot_sandbox::SandboxMode;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The block that holds the key.
+pub(crate) const SANDBOX_BLOCK: &str = "sandbox";
+
+/// The key inside it that names the mode.
+pub const MODE_KEY: &str = "mode";
+
+/// The key beside it that holds the temporary directory back from every stage (SANDBOX-22).
+pub const HOLD_BACK_KEY: &str = "holdBackTemporaryDirectory";
+
+/// Whether a settings root asks for the temporary directory to be held back.
+///
+/// Only `true` asks. Anything else, a word or a number included, asks for nothing, which is the
+/// profile every stage had before the key existed.
+pub(crate) fn holds_back_temporary_directory(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    root.get(SANDBOX_BLOCK)
+        .and_then(serde_json::Value::as_object)
+        .and_then(|block| block.get(HOLD_BACK_KEY))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// What one file said about the mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stated {
+    /// The file named no mode.
+    Absent,
+    /// The file named one.
+    Mode(SandboxMode),
+    /// The file named something that is not a mode: a word that names none of the four, or a value
+    /// that is not a word. Read as absence and reported, since a mistyped `strict` leaves the
+    /// session less confined than whoever wrote it believes.
+    Unreadable,
+}
+
+/// What a settings root says about the mode.
+pub(crate) fn stated(root: &serde_json::Map<String, serde_json::Value>) -> Stated {
+    match root.get(SANDBOX_BLOCK) {
+        None => Stated::Absent,
+        Some(serde_json::Value::Object(block)) => match block.get(MODE_KEY) {
+            None => Stated::Absent,
+            Some(serde_json::Value::String(word)) => {
+                SandboxMode::parse(word).map_or(Stated::Unreadable, Stated::Mode)
+            }
+            Some(_) => Stated::Unreadable,
+        },
+        Some(_) => Stated::Unreadable,
+    }
+}
+
+/// Where the mode in force came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// No layer said, and the command line did not: the default.
+    Default,
+    /// `--sandbox`.
+    Flag,
+    /// A settings file.
+    File(PathBuf),
+    /// The managed file, because nothing stricter was asked for.
+    Managed(PathBuf),
+}
+
+/// The mode a session runs under and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub mode: SandboxMode,
+    pub source: Source,
+}
+
+impl Default for Choice {
+    fn default() -> Self {
+        Self {
+            mode: SandboxMode::WorkspaceWrite,
+            source: Source::Default,
+        }
+    }
+}
+
+/// Why the managed file does not allow a mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Floor {
+    /// It pins `sandbox.mode`.
+    Mode,
+    /// It pins the network closed and names no mode that already holds a program to a profile.
+    /// `off` starts a program with no profile, so the closed network would not bind it.
+    Network,
+}
+
+/// A mode asked for that the managed file does not allow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// What was asked for.
+    pub asked: SandboxMode,
+    /// Where it was asked, or `None` for the command line.
+    pub asked_in: Option<PathBuf>,
+    /// The loosest mode the managed file allows.
+    pub pinned: SandboxMode,
+    /// The managed file.
+    pub pinned_in: PathBuf,
+    /// Which of its keys makes it a floor.
+    pub because: Floor,
+}
+
+/// The mode in force: the flag, else the settings files, else the managed pin, else workspace-write.
+///
+/// A mode looser than the managed pin is refused whoever asked for it. One no looser than the pin
+/// is kept, so a person may hold programs to less than the machine requires. A managed file that
+/// pins the network closed is a floor of `workspace-write` as well, since `off` would otherwise
+/// open it.
+pub fn resolve(
+    flag: Option<SandboxMode>,
+    settings: &crate::Settings,
+    managed: &crate::Managed,
+) -> Result<Choice, Refused> {
+    let asked = match flag {
+        Some(mode) => Some(Choice {
+            mode,
+            source: Source::Flag,
+        }),
+        None => settings.sandbox_under(managed).map(|(mode, file)| Choice {
+            mode,
+            source: Source::File(file.to_path_buf()),
+        }),
+    };
+    let Some(floor) = floor(managed) else {
+        return Ok(asked.unwrap_or_default());
+    };
+    match asked {
+        Some(asked) if asked.mode.is_looser_than(floor.mode) => Err(Refused {
+            asked: asked.mode,
+            asked_in: match asked.source {
+                Source::File(file) => Some(file),
+                _ => None,
+            },
+            pinned: floor.mode,
+            pinned_in: floor.file,
+            because: floor.because,
+        }),
+        Some(asked) => Ok(asked),
+        None if floor.because == Floor::Network => Ok(Choice::default()),
+        None => Ok(Choice {
+            mode: floor.mode,
+            source: Source::Managed(floor.file),
+        }),
+    }
+}
+
+/// The loosest mode the managed file allows, and the file and key that say so.
+struct Held {
+    mode: SandboxMode,
+    file: PathBuf,
+    because: Floor,
+}
+
+/// What the managed file holds the mode to, or `None` where it holds it to nothing.
+fn floor(managed: &crate::Managed) -> Option<Held> {
+    let file = managed.path().map(Path::to_path_buf)?;
+    // A word that is neither is read as `closed` (SANDBOX-20), so it holds the same floor.
+    let closed = managed.network() == Some(bravebot_sandbox::network::Network::Closed)
+        || managed.network_unreadable();
+    let (mode, because) = match managed.sandbox() {
+        Some(pinned) if pinned != SandboxMode::Off || !closed => (pinned, Floor::Mode),
+        _ if closed => (SandboxMode::WorkspaceWrite, Floor::Network),
+        _ => return None,
+    };
+    Some(Held {
+        mode,
+        file,
+        because,
+    })
+}
+
+/// Whether a session already running may move to `mode`, which is the question [`resolve`] puts to a
+/// flag at start-up and is answered by the same floor.
+///
+/// What `/sandbox` asks before it changes anything. Nothing but the managed file is consulted: the
+/// command is a person's word and ranks as `--sandbox` does, so a checkout's `strict` does not
+/// outrank it.
+pub fn allowed_in_session(mode: SandboxMode, managed: &crate::Managed) -> Result<(), Refused> {
+    match floor(managed) {
+        Some(held) if mode.is_looser_than(held.mode) => Err(Refused {
+            asked: mode,
+            asked_in: None,
+            pinned: held.mode,
+            pinned_in: held.file,
+            because: held.because,
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The mode a window's turn runs under, which has no flag to carry and no way to say it was refused.
+///
+/// What the settings say, the managed pin being the floor where they went under it. `off` is
+/// read as `workspace-write`: the window has no way to show that nothing confines a program, and a
+/// setting that silently removed the only thing between a model and the machine is not one a
+/// person looking at a window has agreed to. The command line says so on its opening line.
+pub fn for_a_window(settings: &crate::Settings, managed: &crate::Managed) -> SandboxMode {
+    let mode = match resolve(None, settings, managed) {
+        Ok(choice) => choice.mode,
+        Err(refused) => refused.pinned,
+    };
+    confined(mode)
+}
+
+/// `mode`, or `workspace-write` where it is `off`, which a window has no way to show.
+fn confined(mode: SandboxMode) -> SandboxMode {
+    match mode {
+        SandboxMode::Off => SandboxMode::WorkspaceWrite,
+        mode => mode,
+    }
+}
+
+/// The mode a window's turn runs under where the person has chosen one for the session.
+///
+/// A choice is a person's word, so it outranks the settings as `/sandbox` does, and it is held to
+/// the managed floor at the turn and not only when it was made: a pin written after the choice
+/// still binds the next turn, and the turn then runs at the pin. `off` is read as `workspace-write`, as in
+/// [`for_a_window`].
+pub fn for_a_window_choosing(
+    chosen: Option<SandboxMode>,
+    settings: &crate::Settings,
+    managed: &crate::Managed,
+) -> SandboxMode {
+    match chosen {
+        Some(mode) if allowed_in_session(mode, managed).is_ok() => confined(mode),
+        _ => for_a_window(settings, managed),
+    }
+}
+
+/// The mode this process settled on at start-up.
+///
+/// Process-wide for the reason [`crate::name_a_settings_file`] is: `--sandbox` configures this run,
+/// and the interface, the one-shot run and the plain session each start a turn that has to hold
+/// its programs to the same answer, none of them reached from the entry point that parsed the flag.
+static IN_FORCE: OnceLock<Choice> = OnceLock::new();
+
+/// Settle the mode for the rest of this process. The first call wins.
+pub fn engage(choice: Choice) {
+    let _ = IN_FORCE.set(choice);
+}
+
+/// The `--sandbox` this process was started with, whether or not the managed file let it stand.
+///
+/// Kept apart from [`IN_FORCE`] because a refused flag leaves the pin in force, and `doctor`, which
+/// runs past a refusal, needs the flag to name what was refused (SANDBOX-22).
+static FLAG_GIVEN: OnceLock<SandboxMode> = OnceLock::new();
+
+/// Record the mode `--sandbox` named. The first call wins.
+pub fn note_flag(mode: SandboxMode) {
+    let _ = FLAG_GIVEN.set(mode);
+}
+
+/// The mode `--sandbox` named, or `None` where the run was given none.
+pub fn flag_given() -> Option<SandboxMode> {
+    FLAG_GIVEN.get().copied()
+}
+
+/// The mode the entry point settled on, or the default where it settled none (a test, or a front
+/// end started by something other than the command line).
+pub fn in_force() -> Choice {
+    IN_FORCE.get().cloned().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn root(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().cloned().expect("an object")
+    }
+
+    #[test]
+    fn the_temporary_directory_is_held_back_only_by_a_true() {
+        assert!(holds_back_temporary_directory(&root(
+            json!({"sandbox": {"holdBackTemporaryDirectory": true}})
+        )));
+        for other in [
+            json!({}),
+            json!({"sandbox": {}}),
+            json!({"sandbox": {"holdBackTemporaryDirectory": false}}),
+            json!({"sandbox": {"holdBackTemporaryDirectory": "true"}}),
+            json!({"sandbox": {"holdBackTemporaryDirectory": 1}}),
+            json!({"sandbox": true}),
+        ] {
+            assert!(
+                !holds_back_temporary_directory(&root(other.clone())),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mode_is_read_from_the_block_and_nothing_near_it_is() {
+        assert_eq!(
+            stated(&root(json!({"sandbox": {"mode": "strict"}}))),
+            Stated::Mode(SandboxMode::Strict)
+        );
+        assert_eq!(stated(&root(json!({}))), Stated::Absent);
+        assert_eq!(stated(&root(json!({"sandbox": {}}))), Stated::Absent);
+        assert_eq!(
+            stated(&root(json!({"sandbox": {"enabled": true}}))),
+            Stated::Absent
+        );
+        for bad in [
+            json!({"sandbox": {"mode": "Strict"}}),
+            json!({"sandbox": {"mode": true}}),
+            json!({"sandbox": {"mode": null}}),
+            json!({"sandbox": "strict"}),
+            json!({"sandbox": true}),
+        ] {
+            assert_eq!(stated(&root(bad.clone())), Stated::Unreadable, "{bad}");
+        }
+    }
+}

@@ -1,0 +1,965 @@
+//! Answering a question asked beside the work.
+//!
+//! A person reading a session has questions the session is not about: why a file is shaped the
+//! way it is, what a name means, whether an approach was already tried. Asked as a prompt, each
+//! one becomes a turn: it joins the conversation, the next turn reads it back, and the planner
+//! carries the digression for the rest of the session. Asked here, it does not.
+//!
+//! **The conversation is read once and never written to.** What leaves it is [`Question`], which
+//! is one request: the exchange as the planner would be sent it, and the question that goes on the
+//! end of it. Nothing is pushed, nothing is measured, and no reference is handed out, so the
+//! exchange the next turn resumes is the exchange that was there before the question was asked.
+//! Taking the request rather than the conversation is what makes that structural: an aside cannot
+//! push a message to something it does not have.
+//!
+//! What makes this sound is the property compaction rests on: every message in a conversation has
+//! already been past [`bravebot_core::policy::Policy::present`], so a model given that exchange is
+//! given exactly what the planner was given. Nothing new is read and nothing is upgraded.
+//!
+//! Like a processor, and for the same reasons: no tools in the request, and one round with nothing
+//! for a reply to steer.
+//!
+//! # Two destinations, two gates
+//!
+//! The answer goes to a person's screen, which is
+//! [`bravebot_core::policy::Policy::authorise_display_release`], the same witness a round's own
+//! reply takes on its way to the tail of the transcript.
+//!
+//! It also goes into the session record, so the question and the answer are still there after a
+//! resume, and that is a different claim: a record is read back, so what lands in one is what the
+//! planner could have held. So the answer goes through `present` as well, and only what came back
+//! visible is offered for writing down. Where the exchange has met something untrusted the
+//! planner's own words are quarantined like anything else, [`Answered::kept`] is `None`, and the
+//! answer is on the screen and nowhere else.
+
+use bravebot_aichat::ChatError;
+use bravebot_aichat::protocol::{ChatRequest, Message, Part, Usage};
+use bravebot_core::event::Sink;
+use bravebot_core::label::Integrity;
+use bravebot_core::policy::{Denial, Policy};
+use bravebot_core::reference::Presentation;
+use bravebot_core::slot::SlotId;
+use std::fmt;
+use std::sync::Arc;
+
+use crate::conversation::Conversation;
+use crate::processor::Chat;
+
+/// What the model is told it is doing.
+///
+/// Addressed to a model that is about to read a whole working session and then a question that is
+/// not part of it. Without this the exchange above reads as the instruction and the question reads
+/// as the next step of the work, which is the one thing an aside must not become.
+const SYSTEM_PROMPT: &str = "\
+A person and a coding agent have been working together, and their exchange is shown to you below. \
+You are that agent, and the person has stopped to ask you something beside the work.
+
+The last message is their question. Answer it and do nothing else. Do not carry the work on, do \
+not propose a next step, and do not act as though the question were an instruction: it is a \
+question, even where it is phrased as one about what to do.
+
+You have no tools this time, so answer from the exchange in front of you and from what you know. \
+Where answering properly would mean reading a file or running something, say what you would look \
+at and why, and give the best answer you can without it. Do not invent the contents of anything \
+you have not been shown.
+
+Your answer is shown to the person and then set aside. It does not go back into the exchange \
+above, so the agent picking the work up will not have read it: nothing you write here is a \
+decision, and the person will have to say it again themselves if they want it acted on.
+
+Be brief. Answer the question first, in as few words as it takes, and add the reasoning after it \
+only where the answer is no use without it.";
+
+/// What introduces the person's own question.
+///
+/// The driver's words, as trusted as the system prompt beside them. A conversation ends with
+/// somebody having said something, so a bare question on the end is a continuation of it; this is
+/// what makes the last message read as the thing being asked.
+const INSTRUCTION: &str = "Setting the work aside for a moment, here is my question:";
+
+/// What `/recap` asks, in the driver's own words.
+///
+/// The exchange it is asked over is the planner's own context, so the recap reads the person's
+/// messages, the planner's replies and what the planner was shown, and nothing else.
+pub const RECAP_QUESTION: &str = "\
+I am coming back to this session. Recap it for me in plain text, in at most 400 characters: what \
+we are trying to do, where the work stands, and what is next.";
+
+/// The most a recap shows or keeps, in characters.
+pub const RECAP_LIMIT: usize = 400;
+
+/// What a follow-up suggestion asks, in the driver's own words (INPUT-43).
+///
+/// The exchange it is asked over is the planner's own context, so the suggestion is written from
+/// what the person and the planner have said and from nothing else.
+pub const SUGGEST_QUESTION: &str = "\
+Suggest the one thing I am most likely to type next to carry this work on, written as I would \
+write it to the agent. Use between 2 and 12 words, fewer than 100 characters, on one line, with no \
+quotation marks, no explanation, and no opinion of the work. Answer with the suggestion only.";
+
+/// The most a suggestion may run to, in characters, and the fewest and most words it may hold.
+pub const SUGGEST_CHARS: usize = 100;
+pub const SUGGEST_MIN_WORDS: usize = 2;
+pub const SUGGEST_MAX_WORDS: usize = 12;
+
+/// The most of an answer that is read at all when it is a suggestion, in characters.
+///
+/// Well past [`SUGGEST_CHARS`], so an answer that ran on is cut here and refused by
+/// [`suggestion`] rather than being let through as the front of a longer one.
+const SUGGEST_READ: usize = 4 * SUGGEST_CHARS;
+
+/// What `/handoff` asks, in the driver's own words, ahead of the goal the person typed.
+///
+/// The exchange it is asked over is the planner's own context, so the brief is written from what
+/// the planner has read and from nothing else. It is a message to a planner that has read none of
+/// the exchange, which is why it is asked to be self-contained.
+pub const HANDOFF_QUESTION: &str = "\
+I am starting a new session to carry this work on, and the agent in it will not have read any of \
+this exchange. Write the brief it starts from, in plain text and as short as it can be while still \
+being enough: what we are trying to do, what has been decided and why, what has been done and what \
+state it is in, and the files and commands that matter. Leave out anything the next piece of work \
+does not need. Write the brief only: do not carry the work on, and do not address me. The next \
+piece of work is:";
+
+/// The most a handoff brief shows or keeps, in characters.
+pub const HANDOFF_LIMIT: usize = 4000;
+
+/// What the new session is told about what did not cross, written by the driver after the brief.
+///
+/// A brief cannot say this itself: the model that writes it knows what the old session held, and
+/// not what a new one is asked again.
+pub const HANDOFF_NOTICE: &str = "\
+This session was started from a handoff. Only the brief above came from the earlier session. Its \
+file decisions and permissions did not come with it, so ask before reading a file or running \
+something that the brief says was allowed there.";
+
+/// What the model is told it is doing when it rewrites a draft (INPUT-48).
+///
+/// Its own, and not [`SYSTEM_PROMPT`], which tells the model to answer the last message as a question
+/// and not to treat it as an instruction. A draft is an instruction to the agent, so under that
+/// prompt a model could answer the draft or paraphrase it tersely, and either would be offered.
+const ENHANCE_SYSTEM_PROMPT: &str = "\
+A person and a coding agent have been working together, and their exchange is shown to you below. \
+You are that agent. The person has begun their next message to you and wants it made more specific \
+before they send it.
+
+The last message holds their request and, at its end, their draft. Rewrite the draft as that request \
+says and do nothing else: do not answer the draft, do not do the work it asks for, and do not carry \
+the work on.
+
+You have no tools this time, so work from the exchange in front of you and from what you know. Do \
+not invent the contents of anything you have not been shown.
+
+Your rewrite is shown to the person to read and edit, and then they may send it. It does not go back \
+into the exchange above, so nothing you write here is a decision.";
+
+/// What an enhancement asks, in the driver's own words, ahead of the draft the person typed (INPUT-48).
+///
+/// The exchange it is asked over is the planner's own context, so the rewrite is made from the
+/// draft and from what the person and the planner have said, and from nothing else. It is asked not
+/// to invent, because the one thing a rewrite has to be is the person's own request made clearer.
+pub const ENHANCE_QUESTION: &str = "\
+I am about to send you the draft below as my next message. Rewrite it so that it is more specific \
+and easier to act on: say what is wanted and how I would know it is done, and name the files, \
+functions, commands and constraints from our exchange that bear on it. Keep what I asked for, keep \
+my own words where they were already clear, and write in the language the draft is in. Do not add a \
+requirement, a file name or a fact that neither the draft nor our exchange gives, do not answer the \
+draft, and do not do the work it asks for. Write the rewritten message only, as plain text: no \
+preamble, no quotation marks, no explanation. The draft is:";
+
+/// The most an enhancement may run to, in characters, and the most of an answer that is read at all.
+///
+/// An answer past [`ENHANCE_LIMIT`] is not offered rather than cut, so what lands in the box is
+/// whole. It is read to twice that, so one that ran on is refused by [`enhancement`] and not let
+/// through as the front of a longer one.
+pub const ENHANCE_LIMIT: usize = 4000;
+const ENHANCE_READ: usize = 2 * ENHANCE_LIMIT;
+
+/// The first prompt of a handed-off session: the brief, what did not cross, and what is next.
+///
+/// Built by the driver from the brief and the goal, both of which the person has read. They edit
+/// it in the box before it is sent, and it is sent as a line they typed.
+pub fn handoff_prompt(brief: &str, goal: &str) -> String {
+    format!(
+        "{}\n\n{HANDOFF_NOTICE}\n\nNext: {}",
+        brief.trim(),
+        goal.trim()
+    )
+}
+
+/// Cut `text` to at most `limit` characters, ending in an ellipsis where something was cut.
+fn capped(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(limit.saturating_sub(1)).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    cut
+}
+
+/// The answer to [`SUGGEST_QUESTION`] as something the box may offer, or `None` where it breaks
+/// a count the instruction set (INPUT-43).
+///
+/// Counts only: characters, words and lines. What the words say is not read, so a suggestion that
+/// is a poor one or an odd one is offered as it came, and one that is too long is not offered at
+/// all rather than cut to something the model did not write.
+pub fn suggestion(shown: &str) -> Option<String> {
+    let text = shown.trim();
+    let words = text.split_whitespace().count();
+    let counted = (SUGGEST_MIN_WORDS..=SUGGEST_MAX_WORDS).contains(&words)
+        && text.chars().count() < SUGGEST_CHARS
+        && text.lines().count() == 1;
+    counted.then(|| text.to_string())
+}
+
+/// The answer to [`ENHANCE_QUESTION`] as something the box may hold, or `None` where it is empty or
+/// past [`ENHANCE_LIMIT`] characters (INPUT-48).
+///
+/// Counts only, as [`suggestion`] does: what the words say is not read, so a rewrite that is a poor
+/// one is offered as it came, and one that is too long is not offered rather than cut to something
+/// the model did not write.
+pub fn enhancement(shown: &str) -> Option<String> {
+    let text = shown.trim();
+    (!text.is_empty() && text.chars().count() <= ENHANCE_LIMIT).then(|| text.to_string())
+}
+
+/// One question, and the exchange it was asked beside.
+///
+/// Taken off the conversation before anything else happens, on the thread that holds it, because
+/// a [`Conversation`] is deliberately not `Clone`: its quarantine holds the only copy of content
+/// nobody may read, and a second store would be a second place for a reference to resolve
+/// differently. So this is what crosses to a worker thread, and it is the narrower thing to hand
+/// over anyway.
+#[derive(Debug, Clone)]
+pub struct Question {
+    /// The exchange as the planner would be sent it, with nothing of the question on the end yet.
+    ///
+    /// Shared with the conversation it was taken from, so a fork of it copies pointers.
+    exchange: Vec<Arc<Message>>,
+    /// The question, as the person typed it.
+    asked: String,
+    /// The pictures the question named, pasted into the line the question was typed on.
+    pasted: Vec<crate::turn::PastedImage>,
+    /// The files the question named, dropped onto that same line and already read.
+    ///
+    /// Read before this exists, by [`crate::attached::read`], because the policy [`ask`] builds
+    /// holds no `FileRead` and reaches no workspace. What is here is the kernel's answer about each
+    /// one rather than a path still to be resolved.
+    dropped: Vec<crate::attached::Carried>,
+    /// What the exchange had met, which is what decides whether the answer may be written down.
+    context: Integrity,
+    /// The most the answer may run to, where the question asked for a short one.
+    limit: Option<usize>,
+}
+
+/// The exchange as it stood when a turn built a request, for a question asked while that turn runs.
+///
+/// Taken on the thread that holds the conversation, at the point a round's request is built, and
+/// handed to the interface in place of the conversation, which cannot cross threads or be copied.
+/// It holds what [`Question::about`] would have taken at that moment: the exchange as the planner
+/// would be sent it under the aside's own instructions, and what the exchange had met.
+#[derive(Debug, Clone)]
+pub struct Fork {
+    exchange: Vec<Arc<Message>>,
+    context: Integrity,
+}
+
+impl Fork {
+    pub fn of(conversation: &Conversation) -> Self {
+        Self {
+            exchange: conversation.shared_with_system(SYSTEM_PROMPT),
+            context: conversation.context(),
+        }
+    }
+
+    pub fn context(&self) -> Integrity {
+        self.context
+    }
+}
+
+impl Question {
+    /// Take the question that will go on the end of an exchange published earlier.
+    ///
+    /// The same question [`Question::about`] makes, over the exchange a turn published at a round
+    /// boundary instead of one held by the caller.
+    pub fn over(fork: Fork, question: &str, pasted: Vec<crate::turn::PastedImage>) -> Self {
+        Self {
+            exchange: fork.exchange,
+            asked: question.to_string(),
+            pasted,
+            dropped: Vec::new(),
+            context: fork.context,
+            limit: None,
+        }
+    }
+
+    /// Fork the exchange and take the question that will go on the end of it.
+    ///
+    /// `question` is the line the person typed, which is trusted in the sense a prompt is: it came
+    /// from the keyboard of the user who owns the session. `pasted` is what they pasted into that
+    /// line, which pasting.md PASTE-2 puts on the same footing for the same reason.
+    pub fn about(
+        conversation: &Conversation,
+        question: &str,
+        pasted: Vec<crate::turn::PastedImage>,
+    ) -> Self {
+        Self::under(SYSTEM_PROMPT, conversation, question, pasted)
+    }
+
+    /// The same, told what it is doing in `system`'s words and not in the aside's own.
+    fn under(
+        system: &str,
+        conversation: &Conversation,
+        question: &str,
+        pasted: Vec<crate::turn::PastedImage>,
+    ) -> Self {
+        Self {
+            exchange: conversation.shared_with_system(system),
+            asked: question.to_string(),
+            pasted,
+            dropped: Vec::new(),
+            context: conversation.context(),
+            limit: None,
+        }
+    }
+
+    /// The recap of the exchange so far, which is a question the driver writes and an answer that
+    /// is cut to [`RECAP_LIMIT`] whatever the model made of the instruction.
+    pub fn recap(conversation: &Conversation) -> Self {
+        Self {
+            limit: Some(RECAP_LIMIT),
+            ..Self::about(conversation, RECAP_QUESTION, Vec::new())
+        }
+    }
+
+    /// The next prompt, asked over the exchange as it stands (INPUT-43).
+    ///
+    /// A question the driver writes, over the planner's own context. The answer is read through
+    /// [`suggestion`], which holds it to the counts the instruction asked for.
+    pub fn suggest(conversation: &Conversation) -> Self {
+        Self {
+            limit: Some(SUGGEST_READ),
+            ..Self::about(conversation, SUGGEST_QUESTION, Vec::new())
+        }
+    }
+
+    /// The draft the person typed, asked to be rewritten over the exchange as it stands (INPUT-48).
+    ///
+    /// A question the driver writes, with the person's own line on the end of it. The answer is read
+    /// through [`enhancement`], which holds it to the count the instruction asked for.
+    pub fn enhance(conversation: &Conversation, draft: &str) -> Self {
+        Self {
+            limit: Some(ENHANCE_READ),
+            ..Self::under(
+                ENHANCE_SYSTEM_PROMPT,
+                conversation,
+                &format!("{ENHANCE_QUESTION}\n\n{}", draft.trim()),
+                Vec::new(),
+            )
+        }
+    }
+
+    /// The brief a new session starts from, for the work `goal` names.
+    ///
+    /// A question the driver writes, over the exchange as it stands. The answer is cut to
+    /// [`HANDOFF_LIMIT`] whatever the model made of the instruction.
+    pub fn handoff(conversation: &Conversation, goal: &str) -> Self {
+        Self {
+            limit: Some(HANDOFF_LIMIT),
+            ..Self::about(
+                conversation,
+                &format!("{HANDOFF_QUESTION} {}", goal.trim()),
+                Vec::new(),
+            )
+        }
+    }
+
+    /// Carry the files dropped onto the line, already read.
+    ///
+    /// Separate from [`Question::about`] because the two happen in different places. The exchange is
+    /// taken on the thread that owns the conversation, and the read happens on the thread that owns
+    /// the trail the request is recorded in, so the question crosses between them and picks up what
+    /// was read on the way.
+    pub fn carrying(mut self, dropped: Vec<crate::attached::Carried>) -> Self {
+        self.dropped = dropped;
+        self
+    }
+
+    /// What the exchange had met when the question was asked.
+    pub fn context(&self) -> Integrity {
+        self.context
+    }
+
+    /// Every message the request holds: the exchange, then the question with its pictures in it.
+    ///
+    /// One message for the question and whatever came with it, because that is what the person did:
+    /// they typed a line and pasted a picture into it, or dropped one on it. Two messages would put
+    /// the picture somewhere other than the sentence asking about it.
+    ///
+    /// Dropped files first and pasted pictures after them, which is the order a turn puts them in,
+    /// so one line sends the same request whichever of the three carries it. On a line that both
+    /// pasted and dropped that order is not the order its markers number them, which `dropping.md`
+    /// DROP-11 answers for the dropped half: each dropped picture is sent with its path beside it,
+    /// so the marker is matched by the file the part names rather than by counting parts. A pasted
+    /// picture carries no path and is still only its position, which is a cost `pasting.md` holds.
+    ///
+    /// The record `pasting.md` PASTE-8 asks for is not taken here. This runs wherever the request is
+    /// assembled and the gate belongs to the policy, so [`ask`] takes it before calling this.
+    fn into_request(self) -> Vec<Message> {
+        let mut messages: Vec<Message> = self
+            .exchange
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect();
+        let text = format!("{INSTRUCTION}\n\n{}", self.asked);
+        messages.push(match (self.pasted.is_empty(), self.dropped.is_empty()) {
+            (true, true) => Message::user(text),
+            _ => Message::user_parts(
+                std::iter::once(Part::Text { text })
+                    .chain(
+                        self.dropped
+                            .iter()
+                            .flat_map(crate::attached::Carried::parts),
+                    )
+                    .chain(self.pasted.iter().map(crate::turn::PastedImage::part))
+                    .collect(),
+            ),
+        });
+        messages
+    }
+}
+
+/// What one aside produced.
+pub struct Answered {
+    /// The answer, released for the person's screen.
+    pub shown: String,
+    /// The same answer, where the planner could have held it.
+    ///
+    /// `None` where it could not, which is a conversation that has met something untrusted. The
+    /// person still reads it; the record does not keep it, because a record is read back.
+    pub kept: Option<String>,
+    /// What the question cost, so the session can charge it.
+    pub usage: Usage,
+}
+
+#[derive(Debug)]
+pub enum AsideError {
+    /// The answer was refused on its way past a gate.
+    Denied(Denial),
+    /// The call failed or was refused in transit.
+    Chat(crate::backend::BackendError),
+}
+
+impl fmt::Display for AsideError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(d) => write!(f, "{d}"),
+            Self::Chat(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AsideError {}
+
+impl From<Denial> for AsideError {
+    fn from(value: Denial) -> Self {
+        Self::Denied(value)
+    }
+}
+
+impl From<crate::backend::BackendError> for AsideError {
+    fn from(value: crate::backend::BackendError) -> Self {
+        Self::Chat(value)
+    }
+}
+
+impl From<ChatError> for AsideError {
+    fn from(value: ChatError) -> Self {
+        Self::Chat(value.into())
+    }
+}
+
+/// Ask one question beside the work, and hand back what came of it.
+///
+/// `watching` is given the answer as it arrives, for a caller with somewhere to draw it. It is
+/// handed released text, because whether there is anything worth drawing is a question about the
+/// words and the interface is the side allowed to ask that one. The terminal draws nothing as it
+/// arrives: watching.md WATCH-18 keeps both halves of an aside out of the turn's own lines, and
+/// the one place a reply takes shape there is the tail the planner's own half-written reply
+/// fills.
+pub fn ask<S: Sink>(
+    policy: &mut Policy<'_, S>,
+    chat: &mut Chat<'_>,
+    question: Question,
+    mut watching: impl FnMut(&str),
+) -> Result<Answered, AsideError> {
+    // No tools, deliberately and visibly: `ChatRequest::new` leaves the field empty and nothing
+    // below adds to it. A question that could call a tool would be a turn, and a turn is the
+    // thing this exists to avoid being.
+    let model = chat.model.unwrap_or(&chat.config.default_model);
+    // Each picture the question carries, one by one, so the trail says what arrived rather than that
+    // something did: pasting.md PASTE-8 accounts for every paste, and a question is one of the three
+    // requests one can travel in. Before the request is built, because building it consumes the
+    // question, and because a record taken after the bytes have gone is a record of nothing.
+    for picture in &question.pasted {
+        policy.admit_pasted_image(picture.media_type, picture.bytes.len());
+    }
+    // The exchange is given up once this answers, so nothing asks for a cache of it: a mark would
+    // sit on the question at the end of the request, which only a later question repeating those
+    // words could read back. The instructions keep their mark, being the same bytes every question.
+    let limit = question.limit;
+    let request = ChatRequest::new(model, question.into_request()).giving_up_its_conversation();
+
+    let mut client = chat.backend(model);
+
+    // Minted before the request goes out, because the gate needs the policy and the policy is
+    // lent to the client for the duration of the call. One witness for the whole answer rather
+    // than one per frame: the release is the same release however many chunks it arrives in.
+    let as_written =
+        policy.authorise_display_release("an answer to a question asked beside the work");
+    let completion = client.complete_streaming(policy, &request, |progress| {
+        watching(progress.written.declassify(&as_written));
+    })?;
+
+    // Relabelled from the context the way a round's own words are: what comes back from the
+    // client carries the label the network gave it, and the kernel is the only thing that knows
+    // what this model was shown.
+    let written = policy.adopt_model_output("btw", completion.content.clone())?;
+
+    // The record's gate: it says whether the planner could have held these words, which is what
+    // decides whether they may be written down. A store of its own, thrown away with the request,
+    // because a name out of the conversation's counter would be a change to the exchange and
+    // nothing ever resolves this reference: a quarantined answer is not written down at all.
+    let mut aside_only = bravebot_core::slot::SlotStore::new();
+    let kept = match policy.present(
+        "btw",
+        SlotId::new("aside"),
+        "the answer to a question asked beside the work",
+        &written,
+        &mut aside_only,
+    )? {
+        Presentation::Visible(body) => Some(body),
+        Presentation::Quarantined(_) => None,
+    };
+
+    // Cut inside the kernel, on the answer while it is still labelled: the count and the trim
+    // are a reshape for the screen, and only the finished text is released. `kept` came back
+    // from `present` as visible, so it is words the planner could hold and is cut as such.
+    let (shown, kept) = match limit {
+        Some(limit) => (
+            policy
+                .render_in_place("btw", &completion.content, |text| capped(&text, limit))
+                .declassify(&as_written),
+            kept.map(|body| capped(&body, limit)),
+        ),
+        None => (completion.content.declassify(&as_written), kept),
+    };
+
+    Ok(Answered {
+        shown,
+        kept,
+        usage: completion.usage,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn an_exchange() -> Conversation {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user("add the feature"));
+        conversation.push(Message::assistant("done"));
+        conversation
+    }
+
+    /// A fork is taken at every round of every turn that publishes its exchange, and a question is
+    /// asked over it only when somebody types `/btw`. It therefore shares the messages the
+    /// conversation holds and copies none of them, so a round without a question costs one pointer
+    /// per message.
+    #[test]
+    fn a_fork_shares_the_stored_messages_instead_of_copying_them() {
+        let conversation = an_exchange();
+        let fork = Fork::of(&conversation);
+
+        let stored = conversation.messages();
+        assert_eq!(
+            fork.exchange.len(),
+            stored.len() + 1,
+            "the system prompt and the exchange"
+        );
+        for (shared, kept) in fork.exchange[1..].iter().zip(stored) {
+            assert!(
+                Arc::ptr_eq(shared, &kept.message),
+                "a message of the exchange was copied into the fork"
+            );
+        }
+    }
+
+    /// A question is built from the same shared messages as a fork. Rejects building it from a
+    /// copy of each message.
+    #[test]
+    fn a_question_shares_the_stored_messages_instead_of_copying_them() {
+        let conversation = an_exchange();
+        let question = Question::about(&conversation, "why?", Vec::new());
+
+        let stored = conversation.messages();
+        assert_eq!(
+            question.exchange.len(),
+            stored.len() + 1,
+            "the system prompt and the exchange"
+        );
+        for (shared, kept) in question.exchange[1..].iter().zip(stored) {
+            assert!(
+                Arc::ptr_eq(shared, &kept.message),
+                "a message of the exchange was copied into the question"
+            );
+        }
+    }
+
+    /// The exchange reads as the instruction unless something says otherwise, and a question on
+    /// the end of one reads as the next step of the work. A model that took it that way would
+    /// answer by proposing an edit, which is what this whole path exists to avoid.
+    #[test]
+    fn the_question_is_marked_as_one_rather_than_left_on_the_end_of_the_work() {
+        let asking = Question::about(&an_exchange(), "why is the parser recursive?", Vec::new());
+
+        let request = asking.into_request();
+        let last = request.last().expect("the question closes the request");
+        let text = last.content.text();
+        assert!(
+            text.starts_with(INSTRUCTION),
+            "the question was sent without anything saying it was one: {text}"
+        );
+        assert!(
+            text.contains("why is the parser recursive?"),
+            "the question itself did not reach the request: {text}"
+        );
+    }
+
+    /// INPUT-43: only an answer inside the counts is offered, and the counts are the whole of the
+    /// rule. A word count of one, thirteen words, a hundred characters and a second line each fail
+    /// it, and a good one passes with its surrounding whitespace gone.
+    #[test]
+    fn a_suggestion_is_offered_only_inside_its_counts() {
+        assert_eq!(
+            suggestion("  run the tests again \n"),
+            Some("run the tests again".to_string())
+        );
+        assert_eq!(suggestion("continue"), None);
+        let thirteen = "one two three four five six seven eight nine ten eleven twelve thirteen";
+        assert_eq!(suggestion(thirteen), None);
+        let twelve = "one two three four five six seven eight nine ten eleven twelve";
+        assert_eq!(suggestion(twelve), Some(twelve.to_string()));
+        let long = format!("go {}", "a".repeat(SUGGEST_CHARS - 3));
+        assert_eq!(long.chars().count(), SUGGEST_CHARS);
+        assert_eq!(suggestion(&long), None);
+        let short = format!("go {}", "a".repeat(SUGGEST_CHARS - 4));
+        assert_eq!(suggestion(&short), Some(short.clone()));
+        assert_eq!(suggestion("fix it\nthen run the tests"), None);
+        assert_eq!(suggestion(""), None);
+    }
+
+    /// The characters are counted, not the bytes: a hundred-character line of two-byte letters is
+    /// refused for its characters, and one of ninety-nine is offered although it is over a hundred
+    /// bytes.
+    #[test]
+    fn the_suggestion_limit_counts_characters_rather_than_bytes() {
+        let ninety_nine = format!("go {}", "é".repeat(SUGGEST_CHARS - 4));
+        assert!(ninety_nine.len() > SUGGEST_CHARS);
+        assert_eq!(suggestion(&ninety_nine), Some(ninety_nine.clone()));
+        let hundred = format!("go {}", "é".repeat(SUGGEST_CHARS - 3));
+        assert_eq!(hundred.chars().count(), SUGGEST_CHARS);
+        assert_eq!(suggestion(&hundred), None);
+    }
+
+    /// INPUT-43: a suggestion is a question with a limit, asked over the exchange, in the driver's
+    /// words, and it leaves the exchange as it was.
+    #[test]
+    fn a_suggestion_asks_its_own_question_and_leaves_the_exchange_alone() {
+        let conversation = an_exchange();
+        let before = conversation.len();
+        let request = Question::suggest(&conversation).into_request();
+        assert_eq!(conversation.len(), before);
+        let said: Vec<String> = request.iter().map(|m| m.content.text()).collect();
+        assert!(said.iter().any(|text| text.contains("add the feature")));
+        assert!(
+            said.last()
+                .is_some_and(|text| text.contains(SUGGEST_QUESTION))
+        );
+    }
+
+    /// INPUT-48: an enhancement is offered whole or not at all. Empty text and text past the limit
+    /// are refused rather than cut, a limit-length rewrite is kept with its line breaks, and the
+    /// whitespace around it is dropped.
+    #[test]
+    fn an_enhancement_is_offered_whole_or_not_at_all() {
+        assert_eq!(
+            enhancement("  Add a retry to fetch_page in src/net.rs.\n\nRun cargo test.\n"),
+            Some("Add a retry to fetch_page in src/net.rs.\n\nRun cargo test.".to_string())
+        );
+        assert_eq!(enhancement(""), None);
+        assert_eq!(enhancement(" \n\t "), None);
+        let at_the_limit = "x".repeat(ENHANCE_LIMIT);
+        assert_eq!(enhancement(&at_the_limit), Some(at_the_limit.clone()));
+        assert_eq!(enhancement(&format!("{at_the_limit}x")), None);
+    }
+
+    /// The limit counts characters: a rewrite of two-byte letters that fits in characters and is
+    /// past the limit in bytes is offered, and one character more is not.
+    #[test]
+    fn the_enhancement_limit_counts_characters_rather_than_bytes() {
+        let fits = "\u{e9}".repeat(ENHANCE_LIMIT);
+        assert!(fits.len() > ENHANCE_LIMIT);
+        assert_eq!(enhancement(&fits), Some(fits.clone()));
+        assert_eq!(enhancement(&format!("{fits}\u{e9}")), None);
+    }
+
+    /// INPUT-48: an enhancement asks the driver's instruction with the person's draft on the end of
+    /// it, over the whole exchange, and leaves the exchange as it was. Dropping the draft would ask
+    /// for a rewrite of nothing, and putting the instruction after it would make the draft the thing
+    /// the model was told to answer.
+    #[test]
+    fn an_enhancement_asks_for_the_draft_over_the_exchange_and_leaves_it_alone() {
+        let conversation = an_exchange();
+        let before = conversation.len();
+
+        let asking = Question::enhance(&conversation, "  fix the parser bug \n");
+
+        assert_eq!(asking.limit, Some(ENHANCE_READ));
+        assert_eq!(conversation.len(), before);
+        let request = asking.into_request();
+        let last = request.last().expect("the question closes the request");
+        let text = last.content.text();
+        assert!(
+            text.contains(ENHANCE_QUESTION),
+            "the instruction was not asked: {text}"
+        );
+        assert!(
+            text.ends_with("The draft is:\n\nfix the parser bug"),
+            "the draft did not close the request: {text}"
+        );
+        assert!(
+            request
+                .iter()
+                .any(|message| message.content.text().contains("add the feature")),
+            "the rewrite was asked for without the exchange"
+        );
+    }
+
+    /// INPUT-48. A rewrite is asked under instructions of its own. The aside's tell the model to
+    /// answer the last message as a question and not to act on it, which is the opposite of what a
+    /// rewrite of a draft asks for, and a model that followed them would answer the draft.
+    #[test]
+    fn an_enhancement_is_told_to_rewrite_and_not_to_answer() {
+        let request = Question::enhance(&an_exchange(), "fix it").into_request();
+        let system = request
+            .first()
+            .expect("the instructions lead")
+            .content
+            .text();
+
+        assert!(system.contains("Rewrite the draft"), "{system}");
+        assert!(system.contains("do not answer the draft"), "{system}");
+        assert!(
+            !system.contains("do not act as though the question were an instruction"),
+            "the aside's instructions were sent with a rewrite: {system}"
+        );
+        let asked = Question::about(&an_exchange(), "why?", Vec::new()).into_request();
+        assert!(
+            asked
+                .first()
+                .is_some_and(|first| first.content.text().contains("do not act as though")),
+            "a question lost the aside's own instructions"
+        );
+    }
+
+    /// INPUT-48. An enhancement over an exchange that has met something untrusted carries that with
+    /// it, since it is what decides whether the rewrite may be offered at all. A question built
+    /// afresh would arrive as trusted, and its answer would be offered as words the planner could
+    /// have held.
+    #[test]
+    fn an_enhancement_carries_what_the_exchange_had_met() {
+        let mut conversation = an_exchange();
+        assert_eq!(
+            Question::enhance(&conversation, "fix it").context(),
+            Integrity::Trusted
+        );
+
+        conversation.observed(bravebot_core::label::Label::untrusted_public());
+        assert_eq!(
+            Question::enhance(&conversation, "fix it").context(),
+            Integrity::Untrusted
+        );
+    }
+
+    /// The whole exchange goes out, because a question about the work cannot be answered from the
+    /// question alone.
+    #[test]
+    fn the_exchange_goes_out_with_the_question() {
+        let asking = Question::about(&an_exchange(), "why is the parser recursive?", Vec::new());
+
+        let said: Vec<String> = asking
+            .into_request()
+            .iter()
+            .map(|message| message.content.text())
+            .collect();
+        assert!(
+            said.iter().any(|text| text.contains("add the feature")),
+            "the exchange was not sent with the question: {said:?}"
+        );
+        assert!(
+            said.first().is_some_and(|text| text.contains("no tools")),
+            "the system prompt did not lead the request: {said:?}"
+        );
+    }
+
+    /// The whole point is that the exchange the next turn resumes is untouched. A question that
+    /// grew the conversation would be a turn wearing a different name.
+    #[test]
+    fn asking_leaves_the_exchange_the_length_it_was() {
+        let conversation = an_exchange();
+        let before = conversation.len();
+
+        let _ = Question::about(&conversation, "why is the parser recursive?", Vec::new());
+
+        assert_eq!(
+            conversation.len(),
+            before,
+            "asking a question changed the conversation"
+        );
+    }
+
+    /// The label the answer is judged against is the one the exchange had when the question was
+    /// asked. A question taken over an untrusted exchange whose context arrived as trusted would
+    /// have its answer written down, which is the laundering route the record's rule closes.
+    #[test]
+    fn the_question_carries_what_the_exchange_had_met() {
+        let mut conversation = an_exchange();
+        assert_eq!(
+            Question::about(&conversation, "why?", Vec::new()).context(),
+            Integrity::Trusted
+        );
+
+        conversation.observed(bravebot_core::label::Label::untrusted_public());
+        assert_eq!(
+            Question::about(&conversation, "why?", Vec::new()).context(),
+            Integrity::Untrusted
+        );
+    }
+
+    /// A model told to answer and nothing else still has to be told what it may not reach for,
+    /// because the exchange above it is full of tool calls that worked.
+    #[test]
+    fn the_model_is_told_it_has_no_tools_and_must_not_invent_what_it_cannot_read() {
+        assert!(
+            SYSTEM_PROMPT.contains("You have no tools this time"),
+            "nothing told the model the tools in the exchange above are not available to it"
+        );
+        assert!(
+            SYSTEM_PROMPT.contains("Do not invent the contents"),
+            "a model with no tools and no such instruction answers from an imagined file"
+        );
+    }
+
+    /// A model that ignores the length it was asked for still cannot put more than the limit on
+    /// the person's screen or into the record.
+    #[test]
+    fn a_recap_longer_than_the_limit_is_cut_to_it() {
+        let long = "word ".repeat(200);
+        let cut = capped(&long, RECAP_LIMIT);
+        assert!(cut.chars().count() <= RECAP_LIMIT, "over the limit: {cut}");
+        assert!(cut.ends_with('\u{2026}'), "the cut is not marked: {cut}");
+        assert!(
+            !cut.ends_with(" \u{2026}"),
+            "the ellipsis follows a space: {cut}"
+        );
+    }
+
+    /// A recap that fits is shown as the model wrote it, apart from surrounding whitespace.
+    #[test]
+    fn a_recap_within_the_limit_is_not_cut() {
+        let exact = "x".repeat(RECAP_LIMIT);
+        assert_eq!(capped(&format!("  {exact}\n"), RECAP_LIMIT), exact);
+    }
+
+    /// The limit counts characters, so a multi-byte reply is neither split inside a character nor
+    /// cut short of the limit.
+    #[test]
+    fn the_recap_limit_counts_characters_rather_than_bytes() {
+        let cut = capped(&"\u{e9}".repeat(RECAP_LIMIT + 10), RECAP_LIMIT);
+        assert_eq!(cut.chars().count(), RECAP_LIMIT);
+    }
+
+    /// `/recap` is a question with a limit, asked over the exchange and leaving it as it was.
+    #[test]
+    fn a_recap_asks_its_own_question_with_a_limit_and_leaves_the_exchange_alone() {
+        let conversation = an_exchange();
+        let before = conversation.len();
+
+        let asking = Question::recap(&conversation);
+
+        assert_eq!(asking.limit, Some(RECAP_LIMIT));
+        assert_eq!(conversation.len(), before);
+        let request = asking.into_request();
+        let last = request.last().expect("the question closes the request");
+        assert!(last.content.text().contains(RECAP_QUESTION));
+        assert!(
+            request
+                .iter()
+                .any(|message| message.content.text().contains("add the feature")),
+            "the recap was asked without the exchange"
+        );
+    }
+
+    /// The brief is asked for over the whole exchange, with the goal in the question, and leaves
+    /// the exchange as it was.
+    #[test]
+    fn a_handoff_asks_for_a_brief_for_the_goal_over_the_exchange() {
+        let conversation = an_exchange();
+        let before = conversation.len();
+
+        let asking = Question::handoff(&conversation, "  port the parser to the new lexer ");
+
+        assert_eq!(asking.limit, Some(HANDOFF_LIMIT));
+        assert_eq!(conversation.len(), before);
+        let request = asking.into_request();
+        let last = request.last().expect("the question closes the request");
+        let text = last.content.text();
+        assert!(
+            text.contains(HANDOFF_QUESTION),
+            "no brief was asked for: {text}"
+        );
+        assert!(
+            text.ends_with("port the parser to the new lexer"),
+            "the goal did not reach the question: {text}"
+        );
+        assert!(
+            request
+                .iter()
+                .any(|message| message.content.text().contains("add the feature")),
+            "the brief was asked for without the exchange"
+        );
+    }
+
+    /// What crosses is the brief, then the sentence saying what did not, then the goal: a prompt
+    /// missing the notice would let the new session assume the old one's permissions.
+    #[test]
+    fn the_handed_off_prompt_holds_the_brief_the_notice_and_the_goal_in_that_order() {
+        let prompt = handoff_prompt("  We are porting the parser.\n", " write the tests ");
+
+        let brief = prompt
+            .find("We are porting the parser.")
+            .expect("the brief");
+        let notice = prompt.find(HANDOFF_NOTICE).expect("the notice");
+        let goal = prompt.find("Next: write the tests").expect("the goal");
+        assert!(brief < notice && notice < goal, "out of order: {prompt}");
+        assert!(
+            prompt.starts_with("We are porting"),
+            "untrimmed: {prompt:?}"
+        );
+        assert!(prompt.ends_with("write the tests"), "untrimmed: {prompt:?}");
+    }
+}

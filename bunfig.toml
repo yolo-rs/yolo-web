@@ -1,0 +1,10 @@
+[install]
+exact = false
+peer = true
+
+[test]
+coverage = false
+timeout = 15000
+
+[run]
+bun = true

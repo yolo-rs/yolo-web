@@ -1,0 +1,14 @@
+[package]
+name = "bravebot-signing"
+description = "Brave services request signing (hs2019 HMAC-SHA256 over the body digest)"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }

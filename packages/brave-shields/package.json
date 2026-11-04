@@ -1,0 +1,19 @@
+{
+  "name": "@yolo-web/brave-shields",
+  "version": "0.2.0",
+  "description": "Pure Bun implementation of Brave Shields (adblock-rust compatible rule engine, cookiecrumbler consent blocker, anti-fingerprinting profiles, and Brave Search MCP bridge)",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./mcp-server": "./src/mcp-server.ts"
+  },
+  "bin": {
+    "brave-search-mcp": "./src/mcp-server.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check",
+    "mcp": "bun run ./src/mcp-server.ts"
+  }
+}

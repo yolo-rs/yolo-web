@@ -1,0 +1,21 @@
+[package]
+name = "bravebot-mcp"
+description = "Model Context Protocol client: the extension boundary for tools"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-config = { path = "../config" }
+bravebot-core = { path = "../core" }
+bravebot-diag = { path = "../diag" }
+bravebot-net = { path = "../net" }
+bravebot-sandbox = { path = "../sandbox" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

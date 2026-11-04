@@ -1,0 +1,530 @@
+---
+id: PASTE
+title: Pasting
+status: normative
+governs:
+  - crates/tui/src/clipboard.rs
+  - crates/agent/src/picture.rs
+  - crates/tui/src/state.rs
+  - crates/tui/src/state/attachments.rs
+  - crates/tui/src/state/queue.rs
+  - crates/tui/src/state/editing.rs
+  - crates/tui/src/app.rs
+  - crates/tui/src/app/turns.rs
+  - crates/tui/src/app/side_requests.rs
+  - crates/tui/src/app/keys.rs
+  - crates/tui/src/invisible.rs
+  - crates/ui-bridge/src/attached.rs
+  - ui/src/main/pastes.ts
+  - ui/src/preload/index.ts
+  - ui/src/renderer/staging.ts
+  - ui/src/shared/pastes.ts
+guards:
+  - symbol: Policy::admit_pasted_image
+documented-by: docs/website/docs/using/context.md
+---
+
+## Scope
+
+What Ctrl-V puts into a turn, whether it is text, a picture or files a file manager copied, and on
+what footing. Pasted text is
+presentation and holds no labels: it is the user's own words either way, and the only question is
+that the box stays readable. A pasted picture is a claim about provenance, and most of this spec is
+about that claim. A paste leaves a marker in the box, and deleting the marker takes the paste off.
+
+Three gestures put content into a turn on the user's own footing, and each has its own spec:
+[naming-files.md](naming-files.md) for `@` in a prompt, [pasting.md](pasting.md) for Ctrl-V, and
+[dropping.md](dropping.md) for a file dragged onto the window.
+
+## Why a pasted picture is trusted
+
+A pasted picture is trusted because the user pasted it, exactly as they typed the words beside it.
+It arrives in their own message, on the footing of the prompt it came with, and the gate that
+admits it records that provenance and asserts nothing else. Nothing inspects the pixels and nothing
+could. Being a picture establishes nothing: the trust comes from the gesture and from nowhere else.
+
+It is carried whole rather than quarantined because it arrives in the user's own message, which
+is not quarantined. A picture that is quarantined is held in a slot, and a processor is given it
+there as a picture ([PROC-15](processors.md#PROC-15)). That is a fact about the mechanism, and not
+a second reason to trust it.
+
+## Clauses
+
+<a id="PASTE-1"></a>
+### PASTE-1: a long paste folds to a marker, and the words are what get sent
+
+More than a couple of lines folds to `[Pasted text #2 +40 lines]`, counting the lines a person
+would count. The words around it are left alone, and a short paste lands whole. A paste into a
+command line is never folded. A paste ending in a newline does not send.
+
+The words are put back where the line leaves the box, so the request, the transcript and the
+history all hold the paste itself. The marker goes no further than the box: a prompt coming back
+for editing after a stop comes back behind it.
+
+**Why.** A stack trace would otherwise push the reply being read off the screen. Nothing is hidden:
+what is about to be sent is what the prompt says, and deleting the marker drops the words.
+
+**Why the marker stops at the box.** It is a handle on text that only the session holding it can
+put back. In the transcript it makes the conversation claim something the planner was never given.
+In the history it comes back in a later session naming nothing, and the placeholder is sent in
+place of everything the person pasted, with nothing on the screen to say so.
+
+`verified-by: bravebot_tui::state::a_folded_paste_counts_the_lines_a_person_would_count`
+`verified-by: bravebot_tui::state::a_folded_paste_leaves_the_words_around_it_alone`
+`verified-by: bravebot_tui::state::a_folded_paste_is_put_back_where_the_line_leaves_the_box`
+`verified-by: bravebot_tui::state::the_transcript_shows_the_words_a_folded_paste_stood_for`
+`verified-by: bravebot_tui::state::a_folded_paste_is_remembered_as_the_words_it_stood_for`
+`verified-by: bravebot_tui::state::a_paste_queued_behind_a_turn_is_remembered_as_its_words`
+`verified-by: bravebot_tui::state::a_recalled_prompt_carries_the_words_that_were_pasted_into_it`
+`verified-by: bravebot_tui::state::a_stopped_turn_puts_a_folded_paste_back_behind_its_marker`
+`verified-by: bravebot_tui::state::a_short_paste_lands_in_the_box_whole`
+`verified-by: bravebot_tui::state::a_paste_into_a_command_line_is_never_folded`
+`verified-by: bravebot_tui::render::a_folded_paste_keeps_its_lines_off_the_screen`
+`verified-by: bravebot_tui::app::a_paste_that_ends_in_a_newline_does_not_send_it`
+`verified-by: bravebot_tui::app::a_pasted_prompt_is_sent_when_the_user_says_so`
+`verified-by: bravebot_tui::app::a_long_paste_folds_while_a_turn_is_running`
+`verified-by: bravebot_tui::app::a_folded_paste_in_a_btw_question_is_the_words_that_were_pasted`
+`verified-by: bravebot_tui::app::a_folded_paste_in_a_loop_prompt_is_the_words_that_were_pasted`
+`verified-by: bravebot_tui::app::a_folded_paste_in_a_manifest_task_is_the_words_that_were_pasted`
+
+
+<a id="PASTE-2"></a>
+### PASTE-2: only a picture a human pasted
+
+Never bytes a tool read, never anything a processor produced, never an image a path in model
+output named. Each of those is content, and routing it here would launder it.
+
+**Why.** The justification cannot be checked from the bytes, so it lives at the call site. There
+are two. One is the TUI's Ctrl-V. The other is the `images` list a front end sends with
+`turn.send`, each entry a `media` type and the picture's bytes as standard base64. The bridge cannot
+see the gesture, so a front end putting a picture there is saying that a person pasted it, as a
+`dropped` path says a person dropped it ([DROP-10](dropping.md#DROP-10)). The bridge holds the list
+to what a string can be held to: a type from [PASTE-3](#PASTE-3)'s set, data that decodes, and no
+more than the 10 MB cap (`MAX_PASTED_IMAGE_BYTES` in the agent crate) that the terminal also reads.
+Anything else, or a list of any other shape, refuses the send rather than starting a turn without
+the picture.
+
+A picture a tool read has one way into the planner's context, and it is not this one.
+[VET-4](tools/vet-content.md#VET-4)'s `vet_content` lets one picture through where a person handed a
+copy of it said yes, where auto-vetting took a check's safe verdict as the answer, or where a run
+bypassing permissions answered for them. That route does not come through here and widens nothing
+here. What it rests on is an endorsement of one slot, recorded as that, and the picture never joins
+the person's own message. This gate still admits a paste and nothing else.
+
+`verified-by: bravebot_tui::app::a_picture_off_the_clipboard_becomes_a_marker_in_the_line`
+`verified-by: bravebot_agent::turn::a_picture_is_never_shown_to_the_planner`
+`verified-by: bravebot_agent::turn::a_processor_is_given_a_picture_as_a_picture`
+`verified-by: bravebot_agent::turn::a_picture_a_person_opens_and_lets_through_is_attached_after_the_results`
+`verified-by: bravebot_ui_bridge::attaching::a_pasted_picture_reaches_the_model_with_the_prompt`
+`verified-by: bravebot_ui_bridge::attaching::a_picture_the_bridge_cannot_carry_refuses_the_send`
+
+
+<a id="PASTE-3"></a>
+### PASTE-3: the media type is the driver's, never the content's
+
+It ends up in the data URL, where it is routing, so it comes from a fixed set
+the clipboard reader owns, and never from a filename or from what a tool printed.
+
+The bridge's set is `PASTED_IMAGE_MEDIA` in the agent crate: `image/png`, `image/jpeg`,
+`image/gif` and `image/webp`. A front end's `media` string selects an entry, and the entry is what
+is sent; a string that matches none, `IMAGE/PNG` included, refuses the send. Every type the
+terminal's clipboard reader names ([PASTE-7](#PASTE-7)) is an entry.
+
+`verified-by: by-construction (the type is a static string from the clipboard reader's literals to the data URL it is formatted into, so a media type read from a filename or from what a tool printed does not compile)`
+`verified-by: bravebot_ui_bridge::attaching::a_picture_the_bridge_cannot_carry_refuses_the_send`
+`verified-by: bravebot_tui::clipboard::every_flavour_is_sent_as_a_media_type_the_turn_carries`
+
+
+<a id="PASTE-4"></a>
+### PASTE-4: the picture is inlined, never linked
+
+A URL would have the endpoint fetch it over a connection this process never makes, which is an
+egress `bravebot-net` could not gate.
+
+`verified-by: bravebot_agent::turn::a_pasted_image_reaches_the_model_with_the_prompt`
+
+
+<a id="PASTE-5"></a>
+### PASTE-5: a paste does not lower context integrity
+
+It says nothing about content the planner has met. Lowering it here would have a screenshot mark
+everything the planner then wrote as untrusted, on the strength of the user's own input.
+
+`verified-by: bravebot_core::policy::a_pasted_image_does_not_lower_what_the_context_has_met`
+
+
+<a id="PASTE-6"></a>
+### PASTE-6: what is sent is what the prompt says
+
+The marker is written where the caret is and the picture goes wherever that text goes. Deleting
+the marker unsends it. A prompt recalled from the history carries no pictures and names none: the
+marker is not what gets remembered, because it stands for a screenshot only the session that
+pasted it holds, and the words around it are what the person meant. A picture is refused in shell
+mode rather than written into the command. A command whose argument reaches a model carries the
+picture with it: `/btw` sends a question and `/manifest` plans from a task, and either one about a
+screenshot, answered without the screenshot, is answered about nothing. Waiting changes nothing about
+that, so one the queue reaches when a turn ends carries it too. `/loop` carries it on the first tick,
+which is the turn the person pasted into, and every tick after that sends the same line with the
+marker put back to words, because the picture went with the tick that took it and a loop sends the
+same line however long it runs. A command the driver carries out itself has no turn for a picture to
+travel in, so a marker in one is put back to words, whether the command is dispatched at rest or the
+queue reaches it when the turn ends. Those words say a picture was pasted and cannot be shown, which
+is what a picture on a line queued mid-turn becomes ([dropping.md](dropping.md#DROP-8)), and the
+person is told it did not go. A picture over 10 MB is decoded, scaled so its longest side is at most
+2048 pixels, re-encoded as PNG and sent in that form when the result is under 10 MB. A dropped
+picture is scaled by the same function, `bravebot_agent::picture::downscaled`
+([DROP-4](dropping.md#DROP-4)). The two limits are separate constants and are not the same number:
+a paste is held to `MAX_PASTED_IMAGE_BYTES`, 10 MB, both as it arrives and once scaled, and a drop
+to `MAX_ATTACHMENT_BYTES`, 8 MiB, for the scaled result, with a PNG or JPEG read for scaling only up
+to 64 MiB. Nothing in the code or the specs gives a reason for the difference. Each constant states
+only what it bounds: the paste limit what one request costs to encode, and the attachment limit the
+cost of a picture that every later round re-sends. Only when it will
+not decode, or is still over, is it refused rather than sent, and it says so with the size it was
+pasted at.
+
+**The thumbnail.** Where the terminal draws pictures, a small drawing of each picture named in the
+line sits under the box, so a person can see it is the screenshot they meant. It is drawn for
+a pasted picture and for a dropped PNG or JPEG. It follows the marker: rubbing the marker out takes
+the drawing with it, and sending or clearing the line does the same. A line that goes back into the
+box, after a stopped turn or an unqueue, has its drawings made again from the pictures it names. It
+is presentation only. The picture that is sent is the bytes that were pasted, whether or not a
+drawing was made of them, and a picture that will not decode, or a terminal that answers no query,
+leaves the box as it was.
+
+`verified-by: bravebot_tui::app::a_picture_is_refused_in_shell_mode_rather_than_written_into_the_command`
+`verified-by: bravebot_tui::app::a_picture_pasted_into_a_question_goes_with_it`
+`verified-by: bravebot_tui::app::a_picture_pasted_into_a_task_goes_with_the_plan`
+`verified-by: bravebot_tui::app::a_picture_pasted_into_a_loop_goes_with_its_first_tick`
+`verified-by: bravebot_tui::app::a_picture_named_on_a_question_that_waited_still_goes_with_it`
+`verified-by: bravebot_tui::app::a_picture_a_command_line_named_is_carried_out_as_words_rather_than_as_its_marker`
+`verified-by: bravebot_tui::app::a_picture_named_on_a_command_that_waited_is_words_by_the_time_it_is_carried_out`
+`verified-by: bravebot_tui::app::a_command_line_whose_marker_was_deleted_says_nothing_about_a_picture`
+`verified-by: bravebot_tui::app::a_picture_too_large_to_send_says_so_with_its_size`
+`verified-by: bravebot_tui::clipboard::a_picture_over_the_cap_is_scaled_down_and_sent`
+`verified-by: bravebot_tui::clipboard::a_picture_over_the_cap_that_will_not_decode_is_refused_rather_than_swapped_for_the_text`
+`verified-by: bravebot_tui::clipboard::a_picture_over_the_cap_declaring_too_wide_a_canvas_is_refused_unread`
+`verified-by: bravebot_tui::clipboard::a_picture_over_the_cap_that_would_decode_past_the_allocation_limit_is_refused_unread`
+`verified-by: bravebot_tui::clipboard::a_picture_still_over_the_cap_after_scaling_is_refused_with_its_pasted_size`
+`verified-by: bravebot_tui::state::the_first_tick_of_a_loop_carries_the_picture_pasted_into_it`
+`verified-by: bravebot_tui::state::a_later_tick_of_a_loop_says_the_picture_went_with_the_first`
+`verified-by: bravebot_tui::loops::a_pasted_picture_goes_to_one_tick_and_the_settled_line_to_every_other`
+`verified-by: bravebot_tui::state::a_recalled_prompt_does_not_name_a_picture_that_went_with_the_line`
+`verified-by: bravebot_tui::state::settling_a_marker_for_the_history_does_not_take_the_picture_off_the_turn`
+`verified-by: bravebot_tui::state::a_thumbnail_that_finishes_after_the_paste_is_picked_up_and_drawn_while_named`
+`verified-by: bravebot_tui::state::only_a_dropped_picture_is_given_a_thumbnail`
+`verified-by: bravebot_tui::state::a_cancelled_turn_restages_the_thumbnail_with_the_picture`
+`verified-by: bravebot_tui::state::taking_the_queue_back_restages_the_thumbnails_of_what_it_named`
+`verified-by: bravebot_tui::render::a_staged_picture_is_drawn_under_the_box_while_the_line_names_it`
+`verified-by: bravebot_tui::render::rubbing_out_the_marker_takes_the_thumbnail_with_it`
+`verified-by: bravebot_tui::sessions::cancelled_attachments_return_to_the_editor_and_the_next_request`
+`verified-by: bravebot_agent::turn::a_picture_pasted_into_a_question_reaches_the_model_with_it`
+`verified-by: bravebot_agent::manifest::a_picture_pasted_into_the_task_reaches_the_planner`
+
+
+<a id="PASTE-7"></a>
+### PASTE-7: reading the clipboard is presentation plumbing and holds no labels
+
+Command-V is the terminal's chord and never reaches this process: the byte stream over a pty has
+no encoding for that modifier, and the terminal writes the clipboard's *text* into the pty instead,
+which is why a picture silently arrives as nothing. Ctrl-V comes through as a byte, so the TUI goes
+around the terminal and reads the clipboard itself. An empty paste is read as the picture that was
+meant, except while the scroller ([SCROLL-2](scroller.md#SCROLL-2)), the delegate view
+([WATCH-9](watching.md#WATCH-9)), a picker ([CMD-8](commands.md#CMD-8)) or the prompt search
+([INPUT-19](terminal-input.md#INPUT-19)) is open, where every paste is ignored and none reads the
+clipboard. A picture wins over text when the clipboard holds both, since copying an image in a browser
+leaves the page's URL behind as text and text has another key. Files the clipboard names win over
+both ([PASTE-12](#PASTE-12)).
+
+A picture is read in the first of the flavours the clipboard holds, tried in this order, and the
+flavour decides the media type, which is one of the reader's own literals ([PASTE-3](#PASTE-3)):
+PNG as `image/png`, then JPEG as `image/jpeg`, then on macOS TIFF. The system offers TIFF for a
+picture it holds in any form, so it is how a GIF or a HEIC is reached, and nothing here decodes it:
+AppKit writes it as PNG and it is sent as `image/png`. AppKit draws it only within the decode limits
+that [PASTE-6](#PASTE-6) holds a picture over the cap to, read from the header before anything is
+decoded, and a TIFF declaring more reads as no picture. A flavour the clipboard does not hold, or one
+that reads as empty, is the next one's turn, and the flavours after the first that answers are
+never read. Windows asks the system for whatever picture the clipboard holds and gets PNG. A JPEG
+over the cap is scaled down and sent as PNG, as a PNG is ([PASTE-6](#PASTE-6)), and the hint that
+Ctrl-V would paste a picture appears for any of the flavours.
+
+On macOS this reads the pasteboard through `osascript`. On Linux it needs `wl-paste` or `xclip`.
+
+`verified-by: bravebot_tui::app::an_empty_paste_goes_and_reads_the_clipboard_instead`
+`verified-by: bravebot_tui::app::an_empty_paste_mid_turn_goes_and_reads_the_clipboard_too`
+`verified-by: bravebot_tui::app::ctrl_v_reads_the_clipboard_during_a_turn_too`
+`verified-by: bravebot_tui::app::a_paste_that_carried_text_is_left_alone`
+`verified-by: bravebot_tui::app::which_key_carries_a_picture_is_said_once_per_session`
+`verified-by: bravebot_tui::clipboard::a_picture_wins_over_the_text_beside_it`
+`verified-by: bravebot_tui::clipboard::the_text_beside_a_picture_is_never_read`
+`verified-by: bravebot_tui::clipboard::a_png_is_read_before_a_jpeg_beside_it`
+`verified-by: bravebot_tui::clipboard::a_clipboard_holding_only_a_jpeg_yields_that_picture`
+`verified-by: bravebot_tui::clipboard::a_flavour_that_reads_as_empty_is_not_a_picture`
+`verified-by: bravebot_tui::clipboard::a_clipboard_holding_no_picture_flavour_yields_none`
+`verified-by: bravebot_tui::clipboard::a_tiff_is_sent_as_the_png_the_platform_wrote_it_as`
+`verified-by: bravebot_tui::clipboard::a_jpeg_is_decoded_and_scaled_down_to_a_png_as_a_png_over_the_cap_is`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_a_png_is_read_as_that_png`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_only_a_jpeg_is_read_as_that_jpeg`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_only_a_tiff_is_read_as_a_png_of_the_same_picture`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_only_text_reads_as_no_picture`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_a_tiff_declaring_a_canvas_past_the_limit_is_not_drawn`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_offering_any_picture_flavour_is_said_to_hold_an_image`
+`verified-by: bravebot_tui::clipboard::a_jpeg_only_clipboard_yields_a_picture_through_wl_paste`
+`verified-by: bravebot_tui::clipboard::a_jpeg_only_clipboard_yields_a_picture_through_xclip`
+`verified-by: bravebot_tui::clipboard::a_png_is_asked_for_before_a_jpeg_through_the_tools`
+`verified-by: bravebot_tui::clipboard::a_clipboard_offering_a_jpeg_is_said_to_hold_an_image`
+`verified-by: bravebot_tui::clipboard::a_picture_over_the_cap_that_will_not_decode_is_refused_rather_than_swapped_for_the_text`
+`verified-by: bravebot_tui::clipboard::text_alone_is_the_paste`
+`verified-by: bravebot_tui::clipboard::an_empty_clipboard_reads_as_nothing_rather_than_as_empty_text`
+`verified-by: bravebot_tui::clipboard::a_missing_tool_reads_as_nothing_on_the_clipboard`
+`verified-by: bravebot_tui::clipboard::a_missing_tool_is_not_taken_for_a_successful_copy`
+
+
+<a id="PASTE-8"></a>
+### PASTE-8: every paste is named in the audit trail
+
+With its type and size, so `--trace` and Ctrl-T account for the pictures as well as the words. Each
+of the three requests a picture can travel in takes the record where it holds the policy: a turn's
+prompt, a question asked beside the work, and the task a plan is made from.
+
+`verified-by: bravebot_core::policy::a_pasted_image_is_recorded_in_the_audit_trail`
+`verified-by: bravebot_agent::turn::a_pasted_image_is_named_in_the_audit_trail`
+`verified-by: bravebot_agent::turn::a_picture_pasted_into_a_question_is_named_in_the_audit_trail`
+`verified-by: bravebot_agent::manifest::a_picture_pasted_into_the_task_is_named_in_the_audit_trail`
+
+<a id="PASTE-9"></a>
+### PASTE-9: a pasted picture is kept with the session and comes back on resume
+
+The picture is part of the user's own message, so it is written into the session record alongside
+the words and a resumed turn still has it. The redrawn transcript shows what the interface recorded
+about the attachment rather than the bytes, because a data URI in the scrollback is not a
+transcript.
+
+**Why.** Resuming a session that turned on a screenshot, without the screenshot, would leave the
+planner answering about something it can no longer see. Quarantined content is not written down at
+all, and this is not an exception to that: a pasted picture was never quarantined, it is the user's
+own input.
+
+`verified-by: bravebot_tui::sessions::a_pasted_picture_is_kept_with_the_session_and_comes_back_on_a_resume`
+`verified-by: bravebot_tui::state::a_resumed_prompt_that_carried_a_picture_shows_its_words_and_not_the_bytes`
+`verified-by: bravebot_ui_bridge::attaching::a_pasted_picture_is_still_in_the_conversation_after_the_session_is_reopened`
+
+<a id="PASTE-10"></a>
+### PASTE-10: characters a terminal draws as nothing are removed from a paste, and counted
+
+Pasted text loses the tag block, bidirectional controls, zero-width spaces and word joiners, the
+soft hyphen and the supplementary variation selectors, wherever they stand. The zero-width joiner
+and non-joiner stay where a script or an emoji needs them, after a non-ASCII character that is not
+whitespace, and one emoji or text selector stays after an emoji or before a keycap mark. The flags of
+England, Scotland and Wales, which are tag characters behind a black flag, stay, and no other tags do. The notice
+`removed 3 invisible characters from that paste` follows the paste and gives the count. A paste
+that held none says nothing. It applies to a paste in shell mode, to one that folds, and to one
+that arrives while a turn runs, since all of them come through the same function.
+
+**Why.** A paste lands in the person's own message with no label, so the words in it are taken as
+theirs. Text copied from a page can hold an instruction written in characters nothing draws, and
+the person would send it without having read it. Removing what cannot be seen makes the message
+what the box shows, and the count lets them compare it to what they copied. This is a character
+map. It reads no meaning from the text, decides nothing about any effect, and its count goes only to
+the person's screen.
+
+**Why the joiners and selectors are not all kept.** Zero-width bits between two letters of ASCII,
+and a run of selectors behind one symbol, are how a message is hidden in text that looks plain.
+Persian, Indic and emoji text needs only the first of each, after a character that is not ASCII.
+
+`verified-by: bravebot_tui::invisible::a_message_written_in_tag_characters_is_removed_and_counted`
+`verified-by: bravebot_tui::invisible::bidirectional_controls_and_zero_width_characters_are_removed`
+`verified-by: bravebot_tui::invisible::a_paste_with_nothing_hidden_is_returned_as_it_came`
+`verified-by: bravebot_tui::invisible::the_joiners_persian_and_indic_scripts_are_written_with_are_kept`
+`verified-by: bravebot_tui::invisible::joiners_between_ascii_letters_are_removed`
+`verified-by: bravebot_tui::invisible::a_run_of_joiners_after_a_letter_keeps_only_the_first`
+`verified-by: bravebot_tui::invisible::emoji_sequences_are_kept_whole`
+`verified-by: bravebot_tui::invisible::the_flags_of_england_scotland_and_wales_are_kept_whole`
+`verified-by: bravebot_tui::invisible::tags_behind_a_black_flag_that_are_not_one_of_the_three_flags_are_removed`
+`verified-by: bravebot_tui::invisible::a_run_of_selectors_after_an_emoji_keeps_only_the_first`
+`verified-by: bravebot_tui::invisible::a_selector_that_follows_nothing_it_modifies_is_removed`
+`verified-by: bravebot_tui::invisible::a_selector_after_a_digit_is_kept_only_for_a_keycap`
+`verified-by: bravebot_tui::state::a_paste_loses_the_characters_a_terminal_draws_as_nothing_and_says_how_many`
+`verified-by: bravebot_tui::state::one_removed_character_is_said_in_the_singular`
+`verified-by: bravebot_tui::state::a_paste_with_nothing_hidden_arrives_whole_and_says_nothing`
+`verified-by: bravebot_tui::state::a_paste_of_nothing_but_hidden_characters_writes_nothing_and_says_so`
+`verified-by: bravebot_tui::state::a_folded_paste_is_put_back_without_what_a_terminal_draws_as_nothing`
+`verified-by: bravebot_tui::state::a_paste_into_a_command_line_loses_what_a_terminal_draws_as_nothing`
+`verified-by: bravebot_tui::app::a_paste_loses_what_a_terminal_draws_as_nothing_at_rest_and_while_a_turn_runs`
+`verified-by: bravebot_tui::app::text_read_off_the_clipboard_loses_what_a_terminal_draws_as_nothing`
+`verified-by: bravebot_tui::app::a_pasted_prompt_waits_in_the_box_without_what_a_terminal_draws_as_nothing`
+
+<a id="PASTE-11"></a>
+### PASTE-11: the desktop window takes a picture only from a trusted paste, off the clipboard itself
+
+The window keeps [PASTE-2](#PASTE-2) by never letting the page supply the bytes. The preload, in
+its isolated world, listens for the paste itself and looks only at an event the browser marks
+trusted, inside the composer. When the clipboard holds a picture, the picture wins over any text
+beside it, as in [PASTE-7](#PASTE-7): the browser's own paste is cancelled and the main process is
+asked to stage what is on the clipboard. A paste of text alone is left to the browser. The main
+process reads the operating system's clipboard itself, decodes the picture and writes it out again
+as PNG, so the type is always `image/png`, never something the content claims
+([PASTE-3](#PASTE-3)). The main process asks the bridge's `pastes.check` about the picture's
+size, as it came off the clipboard and again once re-encoded. The bridge holds it to the 10 MB cap
+`turn.send` and the terminal's clipboard reader hold a paste to, and answers with that type and the
+noun the terminal writes, or with the terminal's note for a picture too large, built from the same
+catalog message in `en-US` because the window is in English only. The window holds no cap, type or
+wording of its own. A picture over the cap is refused with that note, which gives its size and the
+limit, and nothing is staged. An empty
+clipboard stages nothing, and so does a bridge that does not answer. The bytes stay in the main
+process against an opaque grant bound to the session, and the page is told the grant and a small
+drawing of the picture. A page that dispatches its own paste event, whatever it puts in it, has
+nothing staged, and the page has no call that reaches the clipboard read.
+
+At send the page names grants, never bytes. The main process takes away every `images` list the
+page sent and composes `images` from the grants the draft still names, in the order they were
+staged. A grant this session does not hold refuses the send rather than starting a turn without
+the picture. Grants end with the session.
+
+The rest follows the terminal where a window can. The marker is `[Image #n]`, numbered from the one
+counter a conversation's drops use, so a drop and then a paste in one draft are `#1` and `#2`. A
+chip with the drawing sits above the box; deleting the marker takes the picture off and removing
+the chip deletes the marker ([PASTE-6](#PASTE-6)). The transcript keeps the marker in the prompt,
+and a reopened session shows those words and draws no bytes ([PASTE-9](#PASTE-9)).
+
+One part does not follow. A message queued while a turn runs keeps its pictures and sends them as
+its own turn when the running one ends, as a dropped file does
+([DROP-12](dropping.md#DROP-12)), rather than becoming words; the window's queue never joins a
+running turn.
+
+`verified-by: bravebot_ui_bridge::attaching::a_window_asks_the_bridge_whether_a_paste_fits_and_is_told_the_terminals_note`
+`verified-by: bravebot_ui_bridge::english_notes::a_note_for_the_window_is_in_english_whatever_the_machine_says`
+`verified-by: by-construction (the preload and the renderer are not crates this workspace compiles, so ui/scripts/pastes.test.mjs pins the shared counter, the markers, and the main process's grants, its re-encode, its stripping of a window's images, and its use of the answer, type, noun and note a stub bridge gives with values the agent does not use, and fails if any file under ui/src says a size in megabytes; ui/scripts/drive-paste.mjs pastes from the real clipboard into the real app and bridge against a stub model, asserts an oversized picture is refused with the bridge's note, and asserts a page-dispatched paste stages nothing; make check-ui runs the tests)`
+
+<a id="PASTE-12"></a>
+### PASTE-12: a file the clipboard names is treated as a drop
+
+When Ctrl-V finds files on the clipboard, as copying a file in Finder, Explorer or a Linux file
+manager leaves, the paths are put to the terminal's drop handling as the line a paste of them would
+have been ([DROP-7](dropping.md#DROP-7)), and that is the only gate they pass. Each file is then
+read under a drop's rules ([DROP-4](dropping.md#DROP-4)): a picture or a PDF is carried as bytes, a
+text file becomes context, and any other type has its path written into the line. Each leaves a
+drop's rule in the trust map ([DROP-2](dropping.md#DROP-2)) and may be from outside the workspace
+([DROP-3](dropping.md#DROP-3)). In shell mode the paths are written as words and nothing is staged
+([DROP-6](dropping.md#DROP-6)), and the markers, the numbering and the order are a drop's. The
+clipboard's own bytes for a file are never read, so nothing goes through the gate
+[PASTE-2](#PASTE-2) states, which still admits a picture a person pasted and nothing else.
+
+The files win over a picture and over the text beside them, since copying a file leaves its name
+behind as text as copying an image in a browser leaves its page. A path is taken when it is
+absolute and names a regular file. One that is not, a directory ([DROP-5](dropping.md#DROP-5)) or a
+file that is gone, is left out, and a clipboard left with none is read as the rest of it would be.
+A name that is not text, or that holds a line break, refuses the whole copy with a note that none
+of the files were pasted, and the text beside it is not pasted in its place. A name that is not
+UTF-8 has no spelling as text, and what it arrives as, a name holding U+FFFD, is the name of
+another file or of none, so a name holding U+FFFD is refused as the desktop window refuses it
+([DROP-12](dropping.md#DROP-12)), whether or not a file has that name. A newline or a carriage
+return would end the line a drop is read from and begin another, so that a file named
+`a<newline>/etc/hosts` would be taken for two. Refusing the whole copy is for the reason
+[DROP-6](dropping.md#DROP-6) refuses the whole drop: the files taken would not be the files
+copied. Any other control character is the drop handling's to judge, so a copied name holding one
+refuses a shell line as a dragged one does. A file gone by the time the line is read says there is
+nothing on the clipboard to paste. It applies while a turn runs, as every Ctrl-V does
+([PASTE-7](#PASTE-7)).
+
+The files are read from the macOS pasteboard's file URLs through `osascript`, on Linux from the
+`text/uri-list` or the GNOME file managers' `x-special/gnome-copied-files` that `wl-paste` or
+`xclip` reads, and on Windows from the clipboard's file drop list through PowerShell.
+
+**Why.** What a drop's rules rest on is where its path came from: a person's gesture put it there,
+and nothing a model said or a file held could. A path on the clipboard has the same origin, a
+person's copy of a file in their own file manager followed by the key that pastes it, and the file
+is read when the turn is built, as a dropped one is, so that justification is the drop's and
+needs no second gate. A picture pasted from its bytes is a different claim, about content that
+arrived on the clipboard, and keeping the two apart is what keeps PASTE-2 narrow.
+
+`verified-by: bravebot_tui::clipboard::files_win_over_the_picture_and_the_text_beside_them`
+`verified-by: bravebot_tui::clipboard::a_clipboard_naming_no_files_reads_what_else_it_holds`
+`verified-by: bravebot_tui::clipboard::a_relative_path_on_the_clipboard_is_not_a_file_that_was_copied`
+`verified-by: bravebot_tui::clipboard::a_name_holding_a_line_break_refuses_the_whole_list_rather_than_being_read_as_two_files`
+`verified-by: bravebot_tui::clipboard::a_name_that_arrived_as_the_replacement_character_refuses_the_whole_list`
+`verified-by: bravebot_tui::clipboard::a_name_holding_a_tab_or_an_escape_is_left_for_the_drop_handling_to_judge`
+`verified-by: bravebot_tui::clipboard::a_refused_list_is_not_swapped_for_the_text_beside_it`
+`verified-by: bravebot_tui::clipboard::a_file_whose_name_is_not_text_refuses_the_list_it_is_copied_in`
+`verified-by: bravebot_tui::clipboard::the_reads_of_the_clipboard_start_no_tool_found_only_in_a_directory_a_stage_may_write`
+`verified-by: bravebot_tui::clipboard::a_directory_and_a_missing_path_are_not_files_that_were_copied`
+`verified-by: bravebot_tui::clipboard::the_files_keep_the_order_they_were_copied_in`
+`verified-by: bravebot_tui::clipboard::a_script_reports_a_name_holding_a_newline_as_one_path`
+`verified-by: bravebot_tui::clipboard::output_that_is_not_a_list_of_paths_names_no_files`
+`verified-by: bravebot_tui::clipboard::a_file_manager_copy_is_read_from_the_uri_list_it_leaves`
+`verified-by: bravebot_tui::clipboard::a_gnome_file_manager_copy_is_read_from_the_type_it_leaves`
+`verified-by: bravebot_tui::clipboard::the_files_on_a_pasteboard_are_read_as_their_paths_in_order`
+`verified-by: bravebot_tui::clipboard::a_pasteboard_holding_only_a_picture_names_no_files`
+`verified-by: bravebot_tui::dropped::the_line_of_paths_reads_back_as_those_paths`
+`verified-by: bravebot_tui::dropped::a_path_with_a_space_is_one_word_of_the_line`
+`verified-by: bravebot_tui::dropped::a_uri_list_names_the_files_it_lists`
+`verified-by: bravebot_tui::dropped::the_verb_line_of_a_gnome_copied_files_payload_is_not_a_path`
+`verified-by: bravebot_tui::dropped::a_name_holding_a_newline_stays_one_entry_of_a_uri_list`
+`verified-by: bravebot_tui::dropped::a_uri_list_line_that_is_not_a_local_file_names_nothing`
+`verified-by: bravebot_tui::dropped::a_uri_naming_localhost_is_a_file_on_this_machine`
+`verified-by: bravebot_tui::dropped::a_name_that_is_not_text_refuses_the_list_and_is_not_taken_for_its_lookalikes`
+`verified-by: bravebot_tui::app::a_file_the_clipboard_names_is_staged_as_dropping_it_stages_it`
+`verified-by: bravebot_tui::app::a_copied_file_is_carried_read_or_written_out_by_its_type_as_a_dropped_one_is`
+`verified-by: bravebot_tui::app::a_copied_file_named_with_a_space_and_a_quote_is_one_file`
+`verified-by: bravebot_tui::app::a_copied_file_is_written_as_its_path_in_shell_mode_and_nothing_is_staged`
+`verified-by: bravebot_tui::app::a_copied_file_that_is_gone_says_there_is_nothing_to_paste`
+`verified-by: bravebot_tui::app::a_copied_file_is_staged_while_a_turn_runs_too`
+`verified-by: bravebot_tui::app::a_refused_list_of_copied_files_says_so_and_stages_nothing`
+`verified-by: bravebot_tui::app::a_copied_file_with_an_escape_in_its_name_refuses_a_shell_line_as_a_dragged_one_does`
+
+## Known costs
+
+- **The desktop decodes a pasted picture in its main process.** The clipboard's bytes come from
+  whatever application copied them, and the main process decodes them to write them out again as
+  PNG and to draw the chip's drawing. A dropped picture is decoded in the sandboxed renderer
+  instead. The decode is the one Electron's clipboard image read always did, and one over the cap
+  as it came off the clipboard is refused before it is decoded.
+
+- **Whatever put the files on the clipboard chose them.** Ctrl-V reads the list as it finds it, so
+  a program that wrote one there has the file read as a drop would be. The marker, or the path of a
+  type nothing takes, is in the line before anything is sent, so the person sees which files.
+  A file read this way is trusted and may be from outside the workspace, as a dropped one is.
+
+- **A read of the clipboard starts a process for each thing it looks for.** Ctrl-V asks for files,
+  then for each picture flavour, then for text, by starting the platform's tool each time, and
+  stops at the first answer. On macOS a clipboard holding only text starts five, `osascript` for the
+  files, the PNG, the JPEG and the TIFF and then `pbpaste`, at about 70 ms each. On Windows each
+  read is a PowerShell that loads the clipboard assembly.
+
+- **A TIFF can paste a picture where the text beside it was meant.** On macOS the system offers a
+  TIFF for any picture it holds, and the TIFF is the last picture flavour tried, so an application
+  that offers a drawing of what it copied only as a TIFF is pasted as that drawing by Ctrl-V.
+  Command-V pastes the text.
+
+- **The Windows readers run in no test.** CI lints the Windows target and does not run it, so the
+  PowerShell scripts that read a clipboard's file list and its picture are checked by reading only.
+
+- **A pasted picture lands on disk.** It is written into the session record so a resume can restore
+  it (PASTE-9), which means a screenshot pasted into a session outlives the session. Deleting the
+  session removes it.
+
+- **A screenshot of a hostile page puts a stranger's words into the planner's context as though
+  the user had typed them.** Nothing inspects the pixels and nothing could. What justifies it is
+  that the user chose what to copy, can see on their own screen what they pasted, and is the party
+  this serves. It is the cost shell mode carries, reached by another route.
+
+- **Only a paste is cleaned.** Text typed at the keyboard, a path a file dropped onto a prompt
+  writes ([dropping.md](dropping.md)), and a prompt given with `-p` or in the desktop application's
+  message box are not run through the filter, so a character nobody can see can still reach a
+  message by those routes. A drop onto a shell line where a name holds such a character writes nothing
+  ([DROP-6](dropping.md#DROP-6)).
+
+- **A listed character is removed even when it was meant.** A soft hyphen or a word joiner in text
+  a person copied from a typeset page goes too. The notice says how many, and the words read the
+  same.
+
+- **A hidden message can use a character this list does not name.** The list is the characters
+  that draw as nothing in a terminal; a visible lookalike is not one.
+
+- **Text that is arranged by a removed control reads in another order.** Left-to-right and
+  right-to-left marks, embeddings and isolates are removed, so Hebrew or Arabic text mixed with Latin
+  names or digits can be drawn in a different order than it was copied. The characters are the same
+  and are sent in the order they were pasted, and the notice says controls were removed.
+
+- **A variation selector on an ideograph or a math symbol is removed.** A Japanese name written
+  with an ideographic variation sequence is pasted in its default glyph. A selector behind an
+  ideograph is also how a byte is hidden behind it, which is why it is not kept.

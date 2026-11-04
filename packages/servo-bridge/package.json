@@ -1,0 +1,14 @@
+{
+  "name": "@yolo-web/servo-bridge",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Pure Bun/TypeScript bridge for consolidated Servo W3C engine crates (servo-euclid, servo-stylo/selectors, servo-xpath, servo-webvtt)",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check"
+  }
+}

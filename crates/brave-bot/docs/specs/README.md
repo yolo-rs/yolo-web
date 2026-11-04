@@ -1,0 +1,222 @@
+# Specs
+
+Each file in this directory is a mini-spec for one topic within the bravebot system.
+Spec changes, additions, and removals are closely reviewed by humans.
+
+If a mini-spec disagrees, that is a bug in the spec that should be fixed.
+
+Specs have automation attached which verifies that there is coverage of functionality and also
+that functionality matches specs. It drafts a bug for every problem it finds, showing what went
+wrong rather than describing it, and a person reads the drafts and says which get posted.
+
+## The specs
+
+| Spec | Id | Clauses | Topic |
+|---|---|---|---|
+| [labels.md](labels.md) | `LABEL` | 10 | the lattice, taint, who may read what, and how a first label is assigned |
+| [routing.md](routing.md) | `ROUTE` | 11 | where an effect may land and what may decide it |
+| [trust-map.md](trust-map.md) | `TRUST` | 25 | which paths the user vouched for, what a write does to that record, and how long an answer lasts |
+| [permissions.md](permissions.md) | `PERM` | 20 | rules written in advance about what to ask about and what to refuse |
+| [processors.md](processors.md) | `PROC` | 16 | the one component that reads untrusted content, and what it may do with it |
+| [vetting.md](vetting.md) | `CHECK` | 15 | checking quarantined content for an injection attempt before every prompt that would promote it, so a person deciding has a second opinion |
+| [grounding.md](grounding.md) | `GROUND` | 6 | counting what a delegate or a goal's turns actually ran and wrote, and telling the planner and the goal judge (proposed: not built) |
+| [delegation.md](delegation.md) | `DELEGATE` | 33 | a second planner, narrower than the first, and what crosses back from one |
+| [addressing-a-definition.md](addressing-a-definition.md) | `ADDRESS` | 13 | running one of those definitions yourself, in place of describing the work and hoping the planner picks it |
+| [definition-memory.md](definition-memory.md) | `MEMORY` | 14 | what a definition keeps between conversations, which checkout it works in, and the desktop's bots as definitions (the desktop's bots proposed, not built) |
+| [recall.md](recall.md) | `RECALL` | 11 | what a person's sessions remember across projects: rules loaded in full every turn, facts ranked and recalled, and how neither lets untrusted content in (proposed: built, thresholds not yet measured on a bravebot store) |
+| [checkouts.md](checkouts.md) | `CHECKOUT` | 23 | a delegate given a checkout of its own, so workers stop editing and building in one tree, and how its work comes back (partly built) |
+| [worktrees.md](worktrees.md) | `WORKTREE` | 10 | a session working in a worktree the driver made for it: asking for one, its name, what the session keeps of it, resuming into it and leaving it (proposed, nothing built) |
+| [turns.md](turns.md) | `TURN` | 16 | how long a turn may go on, what happens when it does not stop, what is said when it produces nothing, checks nothing or runs into its output ceiling, what a session does when it has spent its limit, what is done about the same call three times running, how the reads of one round are run together, what the note under a finished turn says about refusals, what is done about the planner's task list when a turn answers with tasks still open, what the planner is told when a turn ends in a failure, and what a limit a person gave a run does to it |
+| [prompting.md](prompting.md) | `PROMPT` | 14 | every moment the system stops and puts something to a human, what an answer grants, and where each answer is kept |
+| [permission-modes.md](permission-modes.md) | `MODE` | 14 | a standing answer to those prompts: accepting edits, planning, auto, or asking about nothing at all |
+| [auto-mode.md](auto-mode.md) | `AUTO` | 9 | a fifth permission mode in which a classifier that reads only the person's typed lines and the action answers a confined run and the first fetch question, and every other question is asked (the setting that removes the mode from the ladder and from the desktop window's menu, and a model of its own, are not built) |
+| [references.md](references.md) | `REFER` | 6 | directories outside the working one that a person declared in their settings, what declaring one grants, and what the planner is told (repository entries and `@alias` proposed, not built) |
+| [naming-files.md](naming-files.md) | `NAME` | 13 | writing `@path` in a prompt: what it puts into the turn and what it vouches for |
+| [pasting.md](pasting.md) | `PASTE` | 12 | what Ctrl-V puts into a turn, text, a picture or a copied file, and on what footing |
+| [dropping.md](dropping.md) | `DROP` | 12 | what dragging a file onto a window puts into a turn, and on what footing |
+| [deep-links.md](deep-links.md) | `LINK` | 6 | a `bravebot://open` link: what it may ask for, where it starts, and why its words are put in the box and not sent |
+| [shell-mode.md](shell-mode.md) | `SHELL` | 7 | the `!` prompt: a line the user typed, and why the planner can never reach it |
+| [shell-integration.md](shell-integration.md) | `SHELLINT` | 5 | `bravebot shell-init`: a hook that gives `@bravebot` the commands run in a terminal, as quarantined input |
+| [skills.md](skills.md) | `SKILL` | 19 | `AGENTS.md` and skills: what a skill file is and what each source is trusted for, and what a skill kept as a mode adds to every turn |
+| [skill-evals.md](skill-evals.md) | `SKILLEVAL` | 9 | `bravebot skill eval <name>`: a skill's saved cases run with the skill and without it, graded from the driver's own record of each run, and the two scores set side by side |
+| [instructions.md](instructions.md) | `INSTR` | 17 | which instruction files are looked for, where, in what order, and where what they say ends up |
+| [cli.md](cli.md) | `CLI` | 43 | running without the interactive interface: one-shot tasks, piped input, `doctor` and `auth`, and opening it on a task |
+| [schedule.md](schedule.md) | `SCHEDULE` | 8 | what a stored `bravebot schedule` entry does with nobody there: pausing it, stopping at a question, skipping an overlapping firing, which expressions and flags it may hold, where a run's result goes, and `/schedule` in a session |
+| [manifest.md](manifest.md) | `MANIFEST` | 15 | plan the whole run first, then execute it with no model in the control path |
+| [terminal-input.md](terminal-input.md) | `INPUT` | 50 | what the user types into: the box, the keys, and where a terminal's own limits show through |
+| [commands.md](commands.md) | `CMD` | 30 | a line beginning with `/`: where one may come from, when a line is one, what it does to the line, what a slash word is offered, what `/copy` copies, what `/caffeinate` holds awake, what `/init` asks the planner to write, what `/review` asks the planner to review, what `/help` asks the planner to answer from the documentation, what `/changelog` shows, what `/todos` prints, how `/resume` leaves for another session, what `/request` opens, what `/context` divides, what `/lsp` says, what `/open` lists, what `/recap` asks for, when one is given unasked, what `/effort` shows and completes, what `/sandbox`, `/limit`, `/review` and `/reach` show after the word, how a prompt file is expanded, how a line that starts with the word of an MCP server's prompt runs it, and what `/mode` keeps applied |
+| [terminal-transcript.md](terminal-transcript.md) | `VIEW` | 42 | what is drawn back: the transcript, a resumed session, a fenced block in a reply, and how content reaches the screen |
+| [session-view.md](session-view.md) | `RPCVIEW` | 8 | the opt-in shared Rust view for fresh local bridge sessions, the stdio TypeScript client that applies it, and the anonymous channel they speak over |
+| [local-host.md](local-host.md) | `HOST` | 12 | the process that keeps a bridge's sessions while the programs that drive it come and go: who starts it, what a client may ask, where its records are, when a session is closed, and the development relay that hands it to an app on loopback |
+| [watching.md](watching.md) | `WATCH` | 24 | work done outside the transcript: a delegate's own lines, what a command printed, a question asked beside it, the mode Ctrl-L opens over the delegates and the questions, and `/outputs` and Alt-L, which open it over what commands printed |
+| [scroller.md](scroller.md) | `SCROLL` | 10 | reading back through what happened: the mode Ctrl-O opens over the transcript, and the keys inside it |
+| [credential-protection.md](credential-protection.md) | `CRED` | 25 | where credentials come from, which of them may be held at all, and what each tier owes |
+| [premium-credentials.md](premium-credentials.md) | `PREM` | 9 | the key Brave's premium service authorises a request with: how a person stores it, where it is sent, what it is counted against and who may read it |
+| [chatgpt-sign-in.md](chatgpt-sign-in.md) | `CHATGPT` | 17 | signing in to OpenAI with a ChatGPT account through a browser, from a typed command or the window's own sign-in, and offering the account's models in the picker (proposed, built and exercised against a real account; whether OpenAI's terms allow it is undecided, and what that account did not show is listed in the spec) |
+| [xai-sign-in.md](xai-sign-in.md) | `XAI` | 22 | signing in to xAI with a SuperGrok subscription through a code a person enters on any device, from a typed command or the window's own sign-in, the file the tokens are kept in, replacing an access token before it expires, and how the account's models are named (proposed; the command, the turn's request and the account's models are built) |
+| [sandboxing.md](sandboxing.md) | `SANDBOX` | 32 | operating-system confinement for processes running code we did not write |
+| [mcp.md](mcp.md) | `MCP` | 16 | tools that come from outside this repository, the prompts such a server offers a person, and what they are allowed to do |
+| [mcp-servers.md](mcp-servers.md) | `SERVERS` | 22 | how a person declares one of those servers, what that declaration is trusted for, and what is asked before a tool from one runs |
+| [connectors.md](connectors.md) | `CONNECTOR` | 21 | the installed definitions a connector call is made against, and the client that hands a credential authority one request and reads its one reply |
+| [browser.md](browser.md) | `BROWSER` | 46 | reaching a Brave extension from a session: the relay between them, who starts each half, and how each trusts the other |
+| [hooks.md](hooks.md) | `HOOK` | 10 | a command a person asked to have run when something happens |
+| [network-egress.md](network-egress.md) | `NET` | 12 | every request that leaves this process, and what comes back |
+| [backends.md](backends.md) | `BACKEND` | 70 | which service answers a request, and what a person may choose between |
+| [import.md](import.md) | `IMPORT` | 12 | a first start with nothing configured: what Claude Code and opencode set up, or a running Ollama, LM Studio or llama-server serves, and what of it may be copied here |
+| [compaction.md](compaction.md) | `COMPACT` | 19 | shortening a long conversation into a summary of itself, in the request only |
+| [loop.md](loop.md) | `LOOP` | 18 | sending a prompt again and again until somebody stops it, or once after a delay |
+| [triggers.md](triggers.md) | `TRIGGER` | 11 | `bravebot trigger`: a prompt registered under a name and an event, the loopback listener that starts it for a signed delivery, and what it is given and allowed |
+| [goal.md](goal.md) | `GOAL` | 20 | one condition a person set, judged after every turn, until it holds |
+| [open-loops.md](open-loops.md) | `OPEN` | 7 | proposed, nothing built: the unfinished business a session leaves, found by fixed rules, shown when it changes, and told to the planner |
+| [file-watches.md](file-watches.md) | `FSWATCH` | 12 | a standing watch on one path, firing with no turn running to notice it |
+| [sessions.md](sessions.md) | `SESSION` | 39 | what is kept between runs: the record of a session, the questions asked beside it, and the prompts a person typed |
+| [commits.md](commits.md) | `COMMIT` | 11 | a commit of the files each turn wrote: which paths, what message, how git is started, and how `/undo` takes the commit back (proposed, nothing built) |
+| [mouse.md](mouse.md) | `MOUSE` | 53 | dragging, double and triple clicking and shift-clicking to copy text: which cells a selection may take, how a wrapped line and a wide character copy, how a selection of the transcript stays on its text as the view scrolls and goes when the text under it changes, copies in full past the screen and scrolls the view when it is dragged outside it, Escape putting it away, and the notice of a copy naming the pane, clicking a call or a delegate in the scroller, clicking a delegate at the plain prompt and while work runs, leaving a delegate's view with a click, opening the scroller on a call at the plain prompt, copying a reply by its marker, copying a fenced block by its word, taking back a prompt waiting behind a turn, and clicking the name, the model, effort, context, MCP server, language server or plan row or the Files section of the info panel, the whole words of a finished task, the permission mode and the hints under the box, the panel's hide row, a place in the prompt box's text, the rows of the `/effort`, `/config`, `/theme` and `/model` pickers, of the history search, of the lists of sessions and of what is offered under the box, the wheel in them and a press outside them, a file of the list, the close control and the edit bar in the files state of the info panel and the wheel over that state, and a web address with ctrl held and a file path, shown or opened in the editor with ctrl held, in the assistant's words, and the pull request and issue links of the info panel, that no mouse event answers a question, that a press on a panel drawn over the frame reaches nothing beneath it, the scrollbar beside the transcript, what a click acts on being found in one record the frame wrote, the target the pointer is over being held, the menu a right click opens, and a report past column 223 being the cell it names, with what a multiplexer has to forward |
+| [info-panel.md](info-panel.md) | `PANEL` | 15 | telling many sessions apart: the terminal's title and the info panel |
+| [files-mode.md](files-mode.md) | `FILES` | 10 | a state of the info panel that lists the files the session wrote and every edit to the highlighted one |
+| [background-sessions.md](background-sessions.md) | `BG` | 16 | proposed, the roster, its list (grouped by state on a terminal) and stop, `--bg`, `/bg`, attach, reply and the supervisor that restarts an idle process built: sessions that keep running after the terminal closes, with a list, attach and reply |
+| [sessions-screen.md](sessions-screen.md) | `SCREEN` | 17 | the Sessions screen: one list of every session on the machine, opened with Left over an empty box, `/sessions`, `/resume` or `--resume`, its status tabs, grouping, search, pins and the keys and clicks that open, copy, begin, stop, rename, archive and delete one |
+| [session-messages.md](session-messages.md) | `MSG` | 12 | proposed, built: one background session sending text to another, put to a person and never starting a turn |
+| [plugins.md](plugins.md) | `PLUGIN` | 10 | proposed, nothing built: a bundle of skills, definitions, hooks and servers installed by one command a person types, and the marketplace index it may come from |
+| [state-directory.md](state-directory.md) | `STATE` | 4 | `~/.bravebot`, and who on the machine may read what is written into it |
+| [incognito.md](incognito.md) | `INCOG` | 8 | a session that runs normally and adds nothing to `~/.bravebot` |
+| [diagnostic-log.md](diagnostic-log.md) | `DIAG` | 10 | a file of hosts, statuses, counts and fixed words, never content, for a person to attach to a bug report, and the bug report that names it, from the terminal or the desktop app, and a failure of the desktop window's page |
+| [trace.md](trace.md) | `TRACE` | 11 | what is recorded about every decision the system makes, what that record may contain, and the view of the request a turn built |
+| [localization.md](localization.md) | `LOCALE` | 8 | every word said to a person, and which of them change with the reader's language |
+| [acp.md](acp.md) | `ACP` | 9 | an editor hosting a session over the Agent Client Protocol: what a prompt, an attachment and an answer may carry, and what a failed turn says |
+| [layering.md](layering.md) | `LAYER` | 6 | which crate is allowed to do what |
+| [releases.md](releases.md) | `RELEASE` | 22 | what names a version, what starts a release, and what an installer trusts about what it fetched |
+| [updates.md](updates.md) | `UPDATE` | 12 | learning that a newer version is out, and the line or link that installs it |
+| [crash-reports.md](crash-reports.md) | `CRASH` | 10 | what a panic tells the maintainers: the one file it leaves, what the file may hold, when and where it is sent, and how a person stops it |
+
+## The tools
+
+One spec per tool. [tools/tool-surface.md](tools/tool-surface.md) is the table of all of them and
+the routing-versus-content split they share.
+
+| Spec | Id | Clauses | Tool |
+|---|---|---|---|
+| [tools/tool-surface.md](tools/tool-surface.md) | `TOOL` | 6 | the surface every tool shares |
+| [tools/read-file.md](tools/read-file.md) | `READ` | 10 | `read_file` |
+| [tools/list-files.md](tools/list-files.md) | `LIST` | 6 | `list_files` |
+| [tools/search.md](tools/search.md) | `SEARCH` | 13 | `search` |
+| [tools/repo-map.md](tools/repo-map.md) | `MAP` | 5 | `repo_map` |
+| [tools/read-git.md](tools/read-git.md) | `GIT` | 15 | `read_git` |
+| [tools/lsp.md](tools/lsp.md) | `LSP` | 14 | `lsp` |
+| [tools/write-file.md](tools/write-file.md) | `WRITE` | 9 | `write_file` |
+| [tools/edit-file.md](tools/edit-file.md) | `EDIT` | 8 | `edit_file` |
+| [tools/spawn-processor.md](tools/spawn-processor.md) | `SPAWN` | 6 | `spawn_processor` |
+| [tools/spawn-agent.md](tools/spawn-agent.md) | `AGENT` | 8 | `spawn_agent` |
+| [tools/run.md](tools/run.md) | `RUN` | 30 | `run` |
+| [tools/command-line.md](tools/command-line.md) | `CMDLINE` | 16 | `run`'s command line, compiled rather than interpreted |
+| [tools/read-output.md](tools/read-output.md) | `OUTPUT` | 6 | `read_output` |
+| [tools/vet-content.md](tools/vet-content.md) | `VET` | 6 | `vet_content` |
+| [tools/fetch-url.md](tools/fetch-url.md) | `FETCH` | 9 | `fetch_url` |
+| [tools/download-url.md](tools/download-url.md) | `DOWNLOAD` | 5 | `download_url` |
+| [tools/load-skill.md](tools/load-skill.md) | `LOAD` | 5 | `load_skill` |
+| [tools/search-skills.md](tools/search-skills.md) | `FINDSKILL` | 4 | `search_skills` |
+| [tools/todo-write.md](tools/todo-write.md) | `TODO` | 3 | `todo_write` |
+| [tools/schedule-next.md](tools/schedule-next.md) | `SCHED` | 5 | `schedule_next` |
+| [tools/watch-file.md](tools/watch-file.md) | `ARM` | 6 | `watch_file` |
+| [tools/ask-user.md](tools/ask-user.md) | `ASK` | 13 | `ask_user` |
+| [tools/request-path.md](tools/request-path.md) | `PATHREQ` | 7 | `request_path` |
+| [tools/advisor.md](tools/advisor.md) | `ADVISOR` | 9 | `advisor` |
+| [tools/remember.md](tools/remember.md) | `REMEMBER` | 3 | `remember` |
+| [tools/propose-rule.md](tools/propose-rule.md) | `RULE` | 3 | `propose_rule` |
+| [tools/set-link.md](tools/set-link.md) | `SETLINK` | 3 | `set_link` |
+| [tools/recall.md](tools/recall.md) | `RECALLTOOL` | 3 | `recall` |
+
+Topics with no spec yet are ordinary code. Adding one is how a topic becomes review-required.
+
+## Format
+
+Front matter, then numbered clauses. Everything outside a clause is commentary and binds nobody.
+
+- **`id`** is a short prefix. Clause ids are `PREFIX-N`, allocated in order and never reused and
+  never renumbered, because a commit message, an issue, and a test name all point at one. A
+  clause added mid-spec takes the next free id where it stands, so ids need not read in order
+  down the file. A withdrawn clause stays, marked withdrawn, and says what replaced it.
+  `make check-spec` holds a file to this against main, and fails a clause whose heading
+  has moved to another id, since a renumbered id goes on resolving while naming a clause nobody
+  cited. Improving a heading's wording is not that and costs nothing. A spec withdrawn and rewritten
+  wholesale does renumber on purpose, and says so in
+  [../../agents/renumbered-clauses.txt](../../agents/renumbered-clauses.txt), which is also where
+  somebody following a citation of the old id is told where the clause went.
+- **Every clause carries an anchor**, `<a id="PREFIX-N"></a>` on the line directly above its
+  heading, so `labels.md#LABEL-3` is a link that keeps working. The anchor GitHub generates from
+  a heading contains the title, so it breaks the moment somebody improves the wording, which is
+  the moment an issue or a commit pointing at that clause most needs the link to survive.
+- **`governs`** lists the paths this spec decides. A diff touching one of them is reviewed against
+  this file. Anything under no spec's `governs` is ordinary code and reviewed as such.
+  **Name the files, not the crate.** A pattern matching a directory wholesale puts a spec's name on
+  every file that lands in it afterwards, which reads as review-required and is not: whoever added
+  the file chose nothing, and nobody decided the spec reaches it. Enumerating costs a line when a
+  module is added that the spec does decide, and that line is the decision being made where a
+  reviewer sees it. The cost is the other way: a new module is under no spec until somebody adds it,
+  so a file can sit ungoverned without anything saying so. That is the direction to fail in, because
+  a spec claiming reach it has not been read against is worse than one that plainly has a gap.
+  Where a pattern is already a glob, as `crates/*/Cargo.toml` is, what it matches is one file per
+  crate that cannot be added without a crate being added.
+- **`guards`** lists symbols whose every use is review-required. An entry may also pin where it is
+  used, as a `sites:` list of `path: count` items, and the check fails when the tree and the list
+  disagree in either direction. The count is how many times the symbol occurs in that file's code:
+  two uses on one line are two, one call rustfmt wrapped across three lines is one, and a comment
+  naming the symbol is not a use of it at all. The line defining the symbol counts as one of those
+  occurrences. A method is counted where it is called on a receiver too, since `gate.open()` is how
+  most call sites read; an associated function has no receiver, so `Labelled::new` counts its
+  definition and every place the qualified name is written, and nothing besides. A qualified
+  symbol has to be defined where its qualifier owns it, in an `impl` naming the type or, for
+  `home::write_file`, at the margin of the module of that name: a method another type happens to
+  spell the same way is not this one, and a guard whose qualifier defines nothing counts no uses
+  at all rather than that type's. The count reads two spellings of a method, `.method(` on a
+  receiver and `Type::method`. An entry that says `every-spelling: yes` also fails `make check-spec`
+  on any other spelling of its method (`Type::<T>::method(`, `<Type<T>>::method(`, an alias after
+  `use Type as L`) and on a use inside a `macro_rules!` body, which would count once however often
+  the macro is invoked. Only `Labelled::declassify` says so, since the bare name of most guards is a
+  free function elsewhere. The count is of releases of the symbol, not of the decisions a caller
+  then takes from what was released. A count rather than a line number, so moving a call inside a
+  file changes nothing, while adding or removing one is an edit to this spec that a reviewer
+  sees. `make check-spec` prints the number it found, which is the number to record.
+  Within one spec, either every entry pins its sites or none does: an unpinned entry beside pinned
+  ones reads as though it were checked too.
+- **`documented-by`** names the pages under `docs/website/docs/` that describe this spec to somebody
+  using Brave Bot, written from the repository root the same way `governs` is, so one front matter
+  never means two different things by a path. A decision per spec, not per clause: a page is written
+  for a reader with a task, so it covers a topic and rarely lines up with a single clause.
+  `none` is a valid answer and says why in brackets, in one of two forms the check leaves alone but a
+  reader can grep for: `none (internal: ...)` for behaviour nobody using Brave Bot acts on, and
+  `none (gap: ...)` for a page still owed, which is the site's backlog.
+- **`verified-by:`** lines name the tests that pin a clause, as `crate::module::test_name`. The
+  coverage check reads them, fails when a name does not resolve to a test that exists, and drafts a
+  bug for any clause whose value is `none`. `by-construction` is for a clause nothing can execute,
+  such as a crate having no dependencies, and says in brackets what makes it hold.
+  **A named test is a Rust test.** The check resolves a name against the `#[test]` functions in
+  `crates/`, so a test written in anything else cannot be cited however it is spelled. A clause about
+  behaviour only another language implements therefore has two honest forms and no third: a Rust test
+  that observes the behaviour from outside, which is what a clause about a separate process gets, or
+  `verified-by: none`, which lands in [../../unverified-clauses.txt](../../unverified-clauses.txt)
+  where the gap is a line in a diff. Citing a test the check cannot resolve is neither.
+  A clause is still allowed to be about such behaviour: what the check decides is how a clause is
+  pinned, not what one may say. What it means in practice is that the clause worth writing is the one
+  stating the property this side can observe, since that is the one a test can hold to.
+
+A clause is one rule, stated so that a reader can tell whether a given diff obeys it. If a clause
+needs an "and" it is usually two clauses. A set of rules that reads best as a table is one clause with a
+table in it, never a clause id per row: ids must be greppable one to a heading.
+
+**Each spec stands alone.** A clause id is only ever cited inside its own file, where a reader can
+scan for it. Never cite another spec's clause: somebody landing here first has no idea what
+`TRUST-5` is, and chasing an id across files to understand one rule is how a set of small documents
+becomes worse than one big one. Where a clause leans on something another spec owns, state the fact
+plainly in a few words. "The same 'most specific wins' rule the trust map uses" costs a line and
+needs no second tab.
+
+**Point at documents, not at ids.** When a whole topic lives elsewhere, link the file by name:
+`[trust-map.md](trust-map.md)`, not `` `TRUST` ``. A bare prefix means nothing to a first-time
+reader, and it cannot be clicked.
+
+**Clauses describe behaviour, not implementation.** Say what happens and why, never which function
+or type does it. A clause naming a symbol becomes wrong the next time somebody renames one, and it
+pins the code that exists rather than the behaviour the code owes. Identifiers belong in `governs`,
+`guards` and `verified-by`, where tooling reads them and a rename is caught by the check rather
+than by a reader noticing.

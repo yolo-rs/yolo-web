@@ -1,0 +1,32 @@
+# Best practices
+
+What a reviewer holds a pull request against. Every rule here is one a person has to read a diff to
+decide.
+
+Nothing here restates a rule a tool already enforces or could: formatting, lints, clause numbering,
+the lockfiles, an em-dash, an attribution marker, a `declassify` outside the gates, a regex engine,
+an exception in `.config/deny.toml` with no reason, a first-person correction in a commit message. Those
+belong in `make check`, `make check-spec`, `make check-npm`, `make check-deps`,
+`make check-narration` and the security scan, and a rule that can be written as one of those
+checks is a bug against this directory rather than an entry in it.
+
+| Read | For |
+|---|---|
+| [best-practices/specs.md](best-practices/specs.md) | prose a clause is allowed to be, and a change agreeing with the specs that govern it |
+| [best-practices/tests.md](best-practices/tests.md) | what a test is named, what it covers, and proving it fails first |
+| [best-practices/writing.md](best-practices/writing.md) | what a comment is for |
+| [best-practices/dependencies.md](best-practices/dependencies.md) | what a dependency has to be worth across package managers |
+| [best-practices/shared-implementation.md](best-practices/shared-implementation.md) | where shared client behavior lives and how callers reuse it |
+| [best-practices/paths.md](best-practices/paths.md) | carrying paths, programs and arguments as bytes so a lossy rendering never decides what is approved, granted or started, a fix for a spelling that got past a rule covering the file's other names, and a step that turns a name into a key saying which different files it joins, and a program bravebot starts itself being tested for the names it starts, with a fix to one such program checked against the others, and a program bravebot starts for itself with the person's environment having each variable that chooses code to run removed unless its value is a safe file, directory or program name |
+| [best-practices/compatibility.md](best-practices/compatibility.md) | persisted data that earlier versions wrote still reading, or being migrated |
+| [best-practices/carried-grants.md](best-practices/carried-grants.md) | a trust answer, vouch or permission kept for a resume or a later session being restored only for the checkout it was given for, with identity recorded or the cost named in the sessions spec |
+| [best-practices/ui.md](best-practices/ui.md) | what a change to the desktop UI is held to before it lands, and where its logic lives |
+| [best-practices/portability.md](best-practices/portability.md) | a fix or addition making sense for other people on other computers, with no workaround for one setup |
+| [best-practices/usability.md](best-practices/usability.md) | a change asking the person for no command, answer or setup that the feature does not need and no spec clause requires |
+| [best-practices/gaps.md](best-practices/gaps.md) | a pull request or issue that says a defect is left unfixed naming the issue that tracks it, or the spec clause that records it as an accepted cost, and a description edited when a later commit changes what it states |
+
+The review pass over the rule this repository exists for is
+[development/reviewing-for-the-rule.md](development/reviewing-for-the-rule.md): the four
+shapes a violation takes in a diff, and the argument that mistakes a sound design for one.
+[specs/](specs/README.md) is the source of truth for behaviour, and a spec wins where a spec
+and a rule here disagree.

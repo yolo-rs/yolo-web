@@ -1,0 +1,20 @@
+[package]
+name = "bravebot-lsp"
+description = "Language server client: positions in, locations out, and nothing the file wrote"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-core = { path = "../core" }
+bravebot-diag = { path = "../diag" }
+# For the gate every start of a program in this process runs under (RPCVIEW-8).
+bravebot-sandbox = { path = "../sandbox" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

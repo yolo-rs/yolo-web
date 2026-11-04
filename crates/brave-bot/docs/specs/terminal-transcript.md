@@ -1,0 +1,1497 @@
+---
+id: VIEW
+title: The transcript
+status: normative
+governs:
+  - crates/tui/src/avatar.rs
+  - crates/tui/src/blocks.rs
+  - crates/tui/src/colour_codes.rs
+  - crates/tui/src/indicator.rs
+  - crates/tui/src/issue_link.rs
+  - crates/tui/src/logo.rs
+  - crates/tui/src/markdown.rs
+  - crates/tui/src/notify.rs
+  - crates/tui/src/preview.rs
+  - crates/tui/src/reasoning.rs
+  - crates/tui/src/render.rs
+  - crates/tui/src/render/watching.rs
+  - crates/tui/src/render/scroller.rs
+  - crates/tui/src/render/transcript.rs
+  - crates/tui/src/render/export.rs
+  - crates/tui/src/render/prompt.rs
+  - crates/tui/src/render/beneath.rs
+  - crates/tui/src/render/hint.rs
+  - crates/tui/src/state.rs
+  - crates/tui/src/state/attachments.rs
+  - crates/tui/src/state/queue.rs
+  - crates/tui/src/state/entry.rs
+  - crates/tui/src/state/scroller.rs
+  - crates/tui/src/theme.rs
+  - crates/tui/src/theme_prompt.rs
+  - crates/tui/src/list_picker.rs
+  - crates/tui/src/model_prompt.rs
+  - ui/src/renderer/components/Transcript.tsx
+  - ui/src/renderer/components/ThinkingTail.tsx
+  - ui/src/renderer/thinking.ts
+  - ui/src/renderer/apply.ts
+  - ui/src/renderer/transcript.ts
+  - ui/src/renderer/live.ts
+  - ui/src/renderer/components/Agents.tsx
+  - ui/src/renderer/components/Sidebar.tsx
+  - ui/src/renderer/App.tsx
+  - crates/ui-bridge/src/turn.rs
+  - ui/scripts/ux-state.test.mjs
+  - ui/scripts/agents.test.mjs
+  - ui/scripts/marking.test.mjs
+documented-by:
+  - docs/website/docs/using/transcript.md
+  - docs/website/docs/customize/theme.md
+---
+
+## Scope
+
+What is drawn back to the user: the transcript, a resumed session, how content is shaped on its
+way to the screen, which palette paints the interface, and what the environment can decline of
+both. Presentation holds no labels, and the
+rules here are about a person being able to see what the agent did. What the user types into is
+[terminal-input.md](terminal-input.md). A line beginning with `/` is [commands.md](commands.md).
+
+## Clauses
+
+<a id="VIEW-1"></a>
+### VIEW-1: the end of a reply is visible when it arrives, and scrolling back is deliberate
+
+A wrapped reply shows its end as it lands. Scrolling back changes the view and holds it there,
+whatever the running turn adds to the transcript below it.
+
+`verified-by: bravebot_tui::render::the_end_of_a_wrapped_reply_is_visible_when_it_arrives`
+`verified-by: bravebot_tui::render::scrolling_back_changes_the_view`
+`verified-by: bravebot_tui::render::a_reply_arriving_does_not_drag_a_scrolled_back_view_to_the_tail`
+`verified-by: bravebot_tui::state::a_chunk_of_the_reply_leaves_a_view_scrolled_back_at_rest_where_it_was`
+`verified-by: bravebot_tui::state::nothing_a_running_turn_adds_moves_a_scrolled_back_view`
+
+
+<a id="VIEW-2"></a>
+### VIEW-2: a resumed session shows what the earlier turns did
+
+The trail, the plan worked to, the calls made, and what has been spent all come back, so reading a
+transcript back does not depend on remembering the session. Each recorded turn keeps its prompt and
+outcome, including failures and cancellation after visible work. A task list keeps its recorded
+unfinished items and stays on its own turn; a following turn with no list does not inherit it.
+
+`verified-by: bravebot_tui::sessions::reopening_keeps_exact_prompts_and_turn_count`
+`verified-by: bravebot_tui::sessions::reopening_keeps_failure_and_cancellation_in_export`
+`verified-by: bravebot_tui::sessions::reopening_keeps_task_ownership_and_recorded_measurements`
+
+`verified-by: bravebot_tui::state::a_resumed_turn_shows_the_trail_it_left`
+`verified-by: bravebot_tui::state::a_resumed_turn_shows_the_plan_it_worked_to`
+`verified-by: bravebot_tui::state::a_resumed_transcript_shows_the_calls_the_turn_made`
+`verified-by: bravebot_tui::state::a_resumed_session_carries_on_counting_what_it_has_spent`
+`verified-by: bravebot_agent::conversation::a_recounted_turn_says_what_it_did_and_not_only_what_it_said`
+`verified-by: bravebot_agent::conversation::every_call_in_a_round_is_recounted`
+`verified-by: bravebot_agent::conversation::what_a_call_returned_is_not_recounted`
+`verified-by: bravebot_agent::conversation::a_call_with_unreadable_arguments_is_still_recounted`
+
+
+<a id="VIEW-3"></a>
+### VIEW-3: untrusted content is shown on purpose, inside a margin it cannot forge
+
+Showing it is deliberate and not a leak. Filenames out of a quarantined listing, the first lines of
+a file nobody vouched for, what a processor produced, the body of every write: all of it reaches
+the person watching, because an agent that will not say which file it is working on has protected
+nobody. It is the planner that may not read untrusted content, and a terminal is not a planner's
+context. It reaches a screen under a witness minted for release to a display and for nothing else.
+
+What must hold is how it is drawn. A bar runs down the margin of every **drawn row** of the block,
+and the content never gets to draw its own, so a file containing "untrusted content ends here" ends
+nothing. A caption can be imitated by the thing it captions; a margin cannot. Never replace the bar
+with a heading, and never show untrusted content outside a marked block.
+
+Rows rather than lines, because a line longer than the terminal is wide becomes several of them. It
+is broken to the width by the same step that draws the margin, and each row it breaks into carries
+a bar of its own. Leaving the break to the paragraph the block is drawn in is the same defect as
+omitting the margin: the continuation starts at column 0, which is untrusted content outside the
+block, positioned wherever the content's own padding chose to put it. Nothing is dropped to make a
+line fit. The block's heading is laid out the same way and for the same reason, since the origin
+named in it can be a filename read out of a quarantined listing.
+
+Every control character is replaced with a visible glyph on the way to the screen, in the heading
+as well as the content. Replaced rather than dropped, since a character silently removed is one the
+user cannot tell was ever in the file.
+[VIEW-30](#VIEW-30) is the one exception: a complete colour code in output drawn for reading is
+taken out and counted.
+
+A picture or a PDF held in a slot is shown as the driver's rows about it and never as the first
+lines of the `data:` URI it is held as, which are base64 that tells a person nothing. The rows say
+what it is (a picture with its media type, or a PDF), its size in bytes, the name it is held under,
+that the model has not seen it and how a person looks at it: by asking for it to be written to a file
+([WRITE-9](tools/write-file.md#WRITE-9)), or for `vet_content` to be called on it, whose question
+puts a copy to the person ([VET-4](tools/vet-content.md#VET-4)). The second row follows the tools
+the run was offered: it gives both ways where `write_file` and `vet_content` are offered, the one
+that is offered where only one is, and says there is no way to open the picture where neither is. A
+turn addressed to a definition is offered the tools the definition names
+([ADDRESS-7](addressing-a-definition.md#ADDRESS-7)), and the command line can leave tools out. A
+delegate is never offered `vet_content` and nobody can ask it for anything, so the rows for a
+picture it holds say what its tools can do instead: that it can write the picture to a file the
+person opens where it is offered `write_file`, and that there is no way to open it where it is not.
+The rows come from
+`bravebot_agent::report::picture_rows`, so every front end draws the same words, and they are drawn
+as any other row of the block is: behind the bar, under the heading that carries the label. The
+media type is an entry of the closed table the driver chose. The size is the number of bytes the
+picture holds: the length of the file read, or what the base64 of a server's part decodes to,
+counted where each was read or checked. It is smaller than the byte count of the `data:` URI that
+the reference the planner holds reports. The name is the reference's, the second row is chosen by
+whether the run is a delegate and by whether its list of tools holds `write_file` and
+`vet_content`, and no byte of the picture is in a row or decides one.
+
+`verified-by: bravebot_agent::turn::a_picture_read_from_a_file_is_described_to_the_person_and_not_drawn_as_base64`
+`verified-by: bravebot_agent::turn::a_pdf_read_from_a_file_is_described_to_the_person_as_a_pdf`
+`verified-by: bravebot_agent::mcp::a_picture_a_server_returns_is_never_shown_to_the_planner`
+`verified-by: bravebot_agent::turn::a_picture_a_delegate_reads_is_described_by_what_the_delegate_can_do_with_it`
+`verified-by: bravebot_agent::mcp::a_picture_a_delegate_holds_is_described_by_what_the_delegate_can_do_with_it`
+`verified-by: bravebot_agent::turn::the_rows_about_a_picture_follow_the_tools_an_addressed_turn_is_offered`
+`verified-by: bravebot_agent::mcp::a_picture_an_addressed_turn_holds_is_described_by_the_tools_the_turn_is_offered`
+`verified-by: bravebot_mcp::protocol::an_image_part_of_a_listed_type_is_taken_as_a_picture`
+`verified-by: bravebot_tui::marking::the_rows_for_a_picture_are_drawn_behind_the_bar_under_the_label`
+`verified-by: bravebot_cli::progress::a_picture_is_written_as_the_rows_about_it_behind_the_margin_under_its_label`
+`verified-by: bravebot_ui_bridge::wire::the_rows_about_a_picture_cross_as_the_agent_wrote_them_under_their_label`
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so it is pinned instead by ui/scripts/marking.test.mjs, which renders the real transcript row through react-dom with the two rows read from the catalog and asserts that they are drawn as text in the confined block under the label's chip, and that the markup holds no image, no element that loads, no attribute that fetches and no base64; make check-ui and the Front end CI job both run it)`
+`verified-by: bravebot_tui::marking::quarantined_content_cannot_paint_its_own_margin`
+`verified-by: bravebot_tui::marking::a_neutralised_escape_is_still_visible`
+`verified-by: bravebot_tui::marking::a_tab_in_the_content_or_the_origin_is_drawn_as_a_glyph`
+`verified-by: bravebot_tui::marking::text_without_control_characters_is_drawn_as_it_is`
+`verified-by: bravebot_tui::render::quarantined_content_is_shown_and_marked_on_every_line`
+`verified-by: bravebot_tui::marking::a_wrapped_preview_line_is_marked_on_every_row_it_reaches`
+`verified-by: bravebot_tui::marking::wrapped_content_cannot_paint_a_bar_in_the_margin_column`
+`verified-by: bravebot_tui::marking::a_long_origin_keeps_the_heading_inside_the_block`
+`verified-by: bravebot_agent::turn::quarantined_content_reaches_the_person_and_not_the_planner`
+
+<a id="VIEW-4"></a>
+### VIEW-4: untrusted content is never drawn as structure
+
+A quarantined preview is never drawn as a table. Everything untrusted goes through the margin and
+control-character replacement of VIEW-3. Shell mode output is **not** drawn as quarantined,
+because it is trusted, and it still cannot draw its own escapes.
+
+`verified-by: bravebot_tui::render::a_quarantined_preview_is_never_drawn_as_a_table`
+`verified-by: bravebot_tui::shell_mode::output_is_not_drawn_as_quarantined`
+`verified-by: bravebot_tui::shell_mode::output_cannot_draw_its_own_escapes`
+
+
+<a id="VIEW-5"></a>
+### VIEW-5: a tiny terminal still renders
+
+Every prompt and the session view render at small sizes rather than panicking. A prompt keeps its
+question in view where the box has room for it beside the keys. Where the box has not, the prompts
+[PROMPT-4](prompting.md#PROMPT-4) holds to its keys draw the keys and take no yes, so none of them
+approves a question that was never on the screen.
+
+`verified-by: bravebot_tui::trust_prompt::a_tiny_terminal_still_renders`
+`verified-by: bravebot_tui::confirm::write::a_tiny_terminal_draws_the_write_keys_and_takes_no_yes`
+`verified-by: bravebot_tui::render::a_tiny_terminal_renders`
+
+<a id="VIEW-6"></a>
+### VIEW-6: a reply is drawn as it arrives, and the round that ends replaces it
+
+The words are drawn where the finished entry will be and in the shape it will have, so nothing on
+the screen moves when the round ends. A round that finishes with nothing to say takes its own tail
+down, and so does a turn that fails, is stopped, or has to send its request again: what an
+abandoned attempt had written is no part of the reply that replaces it.
+
+**Why.** The longest silence in a turn is the one while the model writes, and it is the silence
+with the most to show. A counter reports that something is happening; it does not report what.
+
+The words are untrusted model output released for a screen, on the same footing as everything else
+in this file and through the same gate. Released once for the round rather than once per frame,
+because it is one release however many pieces it arrives in.
+
+`verified-by: bravebot_tui::render::a_reply_is_drawn_while_it_is_still_arriving`
+`verified-by: bravebot_tui::render::a_reply_looks_the_same_arriving_as_it_does_arrived`
+`verified-by: bravebot_tui::state::a_streamed_reply_grows_rather_than_being_replaced`
+`verified-by: bravebot_tui::state::the_finished_round_takes_over_from_the_reply_that_was_arriving`
+`verified-by: bravebot_tui::state::a_reply_that_was_arriving_is_taken_down_however_the_round_ends`
+`verified-by: bravebot_tui::state::a_round_starting_afresh_starts_from_an_empty_tail`
+`verified-by: bravebot_tui::state::a_delegates_round_leaves_the_reply_the_turn_is_writing`
+`verified-by: bravebot_agent::turn::the_reply_reaches_the_interface_while_it_is_being_written`
+`verified-by: bravebot_agent::turn::showing_a_reply_as_it_arrives_is_recorded_once_for_the_round`
+
+<a id="VIEW-7"></a>
+### VIEW-7: where a result went is drawn only where that is not the ordinary answer
+
+A call whose result the planner may read says nothing about it. A result the planner may not read
+says so on the call, and so does a name that was never opened. The marked block that holds the
+content of a result kept from the planner does not say it again: the heading names the content
+untrusted and the margin marks every row. A block whose content is in no model's context at all, as
+a processor's remark is, says so in its heading, since that is the exception among blocks.
+
+**Why.** Nearly every call reads into the planner's context, and a line under nearly every call
+distinguishes nothing while crowding out the lines that do. What the design turns on is the
+exception, and the exception is still marked twice over: on the call, and again in the margin of
+the block its content is drawn in.
+
+Recording is unaffected. What is dropped here is a row on a screen, not a fact: where every result
+went is still in the audit trail, which is what the record is for.
+
+`verified-by: bravebot_tui::render::the_ordinary_landing_is_not_given_a_line_of_its_own`
+`verified-by: bravebot_tui::render::a_result_the_planner_may_not_read_still_says_so`
+`verified-by: bravebot_tui::render::a_block_states_its_reach_only_where_that_is_the_exception`
+`verified-by: bravebot_cli::progress::a_block_states_its_reach_only_where_that_is_the_exception`
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so it is pinned instead by ui/scripts/marking.test.mjs, which renders the real transcript row through react-dom and asserts that a block of content kept from the planner draws no sentence about it, and that a block of content in no model's context draws that sentence in its heading and not under the content; make check-ui and the Front end CI job both run it)`
+
+<a id="VIEW-8"></a>
+### VIEW-8: a note from the session is drawn in one ink of its own
+
+What the session says in its own voice, the trust answer, an unavailable confinement, a status
+report, is drawn in a single ink belonging to nothing else, and never in the ink that marks
+untrusted content.
+
+A note written by `Session::note_done` is drawn in the ink for finished and one written by
+`Session::note_refused` in the ink for failed ([VIEW-9](#VIEW-9)), so a directory that was added is
+not read as another error. The code that writes the note chooses which, from what happened and
+never from the words of the note. `/add-dir` writes a done note for a directory it opened and a
+refused note for a path it refuses or asks for. `/add-dir close` writes a done note for a directory
+it closed and a refused note for a name it cannot close or asks for. The opening of the directories
+a settings file names goes through the `/add-dir` handler, so it writes the same done note for a
+directory it opens and the same refused note for a name that does not open. `/cd` writes a done
+note for the directory it moved to and a refused note for an empty path or one it could not move
+to. `/checkouts remove` writes a done note for a checkout it removed and a refused note for one it
+does not keep, one kept because the person declined, or one it could not remove. `/export` writes a
+done note for the path it wrote to and a refused note for a path it could not write. `/rename`
+writes a done note for the name it took and a refused note for an empty name or one with nothing in
+it. Every other note has the shared-ink tone and is drawn in the shared ink, whether it is written
+by `Session::note` or built as an entry directly. Neither tone is a failed turn: an export, the
+failure the status area repeats and the reason a turn is recorded under are read from the entry's
+speaker, which the choice leaves as it was. Where every ink is the terminal's own, the wording
+("added", "could not add") is what tells them apart. Under `brave`, neither ink is the one that
+marks untrusted content.
+
+**Why.** That ink is spoken for twice over: a call still running, and the margin down every block
+of content the planner may not read. Drawing a note in it said the trust answer was quarantined.
+An ink of its own rather than merely a different one, because a note sharing with any third meaning
+puts the question back where it started. Under `brave` that ink is a teal, so a note that reports
+nothing wrong does not read as an error. Orange and red are not used for it: a refusal is drawn in
+red, and a note that says something was done or refused takes the ink that already means that. The
+ink every other note shares is still used by nothing else, and has a deeper shade for a light
+background, as the aside does.
+
+This is about which ink, and it is never what makes the marking hold. VIEW-3 stands on the margin
+because a colour can be imitated by the content beside it, and nothing here weakens that: no ink
+tells a reader whether something is quarantined, and a note drawn in the wrong one would still be
+outside a block.
+
+`verified-by: bravebot_tui::render::a_system_note_is_not_drawn_in_the_ink_that_marks_untrusted_content`
+`verified-by: bravebot_tui::theme::the_note_ink_is_shared_with_no_other_ink_of_the_brave_palette`
+`verified-by: bravebot_tui::theme::the_brave_note_ink_is_not_orange_or_red_on_either_background`
+`verified-by: bravebot_tui::theme::the_brave_note_ink_has_a_deeper_shade_for_a_light_background`
+`verified-by: bravebot_tui::render::a_note_of_something_done_or_refused_is_not_drawn_in_the_ink_every_note_shares`
+`verified-by: bravebot_tui::app::add_dir_draws_the_directory_it_added_apart_from_the_names_it_refused`
+`verified-by: bravebot_tui::app::add_dir_close_draws_what_it_closed_apart_from_what_it_refused`
+`verified-by: bravebot_tui::app::under_a_palette_without_colour_the_wording_tells_what_add_dir_did_from_what_it_refused`
+`verified-by: bravebot_tui::app::the_directories_a_settings_file_names_are_told_in_the_tones_of_add_dir`
+`verified-by: bravebot_tui::app::a_refused_command_is_not_taken_for_the_failure_of_the_turn_around_it`
+`verified-by: bravebot_tui::app::cd_draws_the_directory_it_moved_to_apart_from_what_it_refused`
+`verified-by: bravebot_tui::app::checkouts_remove_draws_what_it_removed_apart_from_what_it_refused`
+`verified-by: bravebot_tui::app::export_draws_what_it_wrote_apart_from_what_it_refused`
+`verified-by: bravebot_tui::app::rename_draws_the_name_it_took_apart_from_what_it_refused`
+
+<a id="VIEW-9"></a>
+### VIEW-9: under `brave`, an ink that carries meaning is mixed, not chosen by the terminal
+
+Where a colour is what tells one thing on the screen from another, and the theme in force is
+`brave`, it is a shade this interface mixes. The sixteen named colours are slots a terminal
+repaints, so they are used only where the meaning is the terminal's own and the slot is one
+schemes agree about: green for finished, red for failed, yellow for a call still running, which
+are read against whatever palette the user chose rather than against each other. An aside is not
+one of those and is mixed, and neither is the ink that tells shell mode from ordinary mode and a
+directory from a file. A mixed shade that has to stay legible against the background is picked
+for the background sensed at startup, and a terminal that will not say gets the shade for a dark
+one.
+
+**Why.** A named slot is a request, not a colour. The same code drew a different colour in every
+profile, which is how one slot came to carry two meanings at once without anybody choosing that.
+Bright black, the slot an aside would take, is where that disagreement is worst: across the 606
+schemes in the iTerm2 collection it falls below 4.5:1 against its own background in 88% of the
+dark ones and reaches 1.8:1 at the bottom, so an aside was legible or not according to a choice
+nobody here made. Mixing it holds the contrast steady, and the shade still recedes behind the
+scheme's own foreground in roughly nine schemes out of ten.
+
+`verified-by: bravebot_tui::theme::a_note_is_a_shade_and_not_a_slot_a_terminal_repaints`
+`verified-by: bravebot_tui::theme::brand_primary_is_a_shade_and_not_a_slot_a_terminal_repaints`
+`verified-by: bravebot_tui::theme::a_dark_background_takes_the_brighter_brand_primary`
+`verified-by: bravebot_tui::theme::a_light_background_takes_the_deeper_brand_primary`
+`verified-by: bravebot_tui::theme::colorfgbg_with_a_white_background_is_light`
+`verified-by: bravebot_tui::theme::an_osc_reply_with_a_pale_background_is_light`
+`verified-by: bravebot_tui::theme::brave_keeps_named_slots_for_the_terminals_own_meanings`
+`verified-by: bravebot_tui::theme::an_aside_is_a_shade_picked_for_the_background_rather_than_a_slot`
+`verified-by: bravebot_tui::theme::an_accent_is_a_shade_picked_for_the_background_rather_than_a_slot`
+`verified-by: bravebot_tui::render::the_scroller_names_the_mode_in_a_shade_and_not_a_slot`
+`verified-by: bravebot_tui::render::shell_mode_is_marked_in_a_shade_and_not_a_slot`
+
+<a id="VIEW-10"></a>
+### VIEW-10: a palette a person chose paints every role from that table
+
+A theme chosen with `/theme` mixes every semantic ink from the palette that name names, including
+the background and the default text. Named ANSI slots are not used there, so two roles cannot
+collapse because the terminal remapped green. The choice is a keystroke on this surface, the same
+endorsement `/model` takes for a request field. Moving the cursor live-previews: the theme under
+the cursor is put in force for as long as it is selected, and Escape restores the theme that was
+in force when the picker opened.
+
+**Why.** Leaving finished and failed as named slots under a named theme would put the person's
+chosen palette and the terminal's remapping in a fight over the same meaning. Previewing on the
+cursor rather than only on Enter is what lets a person compare themes against their own transcript
+before committing.
+
+`verified-by: bravebot_tui::theme::a_named_theme_paints_its_own_background_and_inks`
+`verified-by: bravebot_tui::theme_prompt::preview_puts_the_cursor_theme_in_force_and_cancel_restores`
+`verified-by: bravebot_tui::app::typing_the_theme_command_opens_the_picker`
+`verified-by: bravebot_tui::app::the_theme_command_carries_its_name`
+
+<a id="VIEW-11"></a>
+### VIEW-11: user theme files are read only from `~/.bravebot/themes`
+
+A JSON file whose stem is the theme name is loaded from the user's own themes directory and from
+nowhere else. A workspace `.bravebot/themes` is not consulted: that directory is workspace content,
+and a palette file must not become a decision taken from untrusted bytes. An unknown or unreadable
+stored name is `brave`. A broken file is omitted from the list rather than crashing. The earlier
+name `system` still finds `brave`, so a choice saved under that name is not silently lost, and a
+user file may not take either name: it would load and then be unreachable.
+
+`verified-by: bravebot_tui::theme::user_themes_come_from_a_directory_of_json_files`
+`verified-by: bravebot_tui::theme::a_broken_json_file_is_not_a_theme`
+`verified-by: bravebot_tui::theme::none_in_json_inherits_the_terminal_default`
+`verified-by: bravebot_tui::theme::the_old_system_name_still_finds_brave`
+`verified-by: bravebot_tui::theme::a_user_file_cannot_take_a_name_that_reaches_the_default_theme`
+`verified-by: bravebot_session::store::an_empty_theme_file_is_not_a_choice`
+`verified-by: bravebot_session::store::an_over_long_theme_name_is_not_a_choice`
+`verified-by: bravebot_tui::themes::a_theme_file_in_the_workspace_is_not_a_theme`
+`verified-by: bravebot_tui::themes::user_theme_files_are_read_from_the_themes_directory_of_the_state_directory`
+`verified-by: bravebot_tui::themes::a_stored_name_nothing_offers_is_brave`
+
+<a id="VIEW-12"></a>
+### VIEW-12: the theme picker is a centred panel over the session
+
+`/theme` draws a bordered panel in the middle of the screen. The session stays visible behind it,
+and is redrawn each time the cursor moves so the live preview is of the person's own transcript
+rather than of an empty page. The panel is sized to the list and stays inside the frame on a tiny
+terminal. It is not a full-screen takeover.
+
+Under the list is a row for what the theme on the cursor does that its name does not say. A theme
+whose inks were picked for the background sensed at startup has that row filled, which is `brave`,
+every family published in both polarities, and any user theme that gave a pair. The row is drawn
+empty rather than dropped for the themes with nothing to add, so the list does not shift under the
+cursor as it moves.
+
+**Why.** A full-screen list hides the thing a theme is for. The same centred-panel shape the write
+and trust prompts already use keeps the person oriented, and putting the session behind the panel
+is what makes previewing honest. A name is where a person looks first for what a theme will do, and
+no name on this list says whether its inks were chosen for the terminal: `brave` names who it is
+from, and `gruvbox` names a scheme without saying it has two halves. That is the one property the
+list cannot carry, which is why it is the one the row does.
+
+`verified-by: bravebot_tui::theme_prompt::the_terminal_following_theme_says_so_under_the_list`
+`verified-by: bravebot_tui::theme_prompt::a_family_that_follows_the_terminal_says_so_under_the_list`
+`verified-by: bravebot_tui::theme_prompt::a_theme_that_paints_every_ink_itself_has_nothing_to_add`
+`verified-by: bravebot_tui::theme_prompt::the_picker_is_drawn_as_a_centred_panel`
+`verified-by: bravebot_tui::theme_prompt::the_panel_stays_inside_a_tiny_terminal`
+`verified-by: bravebot_tui::theme_prompt::the_session_stays_visible_around_a_list_sized_panel`
+`verified-by: bravebot_tui::render::moving_the_theme_cursor_repaints_the_session_behind_the_panel`
+`verified-by: bravebot_tui::theme_prompt::the_list_shows_names_a_person_reads`
+
+<a id="VIEW-13"></a>
+### VIEW-13: the end of a turn is said, not left to the indicator disappearing
+
+A finished turn is reported on its own row: which turn it was, what it cost, and how long it took.
+A turn that failed and a turn that was cancelled get the same row without the cost and the duration.
+VIEW-22 covers what each of the three endings is called, and the reason a failed one carries. The
+row lasts until the next turn starts, and a session that has not run one shows nothing.
+
+**Why.** The indicator going out was the only thing that said a turn was over, and an announcement
+made by something disappearing is one nobody reads. It matters most for the turn that ends on a
+sentence like `now let me look at the dispatch code`: the model asked for no tool, so the turn ended
+there, and the last thing on the screen was a promise with nothing to distinguish it from a hang.
+The cost is on the row because a turn that spent forty rounds and one that spent a single round look
+identical in scrollback, and the difference is most of the explanation. Both figures are off the
+other two endings because they price an answer, and a turn abandoned part way produced none. What
+it did spend is counted against the session all the same.
+
+`verified-by: bravebot_tui::render::a_finished_turn_says_so_rather_than_leaving_an_empty_line`
+`verified-by: bravebot_tui::render::a_failed_turn_is_not_drawn_as_a_finished_one`
+`verified-by: bravebot_tui::render::a_session_that_has_not_run_a_turn_reports_nothing`
+`verified-by: bravebot_tui::state::a_completed_turn_is_reported_with_what_it_cost`
+`verified-by: bravebot_tui::state::a_failed_turn_is_reported_as_failed`
+`verified-by: bravebot_tui::state::a_completed_turn_is_reported_with_how_long_it_took`
+`verified-by: bravebot_tui::render::only_a_finished_turns_row_carries_its_cost_and_duration`
+`verified-by: bravebot_tui::state::starting_another_turn_forgets_the_last_one`
+`verified-by: bravebot_tui::state::a_session_that_has_not_run_a_turn_reports_none_finished`
+`verified-by: bravebot_tui::state::clearing_a_session_forgets_the_turn_that_finished`
+`verified-by: bravebot_tui::frame::a_failed_turn_reports_no_cost_and_no_duration`
+`verified-by: bravebot_tui::frame::a_cancelled_turn_reports_no_cost_and_no_duration`
+
+<a id="VIEW-14"></a>
+### VIEW-14: the model picker narrows as it is typed into
+
+`/model` draws a bordered panel in the middle of the screen, over the session it was opened from,
+with a search box above the list. Typing narrows the list rather than walking it, matching without
+regard to case anywhere in the name shown, in the name a request would carry, and in the service
+that answers; every word typed has to match something. The cursor stays on the model it was on
+where that model still matches, and falls to the first match where it does not. A search matching
+nothing says so, and there is nothing to select while it does.
+
+**Why.** A gateway's roster runs to hundreds of models, and the picker offers it alongside Brave's
+own and whatever a settings file configured. No arrangement of a list that long makes arrowing to
+one row reasonable, and a name is remembered by a word out of the middle of it, or by the service
+it is reached through, rather than by how it starts. A cursor that stayed at its index would land
+on an unrelated model with every keystroke, which is worst exactly where the list is long enough to
+need searching.
+
+`verified-by: bravebot_tui::model_prompt::typing_narrows_the_list_to_the_models_that_match`
+`verified-by: bravebot_tui::model_prompt::a_search_matches_the_service_and_the_requestable_name_too`
+`verified-by: bravebot_tui::model_prompt::a_search_ignores_case`
+`verified-by: bravebot_tui::model_prompt::a_word_held_by_only_one_place_still_finds_the_model`
+`verified-by: bravebot_tui::model_prompt::the_search_box_is_drawn_with_what_was_typed`
+`verified-by: bravebot_tui::model_prompt::backspace_widens_the_list_again`
+`verified-by: bravebot_tui::model_prompt::the_cursor_stays_on_the_model_it_was_on_while_the_search_narrows`
+`verified-by: bravebot_tui::model_prompt::the_cursor_stays_on_the_model_it_was_on_while_the_search_widens`
+`verified-by: bravebot_tui::model_prompt::the_cursor_falls_to_the_first_match_when_what_it_was_on_is_filtered_out`
+`verified-by: bravebot_tui::model_prompt::a_search_matching_nothing_leaves_nothing_to_choose`
+`verified-by: bravebot_tui::model_prompt::a_search_matching_nothing_says_so`
+`verified-by: bravebot_tui::model_prompt::an_openai_roster_of_mixed_models_is_one_section_with_every_row_reachable`
+`verified-by: bravebot_tui::model_prompt::the_picker_is_drawn_as_a_centred_panel`
+`verified-by: bravebot_tui::model_prompt::the_panel_stays_inside_a_tiny_terminal`
+
+<a id="VIEW-15"></a>
+### VIEW-15: every model is drawn under the service that will answer it
+
+The picker groups its rows by service, one heading per service, in the order the roster first
+mentions each one. The models Brave's own endpoint serves are named as a service like any other.
+A service that the roster mentions in more than one place is still one section. Where a section is
+scrolled through, its heading is held on the top line of the list, so no row on screen is without
+the name of what answers it.
+
+**Why.** The same name is reachable through more than one service, billed and credentialled
+differently, and which of them answers is the whole of what is being chosen between. Said once over
+a section rather than on every row, because the alternative repeats a gateway's name down hundreds
+of rows and pushes the part that identifies the model off the panel. Holding the heading while the
+section scrolls is what keeps that true of a roster too long to see at once, which is the only kind
+a gateway has.
+
+`verified-by: bravebot_tui::model_prompt::every_service_heads_its_own_section`
+`verified-by: bravebot_tui::model_prompt::a_service_that_appears_twice_in_the_roster_is_still_one_section`
+`verified-by: bravebot_tui::model_prompt::an_openai_roster_of_mixed_models_is_one_section_with_every_row_reachable`
+`verified-by: bravebot_tui::model_prompt::a_heading_stays_above_the_rows_when_the_list_is_scrolled`
+`verified-by: bravebot_tui::model_prompt::a_heading_is_held_where_the_list_has_room_for_two_rows`
+`verified-by: bravebot_tui::model_prompt::a_blank_row_is_given_up_so_the_heading_and_the_cursor_both_fit`
+`verified-by: bravebot_tui::model_prompt::a_service_is_never_given_two_headings_at_once`
+`verified-by: bravebot_tui::model_prompt::no_row_on_screen_is_without_its_service_heading_wherever_the_list_is_scrolled`
+`verified-by: bravebot_tui::model_prompt::the_model_in_use_is_marked`
+`verified-by: bravebot_tui::model_prompt::a_premium_model_says_so`
+`verified-by: bravebot_tui::model_prompt::the_list_shows_names_a_person_reads`
+
+<a id="VIEW-16"></a>
+### VIEW-16: a user theme may give one colour for each terminal background
+
+An ink in a theme file is either one value or a pair, `{"dark": …, "light": …}`, and a pair
+resolves to the arm matching the background sensed at startup. Neither arm is a special kind of
+value, so a pair composes with `defs` and with `none` exactly as a lone value does. A pair missing
+an arm is not an ink, and the file holding it is not a theme. A file that gives at least one pair
+is marked as depending on the terminal, which is what the row under the picker's list is read from.
+
+**Why.** A scheme published for a light terminal and a dark one is one theme a person names, not
+two, and shipping it as two files leaves them to work out which their terminal wants. Refusing a
+half-written pair rather than filling in the missing arm keeps a typo from painting half a palette,
+where the wrong half is the one its author never sees.
+
+`verified-by: bravebot_tui::theme::a_colour_given_for_each_background_takes_the_arm_the_terminal_asked_for`
+`verified-by: bravebot_tui::theme::an_arm_of_a_pair_resolves_through_defs_and_none`
+`verified-by: bravebot_tui::theme::a_pair_arm_of_none_leaves_the_terminals_background_showing`
+`verified-by: bravebot_tui::theme::a_pair_missing_an_arm_is_not_a_theme`
+`verified-by: bravebot_tui::theme::a_theme_says_whether_any_of_its_inks_came_from_the_sensed_background`
+
+<a id="VIEW-17"></a>
+### VIEW-17: a scheme published in both polarities is one row, and each half stays reachable
+
+Where a built-in scheme was published for a light terminal and a dark one, the picker lists a
+single row under the family's name, painted from the half matching the background sensed at
+startup. Both fixed halves keep the names they had and still resolve through `/theme`, each with
+the palette its name says, whichever background was sensed. A half is not listed, with one
+exception: the half already in force is, since a picker that cannot show the current theme has no
+row to open on. A scheme published in one polarity only, and a second dark scheme from the same
+authors, are each their own row as before.
+
+**Why.** Two rows for one scheme make a person work out which of them their terminal wants, and
+answer it again on the next machine. Sensing the background answers it for them, but sensing is a
+guess wherever a terminal will not say, and a guess that cannot be overruled is worse than the two
+rows were. Keeping the halves resolvable is what makes the adapting row safe to prefer: being
+guessed wrong about costs one `/theme` and it stays fixed.
+
+`verified-by: bravebot_tui::theme::a_family_replaces_the_two_rows_it_was_published_as`
+`verified-by: bravebot_tui::theme::a_family_takes_the_half_for_the_background_sensed`
+`verified-by: bravebot_tui::theme::a_pinned_half_keeps_its_own_palette_whichever_background_was_sensed`
+`verified-by: bravebot_tui::theme::the_pinned_half_in_use_is_listed`
+`verified-by: bravebot_tui::theme::the_list_is_brave_and_eighteen_named_schemes`
+
+
+<a id="VIEW-18"></a>
+### VIEW-18: a model's own working is not drawn as its answer
+
+Where a reply opens with a reasoning block and closes it before answering, the block is not
+drawn, arriving or arrived, and what reaches the transcript is what follows it. Only a block the
+reply opens with counts: a reply that mentions the tags further down keeps every word. A block
+opened and never closed is drawn whole once the reply is finished, and drawn as nothing while it
+is still being written, as is a part-written opening. The thinking a service sends in a channel of
+its own is not the answer either, and is drawn only as [VIEW-33](#VIEW-33) says.
+
+**Why.** A model with a channel of its own for its working keeps it out of the reply, and this
+never arises. A model without one writes the same words into the reply instead, where they land
+on top of the answer: a paragraph nobody asked for above every answer, kept in the session record
+and drawn again on every resume.
+
+What an unclosed block means is the whole of the difference between the two cases. Part way
+through a reply it means the model is still thinking, and drawing a thought only to take it back
+when the close arrives is a flicker on every turn such a model takes. At the end of a reply it
+means the words ran out mid-thought, and a truncated thought on the screen says more than a blank
+where the answer should be.
+
+Taking it off is a decision read out of the reply, so it belongs to the side that draws rather
+than to the turn. The driver hands over every byte without looking at it, because in a session
+that has observed untrusted content those are untrusted bytes and it may not branch on them.
+
+`verified-by: bravebot_tui::reasoning::a_leading_reasoning_block_is_not_drawn`
+`verified-by: bravebot_tui::reasoning::every_spelling_of_the_block_is_recognised`
+`verified-by: bravebot_tui::reasoning::a_reply_that_mentions_a_tag_keeps_every_word`
+`verified-by: bravebot_tui::reasoning::a_thought_that_never_closed_is_drawn_whole`
+`verified-by: bravebot_tui::reasoning::a_thought_still_being_written_draws_nothing`
+`verified-by: bravebot_tui::reasoning::the_answer_is_drawn_as_soon_as_the_thought_closes`
+`verified-by: bravebot_tui::reasoning::a_part_written_opening_is_held_back`
+`verified-by: bravebot_tui::reasoning::text_that_cannot_become_a_tag_is_drawn_at_once`
+`verified-by: bravebot_tui::render::a_thought_the_model_wrote_into_the_reply_is_not_drawn`
+`verified-by: bravebot_tui::state::a_thought_arriving_is_not_drawn_at_the_tail`
+`verified-by: bravebot_tui::state::a_finished_reply_keeps_the_answer_and_not_the_thought`
+`verified-by: bravebot_tui::state::a_round_that_thought_before_speaking_records_only_what_it_said`
+`verified-by: bravebot_tui::state::a_round_that_only_thought_leaves_no_entry`
+`verified-by: bravebot_tui::state::a_resumed_reply_leaves_off_its_leading_reasoning_block`
+`verified-by: bravebot_tui::state::a_legacy_resumed_reply_leaves_off_its_leading_reasoning_block`
+
+
+<a id="VIEW-19"></a>
+### VIEW-19: a note is the session speaking, not a detail of the line above it
+
+A note is drawn at the column the rest of the transcript's text starts in, without the marker that
+ties a line to the entry above it. A note longer than the window continues on the next row in that
+same column, so every row of it starts where its first does. Consecutive notes are drawn as one
+block, and the blank line falls after the last of them rather than between each.
+
+**Why.** The marker means the line belongs to the entry above it, and a note belongs to no entry:
+the ones startup leaves are drawn before there is anything above them at all, so the marker pointed
+at nothing and left the note hanging off it.
+
+The spacing is the same fact from the other side. A session reporting three things as it starts is
+making one report, and a blank between each presents it as three separate turns. The run ends where
+the notes do, so the last of them is still held apart from whatever is said next.
+
+`verified-by: bravebot_tui::render::a_note_is_not_drawn_as_a_detail_of_the_line_above_it`
+`verified-by: bravebot_tui::render::a_run_of_notes_is_not_spaced_apart`
+`verified-by: bravebot_tui::render::a_note_starts_in_the_column_a_replys_text_starts_in`
+`verified-by: bravebot_tui::render::a_note_that_wraps_continues_under_the_column_its_first_row_starts_in`
+`verified-by: bravebot_tui::render::every_row_of_a_wrapped_note_carries_the_ink_of_its_tone`
+
+
+<a id="VIEW-20"></a>
+### VIEW-20: `NO_COLOR` is honoured, and outranks the theme in force
+
+Where `NO_COLOR` is set to anything but the empty string, every role is drawn in the terminal's own
+ink and this program adds none of its own: the background it would paint, the shades it mixes, the
+named slots it asks for, the gradient across the wordmark, and the pixel face drawn beside it. The terminal is not asked about its
+background either, since nothing is drawn in a shade picked for one. A theme somebody chose stays
+recorded and paints again once the variable is unset.
+
+Distinctions this interface makes in colour alone are lost, which is what was asked for. Nothing a
+colour was not carrying is lost with them: the margin down a block of content the planner may not
+read is a glyph on every row, and it is drawn the same way. The one distinction that is kept is the
+row a cursor is on, which is drawn in reverse video instead of a fill: a list nobody can see their
+place in cannot be walked, and reverse video asks the terminal to swap the two inks the person
+already chose rather than naming one.
+
+**Why.** The convention costs a person one variable rather than one setting per program, which is
+the whole of its value: somebody whose terminal renders colour badly, or who cannot read a shade
+this interface picked, says so once. Reading the presence of the variable rather than its value is
+the convention as written, and `NO_COLOR=0` is somebody who set it: a value that switched colour
+back on would need every program reading one to agree on which words mean false.
+
+It outranks a chosen theme because the two answer different questions. A theme says which palette
+to draw in, and the variable says whether to draw in a palette at all, so there is no order in
+which the theme wins that is not this program deciding it knows better. The choice is kept rather
+than cleared, which is what makes the variable a switch rather than an edit.
+
+`verified-by: bravebot_tui::theme::no_colour_draws_every_role_in_the_terminals_own_ink`
+`verified-by: bravebot_tui::theme::a_chosen_theme_paints_nothing_where_no_colour_is_asked_for`
+`verified-by: bravebot_tui::theme::text_over_a_fill_that_is_not_painted_takes_no_ink`
+`verified-by: bravebot_tui::theme::a_row_the_cursor_is_on_is_marked_where_no_colour_is_drawn`
+`verified-by: bravebot_tui::logo::the_wordmark_takes_no_colour_where_none_was_asked_for`
+`verified-by: bravebot_tui::logo::the_face_takes_no_colour_where_none_was_asked_for`
+`verified-by: bravebot_tui::lib::a_presentation_variable_says_nothing_beyond_being_set`
+
+
+<a id="VIEW-21"></a>
+### VIEW-21: `NO_MOTION` stills the glyph, and the counters go on counting
+
+Where `NO_MOTION` is set to anything but the empty string, the glyph beside a running turn stands
+still instead of cycling, and the pixel face on the opening screen keeps its eyes open and its
+pupils on one side instead of blinking and glancing. The glyph is still drawn, and the elapsed time
+and the token counts change as they always did: a figure that moves when the thing it measures
+moves is information rather than animation.
+
+It is read from the environment the way the request for no colour is, and answers to presence the
+same way. Where it is not set, the glyph cycles.
+
+**Why.** Constant motion is tiring to work beside, and worse than tiring for vestibular
+sensitivity, so it is something a person can decline. Stilling the glyph rather than dropping it
+keeps the indicator answering the question it exists for: a turn runs with nothing else on the
+screen moving, so a row with nothing in it would be indistinguishable from a program that had hung.
+
+The variable is the environment rather than a settings file because the preference belongs to the
+person and their terminal rather than to a project, and because it has to hold for the first frame,
+which is drawn before any file this program reads has been looked for.
+
+`verified-by: bravebot_tui::indicator::the_indicator_stands_still_where_no_motion_is_asked_for`
+`verified-by: bravebot_tui::indicator::motion_nobody_declined_still_moves`
+`verified-by: bravebot_tui::avatar::the_face_stays_at_rest_where_no_motion_is_asked_for`
+`verified-by: bravebot_tui::lib::a_presentation_variable_says_nothing_beyond_being_set`
+
+
+<a id="VIEW-22"></a>
+### VIEW-22: failed and cancelled turns have distinct visible status
+
+A failed turn shows a reason below its status and in its transcript entry. The reason uses fixed
+text and the backend's known status and request count. A refused request also names the backend
+that sent it, the model the turn ran on and the request fields the retries left out, and ends
+with the next step ([BACKEND-37](backends.md#BACKEND-37)); those words are the program's own,
+except the model, which is the name the person configured and is written with control characters
+made visible. It remains visible with the audit expanded
+or collapsed, after resizing, and while reading older scrollback. Long reasons wrap within the
+available space. Terminal control characters are not drawn.
+
+Failure, cancellation, and success have distinct labels. A successful turn after a failure shows
+its own status. Failure labels use the failure colour; shared details keep their muted colour.
+Ending a turn preserves the visible scrollback position, including when the status changes height.
+The live session's export includes its failure and cancellation entries.
+
+`verified-by: bravebot_tui::app::failure_reporting_uses_safe_fields_in_the_transcript_and_status`
+`verified-by: bravebot_tui::frame::a_failed_turn_says_why_with_the_audit_expanded`
+`verified-by: bravebot_tui::frame::a_failed_turn_says_why_with_the_audit_collapsed`
+`verified-by: bravebot_tui::frame::a_long_failure_reason_is_not_lost`
+`verified-by: bravebot_tui::frame::a_failure_reason_carrying_terminal_controls_is_drawn_inert`
+`verified-by: bravebot_tui::frame::a_failure_reason_survives_a_resize`
+`verified-by: bravebot_tui::frame::reading_older_scrollback_is_not_interrupted_by_a_failure`
+`verified-by: bravebot_tui::frame::a_failed_turn_is_called_failed_rather_than_stopped`
+`verified-by: bravebot_tui::frame::a_turn_that_succeeds_after_a_failure_says_so`
+`verified-by: bravebot_tui::frame::an_export_of_a_failed_turn_says_why_it_failed`
+`verified-by: bravebot_tui::frame::an_export_attaches_each_reason_to_the_turn_that_had_it`
+`verified-by: bravebot_tui::frame::an_export_of_a_cancelled_turn_says_it_was_cancelled`
+`verified-by: bravebot_tui::app::a_rejected_request_is_said_with_the_configured_model_in_the_transcript`
+`verified-by: bravebot_tui::failure_history::turn_endings_keep_the_visible_history_anchor`
+`verified-by: bravebot_tui::outcome_colours::what_a_successful_turn_cost_is_not_drawn_in_the_failure_colour`
+`verified-by: bravebot_tui::outcome_colours::failure_label_uses_failure_colour`
+`verified-by: bravebot_tui::frame::cancellation_has_its_own_status_even_when_the_prompt_returns`
+
+
+<a id="VIEW-23"></a>
+### VIEW-23: a call that ran a model inside itself says how long it waited there
+
+Where a call made a request of its own, what it spent waiting on the answer is drawn on that call's
+own line, beside what came of it. Two kinds of call do: a confined check before quarantined content
+may be read ([vetting.md](vetting.md)), and a processor's own round ([processors.md](processors.md)).
+Every other call waited on this machine and says nothing, because a figure under every row
+distinguishes nothing and crowds out the rows that do.
+
+Per call rather than as a total. The turn's own clock already separates what it spent at a model from
+what it spent working, and that total cannot answer which call was the slow one, which is the
+question somebody watching a call take eight seconds is asking.
+
+A wait too short to state is left off rather than drawn as zero.
+
+The interactive terminal, a headless run's progress and the desktop window all say it. None of them
+can measure this for itself: a front end sees a call begin and end and has no way to tell which
+part of that was a model, so a surface the figure does not reach draws a call that was slow because
+a model was slow exactly as it draws a slow program.
+
+`verified-by: bravebot_tui::render::a_call_that_waited_on_a_model_says_how_long`
+`verified-by: bravebot_tui::render::a_call_that_asked_no_model_says_nothing_about_one`
+`verified-by: bravebot_tui::render::a_wait_under_a_second_is_left_off`
+`verified-by: bravebot_cli::progress::a_finished_call_prints_what_it_spent_at_a_model`
+`verified-by: bravebot_cli::progress::a_finished_call_that_asked_no_model_prints_nothing_about_one`
+`verified-by: bravebot_ui_bridge::reporting::what_a_call_spent_at_a_model_reaches_a_front_end`
+`verified-by: bravebot_agent::turn::what_a_check_cost_reaches_the_row_the_call_drew`
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so it is pinned instead by ui/scripts/ux-state.test.mjs, which renders the real transcript row through react-dom and asserts that the figure reaches the markup, written past a minute as the terminal writes it, that a call which asked no model draws none, and that a wait under a second is left off; make check-ui and the Front end CI job both run it, and the governs list above holds the file to existing)`
+
+
+<a id="VIEW-24"></a>
+### VIEW-24: a call the planner read shows a few lines of what it found
+
+Under a call whose result the planner read, the transcript draws up to five lines of that result.
+For a command it draws the last five, because a build or a test run says how it went at the end.
+For anything else it draws the first five. When lines are left out, one line says how many and on
+which side. A read is glimpsed and counted without the paging note and change token the driver adds
+after it for the planner, so the count is the file's own and a short file does not show the
+driver's words as its last lines.
+
+The glimpse is drawn plainly, behind a margin with no bar, because the planner read exactly this and
+the bar of VIEW-3 marks only what it did not. It is released through the same display gate as a
+quarantined preview all the same, and every control character in it is replaced with a visible
+glyph, because a file the planner may read can still contain an escape. Each line is cut to one row
+rather than wrapped, so the glimpse stays the size it says it is. The glimpse is the default and not
+the limit: the scroller expands it on request (see [scroller.md](scroller.md)).
+
+A result that was quarantined gets no plain glimpse. Its marked block of VIEW-3 is what the person
+sees of it. A sentence the driver wrote about a call, such as a count of matches or a refusal, gets
+no glimpse either, since that sentence is already the call's note.
+
+The glimpse goes under the call it came from. A glimpse from a delegate's call stays with that call
+and never goes under one of the turn's, though the delegate's block, which draws each of its latest
+calls as one row, does not draw it. A glimpse with no call of the running turn to go under is
+dropped, because lines drawn under an earlier turn's call would claim that call found them.
+
+**Why.** A one-line summary per call says that the agent read a file or ran a command, and nothing
+about what came back. The person watching could not tell whether the build passed or the file held
+what the planner was about to rely on without opening the file or the command's output themselves.
+
+`verified-by: bravebot_agent::turn::a_result_the_planner_read_is_glimpsed_under_its_call`
+`verified-by: bravebot_agent::turn::a_command_the_planner_read_is_glimpsed_from_its_end`
+`verified-by: bravebot_agent::turn::a_sentence_the_driver_wrote_about_a_call_is_not_glimpsed`
+`verified-by: bravebot_agent::turn::a_search_that_found_nothing_glimpses_no_sentence_of_the_drivers`
+`verified-by: bravebot_tui::render::what_the_planner_read_is_drawn_under_its_call`
+`verified-by: bravebot_tui::render::what_the_planner_read_is_not_drawn_as_quarantined`
+`verified-by: bravebot_tui::render::a_glimpse_from_the_end_says_what_came_before_it`
+`verified-by: bravebot_tui::render::a_glimpse_line_is_cut_to_one_row`
+`verified-by: bravebot_tui::render::a_line_of_escapes_is_cut_to_one_row_all_the_same`
+`verified-by: bravebot_tui::render::a_glimpse_cannot_draw_its_own_escapes`
+`verified-by: bravebot_tui::state::a_glimpse_goes_under_the_call_it_came_from`
+`verified-by: bravebot_tui::state::a_glimpse_does_not_bleed_into_an_earlier_turns_tool`
+`verified-by: bravebot_tui::state::a_delegates_glimpse_goes_under_the_delegates_call`
+
+
+<a id="VIEW-25"></a>
+### VIEW-25: a call is drawn with the reason the planner gave for it
+
+A call carries the planner's own line on what the call is for
+([TOOL-5](tools/tool-surface.md#TOOL-5)). In the interactive terminal and a headless run's progress
+it is the call's headline, and the call is drawn under it as a detail row ahead of what came of it,
+while the call runs and once it is over. A reason of several lines is drawn to its first, since the
+headline is one row of a transcript and not a paragraph. A call given no reason is headed by the
+call itself.
+
+The call is its verb and what it is about. For `run` that is the command line, so a command that
+needs no prompt is still shown on screen. A command of several lines is drawn as its first line
+and "...", since a call is one row. A command line that carries a credential the planner declared,
+on any of its lines, is drawn as the verb alone, since `run` refuses it before anyone is shown it
+([CRED-11](credential-protection.md#CRED-11)).
+
+For a server's tool it is `alias:tool` and the arguments the server is sent, as compact JSON, so a
+call no prompt is put for, under an allow rule, a standing answer or bypassing
+([SERVERS-7](mcp-servers.md#SERVERS-7)), is still shown with what it sends. Compact JSON escapes a
+line break inside a value, so the arguments are one line, and arguments wider than a previewed
+line are cut to its width and "...", since one argument holding a document would otherwise wrap
+across the screen. A reference in them is drawn as the planner wrote it, since that is what the
+server receives. Arguments in which any key or string value carries a credential the planner
+declared are left off, and the call is drawn as `alias:tool` alone
+([CRED-11](credential-protection.md#CRED-11)).
+
+The desktop window draws the reason after the call on the call's own row. A resumed session draws
+each recorded call with the reason it was made with, as it draws the calls themselves under
+[VIEW-2](#VIEW-2). A recorded call to a server's tool is drawn from the name it was offered under
+and its arguments, as it was drawn live. Where that name can be divided into an alias and a tool in
+more than one place, since either may hold `__`, it is drawn as offered. A live call naming a
+server's tool that no offer holds is drawn from its name in the same way, so the two rows agree.
+
+**Why.** The line before a round says what the step is for, and a round of calls made for
+different reasons was explained only as far as that one line went. The call's own reason is the
+one place left to say what each of them was for.
+
+`verified-by: bravebot_tui::render::a_call_is_headed_by_the_reason_it_was_made`
+`verified-by: bravebot_tui::render::the_call_comes_before_its_result`
+`verified-by: bravebot_tui::render::a_call_with_no_reason_draws_nothing_beside_it`
+`verified-by: bravebot_tui::render::a_recalled_call_is_shown_with_its_reason`
+`verified-by: bravebot_cli::progress::a_call_is_printed_with_the_reason_it_was_made`
+`verified-by: bravebot_ui_bridge::wire::a_call_carries_the_reason_it_was_made`
+`verified-by: bravebot_agent::conversation::every_call_in_a_round_is_recounted`
+`verified-by: bravebot_agent::tools::a_stored_call_names_its_command_output_and_file_but_not_a_credential`
+`verified-by: bravebot_agent::turn::a_run_call_is_drawn_with_the_command_it_runs`
+`verified-by: bravebot_agent::turn::a_run_call_of_several_lines_is_drawn_as_its_first`
+`verified-by: bravebot_agent::turn::a_credential_the_line_itself_carries_stops_the_line`
+`verified-by: bravebot_agent::mcp::a_call_answer_two_lets_through_is_drawn_with_what_it_sends`
+`verified-by: bravebot_agent::mcp::a_call_carrying_a_credential_is_drawn_without_its_arguments`
+`verified-by: bravebot_agent::mcp::a_call_to_a_tool_no_server_offers_is_drawn_as_a_resumed_session_draws_it`
+`verified-by: bravebot_agent::tools::a_servers_call_is_drawn_with_the_arguments_it_is_sent`
+`verified-by: bravebot_agent::tools::a_stored_call_to_a_servers_tool_shows_what_it_sent_but_not_a_credential`
+`verified-by: bravebot_tui::render::a_resumed_call_to_a_servers_tool_shows_what_it_sent`
+`verified-by: bravebot_ui_bridge::servers::a_call_to_a_servers_tool_reaches_the_window_with_what_it_sends`
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so it is pinned instead by ui/scripts/ux-state.test.mjs, which renders the real transcript row through react-dom, live and replayed, and asserts that the reason reaches the markup after the call while the call runs and once it is over and that a call with none draws nothing for it; make check-ui and the Front end CI job both run it, and the governs list above holds the file to existing)`
+
+<a id="VIEW-26"></a>
+### VIEW-26: a call the model is writing is named beside the indicator until it starts
+
+While the model writes a tool call, the interactive terminal's working indicator names it, by the
+word the call's own row will start with and from the same table. A name no tool answers to is drawn
+as that table's word for an unknown tool, never as the model wrote it. The name goes when the call
+starts, at the top of the next round, when the attempt writing it is thrown away and the request
+goes again, and however the turn or aside ends. A delegate's call is not named there, for the reason
+its reply taking shape is not drawn at the turn's tail, and a delegate's phase, words or call do not
+take down the name of the call the turn is writing.
+
+**Why.** An argument can be a whole file, and a service holding it back sends nothing else while
+the model writes it, so the round's own word and a count were all a person had to tell minutes of
+work from a stall. [BACKEND-45](backends.md#BACKEND-45) keeps the count moving; this says what the
+work is.
+
+The name is untrusted model output released for a screen through the gate that releases the reply
+taking shape ([VIEW-6](#VIEW-6)), and nothing else reads it: the turn does not branch on it, and it
+leaves the turn only as a word chosen from a fixed table by matching the name, as dispatch does. The
+word is what an interface is given, so no interface can draw the name as it was written.
+
+`verified-by: bravebot_tui::state::a_call_being_written_names_the_indicator`
+`verified-by: bravebot_tui::state::a_call_being_written_gives_the_word_back`
+`verified-by: bravebot_tui::state::a_delegates_call_being_written_is_not_the_turns`
+`verified-by: bravebot_tui::remote_confirm::questions_and_reports_share_the_channel`
+`verified-by: bravebot_agent::turn::the_call_being_written_reaches_the_interface_before_it_runs`
+`verified-by: bravebot_agent::turn::a_call_named_by_an_attempt_thrown_away_is_taken_back`
+
+<a id="VIEW-27"></a>
+### VIEW-27: a held view says it is held, and how many rows arrived below
+
+While the resting view is scrolled off the tail ([VIEW-1](#VIEW-1)), the hint line says it is held,
+how many rows lie below it and the key that returns to the latest. The cue is dim, is dropped whole
+on a terminal with no room for it, and is gone once the view is at the tail.
+
+**Why.** The view stays where it was put while the turn goes on, and a person who scrolled up and
+looked away had no sign on the screen that the turn had moved on, or which key returned to it.
+Only the scroller's footer reported rows below.
+
+The count is read from the layout's row geometry and the sentence is the session's own, so the cue
+holds no bytes of what the rows contain and the rule is kept ([SCROLL-5](scroller.md#SCROLL-5)).
+
+`verified-by: bravebot_tui::render::a_held_view_says_how_many_rows_arrived_below_and_the_key_back`
+`verified-by: bravebot_tui::render::a_held_view_on_a_narrow_terminal_drops_the_cue_and_keeps_the_mode`
+`verified-by: bravebot_tui::render::the_held_cue_is_drawn_dim`
+
+
+<a id="VIEW-28"></a>
+### VIEW-28: block art is drawn from cell backgrounds in a terminal that leaves gaps between rows
+
+The wordmark and the face beside it on the opening screen are drawn in `█`, `▀` and `▄`. Where
+`TERM_PROGRAM` is `Apple_Terminal`, each cell is drawn from its background instead, so that no row
+of the art is cut by a stripe:
+
+- A full block is a space on the colour, or a space in reverse video where the colour is the
+  terminal's own ink.
+- An upper half block is a lower half block in reverse video.
+- A cell with two colours is a lower half block in the lower colour on a background of the upper
+  one.
+- A lower half block, the shadow and a blank cell are drawn as they were.
+
+Each cell shows the same colours in both forms. Every other terminal is drawn the block characters.
+
+**Why.** Apple's Terminal draws block characters from the font, in a band that starts a few pixels
+below the top of the cell. Stacked rows of `█` are separated by a stripe of the window's background,
+and a half block over a background colour shows that colour in the stripe, which makes the face look
+striped. A cell's background fills the whole cell and a lower half block is flush with the bottom of
+it, so a cell drawn from those two has no stripe. The size of the band depends on the font and the
+line spacing, which this program cannot read, so the choice is made by terminal and not by
+measuring.
+
+Other terminals keep the characters because reverse video fills the half it empties with the
+terminal's opaque background colour, which shows against a window the person made translucent.
+Inside tmux `TERM_PROGRAM` names tmux, so the characters are drawn there.
+
+Reverse video adds no colour, so `NO_COLOR` ([VIEW-20](#VIEW-20)) holds: the wordmark under it is
+drawn in the terminal's own ink.
+
+`verified-by: bravebot_tui::blocks::a_painted_cell_shows_the_same_two_halves_as_the_block_it_replaces`
+`verified-by: bravebot_tui::blocks::a_painted_cell_is_a_space_or_a_lower_half_block`
+`verified-by: bravebot_tui::blocks::the_terminals_own_ink_is_painted_by_reversing_the_cell`
+`verified-by: bravebot_tui::avatar::a_face_drawn_from_backgrounds_is_the_same_picture`
+`verified-by: bravebot_tui::logo::a_mark_drawn_from_backgrounds_is_the_same_picture`
+`verified-by: bravebot_tui::lib::only_the_name_apple_terminal_sets_is_apple_terminal`
+
+
+<a id="VIEW-29"></a>
+### VIEW-29: Apple's Terminal is not sent the Kitty graphics query
+
+At start-up the interface asks the terminal which graphics protocol it draws
+([VET-4](tools/vet-content.md#VET-4)). Where `TERM_PROGRAM` is `Apple_Terminal`, the question for the
+Kitty protocol is left out of that exchange and the rest of it is sent. Every other terminal is asked
+as before.
+
+**Why.** The Kitty question is an application program command. Apple's Terminal does not understand
+it and prints its text, `Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA`, at the top of the screen. That terminal
+draws no protocol the question could find, so leaving it out loses no picture.
+
+`verified-by: bravebot_tui::preview::apple_terminal_is_not_sent_the_kitty_query_and_other_terminals_are`
+`verified-by: bravebot_tui::lib::only_the_name_apple_terminal_sets_is_apple_terminal`
+
+
+<a id="VIEW-30"></a>
+### VIEW-30: the colour codes in output are counted and not drawn
+
+A program that colours its output writes a code before and after each coloured word. In output
+drawn for a person to read, the complete colour codes are taken out of the text, and a row under
+the text says how many there were, such as `14 colour codes not drawn`. That row has the same margin
+as the rows above it. Output with no colour code says nothing about them.
+
+A colour code is `ESC [`, up to 64 characters from `0-9`, `;` and `:`, and `m`. Every other escape
+sequence and control character is replaced with a visible glyph as [VIEW-3](#VIEW-3) says. That
+includes a cursor movement, an erase, a window title, a sequence with another parameter or final
+byte, one cut short by the end of the line, and a run of parameters longer than 64. The colour codes
+are taken out first and the replacement runs after, so an escape that is left, or that two halves
+of another code are joined to leave when a code between them is taken out, is replaced like any
+other, and the terminal is sent no escape.
+
+It applies to the output of a command typed in shell mode, whether the command is still running
+([SHELL-7](shell-mode.md#SHELL-7)) or has ended, to the preview in a quarantined block, to the lines
+drawn under a call the planner read, and to the quarantined block a one-shot run writes to stderr.
+Everything else draws every byte. That includes a block's heading, where the origin can be a
+filename, a path or a name wherever one is drawn, the hunks of a write, and every prompt that asks a
+person to approve text: a write, a command's output, a read, a message, a server and its tools. A
+yes on those releases the text or acts on it, and a code that sets the colour of text to the colour
+of its background is the kind of thing the person is deciding about.
+
+**Why.** The replacement of VIEW-3 pictures the escape and leaves the rest of the code as ordinary
+text, so a CI log that colours every token draws as `␛[0m␛[36m├␛[0m` and is hard to read. A colour
+code only sets colours. VIEW-3 replaces control characters so that content cannot move the cursor,
+erase the margin or ask the terminal something, and a colour code with its escape taken out does
+none of those. VIEW-3 replaces a control character and does not drop it so that the person can tell
+it was there, and the count gives the person the same for colour codes.
+
+`verified-by: bravebot_tui::colour_codes::the_codes_of_a_coloured_line_are_taken_out_and_counted`
+`verified-by: bravebot_tui::colour_codes::every_spelling_of_a_colour_code_is_taken_out_whole`
+`verified-by: bravebot_tui::colour_codes::a_sequence_that_is_not_a_colour_code_is_left_in_place`
+`verified-by: bravebot_tui::colour_codes::a_run_of_parameters_longer_than_a_colour_has_is_left_in_place`
+`verified-by: bravebot_tui::colour_codes::taking_a_code_out_can_join_two_halves_and_leaves_their_escape_for_printable`
+`verified-by: bravebot_tui::colour_codes::codes_beside_wide_characters_are_taken_out_cleanly`
+`verified-by: bravebot_tui::colour_codes::nothing_is_said_where_nothing_was_taken_out`
+`verified-by: bravebot_tui::marking::colour_codes_in_a_preview_are_counted_and_not_drawn`
+`verified-by: bravebot_tui::marking::only_colour_codes_are_left_out_of_a_preview`
+`verified-by: bravebot_tui::marking::a_code_joined_by_taking_another_out_is_still_drawn_as_pictures`
+`verified-by: bravebot_tui::marking::a_colour_code_in_the_origin_is_drawn_in_full`
+`verified-by: bravebot_tui::marking::a_preview_without_colour_codes_says_nothing_about_them`
+`verified-by: bravebot_tui::shell_mode::coloured_output_is_drawn_without_its_codes_and_they_are_counted`
+`verified-by: bravebot_tui::shell_mode::output_keeps_every_other_escape_beside_the_codes_it_leaves_out`
+`verified-by: bravebot_tui::shell_mode::output_without_colour_codes_says_nothing_about_them`
+`verified-by: bravebot_tui::shell_mode::running_output_cannot_draw_its_own_escapes`
+`verified-by: bravebot_tui::shell_mode::a_colour_code_split_between_two_pieces_is_counted_once_it_is_whole`
+`verified-by: bravebot_tui::render::a_glimpse_counts_its_colour_codes_and_does_not_draw_them`
+`verified-by: bravebot_tui::render::a_glimpse_line_is_measured_without_its_colour_codes`
+`verified-by: bravebot_tui::render::a_glimpse_from_the_end_counts_its_colour_codes_last`
+`verified-by: bravebot_tui::render::a_glimpse_without_colour_codes_says_nothing_about_them`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_draws_a_colour_code_in_full`
+`verified-by: bravebot_approval::lib::a_colour_code_in_output_awaiting_a_yes_is_written_in_full`
+`verified-by: bravebot_cli::progress::colour_codes_in_a_block_are_counted_and_not_drawn`
+`verified-by: bravebot_cli::progress::only_colour_codes_are_left_out_of_a_block`
+`verified-by: bravebot_cli::progress::a_block_without_colour_codes_says_nothing_about_them`
+
+
+<a id="VIEW-31"></a>
+### VIEW-31: a turn that ends or a question that opens is noticed by a terminal that was left
+
+When the terminal has reported being left and a turn or a command goes from working to ready, or a
+question a turn puts to the person opens (an approval of any kind, or a question from the planner),
+the interface writes one notice to the terminal. A turn that ends with a question still open is
+noticed as ended. The `notificationMethod` setting chooses the notice: `osc9` writes an OSC 9
+sequence, `bel` writes the bell, `off` writes nothing, and `auto`, which is also what any other word
+or no word means, writes OSC 9 where `TERM_PROGRAM` names iTerm.app, WezTerm or ghostty and the bell
+elsewhere. The `notificationCondition` setting `always` writes the notice whether or not the terminal
+was left, and any other word or none writes it only after the terminal reported being left. A terminal
+that reports no focus changes is taken to be in front of the person, so under that default it is
+never written to. A report is taken as the event is read, by whichever prompt or loop reads it, so
+one that arrives while a question is open counts. A state the interface is still in is noticed once,
+not on every frame.
+
+The text is fixed per kind, a message from the catalog that takes no argument (`bravebot: turn finished` and `bravebot: waiting for an answer` in English). It never
+carries a command, a path, a file name, a prompt or any part of a reply, so no byte a turn produced reaches
+the escape sequence. The decision reads the interface's own state, the focus report and the settings. It
+adds no moment to the hooks ([HOOK-2](hooks.md#HOOK-2)), and it is the terminal interface's alone.
+
+**Why.** A person who starts a long turn and switches windows learns that it stopped on a question only by
+looking again. A hook can run a command for either moment ([HOOK-2](hooks.md#HOOK-2)), but the person has
+to write it, and the notice needs no setup.
+
+`verified-by: bravebot_tui::notify::a_turn_that_ends_with_the_terminal_left_is_noticed_once`
+`verified-by: bravebot_tui::notify::a_question_that_opens_with_the_terminal_left_is_noticed_once`
+`verified-by: bravebot_tui::notify::a_focused_terminal_is_noticed_only_where_the_condition_is_always`
+`verified-by: bravebot_tui::notify::a_turn_that_ends_while_a_question_is_open_is_noticed`
+`verified-by: bravebot_tui::notify::off_writes_nothing`
+`verified-by: bravebot_tui::notify::only_a_turn_ending_or_a_question_opening_is_noticed`
+`verified-by: bravebot_tui::notify::auto_chooses_osc9_only_for_a_terminal_known_to_read_it`
+`verified-by: bravebot_tui::notify::a_word_that_names_nothing_is_the_default`
+`verified-by: bravebot_tui::notify::each_method_word_asks_for_its_own_method`
+`verified-by: bravebot_tui::input::the_queue_is_answered_before_the_terminal_and_in_arrival_order`
+`verified-by: bravebot_tui::notify::the_text_of_each_notice_is_fixed_and_carries_no_control_character_of_its_own`
+`verified-by: bravebot_config::settings::a_settings_file_names_how_and_when_the_terminal_is_notified`
+
+
+<a id="VIEW-32"></a>
+### VIEW-32: `#<number>` in an assistant's words links to that issue or pull request on the origin remote's repository
+
+Where the checkout holding the session's directory has an `origin` remote on `github.com`, each
+`#<number>` in an assistant's words is underlined and is a terminal link (OSC 8) to
+`https://github.com/{owner}/{repository}/issues/{number}`, with the owner and the repository taken
+from the remote's address. GitHub sends `/issues/{number}` to `/pull/{number}` where the number is a
+pull request, so one address covers both. A terminal that does not draw links shows the underlined
+number. Where there is no such remote, a number is drawn as the text it is, with no underline and no
+link.
+
+A number is a `#` followed by one to nine digits, the first not a zero. The `#` does not follow a
+letter, a digit, `_`, `&` or `/`, and the digits are not followed by a letter, a digit or `_`, so
+`C#1`, `page#12`, `&#39;`, `https://example.com/docs/#12`, `#12abc` and `#0` are text. A number in a
+code span is text. A line that is a heading is a heading and holds a number as any other line does,
+and `#12` at the start of a line is a number and not a heading.
+
+The assistant's words are the reply in the transcript, the reply still arriving, a cell of a table in
+either, and the answer an aside shows. A number is matched in each and linked after the screen has
+been drawn: the widget that wraps the lines decides which cells a number lands in, so the cells that
+carry the underline and read `#` and digits are the ones linked, wherever the wrapping put them. A
+number cut across two rows is not linked: in a table the cut number is not underlined, and in the
+transcript a run of digits that ends at the right edge of the area above a row that begins with an
+underlined digit is left alone. What a person typed, a note, a program's
+output and the content of a quarantine block ([VIEW-3](#VIEW-3)) are not the assistant's words, are
+not matched and get no link. A selection over a linked number copies the number and none of the
+sequences that make it a link.
+
+The remote is read from the checkout's own configuration, which is workspace content, once where the
+session opens and again where it moves to another directory. The address is that of `remote.origin.url`
+in the `config` file of the git directory the checkout names, or of the repository a linked worktree
+was made from, read as the file is written and with no program started. A value written with a quote,
+a backslash, `#` or `;` is not read, and neither is a configuration with an `include` or `includeIf`
+section, since the file it names can set another remote, or one larger than a megabyte. The address is used to choose
+what is shown and decides nothing: nothing in the driver reads it or a number, and a number is carried
+to the screen as styling only. The host has to be `github.com`, compared as a whole, in the
+`https://`, `http://`, `ssh://`, `git://` and `user@github.com:{owner}/{repository}` spellings.
+The owner holds only ASCII letters, digits and `-`, and the repository only those and `_` and `.`,
+and is not `.` or `..`. Any other address names no repository. A hostile configuration can therefore
+choose which `github.com` repository a number opens, and cannot make it open anything else, since
+the link is built from the host, the validated names and the digits of the match alone.
+
+**Why.** A reply names issues and pull requests by number, and a number is a thing a person wants to
+open. Underlining only where a link will exist keeps an underline from reading as a link that is
+broken. The configuration is the checkout's own file, so the host is fixed and the names are held to
+the characters GitHub allows in them, which leaves a configuration choosing among `github.com`
+repositories and nothing else. Reading the file and not asking git keeps the checkout's own settings
+from naming a program to start, as [GIT-1](tools/read-git.md#GIT-1) does for the history.
+
+`verified-by: bravebot_tui::markdown::a_number_is_marked_wherever_a_reply_may_put_one`
+`verified-by: bravebot_tui::markdown::a_hash_that_is_part_of_something_else_is_not_marked`
+`verified-by: bravebot_tui::markdown::a_number_in_a_code_span_is_not_marked`
+`verified-by: bravebot_tui::markdown::a_heading_is_not_a_number_and_a_number_at_the_head_of_a_line_is_not_a_heading`
+`verified-by: bravebot_tui::markdown::with_references_off_a_number_is_plain_text`
+`verified-by: bravebot_tui::markdown::long_runs_of_hashes_and_digits_terminate`
+`verified-by: bravebot_tui::issue_link::each_spelling_of_a_github_remote_names_the_repository`
+`verified-by: bravebot_tui::issue_link::only_the_host_github_com_names_a_repository`
+`verified-by: bravebot_tui::issue_link::an_owner_or_name_outside_the_characters_github_allows_names_nothing`
+`verified-by: bravebot_tui::issue_link::an_address_is_made_for_a_number_and_for_nothing_else`
+`verified-by: bravebot_tui::issue_link::a_marked_number_is_linked_wherever_it_was_drawn`
+`verified-by: bravebot_tui::issue_link::a_number_the_matcher_did_not_mark_is_not_linked`
+`verified-by: bravebot_tui::issue_link::a_number_split_across_two_rows_is_not_linked`
+`verified-by: bravebot_tui::issue_link::a_number_outside_the_area_is_not_linked`
+`verified-by: bravebot_tui::issue_link::a_run_of_digits_longer_than_a_number_is_not_linked`
+`verified-by: bravebot_tui::table::a_number_cut_across_rows_is_not_marked_and_a_whole_one_is`
+`verified-by: bravebot_tui::issue_links::a_number_in_a_reply_links_to_the_issue_on_the_origin_repository`
+`verified-by: bravebot_tui::issue_links::a_number_on_a_wrapped_row_is_linked_where_it_is_drawn_whichever_way_the_transcript_is_drawn`
+`verified-by: bravebot_tui::issue_links::a_number_in_a_reply_still_arriving_is_linked`
+`verified-by: bravebot_tui::issue_links::a_number_in_a_table_cell_is_linked`
+`verified-by: bravebot_tui::issue_links::a_number_in_an_asides_answer_is_linked`
+`verified-by: bravebot_tui::issue_links::a_hash_that_is_not_a_reference_is_drawn_as_text`
+`verified-by: bravebot_tui::issue_links::without_a_github_origin_a_number_is_plain_text`
+`verified-by: bravebot_tui::issue_links::a_session_that_leaves_its_repository_stops_linking`
+`verified-by: bravebot_tui::issue_links::a_number_in_quarantined_content_is_not_linked`
+`verified-by: bravebot_tui::issue_links::a_number_in_words_that_are_not_the_assistants_is_not_linked`
+`verified-by: bravebot_tui::issue_links::a_selection_over_a_linked_number_copies_the_text`
+`verified-by: bravebot_tui::app::moving_to_another_checkout_changes_the_repository_numbers_link_into`
+`verified-by: bravebot_session::sessions::the_origin_is_read_out_of_the_checkout_configuration`
+`verified-by: bravebot_session::sessions::a_linked_worktree_reads_the_configuration_of_the_repository_it_was_made_from`
+`verified-by: bravebot_session::sessions::an_origin_not_written_plainly_is_not_read`
+`verified-by: bravebot_session::sessions::a_checkout_with_no_configuration_has_no_origin`
+`verified-by: bravebot_session::sessions::a_configuration_past_the_limit_is_not_read`
+
+
+<a id="VIEW-33"></a>
+### VIEW-33: `/thinking` shows the model's thinking as it arrives, for the screen only
+
+`/thinking` turns on drawing the thinking a service sends as it goes
+([BACKEND-46](backends.md#BACKEND-46), [BACKEND-59](backends.md#BACKEND-59)), and typed again turns
+it off. It is off when a session opens, is a setting of that session alone, and says in the
+transcript which way it went. It is carried out as typed, while a turn runs as well. While it is on,
+the end of what the model has thought in the round now being written is drawn at the tail, above the
+reply taking shape ([VIEW-6](#VIEW-6)): under a heading of its own, dimmed and in italics, the last
+eight lines of it, as plain text and never as markdown. A control character in it is drawn as its
+visible picture, as [VIEW-4](#VIEW-4) does for any text. It goes where the reply's tail goes, when
+the round's words arrive, the round ends, the turn ends or is stopped, or the request is sent again,
+and a delegate's thinking is not drawn. Only the last 4,096 bytes of it are kept, so a model that
+thinks for minutes costs the screen what a short think does. A service that sends no thinking, or a
+session with the toggle off, draws nothing.
+
+It is no part of the conversation: it is not written to the session record, an export or a resume,
+and no later request carries it, so the request and the model's answer are the same with the toggle
+on as off. Turning it on mid-round shows what has come so far.
+
+**Why.** A long round shows a token count and a spinner and nothing of what the model is working on.
+Claude Code, Codex, OpenCode and Gemini CLI each let a person show the reasoning, and each keeps it
+off the default screen, since most rounds do not need it.
+
+The thinking is model output, so in a session that has observed untrusted content it is untrusted
+bytes released for a screen through the gate that releases the reply taking shape, on the same
+footing. The driver carries it to the interface and does not branch on it; the side that draws decides
+what to show, and it decides only by the toggle and the byte count, never by what the text says.
+
+`verified-by: bravebot_tui::state::thinking_is_held_shown_on_request_and_ends_with_the_round`
+`verified-by: bravebot_tui::state::a_delegates_thinking_is_not_the_turns`
+`verified-by: bravebot_tui::render::the_models_thinking_is_drawn_only_when_asked_for_and_inert`
+`verified-by: bravebot_tui::app::the_thinking_command_toggles_what_is_drawn_and_runs_mid_turn`
+`verified-by: bravebot_agent::turn::the_thinking_of_a_round_reaches_the_reporter_and_is_in_no_request_or_record`
+
+<a id="VIEW-34"></a>
+### VIEW-34: the desktop window shows the model's thinking on request, on the terms of VIEW-33
+
+The bridge sends the thinking a service hands over as it goes ([BACKEND-46](backends.md#BACKEND-46)) as
+`thinking` events, each holding the words that arrived since the last, in order and as they arrived.
+A frame with none is not sent, and a delegate's thinking is not sent. The window holds the end of what
+the round now being written has thought, the last 4,096 characters of it, whether or not it is shown,
+apart from the transcript, and drops it when the round's words arrive, a call starts, the next round
+opens, or the turn ends, fails or is stopped. It is off when a session opens and is that session's
+alone. A button in the working row turns it on and off: it is offered once the session has been sent
+any thinking, and is there for the rest of the session. While it is on, the last eight lines of what
+is held are drawn under the working row, never taller than eight rows, under a head of its own,
+dimmed and in italics, as text and never as markdown or markup.
+
+It is no part of the conversation: it is not an entry of the transcript, an export or a resumed
+session, and no later request carries it. A service that sends no thinking, or a session with the
+toggle off, draws nothing, and a session that has not been sent any has no button.
+
+**Why.** [VIEW-33](#VIEW-33) gives the terminal a way to see what a long round is working on. Without
+an event to carry it, the window shows only a token count and a spinner for the same long round.
+
+The thinking is model output released for a screen, on the footing of the reply taking shape. The
+renderer draws it as a text child under a head the model's words cannot spell, as
+[LAYER-5](layering.md#LAYER-5) requires of released content, and decides what to show only by the
+toggle and the line count, never by what the text says. The kept length is counted in characters
+where the terminal counts bytes, since the window holds a string, and a cut through the middle of a
+character gives up that character.
+
+`verified-by: bravebot_ui_bridge::reporting::the_models_thinking_is_reported_in_order_and_a_delegates_and_an_empty_one_are_not`
+`verified-by: by-construction (the renderer is not a crate this workspace compiles, so ui/scripts/ux-state.test.mjs drives the window's own event reducer with the bridge's events: the thinking is held apart from the transcript's entries, only its last 4,096 characters are kept and a cut through a character gives it up, a new round, a words event, a call, a new turn, a finished turn, a failed or stopped turn and a plan run starting, finishing or failing each clear it, the choice to show it outlives the round it was made in, and the button is offered from the first thinking sent and stays through every round's end; ui/scripts/marking.test.mjs renders the working row through react-dom and asserts that the last eight lines are drawn under one head, that markup in them is drawn as the characters it is and makes no element, attribute or request, that nothing is drawn with the toggle off or with nothing thought, and that the button is absent for a session sent no thinking and present for one that was, between rounds as well; make check-ui runs both)`
+
+<a id="VIEW-35"></a>
+### VIEW-35: the bridge tells the desktop window which agents a conversation has started and where each stands, and nothing they printed
+
+The bridge keeps the session's agents in the `Roster` the terminal uses ([WATCH-12](watching.md#WATCH-12)),
+and sends the whole list in an `agents` event each time a delegate starts, each time one ends, and
+when a turn or plan run ends with one still working. The event carries `agents`, one entry for each
+agent in the order started, and the counts `started` and `working`. An entry holds `id`, the
+driver's own spelling of the delegate's number (`d1`, `d2.1`), `kind`, `task`, the words the planner
+gave it, and `state`, which is `working`, `finished` or `failed`. A finish is applied to the latest
+agent with that number that is still working, so delegates ending in any order are each marked, and
+a number used again after its first agent ended is a second agent. The list is kept for the session,
+so it lasts across turns, and is not saved: a reopened session and a fork start with none.
+
+An agent still working when a turn or plan run ends did not finish, because a delegate does not
+outlive the turn that started it, so the bridge marks it `failed` and sends the list before
+`turn.done`, `turn.error`, `manifest.done` or `manifest.error`.
+
+The event carries no line a delegate printed, no thought, no tool call, no note the driver wrote
+about how it ended and nothing it reported back, and the stop token is not sent. What a delegate
+said reaches no screen of the window and is written to no record
+([WATCH-12](watching.md#WATCH-12)). A window that counts or lists agents does so from this event and
+from nothing a delegate wrote.
+
+**Why.** A person watching a window has no other way to know that work is going on beside the turn,
+or how much. The terminal draws it from the same type, so the two clients do not each keep their own
+copy of when an agent starts, ends or is counted. The `task` is the planner's own line, and the
+planner holds no untrusted content, so it is words the driver already carries to a screen. What a
+delegate that met untrusted content printed is not, and no event here can carry it because the
+payload is built from the agent's number, kind, task and state alone, and nothing branches on the
+task.
+
+`verified-by: bravebot_ui_bridge::reporting::a_delegate_crosses_in_the_agents_event_carrying_none_of_its_lines`
+`verified-by: bravebot_ui_bridge::reporting::a_delegate_finishing_before_an_earlier_one_marks_its_own_agent`
+`verified-by: bravebot_ui_bridge::reporting::a_delegate_number_used_again_is_a_second_agent`
+`verified-by: bravebot_ui_bridge::reporting::an_end_of_turn_or_run_leaves_no_agent_working`
+`verified-by: bravebot_ui_bridge::reporting::the_list_lasts_across_the_reporters_of_a_session`
+
+<a id="VIEW-36"></a>
+### VIEW-36: the desktop window counts the agents a conversation has started and lists them from the sidebar
+
+The sidebar's foot has an Agents entry beside Settings. It shows the number of agents the open
+conversation has started, and after it the number still working while any is. With none started it
+shows the label alone. Choosing it opens a list over the conversation, one row for each agent in the
+order started, holding the agent's kind, its number, what it was asked, and whether it is working,
+finished or did not finish. The list says so when there are none, and its Done control closes it and
+returns focus to the entry.
+
+The window draws the list and counts VIEW-35 sends and keeps no rule of its own for when an agent
+starts, ends or is counted, and counts none itself: its number, kind and task, and its state, are the bridge's. A new
+conversation starts with none. Nothing a delegate printed is kept
+or drawn here, as the watching spec says.
+
+The accelerator that focuses the composer is not changed by this entry.
+
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so ui/scripts/agents.test.mjs pins it: it folds the agents event through the window's own event reducer and asserts that the list it carries replaces the window's, that a number sent twice is two rows, that no turn.done, turn.error, manifest.done or manifest.error changes an agent, that the sidebar counts are the two the bridge sent, and that a new conversation starts with none; it renders the real Agents view and sidebar foot through react-dom and asserts the rows, the empty sentence, the Done control, the label alone for none started, the count, and the count of those working; make check-ui runs it)`
+
+<a id="VIEW-37"></a>
+### VIEW-37: a plan printed on request is drawn whole, behind a margin its text cannot draw
+
+`/todos` ([CMD-28](commands.md#CMD-28)) and the key that does the same
+([INPUT-32](terminal-input.md#INPUT-32)) put the session's plan in the transcript under a heading
+that says how many of its tasks are done, and how many are cancelled where any are. Every task is
+there, in the plan's order, whatever room the info panel has for rows
+([PANEL-10](info-panel.md#PANEL-10)). A task takes the rows its text needs. The first begins with
+the task's mark and its status in words (`pending`, `in progress`, `completed` or `cancelled`), both
+read from the status the task carries, and the text follows, wrapped to the width. Every row after
+the first has the same margin, blank where the mark and the status stood. A task no longer
+outstanding is struck through, in the colours the plan has under a turn. A task that is neither
+completed nor cancelled is drawn as work being done where a turn is running as it is printed, with
+the mark and ink the panel gives it ([PANEL-10](info-panel.md#PANEL-10)), and left open, with the
+hollow mark and the dim text the panel gives it then, where none is. Its status in words is the one
+the planner wrote either way.
+
+No row is wider than the transcript, so none is wrapped again outside its margin. The margin is
+shortened to leave the text two columns. A status word that does not fit is cut with an ellipsis, a
+margin with room for one column of it holds the mark and blanks, and a margin of one column is the
+mark. From three columns up no text is cut or replaced. At two columns a character wider than the
+column left is drawn as a replacement character, and a single column holds the mark alone, so a task
+is drawn as its mark.
+
+A task's text is the planner's, so it is drawn as the lines of a call's result are. Control
+characters are replaced with visible glyphs ([VIEW-3](#VIEW-3)), a line break among them, so an
+escape sequence in a task is drawn as visible characters and a task is always rows of its own. The margin is drawn by
+the interface on every row, so a task that writes a mark, a status or a margin into its text draws
+it after the margin of the mark and status it carries, and never in place of them.
+
+The entry holds the plan as it stood when it was printed, and whether a turn was running then. A
+later report from the planner, or the end of the turn, does not change it. It is not part of the conversation, the session record or an export.
+
+**Why.** The panel cuts each task to its width and the plan to its room, so a person who wants a
+task's whole text or the whole plan has nowhere else to read it. The text is what the planner wrote
+and may have been dictated by something it read, so a mark or a status inside it would otherwise be
+taken for the interface's own, as a forged margin would be.
+
+`verified-by: bravebot_tui::panel::the_whole_plan_is_printed_with_every_task_its_status_and_none_of_its_text_cut`
+`verified-by: bravebot_tui::panel::a_printed_plan_holds_at_every_width_from_one_column_up`
+`verified-by: bravebot_tui::panel::a_printed_plan_is_drawn_on_the_screen_as_it_is_laid_out`
+`verified-by: bravebot_tui::panel::a_printed_task_cannot_draw_a_margin_a_mark_or_a_status_of_its_own`
+`verified-by: bravebot_tui::panel::a_printed_plan_stays_as_it_was_when_the_plan_changes`
+`verified-by: bravebot_tui::panel::a_printed_plan_draws_open_rows_as_the_panel_does_and_keeps_that_after_the_turn`
+`verified-by: bravebot_tui::app::the_todos_command_prints_the_plan_and_starts_no_turn`
+`verified-by: bravebot_tui::panel::the_key_and_the_command_print_the_same_whole_plan_and_cut_none_of_it`
+
+<a id="VIEW-38"></a>
+### VIEW-38: a fenced block in a reply is drawn as a block, with its lines as they were written
+
+A line of three or more backticks or tildes, indented by any number of spaces, opens a fenced block,
+and the next line of the same character at least as long with nothing after it closes it. A block no
+line closes runs to the end of the reply. A fence of backticks cannot hold a backtick after it, so a
+line that opens with a code span is prose. The block is drawn as a header row where the opening
+fence was, saying what the fence named and cut to the room there is, with the word `copy` at its
+right where the mouse is reported and a click on it copies the block ([MOUSE-27](mouse.md#MOUSE-27);
+`/copy block` does it from the keyboard, [CMD-11](commands.md#CMD-11)), and then each of its lines in
+the ink of inline code under the margin of the reply and two columns further in, with the indent of
+the fence taken off, a tab drawn as four spaces and nothing else changed. The closing fence is not
+drawn. What is inside is not read as markdown, a table, a heading or a number, so a marker in it is
+the character it is and a `#12` in it is not linked ([VIEW-32](#VIEW-32)). A reply still arriving
+draws a block as the finished reply does, closed or not, but for the word `copy`, which comes with the
+end of the round and takes the room at the right of the header, so no row of the screen moves when the
+round ends and the name the fence gave is cut to what the word leaves.
+
+**Why.** A reply is drawn from its lines one at a time, and a line read as prose changes what it
+says. Read as prose, a `*` or `_` in a command makes words italic and vanishes, a `#` makes a comment
+a heading, and a pipe makes a row of code a table. The code a reply asks a person to run has to read
+as it will be run.
+
+The words are a reply's, released for the screen like the rest of it, and the block is drawn after
+no decision about them: the fences are found from the characters that open and close them and
+nothing a block holds is read to decide how it is drawn.
+
+`verified-by: bravebot_tui::render::transcript::a_fenced_block_is_drawn_under_a_header_with_its_lines_as_written`
+`verified-by: bravebot_tui::render::transcript::an_unclosed_block_is_drawn_as_it_will_be_closed_and_a_number_in_one_is_not_a_link`
+`verified-by: bravebot_tui::render::transcript::what_a_block_holds_is_never_a_table_a_heading_or_a_fence`
+`verified-by: bravebot_tui::markdown::a_fence_closes_on_the_same_character_at_least_as_long`
+`verified-by: bravebot_tui::markdown::a_block_that_is_never_closed_runs_to_the_end_and_a_close_has_nothing_after_it`
+`verified-by: bravebot_tui::markdown::a_line_that_opens_with_a_code_span_is_not_a_fence`
+`verified-by: bravebot_tui::markdown::the_text_of_a_block_is_its_lines_without_the_fence_or_its_indent`
+`verified-by: bravebot_tui::markdown::blocks_come_in_the_order_they_are_written`
+`verified-by: bravebot_tui::render::transcript::the_word_that_copies_a_block_sits_where_the_layout_says_at_every_width`
+
+<a id="VIEW-39"></a>
+### VIEW-39: a transcript longer than the pane has a scrollbar in the pane's last column
+
+In the plain frame, while the mouse is captured ([MOUSE-49](mouse.md#MOUSE-49)), a transcript longer
+than the pane is drawn with a scrollbar in the pane's last column. The thumb is drawn with `▐` in the
+muted colour, one row at least and never the whole column. Its length is the share of the transcript
+that the pane shows, and its place in the column is the share of the way down that the first row shown
+is, so it is at the bottom while the view is at the tail and at the top at the first row. The rest of
+the column is blank. The lines are wrapped to the columns the bar leaves.
+
+Whether the transcript is longer is read at that narrower width, so a transcript that fits the pane
+exactly and no more than that draws no bar and keeps the whole width, and one that is longer at the
+narrower width draws the bar however the wider one wraps it. One that fits is laid out at both widths
+in a frame, which costs lines of no more than the pane has rows. No bar is drawn without the mouse
+captured, in the scroller or the delegate view, over the search of earlier prompts, in the opening
+screen, or in a pane with fewer than three rows.
+
+The column is chrome and not text: the transcript's pane for selecting and copying ends before it, so
+a drag that reaches it takes no cell of it. The wheel, the arrow keys and the page keys move the view.
+
+What a copy takes and what a click on a link opens are read at the width the lines were wrapped to,
+so a wrapped line copies as one line and an address or a path that wraps is one link, with the bar
+drawn as without it. A selection of the transcript held when the bar appears or goes away is put away,
+as it is at any other change of width ([MOUSE-34](mouse.md#MOUSE-34)), and one held while the thumb
+only moves is kept.
+
+**Why.** The wheel and the keys move the view and show nothing of where it is, and a drag could scroll
+nothing. The width is read narrower so that the bar and the width the lines were wrapped to cannot
+disagree, which a bar that is added after a layout at the full width cannot promise.
+
+The scroller draws the transcript at the full width of the screen, and the words at the top of the
+view stay at the top across the change of width ([SCROLL-1](scroller.md#SCROLL-1)), as they do when
+the info panel is open and the widths differ.
+
+`verified-by: bravebot_tui::app::tests::scrollbar::a_transcript_longer_than_the_pane_has_a_thumb_where_the_view_is_and_wraps_to_the_columns_left`
+`verified-by: bravebot_tui::app::tests::scrollbar::no_bar_is_drawn_without_the_mouse_in_the_scroller_or_in_a_pane_too_short`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_pane_of_three_rows_has_a_bar_and_one_of_two_has_none`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_transcript_that_fills_the_pane_exactly_has_no_bar_and_one_row_more_has_one`
+`verified-by: bravebot_tui::app::tests::scrollbar::the_opening_screen_has_no_bar_however_much_it_holds`
+`verified-by: bravebot_tui::render::a_transcript_that_fits_the_pane_costs_lines_of_no_more_than_the_pane_each_frame`
+`verified-by: bravebot_tui::app::tests::scrollbar::opening_the_scroller_with_the_view_scrolled_back_beside_a_bar_leaves_the_same_words_at_the_top`
+`verified-by: bravebot_tui::app::tests::scrollbar::the_thumb_stands_for_the_rows_shown_and_gives_the_row_back`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_selection_that_reaches_the_last_column_never_takes_the_thumb`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_drag_from_the_text_into_the_bar_copies_the_text_and_not_the_thumb`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_selection_longer_than_the_screen_copies_the_same_with_the_bar_as_without_it`
+`verified-by: bravebot_tui::app::tests::scrollbar::an_address_or_a_path_wrapped_beside_the_bar_is_one_link`
+`verified-by: bravebot_tui::app::tests::scrollbar::the_word_that_copies_a_block_is_left_of_the_bar_and_a_press_on_the_bar_copies_nothing`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_selection_held_when_the_bar_first_appears_is_put_away_and_not_when_it_only_moves`
+`verified-by: bravebot_tui::render::drawing_the_visible_slice_matches_wrapping_the_whole_transcript`
+
+<a id="VIEW-40"></a>
+### VIEW-40: a section of the model picker folds to its heading
+
+In the model picker, Left folds the section the cursor is in. The models of a folded section are not
+drawn, and its heading says how many matching models it holds (`▸ Name  (3)`) where an open section's
+heading is marked `▾`. The cursor goes to the heading of the section folded, which is drawn as the
+row the cursor is on. Up, Down, Home, End and the page keys stop on the heading of a folded section
+as they stop on a model, so a list with every section folded is walked by the same keys, and they go
+over the models of a folded section. The wheel goes over the headings and the models of a folded
+section. Right opens the folded section the cursor is on, or else the nearest one above it, or else
+the first one in the list, and puts the cursor on that section's first model. A heading cannot be
+taken: while the cursor is on one Enter leaves the picker open and takes nothing, and Escape leaves
+it as it does anywhere. Typing a character or deleting one opens every section and puts the cursor on
+the first model of the section it was on. A press on the heading of a section does nothing
+([MOUSE-15](mouse.md#MOUSE-15)). The key line names the keys, and is short enough to be drawn whole in
+the widest panel.
+
+**Why.** A gateway's roster runs to hundreds of models and is listed beside Brave's own and whatever
+a settings file configured, so the section wanted can be several screens below the first one. Folding
+puts a section out of the way without taking it out of the search. The cursor stops on a folded
+heading because a cursor that skipped it would leave a person with every section folded unable to
+move until they had opened one, and would leave the section just folded with no way to open it
+again. Enter does nothing while the cursor is on a heading because the picker closes on a row taken
+with nothing under the cursor, and a key pressed to look at the list should not end it. A search opens every section because a
+section folded away would hide the models a person typed to find.
+
+`verified-by: bravebot_tui::model_prompt::left_folds_the_section_the_cursor_is_in_to_its_heading`
+`verified-by: bravebot_tui::model_prompt::a_fold_puts_the_cursor_on_the_heading_it_folded`
+`verified-by: bravebot_tui::model_prompt::the_keys_stop_on_the_heading_of_a_folded_section_and_go_over_its_models`
+`verified-by: bravebot_tui::model_prompt::the_arrows_walk_the_headings_of_a_list_folded_entirely`
+`verified-by: bravebot_tui::model_prompt::nothing_is_taken_from_a_section_folded_away`
+`verified-by: bravebot_tui::model_prompt::right_opens_a_folded_section_and_puts_the_cursor_on_its_first_model`
+`verified-by: bravebot_tui::model_prompt::typing_or_backspacing_opens_every_section`
+`verified-by: bravebot_tui::model_prompt::a_folded_section_holding_the_cursor_is_drawn_as_the_row_it_is_on`
+`verified-by: bravebot_tui::model_prompt::the_wheel_goes_over_the_models_of_a_folded_section`
+`verified-by: bravebot_tui::model_prompt::a_press_finds_its_model_among_rows_a_fold_has_left_out`
+`verified-by: bravebot_tui::model_prompt::a_ctrl_chord_does_not_fold`
+`verified-by: bravebot_tui::model_prompt::the_fold_and_page_keys_do_nothing_where_there_are_no_models`
+`verified-by: bravebot_tui::model_prompt::the_key_line_is_drawn_whole_in_the_widest_panel`
+`verified-by: bravebot_tui::app::tests::pickers::enter_on_a_folded_section_leaves_the_model_picker_open`
+
+<a id="VIEW-41"></a>
+### VIEW-41: the page keys move the model picker's cursor a screenful
+
+In the model picker, PageDown and PageUp move the cursor by the height of the list less one row,
+counted in rows of the list, so the headings and the gaps between sections count. The cursor lands on
+the last model within that distance, and where no model is within it, on the next one. A folded
+section ([VIEW-40](#VIEW-40)) is one row, its heading, which a page can land on, and its models are
+neither drawn nor landed on. It stops at the first row the cursor can be on and the last. Every model
+is drawn on some screen on the way down and on the way back. Home and End go to the first and last of
+those rows. The height is the list as the last frame drew it.
+
+**Why.** The panel is as tall as the terminal allows and a gateway's roster is longer than that, so
+arrowing one row at a time is the only way through it that the search does not replace. A step counted
+in models would carry the cursor past the headings and gaps it crosses, and a model just short of the
+boundary would never be on screen. A page of one row less than the list is tall begins on the row the
+last one ended on, which leaves nothing unseen even when a held heading ([VIEW-15](#VIEW-15)) takes the
+top row of the list.
+
+`verified-by: bravebot_tui::model_prompt::a_page_moves_the_cursor_a_screenful_less_a_row_counting_headings_and_gaps`
+`verified-by: bravebot_tui::model_prompt::paging_shows_every_model_and_stops_at_both_ends`
+`verified-by: bravebot_tui::model_prompt::paging_goes_over_a_folded_section`
+`verified-by: bravebot_tui::model_prompt::the_fold_and_page_keys_do_nothing_where_there_are_no_models`
+`verified-by: bravebot_tui::app::tests::pickers::page_down_moves_the_model_picker_by_the_list_the_session_drew`
+
+<a id="VIEW-42"></a>
+### VIEW-42: the questions of an `ask_user` call and what became of them are drawn under the call
+
+Once a series of questions is settled, the question the planner put, with its tag, is drawn under the
+call for each question that was put, and under each the option picked, the words typed, `skipped` or
+`closed on the clock` ([ASK-13](tools/ask-user.md#ASK-13)). The rows are the call's glimpse, handed to
+`Session::returned` as the rows of any other call are, so they are drawn behind the margin of one,
+through the replacement of [VIEW-3](#VIEW-3) and without the structure of [VIEW-4](#VIEW-4): a
+question or an answer that holds a line break or an escape is drawn on one line as text. They stay
+after the call finishes and carry over to the finished entry. A series that put no question draws no
+rows. They are of the screen alone, and a resumed session does not draw them ([VIEW-2](#VIEW-2)),
+since they are not in the session record.
+
+**Why.** Without them the scroll back holds `3 questions asked` and the planner's later reply, so a
+person reading what was decided has to read what the planner made of it.
+
+`verified-by: bravebot_tui::render::a_settled_ask_user_call_shows_each_question_and_its_answer_without_a_reply`
+`verified-by: bravebot_tui::render::a_series_nobody_could_be_asked_draws_no_rows`
+
+## Known costs
+
+- **A picture is not drawn when it arrives.** The rows about a tool's picture or a read file's say
+  where it is held and how to look at it, and the picture itself is drawn only by the question
+  `vet_content` puts, in a terminal that draws real pictures ([VET-4](tools/vet-content.md#VET-4)),
+  and from a copy a person opens. Drawing it on arrival needs the picture's bytes released to a
+  screen without a question, and a place in the transcript's scroll to draw them. The desktop
+  window draws no image for it at all, since an image in released content is never an `<img>`
+  there ([LAYER-5](layering.md#LAYER-5)).
+- **The desktop window is sent the thinking whether or not it is shown.** Holding it is what lets
+  turning it on mid-round show what has come so far, as the terminal does, and the cost is an event
+  across the pipe for each frame that carries some, however long the model thinks.
+- **The trust question asked when the interface opens is not noticed.** The terminal has not reported
+  being left when it is drawn, and the person who started the program is looking at it, so
+  [VIEW-31](#VIEW-31) writes nothing for it under any `notificationCondition`. A question put to a
+  person outside a turn is not noticed either, which is the boundary `prompt-shown` has in
+  [hooks.md](hooks.md).
+- **`auto` knows a terminal by `TERM_PROGRAM`, which is not always the terminal.** Inside tmux it
+  names tmux and over ssh it is often unset, so `auto` writes the bell there although the terminal
+  in front may read OSC 9. `notificationMethod` set to `osc9` asks for it by name, and whether the
+  sequence reaches the terminal is up to what sits between.
+- **A terminal that reports no focus changes is never written to under the default condition.** A
+  person whose terminal sends none is taken to be looking, so one who walks away learns nothing
+  unless `notificationCondition` is `always`, which writes the notice to a person who is looking
+  as well.
+- **A number is linked only where the checkout's own `origin` names it.** A remote set in an
+  `include`d file (a configuration with an `include` is not read at all), a host other than
+  `github.com` (an enterprise server among them), and a repository reached through a
+  `url.<base>.insteadOf` rewrite are not read as git would read them, so a session in such a checkout
+  draws numbers as text. A number written as `{owner}/{repository}#N` is a word of its own and is not
+  linked.
+- **A checkout whose `origin` is a fork links numbers into the fork.** A number in a reply may name
+  an issue of the repository the fork was made from, and the link opens the fork's issue of that
+  number, or none.
+- **A `#` and digits written for another purpose is linked as a number.** A colour written as
+  `#336699` or a rank written as `#3`, outside a code span, is underlined and opens that issue.
+- **A number cut across the last row of the transcript is linked by the digits shown.** The row it
+  continues on is below the screen, so the check for a cut has nothing to look at. A number is cut
+  only where the transcript is narrower than the word that holds it, which for a number alone is at
+  most ten columns.
+- **The desktop application draws `#<number>` as text.** Its renderer is not the terminal's, and it
+  has no link for a number.

@@ -1,0 +1,1773 @@
+//! Running a pipeline of argv stages.
+//!
+//! Process plumbing and nothing else. Every decision about whether a pipeline may run at all is
+//! taken before anything here is called: the capability, the person's approval, and the label the
+//! output will carry all belong to [`bravebot_core::policy::Policy`]. This module is what happens after
+//! those said yes, so it takes a [`bravebot_core::Pipeline`] of plain strings and reports what came back.
+//!
+//! # No shell, at any point
+//!
+//! Each stage is spawned with its program and its argument vector passed directly to the operating
+//! system. Nothing is concatenated into a string and nothing re-parses one, so an argument
+//! containing `; rm -rf /` is one argument and arrives as one argument. That is the property the
+//! whole tool rests on, and it lives here: a future change that built a command line out of these
+//! parts would break it without any gate noticing.
+//!
+//! Stages are chained the way a shell chains them, by handing one child's stdout to the next
+//! child's stdin as a file descriptor. The operating system moves the bytes, so a large
+//! intermediate result cannot deadlock against a buffer we forgot to drain.
+//!
+//! # What runs is what was resolved
+//!
+//! Each stage is spawned by the absolute path its name was found by, not by the name in the
+//! [`bravebot_core::Pipeline`]. The name was looked up once, before the person was asked; spawning by name here
+//! would look it up a second time, leaving a window in which `$PATH` changed and something other
+//! than what they approved ran. Before a pipeline starts, each path is followed again, and the
+//! pipeline is refused if a step no longer reaches the file that was approved. See
+//! [`crate::programs`].
+//!
+//! # Confined where the session asks for it
+//!
+//! A caller that passes a [`Confinement`] has every step started under the profile that step's
+//! plan accounts for ([`crate::confine`]), and a step the platform cannot confine is not started.
+//! A caller that passes none runs steps with whatever access the user's own shell would give
+//! them, which is what a platform with no base does. What holds either way is the label on the
+//! output, not any belief about the binary. The rows are decided in `docs/specs/sandboxing.md`.
+//!
+//! # Nothing on stdin unless it was approved
+//!
+//! The first stage is given an empty stdin rather than the terminal's. A program that reads stdin
+//! would otherwise block forever on input nobody is typing, and the turn would hang with no
+//! indication of why.
+//!
+//! Where a caller supplies bytes for it, they are the ones the policy layer resolved out of a
+//! quarantined reference and nothing else ([`run_plan_observed`]'s `stdin`). This module writes them to the
+//! first step's descriptor on a thread of its own and never looks at them: they are carried into a
+//! process exactly as an argument vector is, and no branch here reads a byte of them.
+//!
+//! # This agent's own credentials are not handed on
+//!
+//! The environment is inherited, less the names in [`bravebot_config::scrub::withheld`], which
+//! [`bravebot_sandbox::programs::start`] removes. A person approving a run reads the
+//! binary, the argv and the directory, so a credential travelling alongside those is something they
+//! were never shown and could not have endorsed. The signing key has no use in a subprocess anyway:
+//! a program the planner chose is doing what somebody approved, not authenticating as this agent.
+//!
+//! The rest of the environment stays. `run aws s3 ls` and `run gh pr list` are things people ask
+//! for, and a filter matching names cannot tell one of those from an exfiltration, so it is not
+//! attempted: what holds is narrow and exact rather than broad and approximate.
+
+use crate::confine::Confinement;
+use crate::interjections::Arrival;
+use bravebot_core::cancel::{Cancel, Handoff, JobStop};
+use bravebot_core::command::{Joiner, Plan, Route, Step, Steps, is_the_null_device};
+use std::fmt;
+use std::io::{Read, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long a pipeline may run before it is given up on, where nobody named a figure.
+///
+/// A program that never terminates would otherwise hold the turn open with nothing to show for
+/// it. Generous, because a build or a test run is a reasonable thing to ask for and a limit that
+/// cuts those off is worse than no limit for the user who was waiting.
+///
+/// Reaching it is not an error. What the stages printed before they were killed comes back the
+/// same way it does from a pipeline that ended by itself, marked with [`Ran::stopped`].
+///
+/// The built-in figure rather than the figure: a settings file may name its own, and what a run is
+/// actually held to is [`Deadlines`] (RUN-23).
+pub const LIMIT: Duration = Duration::from_secs(300);
+
+/// The shortest deadline a call may set for its own run.
+///
+/// Zero and below do not name a wait: they would end a run at or before the moment it began. This
+/// is the least value that still asks for one. It promises nothing about reaching the first spawn,
+/// because the clock starts before it, so a run held to the floor can be stopped having printed
+/// nothing.
+pub const FLOOR: Duration = Duration::from_secs(1);
+
+/// The longest deadline a call may set for its own run, where nobody named a figure.
+///
+/// A call may raise its deadline up to this value and no further. Not a safety property:
+/// a program that finishes in time is no safer than one that does not. It bounds the time
+/// the turn spends waiting on one command, which is a budget decision.
+///
+/// Which is why it is a built-in figure rather than the figure: the budget belongs to whoever is
+/// waiting, and a settings file may name their own. See [`Deadlines`].
+pub const CEILING: Duration = Duration::from_secs(600);
+
+/// The wall-clock figures a run is held to: what a call that names no deadline gets, and the most
+/// one may name for itself.
+///
+/// Resolved once, by whichever caller read the settings, and carried to the call from there. A
+/// figure read where it is spent would answer differently on a machine whose owner had configured
+/// one, which is the one thing a test of a figure cannot have.
+///
+/// Nothing here is a safety property, and nothing here is derived from anything a program printed:
+/// these are two numbers a person chose about their own machine, and how long a command ran decides
+/// nothing about what its output may be read for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadlines {
+    /// What a call that names no deadline of its own is given.
+    pub default: Duration,
+    /// The most a call may name for itself.
+    pub ceiling: Duration,
+}
+
+impl Deadlines {
+    /// The figures a caller that read no settings file runs under.
+    pub const BUILT_IN: Self = Self {
+        default: LIMIT,
+        ceiling: CEILING,
+    };
+
+    /// The figures in force, given what a settings file named of each.
+    ///
+    /// A figure nobody wrote never contradicts one somebody did, which is the whole of the
+    /// arithmetic here:
+    ///
+    /// - A default past the built-in ceiling raises it. The default is a deadline a run is actually
+    ///   given, so a ceiling below it would forbid the figure the person just named, and they would
+    ///   get eight minutes of the ten their build takes with nothing saying why.
+    /// - A ceiling under the built-in default lowers it. A default no call could name is not a
+    ///   default, and somebody holding every run to a minute meant every run.
+    /// - Where a file names both, the ceiling it names is the bound and the default is held to it.
+    ///   Both are that person's own words, and of the two the ceiling is the one that says what the
+    ///   most a run may take is.
+    ///
+    /// The floor is not configurable and is not part of this. It is what makes a deadline name a
+    /// wait at all rather than a budget anybody would want to choose, so a ceiling under it is
+    /// raised to it rather than allowed to describe a run that ends before it starts.
+    ///
+    /// Takes what the settings said whole rather than a figure at a time, so the five callers that
+    /// read a settings file hand over one value and none of them takes the block apart.
+    pub fn resolve(named: bravebot_config::RunDeadlines) -> Self {
+        let bravebot_config::RunDeadlines { default, ceiling } = named;
+        let ceiling = ceiling
+            .unwrap_or_else(|| CEILING.max(default.unwrap_or(LIMIT)))
+            .max(FLOOR);
+        Self {
+            default: default.unwrap_or(LIMIT).clamp(FLOOR, ceiling),
+            ceiling,
+        }
+    }
+
+    /// The deadline a call asking for `seconds` is held to.
+    ///
+    /// Clamped rather than refused, which is [`crate::tools`]' decision to explain: what comes back
+    /// from a run says how long it was given, so a deadline shortened is visible in the answer.
+    pub fn held_to(&self, seconds: i64) -> Duration {
+        let floor = FLOOR.as_secs() as i64;
+        // Never below the floor, so that a ceiling somebody built by hand cannot make this a
+        // clamp whose bounds are the wrong way round. Saturating rather than cast, because a
+        // ceiling past `i64::MAX` seconds would wrap to a negative bound and then clamp every
+        // deadline a call named down to the floor: one second for every command, and nothing
+        // anywhere saying why.
+        let ceiling = i64::try_from(self.ceiling.as_secs())
+            .unwrap_or(i64::MAX)
+            .max(floor);
+        Duration::from_secs(seconds.clamp(floor, ceiling) as u64)
+    }
+}
+
+/// The shortest and the longest one look at a background job may wait for it.
+///
+/// Their own pair rather than [`FLOOR`] and [`CEILING`]. Those bound a deadline, which is how long a
+/// pipeline is allowed to run, and raising what a program may take is not a decision about how long
+/// a single look may sit watching one. Both numbers are quoted to the planner in the tool's
+/// description and in its refusal, so a test pins those words to these values.
+pub const WAIT_FLOOR: Duration = Duration::from_secs(1);
+/// See [`WAIT_FLOOR`].
+pub const WAIT_CEILING: Duration = Duration::from_secs(600);
+
+/// How often the wait loop looks up to see whether it should stop.
+const TICK: Duration = Duration::from_millis(50);
+
+/// How long the drain threads are given to reach the end of their pipe, once the stages are done.
+///
+/// They are waited on rather than joined, because a stage can leave a child holding the write end
+/// of the pipe. `sh -c 'sleep 30 & echo hi'` is enough: the shell exits and `sleep` holds the same
+/// descriptor, so the pipe never reaches end-of-file and a joining thread waits on a process
+/// nobody is waiting for. A child that left the stage's process group does the same when the
+/// stage is stopped. Whatever was read by the time the grace runs out is kept, which is what
+/// makes the wait safe to abandon.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the process group of a stage is given to end after it has been asked to, before
+/// what is left of it is killed (RUN-11).
+///
+/// A program that is asked to end can undo what it holds: `git` removes its `index.lock` on
+/// `SIGTERM` and nothing removes it after `SIGKILL`. Short, because the stage was asked to end
+/// because a person's turn or deadline ran out, and one that ignores the request is killed
+/// anyway. Every stage of a pipeline waits out the same grace together, so a long pipeline is no
+/// slower to stop than one stage.
+#[cfg(unix)]
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// What running a pipeline produced.
+///
+/// The text fields are what the programs printed. They are returned as plain `String`s because
+/// this module has no business labelling anything: the caller wraps them at the label
+/// [`bravebot_core::policy::Policy::before_plan`] already decided, which is `(U,priv)` whatever is
+/// in them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ran {
+    /// The last stage's standard output.
+    pub stdout: String,
+    /// Standard error, from every stage, in stage order.
+    ///
+    /// Kept apart from stdout because a stage that failed usually explains itself here, and a
+    /// person reading the result should be able to tell the explanation from the output.
+    pub stderr: String,
+    /// The exit code of each stage, in order. `None` where a stage was killed by a signal.
+    pub codes: Vec<Option<i32>>,
+    /// How long the pipeline had run when the limit ran out and it was killed, or `None` if every
+    /// stage exited on its own.
+    ///
+    /// A pipeline that outstays the limit is stopped, but it is not a pipeline that did not run:
+    /// a server asked to serve a page serves it for five minutes and prints as it goes. Reporting
+    /// only the failure threw that away and left the caller unable to tell a program that hung
+    /// from one that was working exactly as asked. So the output is collected either way and the
+    /// distinction is carried here, where a caller can say which happened without reading a byte
+    /// of what was printed.
+    pub stopped: Option<Duration>,
+    /// Whether the line ended well, the way its own branches decide.
+    ///
+    /// A pipeline is as good as its worst step, which is what [`Ran::succeeded`] says. A line with
+    /// branches has a second answer: `test -f x || echo missing` did what it was told even though
+    /// its first step failed, and reporting that as a failure would be wrong.
+    pub ended_well: bool,
+}
+
+impl Ran {
+    /// Whether every stage reported success.
+    ///
+    /// A pipeline is as good as its worst stage. A shell would report only the last one, which
+    /// hides the case that matters most here: an early stage failing and a later one cheerfully
+    /// processing the nothing it was handed.
+    pub fn succeeded(&self) -> bool {
+        // A pipeline that had to be killed did not succeed, whatever its stages had managed to
+        // report by then. Stages still running have no code at all, so this would be false in
+        // most cases anyway; it is stated rather than relied on.
+        self.stopped.is_none() && self.codes.iter().all(|code| *code == Some(0))
+    }
+}
+
+/// What a run printed, as the one text a reader gets.
+///
+/// Standard error comes back rather than being dropped, because a stage that failed usually explains
+/// itself there and a result without the explanation is the least useful thing to hand back. It comes
+/// back under a line naming it, because run together the two are one listing: a reader taking
+/// `ls: nosuch: No such file or directory` for something the listing printed concludes that the
+/// command worked.
+///
+/// The label is a line of the text rather than a second field, which is what [CMDLINE-10] asks for
+/// and what every reader of this already handles. It marks the boundary, and does not prove it: what
+/// a program prints on either stream can spell the same line. Nothing here turns on the boundary, and
+/// the block a planner reads is already labelled untrusted as a whole, so a forged line moves nothing
+/// from one side of the trust boundary to the other.
+///
+/// [CMDLINE-10]: ../../../docs/specs/tools/command-line.md
+pub fn both_streams(stdout: &str, stderr: &str) -> String {
+    let mut text = stdout.to_string();
+    if !stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("standard error:\n");
+        text.push_str(stderr);
+    }
+    text
+}
+
+#[derive(Debug)]
+pub enum ExecError {
+    /// The program could not be started: usually not installed, or not executable.
+    ///
+    /// Carries the program name, which is safe to report: argv was endorsed by a person, so it is
+    /// not content an attacker chose.
+    NotStarted { program: String, detail: String },
+    /// The directory the line was to run in no longer exists, so the pipeline was not started.
+    ///
+    /// Checked immediately before the first stage is spawned, since an approval can wait for
+    /// hours. Names no path: the directory is the one the person was shown and approved, and the
+    /// line it belongs to is told with the directory the planner typed, where a path here would be
+    /// where a link led.
+    DirectoryGone,
+    /// The platform could not confine the program, so it was not started.
+    ///
+    /// A program a person approved runs under its profile or not at all, so this is a refusal and
+    /// never a program started without one ([SANDBOX-17]).
+    ///
+    /// [SANDBOX-17]: ../../../docs/specs/sandboxing.md
+    NotConfined { program: String, detail: String },
+    /// The user asked the turn to stop while this was running, and it has been killed.
+    Cancelled,
+    /// The plumbing itself failed: a pipe that could not be created or read.
+    Io(String),
+    /// A redirection's file could not be opened.
+    Redirection { path: String, detail: String },
+    /// A redirection's file could not be opened, with the path exec tried, kept as a path until it
+    /// is shown so that a caller can decide on it ([PATH-001]).
+    ///
+    /// [PATH-001]: ../../../docs/best-practices/paths.md
+    Unopened {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+}
+
+impl fmt::Display for ExecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStarted { program, detail } => {
+                write!(f, "'{program}' could not be started: {detail}")
+            }
+            Self::DirectoryGone => f.write_str("the directory it was to run in no longer exists"),
+            Self::NotConfined { program, detail } => {
+                write!(
+                    f,
+                    "'{program}' was not started, since it could not be confined: {detail}"
+                )
+            }
+            Self::Cancelled => f.write_str("stopped because the turn was cancelled"),
+            Self::Io(detail) => write!(f, "the pipeline could not be run: {detail}"),
+            Self::Redirection { path, detail } => {
+                write!(f, "'{path}' could not be opened: {detail}")
+            }
+            Self::Unopened { path, detail } => {
+                write!(f, "'{}' could not be opened: {detail}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExecError {}
+
+/// Run a compiled command line and collect what it printed, with notification immediately before
+/// each destination may be opened for writing.
+///
+/// Every part of the plan shares one deadline, because the limit is on the line rather than on
+/// any one program in it, and a part reached after the time ran out is not started.
+///
+/// The notification is the whole of what a caller learns about the files a line writes. Nothing
+/// is collected afterwards: a list handed back once the line has finished cannot order a read
+/// against a write that already happened, which is what [`FileCapture::begin`] is for.
+///
+/// `cancel` is checked while waiting, so a user who changes their mind does not have to wait out a
+/// slow program. Unlike cancellation between rounds, this one kills: a child already running is an
+/// effect in progress, and the request to stop is precisely a request to end it.
+///
+/// `scratch` is the directory this session was given, which every part of the line is told the
+/// path of. A caller that has none passes nothing, and then no part is told of one: a name set to
+/// a directory that does not exist would be worse than an absent name, which a line can test for.
+///
+/// `stdin` is the bytes the policy layer resolved out of a quarantined reference, for the first
+/// step of the line and no other, and [`Plan::stdin`] is the label they carry. They are written to
+/// that step's descriptor and nothing here reads them, which is the whole of RUN-3's first
+/// sentence: the planner named the reference, the policy layer produced the bytes, and the driver
+/// only carries them. `None` where the call named no reference, and then the first step is given
+/// an empty stdin exactly as it was before.
+///
+/// [`FileCapture::begin`]: bravebot_core::file_authority::FileCapture::begin
+/// [RUN-3]: ../../../docs/specs/tools/run.md
+pub fn run_plan_observed(
+    plan: &Plan,
+    cancel: &Cancel,
+    limit: Duration,
+    scratch: Option<&std::path::Path>,
+    stdin: Option<&str>,
+    confinement: Option<&Confinement>,
+    entering: &mut dyn FnMut(&std::path::Path) -> Result<(), ExecError>,
+) -> Result<Ran, ExecError> {
+    let mut running = Running::new(&plan.directory, cancel, limit, scratch, stdin);
+    running.confinement = confinement;
+    running.entering = Some(entering);
+    running.finish(&plan.steps)
+}
+
+/// [`run_plan_observed`], with `reading` called on each redirection's source immediately before
+/// it is opened, as `entering` is on each destination. An earlier part of the line may have left
+/// a link at that name since the line was checked, and a read is opened here, outside any profile
+/// a program runs under (RECALL-8).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "run_plan_observed's arguments and the read hook beside its write hook"
+)]
+pub fn run_plan_observed_reading(
+    plan: &Plan,
+    cancel: &Cancel,
+    limit: Duration,
+    scratch: Option<&std::path::Path>,
+    stdin: Option<&str>,
+    confinement: Option<&Confinement>,
+    entering: &mut dyn FnMut(&std::path::Path) -> Result<(), ExecError>,
+    reading: &mut dyn FnMut(&std::path::Path) -> Result<(), ExecError>,
+) -> Result<Ran, ExecError> {
+    let mut running = Running::new(&plan.directory, cancel, limit, scratch, stdin);
+    running.confinement = confinement;
+    running.entering = Some(entering);
+    running.reading = Some(reading);
+    running.finish(&plan.steps)
+}
+
+/// How a run that could be moved to the background came back.
+#[derive(Debug)]
+pub enum Waited {
+    /// It was waited for to the end, as [`run_plan_observed`] waits.
+    Ran(Ran),
+    /// A person asked for it to go on running, and it is still running.
+    Moved(Moved),
+}
+
+/// A line that stopped being waited for part way through, with every step it started.
+#[derive(Debug)]
+pub struct Moved {
+    /// The same processes and the same pipes, so what it printed before the move is still there.
+    pub running: Background,
+    /// How long it had been waited for when the person asked.
+    pub after: Duration,
+}
+
+/// [`run_plan_observed`], for a line a person may ask to go on running in the background.
+///
+/// Only a line [`Steps::unrouted_pipeline`] accepts reads `handoff`, because that is the one shape a
+/// job can hold. Any other line runs exactly as [`run_plan_observed`] runs it and a request on the token does
+/// nothing to it.
+///
+/// The token is read on every pass of the wait, after the cancellation token. A pass that finds
+/// both set kills the line, because a person who asked the turn to stop has asked for everything
+/// in it to stop. What the move hands over is the processes themselves: they are never killed and
+/// started again, so a build that was half done is still half done.
+///
+/// No stdin is taken, because a line fed a reference is not one this is offered for: its bytes
+/// would have to be written into a job nobody waits for.
+pub fn run_plan_movable(
+    plan: &Plan,
+    cancel: &Cancel,
+    handoff: &Handoff,
+    limit: Duration,
+    scratch: Option<&std::path::Path>,
+    confinement: Option<&Confinement>,
+) -> Result<Waited, ExecError> {
+    let mut running = Running::new(&plan.directory, cancel, limit, scratch, None);
+    running.confinement = confinement;
+    running.handoff = plan.steps.unrouted_pipeline().map(|_| handoff);
+    let ended_well = running.run(&plan.steps)?;
+    Ok(match running.moved.take() {
+        Some(moved) => Waited::Moved(moved),
+        None => Waited::Ran(running.into_ran(ended_well)),
+    })
+}
+
+/// Where one of a step's streams goes.
+enum Where {
+    /// The stage before this one.
+    Upstream,
+    /// The stage after this one.
+    Chain,
+    /// A pipe this module reads, so the bytes come back in the result.
+    Collect,
+    /// A file the plan named, opened for appending where the line said so.
+    File(std::path::PathBuf, bool),
+    /// Nowhere: the line sent the stream to the null device, which is no file effect.
+    Discard,
+    /// Wherever standard output is going, as a second handle on the same place.
+    AsStdout,
+}
+
+impl Where {
+    fn writing(path: &std::path::Path, append: bool) -> Self {
+        if is_the_null_device(path) {
+            Self::Discard
+        } else {
+            Self::File(path.to_path_buf(), append)
+        }
+    }
+}
+
+/// One line's worth of running: its parts in order, what they printed, and one deadline over all
+/// of them.
+type Entering<'a> = &'a mut dyn FnMut(&std::path::Path) -> Result<(), ExecError>;
+
+struct Running<'a> {
+    entering: Option<Entering<'a>>,
+    /// Called on a redirection's source before it is opened, where the caller gave one.
+    reading: Option<Entering<'a>>,
+    directory: &'a std::path::Path,
+    cancel: &'a Cancel,
+    started: Instant,
+    limit: Duration,
+    stdout: String,
+    stderr: String,
+    codes: Vec<Option<i32>>,
+    stopped: Option<Duration>,
+    /// The directory this session was given, where it has one.
+    scratch: Option<&'a std::path::Path>,
+    /// The bytes the policy layer supplied for standard input, until a step has been given them.
+    ///
+    /// Taken by the first step of the line and left `None` afterwards, so a line of several parts
+    /// feeds them once rather than handing every part its own copy: `sed … && wc -l` is `sed`
+    /// reading the reference and `wc` reading what `sed` printed, which is what a reader of the
+    /// line expects and the only reading under which the bytes are released once.
+    stdin: Option<&'a str>,
+    /// The token a person presses to stop waiting, where this line is one that can be moved.
+    handoff: Option<&'a Handoff>,
+    /// The pipeline the token took, once it has.
+    moved: Option<Moved>,
+    /// What each step is confined to, where the session asked for it.
+    confinement: Option<&'a Confinement>,
+}
+
+/// Why a wait came back without an error.
+enum Ending {
+    /// Every step is over, by exiting or by being stopped at the deadline.
+    Over(Vec<Option<i32>>),
+    /// A person asked for the steps to go on without being waited for, and at least one is still
+    /// running.
+    Handed {
+        codes: Vec<Option<i32>>,
+        finished: Vec<bool>,
+    },
+}
+
+impl<'a> Running<'a> {
+    fn new(
+        directory: &'a std::path::Path,
+        cancel: &'a Cancel,
+        limit: Duration,
+        scratch: Option<&'a std::path::Path>,
+        stdin: Option<&'a str>,
+    ) -> Self {
+        Self {
+            entering: None,
+            reading: None,
+            directory,
+            cancel,
+            started: Instant::now(),
+            limit,
+            stdout: String::new(),
+            stderr: String::new(),
+            codes: Vec::new(),
+            stopped: None,
+            scratch,
+            stdin,
+            handoff: None,
+            moved: None,
+            confinement: None,
+        }
+    }
+
+    fn finish(mut self, steps: &Steps) -> Result<Ran, ExecError> {
+        let ended_well = self.run(steps)?;
+        Ok(self.into_ran(ended_well))
+    }
+
+    fn into_ran(self, ended_well: bool) -> Ran {
+        Ran {
+            stdout: self.stdout,
+            stderr: self.stderr,
+            codes: self.codes,
+            stopped: self.stopped,
+            ended_well,
+        }
+    }
+
+    /// Run one shape of a plan, and say whether it ended well.
+    fn run(&mut self, steps: &Steps) -> Result<bool, ExecError> {
+        match steps {
+            Steps::Pipeline(steps) => self.pipeline(steps),
+            Steps::Group(inner) => self.run(inner),
+            Steps::Join {
+                left,
+                joiner,
+                right,
+            } => {
+                let ok = self.run(left)?;
+                let onwards = match joiner {
+                    Joiner::And => ok,
+                    Joiner::Or => !ok,
+                    Joiner::Then => true,
+                };
+                // A line that ran out of time does not go on to its next part. The deadline is on
+                // the line, and what was collected before it is the account of what happened.
+                if !onwards || self.stopped.is_some() {
+                    return Ok(ok);
+                }
+                self.run(right)
+            }
+        }
+    }
+
+    /// Run one pipeline of steps, chained by descriptor the way a shell chains them.
+    fn pipeline(&mut self, steps: &[Step]) -> Result<bool, ExecError> {
+        if steps.is_empty() {
+            return Err(ExecError::Io("no stages to run".to_string()));
+        }
+        the_directory_exists(self.directory)?;
+        still_approved(steps)?;
+
+        let mut children = ForegroundChildren(Vec::with_capacity(steps.len()));
+        // Nothing is typed at a program bravebot started, so a step with nothing upstream reads an
+        // empty stdin rather than the terminal's. Unless the policy layer supplied bytes for it,
+        // which are taken here and given to the first step below: taken rather than borrowed, so
+        // the second part of a joined line is back to the empty stdin.
+        let supplied = self.stdin.take();
+        // The two routes to one descriptor cannot both be honoured, and whichever lost would have
+        // been dropped without anybody being told. Refused here as well as where the call is read,
+        // because a caller reaching this with both is a caller whose bytes would otherwise vanish
+        // into a run that looked like it had worked.
+        if supplied.is_some()
+            && steps[0]
+                .routes
+                .iter()
+                .any(|route| matches!(route, Route::Stdin { .. }))
+        {
+            return Err(ExecError::Io(
+                "a line cannot both be fed a reference and name a file for standard input"
+                    .to_string(),
+            ));
+        }
+        let mut upstream: Option<Handle> = match supplied {
+            Some(bytes) => Some(feed(bytes)?),
+            None => None,
+        };
+        let mut tail: Option<Drain> = None;
+        let mut draining: Vec<Drain> = Vec::new();
+        let last = steps.len() - 1;
+
+        for (index, step) in steps.iter().enumerate() {
+            let command = command_for(step, self.directory, self.scratch);
+            // Decided before a redirection's file is opened, so a step the platform will not
+            // confine is refused ahead of every effect its line has.
+            let launching = crate::confine::begin(self.confinement, command, step, self.directory)?;
+
+            let mut into = Where::Upstream;
+            let mut out = if index == last {
+                Where::Collect
+            } else {
+                Where::Chain
+            };
+            let mut err = Where::Collect;
+            // In the order the line wrote them, which is what decides `> f 2>&1` from `2>&1 > f`.
+            for route in &step.routes {
+                match route {
+                    Route::Stdin { path } => into = Where::File(path.clone(), false),
+                    Route::Stdout { path, append } => out = Where::writing(path, *append),
+                    Route::Stderr { path, append } => err = Where::writing(path, *append),
+                    Route::Both { path } => {
+                        out = Where::writing(path, false);
+                        err = Where::AsStdout;
+                    }
+                    Route::StderrToStdout => err = Where::AsStdout,
+                }
+            }
+
+            let reading_from = match &into {
+                Where::File(path, _) => {
+                    if let Some(reading) = self.reading.as_mut() {
+                        reading(path)?;
+                    }
+                    Handle::from(for_reading(path)?)
+                }
+                // Taken rather than moved, so every iteration starts with a stdin of its own.
+                _ => from_upstream(&mut upstream)?,
+            };
+
+            // Before the open, never after it. Opening for writing truncates, so a notification
+            // that waited for a successful open would leave a window in which the file is empty
+            // and the map still calls it trusted. The cost is that a target that could not be
+            // opened at all has entered an effect by then, which the caller is conservative
+            // about: a path that may have been written is not a path to go on trusting.
+            if let Where::File(path, _) = &out
+                && let Some(entering) = self.entering.as_mut()
+            {
+                entering(path)?;
+            }
+            // The duplicate is what `2>&1` needs: a second handle on wherever standard output is
+            // going at that point, rather than a second place.
+            let (writing, reading, duplicate) = destination(&out)?;
+            let (erring, err_reading) = match &err {
+                Where::File(path, append) => {
+                    if let Some(entering) = self.entering.as_mut() {
+                        entering(path)?;
+                    }
+                    let file = for_writing(path, *append)?;
+                    (Handle::from(file), None)
+                }
+                Where::Discard => (nowhere()?, None),
+                Where::AsStdout => (
+                    duplicate.ok_or_else(|| {
+                        ExecError::Io(
+                            "standard error could not be joined to standard output".to_string(),
+                        )
+                    })?,
+                    None,
+                ),
+                _ => {
+                    let (reader, writer) =
+                        bravebot_sandbox::process::creating_a_channel(std::io::pipe)
+                            .map_err(|e| ExecError::Io(e.to_string()))?;
+                    (Handle::from(writer), Some(reader))
+                }
+            };
+
+            let child = match launch(launching, step, reading_from, writing, erring) {
+                Ok(child) => child,
+                Err(error) => {
+                    // Whatever started already is killed rather than left running behind a
+                    // pipeline that will never complete.
+                    stop(&mut children);
+                    return Err(error);
+                }
+            };
+            children.push(child);
+
+            // Read on threads of their own, started as each step spawns, so a program printing
+            // more than a pipe holds is being drained while it is still writing. Waiting first and
+            // reading afterwards would deadlock on exactly that.
+            match (&out, reading) {
+                (Where::Chain, Some(reader)) => upstream = Some(Handle::from(reader)),
+                (_, Some(reader)) => tail = Some(Drain::reading(reader)),
+                (_, None) => {}
+            }
+            if let Some(reader) = err_reading {
+                draining.push(Drain::reading(reader));
+            }
+        }
+
+        // Offered only with a pipe for standard output, since that is the one a job reads from.
+        let handoff = self.handoff.filter(|_| tail.is_some());
+        let (codes, tail) = match (self.wait(&mut children, handoff)?, tail) {
+            (Ending::Handed { codes, finished }, Some(stdout)) => {
+                // Taken out of the guard in the one expression that hands them on, so there is
+                // no point at which its drop could kill them and nothing else holds them.
+                self.moved = Some(Moved {
+                    running: Background {
+                        children: std::mem::take(&mut children.0),
+                        stdout,
+                        stderr: std::mem::take(&mut draining),
+                        codes,
+                        finished,
+                        started: self.started,
+                        exited: None,
+                    },
+                    after: self.started.elapsed(),
+                });
+                return Ok(false);
+            }
+            // Not reached, since the token is offered only with a tail. Stopped as the deadline
+            // stops a line, so nothing is left running behind a result that says it ended.
+            (Ending::Handed { codes, .. }, None) => {
+                stop(&mut children.0);
+                self.stopped = Some(self.started.elapsed());
+                (codes, None)
+            }
+            (Ending::Over(codes), tail) => (codes, tail),
+        };
+
+        // Collected once the steps are over, whether they ended on their own or were killed. The
+        // usual case is that every pipe reached its end the moment the step writing to it did; the
+        // grace is there for the pipe something else is still holding, and what had been read by
+        // then is taken rather than lost.
+        let waiting = Instant::now();
+        while waiting.elapsed() < DRAIN_GRACE
+            && !(tail.as_ref().is_none_or(Drain::finished) && draining.iter().all(Drain::finished))
+        {
+            std::thread::sleep(TICK);
+        }
+
+        if let Some(tail) = &tail {
+            self.stdout.push_str(&tail.text());
+        }
+        for drain in &draining {
+            self.stderr.push_str(&drain.text());
+        }
+        self.codes.extend(codes.iter().copied());
+
+        Ok(self.stopped.is_none() && codes.iter().all(|code| *code == Some(0)))
+    }
+
+    /// Wait for every child, until they are done, the user says stop, the user says to stop
+    /// waiting, or the time runs out.
+    fn wait(
+        &mut self,
+        children: &mut [Process],
+        handoff: Option<&Handoff>,
+    ) -> Result<Ending, ExecError> {
+        let mut codes = vec![None; children.len()];
+        let mut finished = vec![false; children.len()];
+
+        loop {
+            for (index, child) in children.iter_mut().enumerate() {
+                if finished[index] {
+                    continue;
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        codes[index] = status.code();
+                        finished[index] = true;
+                    }
+                    Ok(None) => {}
+                    // A child we cannot ask about is not one to keep waiting for.
+                    Err(_) => finished[index] = true,
+                }
+            }
+
+            if finished.iter().all(|done| *done) {
+                return Ok(Ending::Over(codes));
+            }
+
+            // Both of these kill. Something still running is an effect in progress, and neither a
+            // cancellation nor the deadline is served by leaving it to finish unwatched.
+            if self.cancel.is_cancelled() {
+                stop(children);
+                return Err(ExecError::Cancelled);
+            }
+            // Before the deadline, so a press that arrived in time is not lost to a pass that
+            // happens to land after it.
+            if handoff.is_some_and(Handoff::is_requested) {
+                return Ok(Ending::Handed { codes, finished });
+            }
+            let waited = self.started.elapsed();
+            if waited >= self.limit {
+                stop(children);
+                self.stopped = Some(waited);
+                return Ok(Ending::Over(codes));
+            }
+
+            std::thread::sleep(TICK);
+        }
+    }
+}
+
+/// Where a step's standard output goes: what the child is given, the end this module keeps, and a
+/// second handle on the same place for `2>&1`.
+fn destination(
+    out: &Where,
+) -> Result<(Handle, Option<std::io::PipeReader>, Option<Handle>), ExecError> {
+    match out {
+        Where::File(path, append) => {
+            let file = for_writing(path, *append)?;
+            let duplicate = file.try_clone().ok().map(Handle::from);
+            Ok((Handle::from(file), None, duplicate))
+        }
+        Where::Discard => Ok((nowhere()?, None, Some(nowhere()?))),
+        _ => {
+            let (reader, writer) = bravebot_sandbox::process::creating_a_channel(std::io::pipe)
+                .map_err(|e| ExecError::Io(e.to_string()))?;
+            let duplicate = writer.try_clone().ok().map(Handle::from);
+            Ok((Handle::from(writer), Some(reader), duplicate))
+        }
+    }
+}
+
+/// What a standard stream is given to refer to: an open descriptor on Unix, an open handle on
+/// Windows. A confined process on Windows is created from handles rather than from a `Command`,
+/// so the streams are held as these until the step starts.
+#[cfg(unix)]
+type Handle = std::os::fd::OwnedFd;
+#[cfg(windows)]
+type Handle = std::os::windows::io::OwnedHandle;
+
+/// The null device, opened for both directions: what a stream with nothing to read or nowhere to
+/// write is attached to.
+fn nowhere() -> Result<Handle, ExecError> {
+    #[cfg(unix)]
+    const NULL: &str = "/dev/null";
+    #[cfg(windows)]
+    const NULL: &str = "NUL";
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(NULL)
+        .map(Handle::from)
+        .map_err(|e| ExecError::Io(e.to_string()))
+}
+
+/// The stream the stage before wrote to, or the null device for the first stage.
+fn from_upstream(upstream: &mut Option<Handle>) -> Result<Handle, ExecError> {
+    match upstream.take() {
+        Some(handle) => Ok(handle),
+        None => nowhere(),
+    }
+}
+
+/// A started step: an ordinary child, or on Windows a process in a container.
+enum Process {
+    /// On Unix the child leads a process group of its own (see [`crate::confine::begin`]), so its
+    /// number is also the number of the group everything it started belongs to.
+    Plain {
+        child: Child,
+        /// Whether the child has been waited for. Its number is free to be given to another
+        /// process from then on, so a signal addressed by it could reach a process that is not
+        /// this stage's, and none is sent once this is set.
+        #[cfg(unix)]
+        reaped: bool,
+    },
+    #[cfg(windows)]
+    Contained(crate::confine::Contained),
+}
+
+impl Process {
+    fn plain(child: Child) -> Self {
+        Self::Plain {
+            child,
+            #[cfg(unix)]
+            reaped: false,
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = match self {
+            Self::Plain { child, .. } => child.try_wait(),
+            #[cfg(windows)]
+            Self::Contained(contained) => contained.child.try_wait(),
+        };
+        // Any answer but "still running" ends the waiting, an error included. A parent that
+        // ignores `SIGCHLD` has its children collected by the kernel, and the number of a child
+        // that was collected may belong to another process.
+        #[cfg(unix)]
+        if !matches!(status, Ok(None)) {
+            self.waited_for();
+        }
+        status
+    }
+
+    #[cfg(unix)]
+    fn waited_for(&mut self) {
+        let Self::Plain { reaped, .. } = self;
+        *reaped = true;
+    }
+
+    /// End the stage, and on Unix every program in its process group with it.
+    ///
+    /// Nothing is signalled by number once the stage has been waited for: see
+    /// [`Process::Plain`].
+    fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(group) = self.group() {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        match self {
+            Self::Plain { child, .. } => child.kill(),
+            #[cfg(windows)]
+            Self::Contained(contained) => contained.child.kill(),
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = match self {
+            Self::Plain { child, .. } => child.wait(),
+            #[cfg(windows)]
+            Self::Contained(contained) => contained.child.wait(),
+        };
+        #[cfg(unix)]
+        self.waited_for();
+        status
+    }
+
+    /// The process group the stage leads, while the stage has not been waited for.
+    ///
+    /// Not waited for means its number still names it, even if it has exited and is waiting to be
+    /// collected, so the group it names cannot belong to anything else.
+    #[cfg(unix)]
+    fn group(&self) -> Option<rustix::process::Pid> {
+        let Self::Plain { child, reaped } = self;
+        if *reaped {
+            return None;
+        }
+        rustix::process::Pid::from_raw(i32::try_from(child.id()).ok()?)
+    }
+
+    /// Ask the stage to end, and every program in its group with it, and name the group asked.
+    ///
+    /// `SIGCONT` follows, because a stopped group holds a `SIGTERM` back until it is continued.
+    #[cfg(unix)]
+    fn ask_to_end(&self) -> Option<rustix::process::Pid> {
+        let group = self.group()?;
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::CONT);
+        Some(group)
+    }
+
+    /// Collect the stage if it has exited, then say whether anything is left in `group`, the group
+    /// it was asked to end.
+    ///
+    /// The stage is collected first because a leader nobody has collected still counts as a member
+    /// of its group. A group's number is not given to another process while the group has a member,
+    /// so a group this finds a member in can still be signalled by that number.
+    #[cfg(unix)]
+    fn collect_then_group_has_members(&mut self, group: rustix::process::Pid) -> bool {
+        let _ = self.try_wait();
+        !matches!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        )
+    }
+}
+
+/// Start `launching` with its three standard streams.
+fn launch(
+    launching: crate::confine::Launch,
+    step: &Step,
+    stdin: Handle,
+    stdout: Handle,
+    stderr: Handle,
+) -> Result<Process, ExecError> {
+    match launching {
+        crate::confine::Launch::Command(mut command) => {
+            command
+                .stdin(Stdio::from(stdin))
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(stderr));
+            bravebot_sandbox::process::starting_a_program(|| command.spawn())
+                .map(Process::plain)
+                .map_err(|e| ExecError::NotStarted {
+                    program: step.program.clone(),
+                    detail: e.to_string(),
+                })
+        }
+        #[cfg(windows)]
+        crate::confine::Launch::Container(container) => container
+            .start(bravebot_sandbox::Attached {
+                stdin,
+                stdout,
+                stderr,
+            })
+            .map(Process::Contained),
+    }
+}
+
+/// Every error after spawning a stage must stop it before its file effects are released.
+struct ForegroundChildren(Vec<Process>);
+impl std::ops::Deref for ForegroundChildren {
+    type Target = Vec<Process>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ForegroundChildren {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for ForegroundChildren {
+    fn drop(&mut self) {
+        stop(&mut self.0);
+    }
+}
+
+/// A redirection's target, opened to be written.
+///
+/// The path is named in the error because it is routing a person endorsed rather than content an
+/// attacker chose.
+fn for_writing(path: &std::path::Path, append: bool) -> Result<std::fs::File, ExecError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+        .map_err(|e| ExecError::Unopened {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        })
+}
+
+/// A pipe holding `bytes`, for a child to read as its standard input.
+///
+/// Written from a thread of its own, because a program reading less than it was given would
+/// otherwise deadlock the turn: more than a pipe holds cannot be written before the reader starts,
+/// and the reader is a child this same function is about to spawn.
+///
+/// The bytes came out of a quarantined reference and nothing here reads them. There is no branch on
+/// them, no comparison, and no length test that decides anything: they are written and the writer
+/// is dropped, which is what tells the child its input has ended.
+///
+/// A write that fails is dropped, and the usual reason is a program that read none of what it was
+/// given: `head -1` of a long document closes its end, and the write comes back `EPIPE`. That is
+/// the program doing what it was asked to do rather than a failure of the run, and a run that
+/// reported it would report one for every line that filters.
+fn feed(bytes: &str) -> Result<Handle, ExecError> {
+    let (reader, mut writer) = bravebot_sandbox::process::creating_a_channel(std::io::pipe)
+        .map_err(|e| ExecError::Io(e.to_string()))?;
+    let bytes = bytes.as_bytes().to_vec();
+    std::thread::spawn(move || {
+        let _ = writer.write_all(&bytes);
+    });
+    Ok(Handle::from(reader))
+}
+
+/// A redirection's source, opened to be read.
+fn for_reading(path: &std::path::Path) -> Result<std::fs::File, ExecError> {
+    std::fs::File::open(path).map_err(|e| ExecError::Unopened {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    })
+}
+
+/// A pipe being read on a thread of its own, and what has been read so far.
+///
+/// The bytes are shared rather than sent at the end, because the end may not come: the reader can
+/// be left on a pipe a killed stage's own child is still holding open. Anything that handed over
+/// its result only on completion would have nothing to hand over in exactly the case where what
+/// was printed matters most, which is the pipeline that had to be stopped.
+struct Drain {
+    read: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+}
+
+impl Drain {
+    /// Start reading `source` into a buffer the caller can look at at any time.
+    fn reading<R: Read + Send + 'static>(mut source: R) -> Self {
+        let read = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let into = Arc::clone(&read);
+        let ended = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match source.read(&mut chunk) {
+                    // End of the pipe, or a pipe that can no longer be read. Either way there is
+                    // no more to come, and a read error is not a failure of the run.
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => into
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                }
+            }
+            ended.store(true, Ordering::Release);
+        });
+        Self { read, done }
+    }
+
+    /// Whether the pipe has reached its end, so there is nothing further to wait for.
+    fn finished(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// What has been read so far.
+    ///
+    /// A stage printing bytes that are not UTF-8 is not a failure of the run, so the text is taken
+    /// lossily rather than discarded.
+    fn text(&self) -> String {
+        let read = self.read.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&read).into_owned()
+    }
+
+    /// How many bytes the pipe has delivered so far.
+    ///
+    /// The buffer's length, which is not the length of what [`Drain::text`] returns: that is taken
+    /// lossily, so one byte the pipe delivered can become three characters a caller sees. Only ever
+    /// compared against itself, to say whether more has arrived.
+    fn bytes_read(&self) -> usize {
+        self.read.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// What this pipe has delivered past `seen`, advancing `seen` by the bytes taken.
+    ///
+    /// A byte offset into this one pipe's buffer, which is the only offset that means anything:
+    /// see [`Seen`] for why an offset into the composed text does not.
+    ///
+    /// A final character the pipe has not finished delivering is held back rather than taken
+    /// lossily. Decoding a half-arrived character now would hand back U+FFFD and move the offset
+    /// past it, so the character that is on its way would never be handed to anybody. Bytes that
+    /// are not the start of a character are not waited for: they are not going to become valid.
+    fn since(&self, seen: &mut Mark) -> (String, Counted) {
+        let read = self.read.lock().unwrap_or_else(|e| e.into_inner());
+        let rest = &read[seen.handed.min(read.len())..];
+        let take = match std::str::from_utf8(rest) {
+            Ok(_) => rest.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => rest.len(),
+        };
+        seen.handed = read.len() - rest.len() + take;
+        // Taken under the same lock as the bytes, so what was looked at is exactly what had arrived
+        // when they were taken, and nothing landing after this is counted as looked at.
+        seen.looked = read.len();
+        let counted = seen.count(&rest[..take]);
+        (String::from_utf8_lossy(&rest[..take]).into_owned(), counted)
+    }
+}
+
+/// How many lines one delivery from a job completed, counted from the pipes' own bytes.
+///
+/// A count of line starts, never a look at what the bytes spell. Taken from the pipes and not from
+/// the composed text, so the `standard error:` label and the newline [`both_streams`] puts between
+/// the two streams are not lines of the job.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Counted {
+    /// The lines that begin in this delivery. A line is counted once, by the delivery that holds
+    /// its first byte, so a line cut between two deliveries is counted by the earlier one and the
+    /// later one adds nothing for the rest of it. A last line with no newline counts as soon as
+    /// its first byte arrives.
+    pub lines: usize,
+}
+
+/// How much of one pipe a caller has been handed, and how much of it had arrived at that look.
+///
+/// The two differ while a character is half delivered: the look holds its bytes back, so they are
+/// not handed over, and they are not news either. Only bytes arriving past `looked` are.
+#[derive(Debug, Default, Clone, Copy)]
+struct Mark {
+    /// Bytes of the pipe handed to the caller.
+    handed: usize,
+    /// Bytes the pipe had delivered when the caller last looked.
+    looked: usize,
+    /// Whether the bytes handed end in the middle of a line, so the next byte continues it.
+    mid_line: bool,
+}
+
+impl Mark {
+    /// Count the lines that begin in `taken`, and remember whether it ends inside one.
+    ///
+    /// A line begins at the first byte of the pipe and after each newline. It is counted where its
+    /// first byte is handed over, so the count does not depend on where a look happens to cut the
+    /// bytes: a cut inside a line neither counts it twice nor leaves it uncounted. The count is a
+    /// number the caller carries into a sentence whose words do not depend on it.
+    fn count(&mut self, taken: &[u8]) -> Counted {
+        let mut lines = 0;
+        for byte in taken {
+            if !self.mid_line {
+                lines += 1;
+                self.mid_line = true;
+            }
+            if *byte == b'\n' {
+                self.mid_line = false;
+            }
+        }
+        Counted { lines }
+    }
+}
+
+/// How much of each of a job's pipes a caller has already been handed.
+///
+/// One offset per pipe, never a single offset into what [`Background::printed`] composes. That
+/// composition puts standard output first, so a line arriving on standard output after standard
+/// error has printed moves every byte of the error text further along it: a lone offset into it then
+/// names a place in the middle of text the caller was already shown, and the bytes it was waiting
+/// for sit before that place and are never handed over at all.
+///
+/// Byte counts and nothing else. Comparing two of these says whether more has arrived; it never says
+/// what arrived, and nothing here reads a byte of it.
+#[derive(Debug, Default, Clone)]
+pub struct Seen {
+    stdout: Mark,
+    /// One per standard-error pipe, grown to match when a pipeline's stages are first looked at.
+    stderr: Vec<Mark>,
+}
+
+/// Stop every stage and reap it, so nothing is left behind.
+///
+/// On Unix each stage is first asked to end, together with everything in its process group, and
+/// its group is given `STOP_GRACE` to do so. Whatever is left of a group after that is killed, so
+/// a program that ignored the request, or a child that outlived the stage, does not keep running
+/// (RUN-11). The grace lasts while the group has a member, since a stage that ends at once on the
+/// request can leave programs it started that are still undoing what they hold.
+fn stop(children: &mut [Process]) {
+    stop_processes(children.iter_mut().collect());
+}
+
+/// [`stop`] over stages that may belong to several jobs, which then share the one grace.
+fn stop_processes(mut children: Vec<&mut Process>) {
+    #[cfg(unix)]
+    {
+        let asked: Vec<(usize, rustix::process::Pid)> = children
+            .iter()
+            .enumerate()
+            .filter_map(|(index, child)| Some((index, child.ask_to_end()?)))
+            .collect();
+        let until = Instant::now() + STOP_GRACE;
+        while Instant::now() < until
+            && asked
+                .iter()
+                .any(|&(index, group)| children[index].collect_then_group_has_members(group))
+        {
+            std::thread::sleep(TICK);
+        }
+        for &(index, group) in &asked {
+            if children[index].collect_then_group_has_members(group) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+        }
+    }
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Refuse the pipeline when the directory it runs in has been removed since the line was planned
+/// or approved. Without this the spawn fails with the operating system's "No such file or
+/// directory", which reads as a missing program.
+fn the_directory_exists(directory: &std::path::Path) -> Result<(), ExecError> {
+    if directory.is_dir() {
+        return Ok(());
+    }
+    Err(ExecError::DirectoryGone)
+}
+
+/// Refuse the pipeline unless every step's start path still leads to the file that was approved.
+///
+/// A link can be repointed after the person approved the file it led to, so each path is resolved
+/// again here. Every step is checked before any starts, so a refusal leaves nothing running and no
+/// file opened. RUN-2 accepts the gap between this check and the last step's spawn, and the steps
+/// before it are already running during part of that gap.
+///
+/// The detail names no path, because whoever repointed the link chose the path it now leads to.
+/// The message already names the program the line used.
+fn still_approved(steps: &[Step]) -> Result<(), ExecError> {
+    for step in steps {
+        // Reads the two paths that decide what runs. Nothing here is a key.
+        let Step {
+            program,
+            resolved,
+            started_as,
+            args: _,
+            environment: _,
+            routes: _,
+        } = step;
+        if started_as.canonicalize().ok().as_ref() != Some(resolved) {
+            return Err(ExecError::NotStarted {
+                program: program.clone(),
+                detail: "it no longer leads to the program that was approved".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A pipeline left running, and what it has printed so far.
+///
+/// For the program that is doing exactly what was asked and will never exit: a server told to
+/// serve, a watcher told to watch. [`LIMIT`] exists for the program that hangs, and applying it to
+/// these two meant the only way to start a server was to have it killed three hundred seconds
+/// later, so the turn that started one could never talk to it.
+///
+/// What is deferred is only the waiting. The argv was resolved and endorsed before anything
+/// started, exactly as for [`run_plan_observed`], and the label its output carries was fixed then too: a
+/// pipeline is not made more trustworthy by being left alone. Nothing here reads a byte of what it
+/// printed.
+///
+/// Dropping this kills the pipeline. A background job outliving the turn that started it would be
+/// an effect nobody is watching and nobody can stop, so the turn owns it and ends it.
+pub struct Background {
+    children: Vec<Process>,
+    stdout: Drain,
+    stderr: Vec<Drain>,
+    /// The exit code of each step, filled in as they are collected.
+    codes: Vec<Option<i32>>,
+    finished: Vec<bool>,
+    started: Instant,
+    /// When every step was first seen to have exited, which bounds the wait for the pipes.
+    exited: Option<Instant>,
+}
+
+impl Background {
+    /// Whether every step has exited and everything it printed has been read.
+    ///
+    /// Polled rather than waited on, so asking costs nothing and a caller is never blocked by a
+    /// program that is behaving as intended. The exception is the moment the last step exits: the
+    /// pipes are given until [`DRAIN_GRACE`] after that to reach their end, because a step can
+    /// print and exit with its output still in the pipe, unread because the thread reading it has
+    /// not run yet. Reporting ended then would say the account was complete while the last of it
+    /// was still in flight, and a caller told a job ended stops asking.
+    ///
+    /// The grace is a deadline from that moment rather than a wait on each call, so a pipe a
+    /// step's own child is still holding costs it once and does not leave a pipeline whose steps
+    /// have all exited reported as running forever.
+    pub fn ended(&mut self) -> bool {
+        if !self.steps_exited() {
+            return false;
+        }
+
+        let exited = *self.exited.get_or_insert_with(Instant::now);
+        while exited.elapsed() < DRAIN_GRACE && !self.drained() {
+            std::thread::sleep(TICK);
+        }
+        true
+    }
+
+    /// Whether every step has exited, without waiting for the pipes to catch up.
+    ///
+    /// [`Background::ended`] pays [`DRAIN_GRACE`] on top of this so that the account it gives is
+    /// complete. Anything waiting to a bound has to ask this instead: the grace would carry the wait
+    /// past the bound it was given, and it does not look at the cancellation token, so a person who
+    /// changed their mind would still sit through it.
+    pub(crate) fn steps_exited(&mut self) -> bool {
+        for (index, child) in self.children.iter_mut().enumerate() {
+            if self.finished[index] {
+                continue;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.codes[index] = status.code();
+                    self.finished[index] = true;
+                }
+                Ok(None) => {}
+                // A child that cannot be asked about is not one to keep waiting for.
+                Err(_) => self.finished[index] = true,
+            }
+        }
+        self.finished.iter().all(|done| *done)
+    }
+
+    /// Whether every pipe has reached its end, so nothing more of the output is to come.
+    fn drained(&self) -> bool {
+        self.stdout.finished() && self.stderr.iter().all(Drain::finished)
+    }
+
+    /// What it has printed so far, standard output then standard error under the label
+    /// [`both_streams`] gives it.
+    ///
+    /// A snapshot rather than a stream: the drains keep everything read since the pipeline
+    /// started, so two reads of a growing log both begin at the beginning. Whoever reads this is
+    /// told how much of it they have seen.
+    pub fn printed(&self) -> String {
+        let mut errored = String::new();
+        for drain in &self.stderr {
+            let text = drain.text();
+            if text.is_empty() {
+                continue;
+            }
+            if !errored.is_empty() && !errored.ends_with('\n') {
+                errored.push('\n');
+            }
+            errored.push_str(&text);
+        }
+        // Labelled here as it is for a run waited for, because backgrounding changes when the
+        // planner is told and never what it is told (CMDLINE-14). One label for every stage, since
+        // it names the stream rather than the stage.
+        both_streams(&self.stdout.text(), &errored)
+    }
+
+    /// What it has printed past `seen`, composed the way [`Background::printed`] composes it, and
+    /// advancing `seen` by what is taken.
+    ///
+    /// Per pipe rather than an offset into the composition, which is the whole point of [`Seen`].
+    /// Each delivery that carries standard error carries the label with it, so a reader of a later
+    /// delivery, which holds none of the earlier ones, can still tell the stream apart (CMDLINE-10).
+    pub fn since(&self, seen: &mut Seen) -> String {
+        self.take(seen).0
+    }
+
+    /// What [`Background::since`] returns, with the lines that begin in it counted per pipe.
+    ///
+    /// The count is of the pipes' bytes, so the label and the newline joining the streams are not
+    /// in it.
+    pub fn take(&self, seen: &mut Seen) -> (String, Counted) {
+        seen.stderr.resize(self.stderr.len(), Mark::default());
+        let (stdout, mut counted) = self.stdout.since(&mut seen.stdout);
+        let mut errored = String::new();
+        for (drain, seen) in self.stderr.iter().zip(seen.stderr.iter_mut()) {
+            let (text, more) = drain.since(seen);
+            counted.lines += more.lines;
+            if text.is_empty() {
+                continue;
+            }
+            if !errored.is_empty() && !errored.ends_with('\n') {
+                errored.push('\n');
+            }
+            errored.push_str(&text);
+        }
+        (both_streams(&stdout, &errored), counted)
+    }
+
+    /// Whether any pipe has delivered anything since the caller last looked.
+    ///
+    /// Byte counts per pipe, so asking costs nothing however much a job has printed. Composing the
+    /// text to measure its length would copy the whole log every time somebody wanted to know
+    /// whether there was anything in it. Measured from the last look rather than from what that look
+    /// handed over, so the bytes of a half-delivered character, which the look held back, do not
+    /// count as news until the rest of the character arrives.
+    pub fn has_more(&self, seen: &Seen) -> bool {
+        if self.stdout.bytes_read() > seen.stdout.looked {
+            return true;
+        }
+        self.stderr.iter().enumerate().any(|(at, drain)| {
+            drain.bytes_read() > seen.stderr.get(at).map_or(0, |mark| mark.looked)
+        })
+    }
+
+    /// How long it has been running.
+    pub fn ran_for(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// The exit codes collected so far, for a step that has ended.
+    pub fn codes(&self) -> &[Option<i32>] {
+        &self.codes
+    }
+
+    /// Kill every step, and keep what it printed.
+    pub fn kill(&mut self) {
+        stop(&mut self.children);
+    }
+
+    /// Stop several jobs at once and keep what each printed.
+    ///
+    /// Every job is asked to end before any is waited for, and their process groups share one
+    /// grace period, so jobs that ignore the request take two seconds together and not two seconds
+    /// each. Stopping them one after another with [`Background::kill`] gives each its own.
+    pub fn stop_together(jobs: &mut [&mut Background]) {
+        stop_processes(
+            jobs.iter_mut()
+                .flat_map(|job| job.children.iter_mut())
+                .collect(),
+        );
+    }
+
+    /// Wait for something to happen, and return at the first of six things.
+    ///
+    /// Output past `seen` being there, every step having exited, `bound` running out, `cancel`
+    /// being set, one of `stops` being set, and `arrival` reporting a line the turn may take.
+    /// `seen` is where the caller's last look left off, so output that arrived after that look and
+    /// before this call ends the wait at once. Which it was is not reported, because the caller
+    /// then takes the account [`Background::ended`] and [`Background::printed`] give and that
+    /// account says it.
+    ///
+    /// **Nothing of the output is read.** Both conditions are counts this struct kept about a
+    /// pipeline it started: how many bytes each pipe has delivered against how many the caller has
+    /// been handed, and which steps have exited. A program that decides its own output therefore
+    /// decides when this returns, which is exactly what a caller waiting to be told about new output
+    /// asked for, and the bytes themselves still reach anybody only under the label the plan was
+    /// given.
+    ///
+    /// `stops` holds the token of every job the turn has not finished with, this one's among them,
+    /// since a stop of any of them is carried out by the turn's next step and this wait holds that
+    /// step back. The tokens are checked on every pass rather than once at the end, and nothing
+    /// inside a pass blocks. The bound runs to ten minutes, and a person who has changed their
+    /// mind, about the turn or about one job, should not have to sit through the rest of somebody
+    /// else's `tail -f`. This is also why the steps are asked about with
+    /// [`Background::steps_exited`] and not with [`Background::ended`]: the latter waits out
+    /// [`DRAIN_GRACE`] for the pipes, which would carry the wait past `bound` and would not look at
+    /// the tokens while it did.
+    pub fn wait_for_more(
+        &mut self,
+        seen: &Seen,
+        bound: Duration,
+        cancel: &Cancel,
+        stops: &[JobStop],
+        arrival: &Arrival,
+    ) {
+        self.wait(Some(seen), bound, cancel, stops, arrival);
+    }
+
+    /// Wait for the job to end, and return at the first of five things.
+    ///
+    /// Every step having exited, `bound` running out, `cancel` being set, one of `stops` being
+    /// set, and `arrival` reporting a line the turn may take. Output arriving ends none of it,
+    /// whether it arrives during the wait or was already there, unseen, when the wait began: that is
+    /// the difference from [`Background::wait_for_more`], whose caller gets back at the next line
+    /// from a job that prints more often than a round takes.
+    ///
+    /// Of the output this asks for nothing at all, not even a byte count, so it decides on which
+    /// steps have exited and on the clock alone. What was printed is taken by the caller afterwards,
+    /// the same way [`Background::wait_for_more`]'s is, and is all of what the job printed since the
+    /// caller's last look.
+    pub fn wait_for_exit(
+        &mut self,
+        bound: Duration,
+        cancel: &Cancel,
+        stops: &[JobStop],
+        arrival: &Arrival,
+    ) {
+        self.wait(None, bound, cancel, stops, arrival);
+    }
+
+    /// The loop both waits share. `seen` is where the caller's last look left off for a wait that
+    /// output ends, and `None` for one that only an exit, the bound, the token, a stop or a line
+    /// does.
+    ///
+    /// `arrival` is read the way a stop is: a flag the buffer keeps about whether it holds a line
+    /// the turn may take, never the line. A line already waiting when the wait begins ends it at
+    /// the first pass. A held line, which the turn may not take, does not count, and a handle from
+    /// no buffer ([`Arrival::never`]) never ends it.
+    fn wait(
+        &mut self,
+        seen: Option<&Seen>,
+        bound: Duration,
+        cancel: &Cancel,
+        stops: &[JobStop],
+        arrival: &Arrival,
+    ) {
+        let until = Instant::now() + bound;
+        loop {
+            if cancel.is_cancelled()
+                || stops.iter().any(JobStop::is_requested)
+                || arrival.is_waiting()
+                || seen.is_some_and(|seen| self.has_more(seen))
+                || self.steps_exited()
+            {
+                return;
+            }
+            if Instant::now() >= until {
+                return;
+            }
+            std::thread::sleep(TICK);
+        }
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        stop(&mut self.children);
+    }
+}
+
+impl fmt::Debug for Background {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // No output: it is labelled content, and a `Debug` that printed it would be a way past
+        // every gate that decides who may read it.
+        f.debug_struct("Background")
+            .field("steps", &self.children.len())
+            .field("codes", &self.codes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The process a step becomes, before it is confined or given its descriptors. The foreground
+/// pipeline and a background job both build every step here, so the scrub of this agent's own
+/// credentials is one implementation for both.
+fn command_for(
+    step: &Step,
+    directory: &std::path::Path,
+    scratch: Option<&std::path::Path>,
+) -> Command {
+    // Exhaustive so that a field added to `Step` stops the build here. This is where a step
+    // becomes a real process, so a field this applies that no standing answer's key holds
+    // would be a line running differently from the one somebody was shown ([RUN-8]).
+    //
+    // [RUN-8]: ../../../docs/specs/tools/run.md
+    let Step {
+        program: _,
+        resolved: _,
+        started_as,
+        args: _,
+        environment: _,
+        routes: _,
+    } = step;
+    // Started by the path the name was found by, which some programs read
+    // ([`Step::started_as`]). A second lookup here would let a `$PATH` changed since the
+    // question decide what runs.
+    //
+    // Every step, not only the first, is started without this agent's own credentials. One
+    // is as reachable from the middle of a pipeline as from the front, and one step spared
+    // would be the whole of the hole.
+    let withheld = bravebot_config::scrub::withheld();
+    let inherits = bravebot_sandbox::programs::Inherits::Without(&withheld);
+    let mut command = bravebot_sandbox::programs::start(
+        &bravebot_sandbox::programs::Resolved::found_earlier(started_as),
+        inherits,
+        bravebot_sandbox::programs::SearchPath::Inherited,
+    );
+    // The vector, never a string. Nothing here builds a command line, so nothing has to
+    // unbuild one.
+    command.args(&step.args).current_dir(directory);
+    // Where to put an intermediate file, so a line can name one without having been told
+    // the path first. Before the step's own assignments, so a line that sets the name
+    // itself wins, which is what the same assignment in front of a program does in a
+    // shell.
+    if let Some(scratch) = scratch {
+        command.env(bravebot_config::env_var::SCRATCH_DIR, scratch);
+    } else {
+        // Removed rather than left as it arrived. Whatever an outer environment set the
+        // name to is another session's directory or none, and a program that tests the
+        // name would find one that has already been removed.
+        command.env_remove(bravebot_config::env_var::SCRATCH_DIR);
+    }
+    // Written in front of this step's own program, so it reaches this step and no other.
+    for (name, value) in &step.environment {
+        command.env(name, value);
+    }
+    // Withheld again, since the line is the planner's and a name it assigns is not the
+    // person's own: `run.scrubEnv` lists what their commands may not be handed.
+    inherits.withhold(&mut command);
+    command
+}
+
+/// Start the steps of a compiled plan and leave them running. Every step is started, chained the
+/// same way, and given the same scrubbed environment and empty stdin as in the foreground; what
+/// differs is that nothing waits for them.
+///
+/// A plan's redirections and joins are not honoured here: a background job is one pipeline, which
+/// is what [`crate::tools`] refuses anything else for. Every step's own environment is applied, as
+/// it is in the foreground, and so is the session's own directory: a program left running is one
+/// with more reason to want somewhere to write, not less.
+pub fn start_steps(
+    steps: &[Step],
+    directory: &std::path::Path,
+    scratch: Option<&std::path::Path>,
+    confinement: Option<&Confinement>,
+) -> Result<Background, ExecError> {
+    if steps.is_empty() {
+        return Err(ExecError::Io("no stages to run".to_string()));
+    }
+    the_directory_exists(directory)?;
+    still_approved(steps)?;
+
+    let mut children: Vec<Process> = Vec::with_capacity(steps.len());
+    let mut upstream: Option<Handle> = None;
+    let mut tail: Option<Drain> = None;
+    let mut draining: Vec<Drain> = Vec::new();
+    let last = steps.len() - 1;
+
+    for (index, step) in steps.iter().enumerate() {
+        let command = command_for(step, directory, scratch);
+        let launching = match crate::confine::begin(confinement, command, step, directory) {
+            Ok(launching) => launching,
+            Err(error) => {
+                stop(&mut children);
+                return Err(error);
+            }
+        };
+
+        let (out_reader, out_writer) = bravebot_sandbox::process::creating_a_channel(std::io::pipe)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+        let (err_reader, err_writer) = bravebot_sandbox::process::creating_a_channel(std::io::pipe)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+
+        let child = match from_upstream(&mut upstream).and_then(|reading_from| {
+            launch(
+                launching,
+                step,
+                reading_from,
+                Handle::from(out_writer),
+                Handle::from(err_writer),
+            )
+        }) {
+            Ok(child) => child,
+            Err(error) => {
+                stop(&mut children);
+                return Err(error);
+            }
+        };
+        children.push(child);
+
+        if index == last {
+            tail = Some(Drain::reading(out_reader));
+        } else {
+            upstream = Some(Handle::from(out_reader));
+        }
+        draining.push(Drain::reading(err_reader));
+    }
+
+    let steps = children.len();
+    Ok(Background {
+        children,
+        // An invariant of the loop above, not a runtime condition: an error return here
+        // would invent a failure mode no caller could act on.
+        // nosemgrep: trailofbits.rs.panic-in-function-returning-result.panic-in-function-returning-result
+        stdout: tail.expect("the last step's output is always collected"),
+        stderr: draining,
+        codes: vec![None; steps],
+        finished: vec![false; steps],
+        started: Instant::now(),
+        exited: None,
+    })
+}

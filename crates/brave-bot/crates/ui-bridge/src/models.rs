@@ -1,0 +1,1425 @@
+//! Model discovery uses the agent's clients and egress policy, never renderer-supplied URLs.
+
+use crate::account_words::{self, Said};
+use bravebot_aichat::models::{Advertised, Model};
+use bravebot_config::{Config, ModelRefusal, RosterScope};
+use serde_json::{Value, json};
+
+pub fn list(config: &Config) -> Value {
+    let (rows, warnings) = roster(config, RosterScope::for_a_picker());
+    catalogue(config, rows, warnings)
+}
+
+/// Take the window of the model a turn will be answered by, the one `model` names or, where it names
+/// none, the configured default, so the turn compacts against that model's budget and not the
+/// default one (BACKEND-7, BACKEND-14, COMPACT-9).
+///
+/// Every turn builds its configuration afresh, so nothing carries over from an earlier model: the
+/// budget is the default until this says otherwise. A model whose row states no window, or that no
+/// row describes, or a listing that could not be fetched, leaves the default in place, except that the
+/// compiled names of the ChatGPT account stand in for its listing and carry the assumed window.
+pub fn adopt_window(config: &mut Config, model: Option<&str>) {
+    let rows = roster(config, config.roster_scope_for_a_turn(model)).0;
+    config.adopt_window_of_model_in_force(model, |in_force| {
+        rows.iter()
+            .find(|row| row.key == in_force)
+            .and_then(|row| row.conversation_tokens)
+    });
+}
+
+/// The rows every service this window reaches offers, and what could not be asked of the ones that
+/// failed.
+///
+/// The warnings for the ChatGPT account are catalog messages (`account_words`), since
+/// [CHATGPT-8](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-8) and
+/// [CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9) word every sentence for that account
+/// that way, with its command as an argument. The warnings for a gateway and for Brave are English
+/// text built here. The window reads the reference catalog whatever language the machine is set to
+/// ([LOCALE-7](../../../docs/specs/localization.md#LOCALE-7)), so a person reads the same words from
+/// either.
+fn roster(config: &Config, scope: RosterScope<'_>) -> (Vec<Model>, Vec<Said>) {
+    use bravebot_aichat::roster::Entry;
+
+    // Every request goes out at once, so what the window waits for is the slowest service and not
+    // the sum, and the entries come back in the order the configuration lists them
+    // ([BACKEND-64](../../../docs/specs/backends.md#BACKEND-64)). The accounts are asked on this
+    // thread while they are in flight: a unit test scripts them per thread.
+    let (roster, (chatgpt, xai)) =
+        bravebot_aichat::roster::ask(config, scope, &bravebot_session::audit::Trail::new, || {
+            (
+                scope.accounts.chatgpt.then(|| ask_the_account(config)),
+                scope.accounts.xai.then(|| ask_the_xai_account(config)),
+            )
+        });
+    let mut rows = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in roster.entries {
+        match entry {
+            // An entry naming AWS is served by the Bedrock backend under the bare id it is keyed by,
+            // and there is no listing to ask, so a block that named no models offers none.
+            Entry::Bedrock(bedrock) => rows.extend(bedrock_rows(bedrock)),
+            Entry::Named(provider) => rows.extend(named_rows(provider)),
+            Entry::NoCredential(provider) => warnings.push(Said::plain(format!(
+                "No credential configured for {}.",
+                provider.display_name()
+            ))),
+            Entry::Asked(_, Ok(listed)) => rows.extend(listed),
+            Entry::Asked(provider, Err(_)) => warnings.push(Said::plain(format!(
+                "Could not load models from {}. Try again.",
+                provider.display_name()
+            ))),
+        }
+    }
+    // Additive like a gateway: a stored ChatGPT sign-in adds its models and takes none away, and so
+    // does a stored xAI sign-in ([XAI-19](../../../docs/specs/xai-sign-in.md#XAI-19)).
+    if let Some(account) = chatgpt {
+        with_account(&mut rows, &mut warnings, account);
+    }
+    if let Some(account) = xai {
+        with_xai_account(&mut rows, &mut warnings, account);
+    }
+    match roster.brave {
+        Some(Ok(listed)) => rows.extend(listed),
+        Some(Err(_)) => warnings.push(Said::plain("Could not load Brave models. Try again.")),
+        None => {}
+    }
+    (rows, warnings)
+}
+
+/// The rows of the models a gateway's block names, which it describes none of.
+fn named_rows(provider: &bravebot_config::provider::Provider) -> Vec<Model> {
+    provider
+        .models
+        .iter()
+        .map(|model| Model {
+            key: format!("{}/{}", provider.id, model.id),
+            display_name: model.id.clone(),
+            premium: false,
+            reads_effort: true,
+            provider: Some(provider.display_name().to_string()),
+            conversation_tokens: Some(provider.window_of(model)),
+            advertised: Advertised::default(),
+        })
+        .collect()
+}
+
+/// What the ChatGPT account offers, asked of the serving host with the stored sign-in
+/// ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+///
+/// The one place this crate asks. A unit test never reaches the host, which is compiled in and would
+/// be sent a stored sign-in's token from a machine that has one: it gets the answer it scripted on
+/// its thread, or an account nobody signed in to, and can read how often it was asked.
+fn ask_the_account(config: &Config) -> bravebot_agent::chatgpt::AccountModels {
+    #[cfg(test)]
+    {
+        let _ = config;
+        scripted_account::ask()
+    }
+    #[cfg(not(test))]
+    {
+        bravebot_agent::chatgpt::account_models(config, &mut bravebot_session::audit::Trail::new())
+    }
+}
+
+/// What the xAI account offers, asked of the serving host with the stored sign-in
+/// ([XAI-19](../../../docs/specs/xai-sign-in.md#XAI-19)).
+///
+/// The one place this crate asks, for the reason [`ask_the_account`] gives.
+fn ask_the_xai_account(config: &Config) -> bravebot_agent::xai::AccountModels {
+    #[cfg(test)]
+    {
+        let _ = config;
+        scripted_xai::ask()
+    }
+    #[cfg(not(test))]
+    {
+        bravebot_agent::xai::account_models(config, &mut bravebot_session::audit::Trail::new())
+    }
+}
+
+/// Add what the xAI account offers to the rows, or say that its listing could not be had. A person who
+/// never signed in is told nothing, and a listing that was read, empty or not, is not a failure.
+fn with_xai_account(
+    rows: &mut Vec<Model>,
+    warnings: &mut Vec<Said>,
+    account: bravebot_agent::xai::AccountModels,
+) {
+    warnings.extend(account_words::of_xai_listing(&account));
+    match account {
+        bravebot_agent::xai::AccountModels::Offered(models) => rows.extend(models),
+        bravebot_agent::xai::AccountModels::Unlisted
+        | bravebot_agent::xai::AccountModels::Absent => {}
+    }
+}
+
+/// Add what the ChatGPT account offers (CHATGPT-9) to the rows, or say that its listing could not
+/// be had.
+///
+/// Split from the request so it is testable without a server. A person who never signed in is told
+/// nothing about it, and a listing that could not be had adds the compiled list and says so.
+fn with_account(
+    rows: &mut Vec<Model>,
+    warnings: &mut Vec<Said>,
+    account: bravebot_agent::chatgpt::AccountModels,
+) {
+    // The warning is the window's own sentence, chosen from how the listing failed and not from
+    // anything the service said. A signed-out machine and a listing that was read have none.
+    warnings.extend(account_words::of_listing(&account));
+    match account {
+        bravebot_agent::chatgpt::AccountModels::Offered(models)
+        | bravebot_agent::chatgpt::AccountModels::Compiled(models) => rows.extend(models),
+        bravebot_agent::chatgpt::AccountModels::Unreadable
+        | bravebot_agent::chatgpt::AccountModels::Refused(_)
+        | bravebot_agent::chatgpt::AccountModels::Absent => {}
+    }
+}
+
+/// The rows an AWS account offers, keyed by the bare id the Bedrock backend is reached by.
+fn bedrock_rows(bedrock: &bravebot_config::bedrock::Bedrock) -> Vec<Model> {
+    bedrock
+        .models()
+        .iter()
+        .map(|entry| Model {
+            key: entry.id.clone(),
+            display_name: entry.display_name().to_string(),
+            premium: false,
+            reads_effort: true,
+            provider: Some("AWS Bedrock".into()),
+            conversation_tokens: Some(entry.window()),
+            // Bedrock has no listing, so nothing has described these models.
+            advertised: Advertised::default(),
+        })
+        .collect()
+}
+
+/// The badges a picker draws, from what the service said about the model.
+///
+/// Words of this window's own, composed from the service's: `image` among what a model accepts
+/// is a camera on the row, and what it produces is a different badge entirely. Nothing decides
+/// anything on them.
+fn badges(advertised: &Advertised) -> Vec<&'static str> {
+    let input = |kind: &str| advertised.input_modalities.iter().any(|m| m == kind);
+    let output = |kind: &str| advertised.output_modalities.iter().any(|m| m == kind);
+    let parameter = |kind: &str| {
+        advertised
+            .parameters
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|p| p == kind))
+    };
+    [
+        (output("text"), "text"),
+        (input("image"), "vision"),
+        (output("image"), "image-output"),
+        (input("audio"), "audio-input"),
+        (output("audio"), "audio-output"),
+        (input("video"), "video"),
+        (input("file"), "files"),
+        (parameter("tools"), "tools"),
+        (parameter("reasoning"), "reasoning"),
+        (parameter("structured_outputs"), "structured-output"),
+    ]
+    .into_iter()
+    .filter_map(|(supported, badge)| supported.then_some(badge))
+    .collect()
+}
+
+/// What the machine-level layer says about a model this window asked for, where it refuses it
+/// (BACKEND-48).
+///
+/// `None` for the model means the configured one, which is what a request naming none asks for. In
+/// English here rather than through a catalog, as the warnings of `roster` for a gateway and for Brave
+/// are. The file is the only actionable thing in the sentence: nobody using this window can write it.
+pub fn refused(config: &Config, model: Option<&str>) -> Option<String> {
+    let asked = model.unwrap_or(&config.default_model);
+    let (file, why) = config.model_refused(asked)?;
+    let reason = match why {
+        ModelRefusal::NotAllowed => "allows only the models its models.allow names",
+        ModelRefusal::Denied => "denies it with a models.deny entry",
+    };
+    Some(format!(
+        "{asked} is not requested on this machine: {}, which this machine's administrator \
+         manages, {reason}.",
+        file.display()
+    ))
+}
+
+fn catalogue(config: &Config, rows: Vec<Model>, warnings: Vec<Said>) -> Value {
+    let default = config.default_model.as_str();
+    // Dropped before the default is put back, so a refused configured model is not offered either: a
+    // row this window cannot start a turn on is a row that fails on being picked (BACKEND-48).
+    let mut rows: Vec<Model> = rows
+        .into_iter()
+        .filter(|row| config.model_refused(&row.key).is_none())
+        .collect();
+    if config.model_refused(default).is_none() && !rows.iter().any(|row| row.key == default) {
+        rows.push(Model {
+            key: default.into(),
+            display_name: default.into(),
+            premium: false,
+            reads_effort: true,
+            provider: Some("Configured default".into()),
+            conversation_tokens: None,
+            // A name out of a settings file, which nothing has described.
+            advertised: Advertised::default(),
+        });
+    }
+    rows.sort_by(|a, b| {
+        (a.key != default)
+            .cmp(&(b.key != default))
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            })
+    });
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| seen.insert(row.key.clone()))
+        .map(|row| {
+            json!({ "id": row.key, "name": row.display_name,
+            "provider": row.provider.unwrap_or_else(|| "Brave".into()),
+            "premium": row.premium, "contextWindow": row.conversation_tokens,
+            "capabilities": badges(&row.advertised) })
+        })
+        .collect();
+    // The sentences, and beside them the command each names, in the same order, so a window draws
+    // the words that are a command as code without reading a sentence for them.
+    let commands: Vec<Option<&str>> = warnings.iter().map(|said| said.command).collect();
+    let warnings: Vec<&str> = warnings.iter().map(|said| said.sentence.as_str()).collect();
+    json!({ "models": rows, "defaultModel": default, "warnings": warnings,
+        "warningCommands": commands })
+}
+
+/// A missing model keeps the configured default; malformed input must not silently select it.
+pub fn selection(value: Option<&Value>) -> Result<Option<String>, crate::protocol::Failure> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name))
+            if !name.trim().is_empty()
+                && name.len() <= 1024
+                && !name.chars().any(char::is_control) =>
+        {
+            Ok(Some(name.trim().to_string()))
+        }
+        _ => Err(crate::protocol::Failure::bad_request(
+            "model must be a non-empty model ID",
+        )),
+    }
+}
+
+/// What a unit test scripts for the xAI account's listing, and how often it was asked for.
+#[cfg(test)]
+mod scripted_xai {
+    use bravebot_agent::xai::AccountModels;
+    use bravebot_aichat::models::Model;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static OFFERED: RefCell<Option<Vec<Model>>> = const { RefCell::new(None) };
+        static ASKED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Offer `models` to whatever asks on this thread, and forget how often it was asked.
+    pub(super) fn offer(models: Vec<Model>) {
+        OFFERED.with(|offered| *offered.borrow_mut() = Some(models));
+        ASKED.with(|asked| asked.set(0));
+    }
+
+    /// How often the account was asked on this thread since [`offer`], or since it began.
+    pub(super) fn asked() -> usize {
+        ASKED.with(Cell::get)
+    }
+
+    pub(super) fn ask() -> AccountModels {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        OFFERED.with(|offered| match offered.borrow().as_ref() {
+            Some(models) => AccountModels::Offered(models.clone()),
+            None => AccountModels::Absent,
+        })
+    }
+}
+
+/// What a unit test scripts for the account's listing, and how often it was asked for.
+#[cfg(test)]
+mod scripted_account {
+    use bravebot_agent::chatgpt::AccountModels;
+    use bravebot_aichat::models::Model;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static OFFERED: RefCell<Option<Vec<Model>>> = const { RefCell::new(None) };
+        static ASKED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Offer `models` to whatever asks on this thread, and forget how often it was asked.
+    pub(super) fn offer(models: Vec<Model>) {
+        OFFERED.with(|offered| *offered.borrow_mut() = Some(models));
+        ASKED.with(|asked| asked.set(0));
+    }
+
+    /// How often the account was asked about on this thread since [`offer`], or since it began.
+    pub(super) fn asked() -> usize {
+        ASKED.with(Cell::get)
+    }
+
+    pub(super) fn ask() -> AccountModels {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+        OFFERED.with(|offered| match offered.borrow().as_ref() {
+            Some(models) => AccountModels::Offered(models.clone()),
+            None => AccountModels::Absent,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_distinguish_input_from_output() {
+        let advertised = Advertised {
+            input_modalities: ["text", "image", "audio", "video", "file"]
+                .map(String::from)
+                .into(),
+            output_modalities: ["text", "audio"].map(String::from).into(),
+            parameters: Some(
+                ["tools", "reasoning", "structured_outputs"]
+                    .map(String::from)
+                    .into(),
+            ),
+        };
+        assert_eq!(
+            badges(&advertised),
+            vec![
+                "text",
+                "vision",
+                "audio-input",
+                "audio-output",
+                "video",
+                "files",
+                "tools",
+                "reasoning",
+                "structured-output"
+            ]
+        );
+        // A model that draws pictures takes none, and a badge list that confused the two would
+        // tell somebody they could hand it a screenshot.
+        let image = Advertised {
+            input_modalities: ["text"].map(String::from).into(),
+            output_modalities: ["image"].map(String::from).into(),
+            parameters: None,
+        };
+        assert_eq!(badges(&image), vec!["image-output"]);
+    }
+
+    /// A roster that described nothing gets no badges, which is different from a roster saying a
+    /// model can do nothing: the row is still offered, and it is offered with nothing claimed
+    /// about it either way.
+    #[test]
+    fn unknown_capabilities_stay_unknown() {
+        assert!(badges(&Advertised::default()).is_empty());
+        assert!(
+            badges(&Advertised {
+                parameters: Some(Vec::new()),
+                ..Advertised::default()
+            })
+            .is_empty()
+        );
+    }
+
+    /// A configuration whose model this window asks for, with whatever a managed file states over it.
+    fn configured(default: &str, managed: Option<&str>) -> Config {
+        let mut config = Config::from_lookup(|key| match key {
+            "BRAVE_AI_CHAT_ENDPOINT" => Some("https://example.invalid".into()),
+            "BRAVE_SERVICES_KEY_ID" => Some("a-key-id".into()),
+            "SERVICES_KEY_AICHAT" => Some("a-signing-key".into()),
+            "BRAVEBOT_DEFAULT_MODEL" => Some(default.into()),
+            _ => None,
+        })
+        .expect("configured");
+        if let Some(text) = managed {
+            let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/test-scratch")
+                .join("ui-bridge-models");
+            std::fs::create_dir_all(&scratch).expect("a scratch directory");
+            let path = scratch.join("managed.json");
+            std::fs::write(&path, text).expect("a managed file");
+            config.models = bravebot_config::Managed::at(&path).models().clone();
+        }
+        config
+    }
+
+    fn account_row(key: &str) -> Model {
+        Model {
+            key: key.to_string(),
+            display_name: key.to_string(),
+            premium: false,
+            reads_effort: true,
+            provider: Some("ChatGPT".into()),
+            conversation_tokens: Some(272_000),
+            advertised: Advertised::default(),
+        }
+    }
+
+    /// CHATGPT-9 in the window: the account's models are added beside the rows already there and
+    /// take none away, a listing that could not be had adds the compiled list and says that it is
+    /// one, a sign-in file that could not be read says so and adds nothing, and an account nobody
+    /// signed in to is not mentioned. The row reaches the window under the account's name.
+    #[test]
+    fn the_accounts_models_join_the_roster_and_a_failed_listing_adds_the_compiled_list_and_a_warning()
+     {
+        use bravebot_agent::chatgpt::AccountModels;
+        let elsewhere = Model {
+            provider: Some("openrouter".into()),
+            ..account_row("openrouter/z-ai/glm-4.6")
+        };
+
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_account(
+            &mut rows,
+            &mut warnings,
+            AccountModels::Offered(vec![account_row("chatgpt/gpt-5.5")]),
+        );
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["openrouter/z-ai/glm-4.6", "chatgpt/gpt-5.5"]);
+        assert!(warnings.is_empty());
+
+        let result = catalogue(&configured("the-configured-model", None), rows, warnings);
+        let row = result["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["id"] == "chatgpt/gpt-5.5")
+            .expect("the account's row reached the window");
+        assert_eq!(row["provider"], "ChatGPT");
+        assert_eq!(row["contextWindow"], 272_000);
+
+        // The warnings are the window's own sentences, in the catalog: one sentence in sentence case
+        // that says what happened and what to do, with the command beside it for the window to draw
+        // as code. Not the terminal's lower case sentence, which names `/model`.
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_account(
+            &mut rows,
+            &mut warnings,
+            AccountModels::Compiled(vec![account_row("chatgpt/gpt-5.5")]),
+        );
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["openrouter/z-ai/glm-4.6", "chatgpt/gpt-5.5"]);
+        assert_eq!(
+            warnings,
+            [Said::naming(
+                "bravebot auth login chatgpt",
+                "Could not load models from ChatGPT, so the list shown is built in and may name a model the account cannot reach; try again, or run bravebot auth login chatgpt in a terminal to sign in again."
+            )]
+        );
+
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_account(&mut rows, &mut warnings, AccountModels::Unreadable);
+        assert_eq!(rows, std::slice::from_ref(&elsewhere));
+        assert_eq!(
+            warnings,
+            [Said::naming(
+                "bravebot auth login chatgpt",
+                "Could not load models from ChatGPT, so try again, or run bravebot auth login chatgpt in a terminal to sign in again."
+            )],
+            "no list was offered, so none is said to be"
+        );
+
+        // A listing refused for a code that names the account is told in the refusal's own sentence,
+        // which is not the unreadable listing's and does not name signing in again.
+        use bravebot_aichat::responses::protocol::Refusal;
+        for (refusal, said) in [
+            (
+                Refusal::NotPermitted,
+                "Could not load models from ChatGPT because OpenAI does not allow this account to be used this way, so use another account or another service's model.",
+            ),
+            (
+                Refusal::UsageLimit,
+                "Could not load models from ChatGPT because the account has reached its usage limit, so try again later.",
+            ),
+        ] {
+            let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+            with_account(&mut rows, &mut warnings, AccountModels::Refused(refusal));
+            assert_eq!(rows, std::slice::from_ref(&elsewhere));
+            assert_eq!(warnings, [Said::plain(said)], "{refusal:?}");
+        }
+
+        // The command each warning names reaches the window beside its sentence, in the same order.
+        let (mut rows, mut warnings) = (Vec::new(), Vec::new());
+        with_account(&mut rows, &mut warnings, AccountModels::Unreadable);
+        warnings.push(Said::plain("Could not load Brave models. Try again."));
+        let result = catalogue(&configured("the-configured-model", None), rows, warnings);
+        assert_eq!(result["warnings"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            result["warningCommands"],
+            json!(["bravebot auth login chatgpt", null])
+        );
+
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_account(&mut rows, &mut warnings, AccountModels::Absent);
+        assert_eq!(rows, [elsewhere]);
+        assert!(warnings.is_empty());
+    }
+
+    fn xai_row(key: &str) -> Model {
+        Model {
+            key: key.to_string(),
+            display_name: key.to_string(),
+            premium: false,
+            reads_effort: false,
+            provider: Some("xAI".into()),
+            conversation_tokens: Some(500_000),
+            advertised: Advertised::default(),
+        }
+    }
+
+    /// XAI-19 in the window: the xAI account's models are added beside the rows already there and take
+    /// none away, and reach the window under the provider the listing files them under, which is all
+    /// the desktop picker groups by, so the picker needs no knowledge of this service. A listing that
+    /// could not be had adds nothing and warns once with the command that signs in, in the window's own
+    /// sentence. An account nobody signed in to and a listing that was read are not mentioned.
+    #[test]
+    fn the_xai_accounts_models_join_the_roster_and_a_failed_listing_adds_none_and_a_warning() {
+        use bravebot_agent::xai::AccountModels;
+        let elsewhere = Model {
+            provider: Some("openrouter".into()),
+            ..account_row("openrouter/z-ai/glm-4.6")
+        };
+
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_xai_account(
+            &mut rows,
+            &mut warnings,
+            AccountModels::Offered(vec![xai_row("xai/grok-4.5"), xai_row("xai/grok-4.6")]),
+        );
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["openrouter/z-ai/glm-4.6", "xai/grok-4.5", "xai/grok-4.6"]
+        );
+        assert!(warnings.is_empty());
+        let result = catalogue(&configured("the-configured-model", None), rows, warnings);
+        let row = result["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["id"] == "xai/grok-4.5")
+            .expect("the account's row reached the window");
+        assert_eq!(row["provider"], "xAI");
+        assert_eq!(row["contextWindow"], 500_000);
+
+        let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+        with_xai_account(&mut rows, &mut warnings, AccountModels::Unlisted);
+        assert_eq!(rows, std::slice::from_ref(&elsewhere));
+        assert_eq!(
+            warnings,
+            [Said::naming(
+                "bravebot auth login xai",
+                "Could not load models from xAI, so try again, or run bravebot auth login xai in a terminal to sign in again."
+            )]
+        );
+        let warned = catalogue(
+            &configured("the-configured-model", None),
+            Vec::new(),
+            warnings,
+        );
+        assert_eq!(
+            warned["warningCommands"],
+            json!(["bravebot auth login xai"])
+        );
+
+        for listing in [AccountModels::Absent, AccountModels::Offered(Vec::new())] {
+            let (mut rows, mut warnings) = (vec![elsewhere.clone()], Vec::new());
+            with_xai_account(&mut rows, &mut warnings, listing);
+            assert_eq!(rows, std::slice::from_ref(&elsewhere));
+            assert!(warnings.is_empty());
+        }
+    }
+
+    /// XAI-19 in the window: a turn on a model that is not the xAI account's sends the stored token
+    /// nowhere, and one on its own model asks for its row and takes the window the listing states. The
+    /// window is asked from a fresh configuration each time, as every turn builds one.
+    #[test]
+    fn a_turn_in_the_window_asks_the_xai_account_only_for_one_of_its_own_models() {
+        let model_for = |model: Option<&str>| {
+            let mut config = configured("the-configured-model", None);
+            scripted_xai::offer(vec![xai_row("xai/grok-4.5")]);
+            adopt_window(&mut config, model);
+            (scripted_xai::asked(), config.context_budget)
+        };
+
+        for other in [None, Some("openrouter/z-ai/glm-4.6"), Some("xai")] {
+            assert_eq!(model_for(other).0, 0, "{other:?} asked the account");
+        }
+        let (asked, budget) = model_for(Some("xai/grok-4.5"));
+        assert_eq!(asked, 1);
+        assert_eq!(budget, 500_000);
+    }
+
+    /// XAI-19: the window's model list asks the xAI account whatever model is configured, so a person who
+    /// has not chosen one is shown the account's models.
+    #[test]
+    fn the_models_list_asks_the_xai_account_whatever_model_is_configured() {
+        scripted_xai::offer(vec![xai_row("xai/grok-4.5")]);
+
+        let listed = list(&configured("the-configured-model", None));
+
+        assert_eq!(scripted_xai::asked(), 1);
+        assert!(
+            listed["models"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .any(|row| row["id"] == "xai/grok-4.5"),
+            "{listed}"
+        );
+    }
+
+    /// The window has no command line, so no warning it sends names the flag that names a model, and
+    /// the command a warning does name is one that works as typed: the sign-in. The terminal's notes
+    /// name `bravebot -i "<prompt>" --model <model>` and `bravebot "<task>" --model <model>`, which a
+    /// window draws as nothing. Each listing that gave no row sends a warning, so the check below is
+    /// made of something, and a listing that gave rows or belongs to nobody sends none. The regression
+    /// it rejects is a warning that carries either form, or a bare `--model`, to a window that cannot
+    /// use it.
+    #[test]
+    fn no_warning_the_window_sends_names_a_command_line_that_names_a_model() {
+        use bravebot_agent::chatgpt::AccountModels;
+        use bravebot_aichat::responses::protocol::Refusal;
+        for (listing, warned) in [
+            (AccountModels::Absent, false),
+            (
+                AccountModels::Offered(vec![account_row("chatgpt/gpt-5.5")]),
+                false,
+            ),
+            (AccountModels::Unreadable, true),
+            (
+                AccountModels::Compiled(vec![account_row("chatgpt/gpt-5.5")]),
+                true,
+            ),
+            (AccountModels::Refused(Refusal::NotPermitted), true),
+            (AccountModels::Refused(Refusal::UsageLimit), true),
+        ] {
+            let (mut rows, mut warnings) = (Vec::new(), Vec::new());
+            with_account(&mut rows, &mut warnings, listing);
+            assert_eq!(!warnings.is_empty(), warned, "{warnings:?}");
+            for said in &warnings {
+                assert!(!said.sentence.contains("--model"), "{}", said.sentence);
+                assert!(
+                    said.command
+                        .is_none_or(|command| command == "bravebot auth login chatgpt"),
+                    "{:?}",
+                    said.command
+                );
+            }
+        }
+    }
+
+    /// CHATGPT-9 in the window: a turn on a model that is not the account's sends the stored token
+    /// nowhere, whether the model is named for the turn or is the configured default, and a turn on
+    /// one of the account's own models asks for its row and takes the window the listing states.
+    /// The window is asked from a fresh configuration each time, as every turn builds one, so the
+    /// budget it ends with is its own.
+    #[test]
+    fn a_turn_in_the_window_asks_the_account_only_for_one_of_its_own_models() {
+        use scripted_account::{asked, offer};
+        let listing = || {
+            vec![Model {
+                conversation_tokens: Some(65_536),
+                ..account_row("chatgpt/gpt-5.5")
+            }]
+        };
+
+        offer(listing());
+        let mut named = a_config_with_a_gateway_stating_a_window(8_192);
+        adopt_window(&mut named, Some("ollama/tiny"));
+        assert_eq!(asked(), 0, "a turn named for a gateway's model asked");
+        let mut unnamed = a_config_with_a_gateway_stating_a_window(8_192);
+        adopt_window(&mut unnamed, None);
+        assert_eq!(asked(), 0, "a turn on the configured default asked");
+        assert_eq!(
+            unnamed.context_budget, 8_192,
+            "the gateway's window was lost"
+        );
+
+        offer(listing());
+        let mut account = a_config_with_a_gateway_stating_a_window(8_192);
+        adopt_window(&mut account, Some("chatgpt/gpt-5.5"));
+        assert_eq!(asked(), 1, "a turn on the account's model did not ask");
+        assert_eq!(account.context_budget, 65_536);
+
+        // The configured default can be the account's own: a turn naming no model asks too.
+        offer(listing());
+        let mut by_default = a_config_with_a_gateway_stating_a_window(8_192);
+        by_default.default_model = "chatgpt/gpt-5.5".into();
+        adopt_window(&mut by_default, None);
+        assert_eq!(asked(), 1, "a turn on an account default did not ask");
+        assert_eq!(by_default.context_budget, 65_536);
+    }
+
+    /// CHATGPT-9 in the window: the model list asks the account whatever model is configured, since
+    /// it is where a person who has yet to choose one finds it, and offers what it lists beside the
+    /// rows already there. Run on a configuration whose default is a gateway's model.
+    #[test]
+    fn the_models_list_asks_the_account_whatever_model_is_configured() {
+        use scripted_account::{asked, offer};
+        let config = a_config_with_a_gateway_stating_a_window(8_192);
+        offer(vec![account_row("chatgpt/gpt-5.5")]);
+
+        let result = list(&config);
+
+        assert_eq!(asked(), 1, "the list did not ask");
+        let ids: Vec<&str> = result["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id"))
+            .collect();
+        assert!(ids.contains(&"chatgpt/gpt-5.5"), "{ids:?}");
+        assert!(
+            ids.contains(&"ollama/tiny"),
+            "a row already there was taken away: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_listing_keeps_the_configured_default() {
+        let result = catalogue(
+            &configured("openrouter/anthropic/claude-haiku-4.5", None),
+            Vec::new(),
+            vec![Said::plain("offline")],
+        );
+        assert_eq!(result["models"][0]["id"], result["defaultModel"]);
+        assert_eq!(result["warnings"][0], "offline");
+    }
+
+    /// BACKEND-48 in the window: the roster leaves out a model this machine may not request, the
+    /// configured one included, and a turn asked for one is refused with the file that refused it.
+    ///
+    /// The configured model among them because `catalogue` puts it back when no listing described
+    /// it, so a build that filtered only the listed rows would offer the one row that is certain to
+    /// be there. A turn is checked as well as the roster, the window being able to name a model the
+    /// roster never offered.
+    #[test]
+    fn the_window_neither_offers_nor_requests_a_model_this_machine_refuses() {
+        let managed = r#"{"models": {"deny": ["denied-model", "the-configured-model"]}}"#;
+        let config = configured("the-configured-model", Some(managed));
+        let listed = |key: &str| Model {
+            key: key.to_string(),
+            display_name: key.to_string(),
+            premium: false,
+            reads_effort: true,
+            provider: None,
+            conversation_tokens: None,
+            advertised: Advertised::default(),
+        };
+
+        let result = catalogue(
+            &config,
+            vec![listed("an-allowed-model"), listed("denied-model")],
+            Vec::new(),
+        );
+        let offered: Vec<&str> = result["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(offered, ["an-allowed-model"]);
+
+        // A turn naming one, and a turn naming none, which asks for the configured model.
+        for asked in [Some("denied-model"), None] {
+            let refused = refused(&config, asked).expect("the turn was not refused");
+            assert!(
+                refused.contains("models.deny"),
+                "the refusal did not say which list refused it: {refused}"
+            );
+        }
+        assert_eq!(refused(&config, Some("an-allowed-model")), None);
+    }
+
+    /// A configuration whose only service is a local gateway stating a window for its one model, and
+    /// whose configured default is that model. No Brave credentials, so no listing costs a request.
+    fn a_config_with_a_gateway_stating_a_window(window: u64) -> Config {
+        use bravebot_config::env_var;
+
+        let mut config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            _ => None,
+        })
+        .expect("an account named on its own is a working configuration");
+        config.providers = bravebot_config::Settings::parse(&format!(
+            r#"{{"provider": {{"ollama": {{"options": {{"baseURL": "http://localhost:11434/v1"}},
+                "models": {{"tiny": {{"limit": {{"context": {window}, "output": 2048}}}}}}}}}}}}"#
+        ))
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 1, "the block configured no service");
+        config.default_model = "ollama/tiny".into();
+        config
+    }
+
+    /// BACKEND-7, BACKEND-14 and COMPACT-9 in the window: every turn is built from a fresh
+    /// configuration whose budget is the default, so the window of the model that answers is taken
+    /// before it runs. A model named for the turn and the configured default, which a turn naming
+    /// none asks for, each have their own.
+    #[test]
+    fn a_turn_in_the_window_compacts_against_the_window_of_the_model_that_answers() {
+        let mut named = a_config_with_a_gateway_stating_a_window(8_192);
+        adopt_window(&mut named, Some("ollama/tiny"));
+        assert_eq!(named.context_budget, 8_192);
+        assert!(!named.budget_is_guessed());
+
+        let mut unnamed = a_config_with_a_gateway_stating_a_window(102_400);
+        adopt_window(&mut unnamed, None);
+        assert_eq!(unnamed.context_budget, 102_400);
+    }
+
+    /// IMPORT-5 in the window: a block that states a window for the provider and none for its model
+    /// gives that model the provider's window. Read through the model alone, the default would stand.
+    #[test]
+    fn a_turn_in_the_window_takes_the_window_a_provider_block_states() {
+        let mut config = a_config_with_a_gateway_stating_a_window(8_192);
+        config.providers = bravebot_config::Settings::parse(
+            r#"{"provider": {"ollama": {
+                "options": {"baseURL": "http://localhost:11434/v1", "contextWindow": 65536},
+                "models": {"tiny": {}}}}}"#,
+        )
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 1, "the block configured no service");
+        adopt_window(&mut config, Some("ollama/tiny"));
+        assert_eq!(config.context_budget, 65_536);
+        assert!(!config.budget_is_guessed());
+    }
+
+    /// A model no roster describes states no window, so the default stands rather than the window
+    /// of the configured default or of the first row.
+    #[test]
+    fn a_turn_in_the_window_on_a_model_no_roster_describes_keeps_the_default() {
+        let mut config = a_config_with_a_gateway_stating_a_window(102_400);
+        adopt_window(&mut config, Some("a-model-nothing-lists"));
+        assert_eq!(
+            config.context_budget,
+            bravebot_config::DEFAULT_CONTEXT_BUDGET
+        );
+        assert!(config.budget_is_guessed());
+    }
+
+    /// A configuration that reaches Google Vertex through a block naming `models` where given. The
+    /// Brave credentials are blank so no Brave roster is asked for. With a key, the key is in the
+    /// block, so that it is found whatever this process has exported. Without one, the block names a
+    /// variable nothing sets.
+    fn a_config_with_google_vertex(key: Option<&str>, models: Option<&str>) -> Config {
+        use bravebot_config::env_var;
+
+        let credential = match key {
+            Some(key) => {
+                format!(r#""options": {{"project": "example-project-1", "apiKey": "{key}"}}"#)
+            }
+            None => r#""options": {"project": "example-project-1"},
+                "env": ["BRAVEBOT_TEST_UNSET_VERTEX_KEY"]"#
+                .to_string(),
+        };
+        let models = models
+            .map(|models| format!(r#", "models": {models}"#))
+            .unwrap_or_default();
+        let mut config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            _ => None,
+        })
+        .expect("an account named on its own is a working configuration");
+        config.providers = bravebot_config::Settings::parse(&format!(
+            r#"{{"provider": {{"google-vertex": {{{credential}{models}}}}}}}"#
+        ))
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 1, "the block configured no service");
+        config
+    }
+
+    /// The ids the window offers for the Google Vertex service.
+    fn google_vertex_rows(config: &Config) -> Vec<String> {
+        list(config)["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .filter(|id| id.starts_with("google-vertex/"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// BACKEND-49 in the window: Vertex has no listing a key can call, so a service naming no models
+    /// is offered the list compiled in. Offering it asks nothing, so a key that is not found keeps no
+    /// row out, as it keeps out none of the models a block names.
+    #[test]
+    fn the_window_offers_the_compiled_models_for_a_google_vertex_service_naming_none() {
+        for key in [Some("placeholder-key"), None] {
+            let config = a_config_with_google_vertex(key, None);
+            let compiled = config.providers[0]
+                .compiled_roster()
+                .expect("a compiled list");
+            let mut expected: Vec<String> = compiled
+                .iter()
+                .map(|id| format!("google-vertex/{id}"))
+                .collect();
+            expected.sort();
+            assert!(!expected.is_empty());
+            assert_eq!(google_vertex_rows(&config), expected, "key {key:?}");
+        }
+    }
+
+    /// BACKEND-49 in the window: a block naming models is offered those and no others. The one named
+    /// is on no compiled list, so a window adding the two together would offer more than this row.
+    #[test]
+    fn the_window_offers_a_google_vertex_block_its_own_models_alone() {
+        let config = a_config_with_google_vertex(
+            Some("placeholder-key"),
+            Some(r#"{"google/gemini-3-flash-preview": {}}"#),
+        );
+        assert_eq!(
+            google_vertex_rows(&config),
+            ["google-vertex/google/gemini-3-flash-preview"]
+        );
+    }
+
+    /// BACKEND-29 in the window: an entry naming AWS is offered under the bare id the Bedrock backend
+    /// routes, and is never asked as a gateway, so a block naming no models adds no row and no warning.
+    #[test]
+    fn the_window_offers_an_aws_provider_entry_under_its_bare_id() {
+        use bravebot_config::env_var;
+
+        let with = |models: &str| {
+            let mut config = Config::from_lookup(|key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                _ => None,
+            })
+            .expect("an account named on its own is a working configuration");
+            config.providers = bravebot_config::Settings::parse(&format!(
+                r#"{{"provider": {{"amazon-bedrock": {{"options": {{"region": "us-east-1"}}{models}}}}}}}"#
+            ))
+            .providers()
+            .to_vec();
+            assert!(config.providers[0].bedrock.is_some());
+            config
+        };
+        let ids = |config: &Config| -> Vec<String> {
+            list(config)["models"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .filter_map(|row| row["id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let named = with(r#", "models": {"openai.gpt-5.6-sol": {}}"#);
+        let listed = ids(&named);
+        assert!(
+            listed.contains(&"openai.gpt-5.6-sol".to_string()),
+            "{listed:?}"
+        );
+        assert!(
+            listed.iter().all(|id| !id.starts_with("amazon-bedrock/")),
+            "{listed:?}"
+        );
+        let empty = with("");
+        assert!(ids(&empty).iter().all(|id| id != "amazon-bedrock/"));
+        assert_eq!(list(&empty)["warnings"], json!([]));
+    }
+
+    /// An account named by the tier variables alone, with whatever `extra` names besides.
+    fn an_aws_account_and(extra: impl Fn(&str) -> Option<String>) -> Config {
+        use bravebot_config::env_var;
+
+        Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            _ => extra(key),
+        })
+        .expect("an account named on its own is a working configuration")
+    }
+
+    /// BACKEND-5 in the window: a build pointed at AWS with the endpoint set and the Brave keys
+    /// blank is not asked the unsigned listing. Its rows would fail unsigned when picked, and a
+    /// warning to try again would point at a listing no retry makes usable.
+    ///
+    /// The endpoint is a port nothing listens on, so a window that asked would say it could not
+    /// load the Brave models.
+    #[test]
+    fn the_window_asks_for_no_brave_roster_this_build_cannot_sign_for() {
+        let config = an_aws_account_and(|key| {
+            (key == bravebot_config::env_var::ENDPOINT).then(|| "http://127.0.0.1:1".into())
+        });
+        assert!(!config.serves_aichat());
+
+        assert_eq!(list(&config)["warnings"], json!([]));
+    }
+
+    /// BACKEND-5 in the window: a gateway whose block names a credential nothing holds is not asked
+    /// for its models, and the window says the credential is missing. A refused listing would say
+    /// only that the models could not be loaded, which sends somebody to retry rather than to the
+    /// key.
+    ///
+    /// The gateway is a port nothing listens on, so a window that asked would say it could not load
+    /// the models.
+    #[test]
+    fn the_window_asks_no_gateway_whose_credential_nothing_holds() {
+        let mut config = an_aws_account_and(|_| None);
+        config.providers = bravebot_config::Settings::parse(
+            r#"{"provider": {"local": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                "env": ["BRAVEBOT_TEST_UNSET_GATEWAY_KEY"]}}}"#,
+        )
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 1, "the block configured no gateway");
+
+        assert_eq!(
+            list(&config)["warnings"],
+            json!(["No credential configured for local."])
+        );
+    }
+
+    /// BACKEND-19 in the window: a gateway that names no models and whose listing could not be read is
+    /// said by the name its block gives it, in a warning that means what the terminal's note for the
+    /// same gateway means, and a gateway whose key is missing is said as that and not as a listing
+    /// that could not be read. A gateway that names its models is not asked and is not mentioned. The
+    /// gateways are ports nothing listens on.
+    ///
+    /// The regressions it rejects are a warning that leaves out which gateway failed, one that tells
+    /// a missing key as a listing to try again, and one gateway's failure taking another's rows with
+    /// it.
+    #[test]
+    fn the_window_says_which_gateway_could_not_be_listed() {
+        let mut config = an_aws_account_and(|_| None);
+        config.providers = bravebot_config::Settings::parse(
+            r#"{"provider": {
+                "down": {"name": "Down Gateway", "options": {"baseURL": "http://127.0.0.1:1/v1"}},
+                "keyless": {"name": "Keyless Gateway", "env": ["BRAVEBOT_TEST_UNSET_GATEWAY_KEY"],
+                            "options": {"baseURL": "http://127.0.0.1:1/v1"}},
+                "named": {"name": "Named Gateway", "options": {"baseURL": "http://127.0.0.1:1/v1"},
+                          "models": {"m": {}}}
+            }}"#,
+        )
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 3, "a block configured no gateway");
+
+        let listed = list(&config);
+        let mut warnings: Vec<&str> = listed["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .map(|warning| warning.as_str().expect("a sentence"))
+            .collect();
+        warnings.sort_unstable();
+
+        assert_eq!(
+            warnings,
+            [
+                "Could not load models from Down Gateway. Try again.",
+                "No credential configured for Keyless Gateway.",
+            ]
+        );
+        assert_eq!(listed["warningCommands"], json!([null, null]));
+        let ids: Vec<&str> = listed["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id"))
+            .collect();
+        assert!(ids.contains(&"named/m"), "{ids:?}");
+        assert!(ids.contains(&"opus-arn"), "{ids:?}");
+    }
+
+    /// BACKEND-19 in the window: an entry keyed `openai` is asked as the shared listing asks any
+    /// gateway, with the account route first and the key as a bearer token on both requests, and
+    /// every row it lists is offered under `openai/` and the entry's name, embedding and speech
+    /// models beside the chat ones.
+    ///
+    /// The stand-in is on a loopback address, so it is not `api.openai.com` and the models only
+    /// OpenAI's Responses API takes are offered here, as they are by any proxy keyed `openai`. The
+    /// filter that leaves them out follows the host and is pinned by the shared listing's own tests.
+    ///
+    /// The regressions it rejects are a window that sends the key on neither request or only on
+    /// one, one that never asks the account route, and one that offers a row unqualified or drops
+    /// the rows that are not chat models.
+    #[test]
+    fn the_window_lists_an_openai_entry_with_its_key_and_offers_every_row_under_openai() {
+        use std::io::{BufRead, Write};
+
+        const KEY: &str = "placeholder-openai-key-5d27a9";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let (seen, asked) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut lines = std::io::BufReader::new(&stream)
+                    .lines()
+                    .map_while(Result::ok);
+                let request = lines.next().unwrap_or_default();
+                let path = request.split(' ').nth(1).unwrap_or_default().to_string();
+                let authorization = lines.take_while(|line| !line.is_empty()).find_map(|line| {
+                    line.strip_prefix("authorization: ")
+                        .or_else(|| line.strip_prefix("Authorization: "))
+                        .map(str::to_string)
+                });
+                let _ = seen.send((path.clone(), authorization));
+                let (status, body) = if path.ends_with("/models/user") {
+                    (
+                        "404 Not Found",
+                        r#"{"error":{"message":"no such route","type":"invalid_request_error","code":"model_not_found"}}"#,
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"object":"list","data":[
+                            {"id":"gpt-4o-mini","object":"model","created":1,"owned_by":"system"},
+                            {"id":"text-embedding-3-small","object":"model","created":1,"owned_by":"system"},
+                            {"id":"tts-1","object":"model","created":1,"owned_by":"openai-internal"},
+                            {"id":"o3-pro","object":"model","created":1,"owned_by":"system"}]}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = (&stream).write_all(response.as_bytes());
+                let _ = (&stream).flush();
+            }
+        });
+
+        let mut config = an_aws_account_and(|_| None);
+        config.providers = bravebot_config::Settings::parse(&format!(
+            r#"{{"provider": {{"openai": {{"options": {{
+                "baseURL": "http://127.0.0.1:{port}/v1", "apiKey": "{KEY}"}}}}}}}}"#
+        ))
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 1, "the block configured no service");
+
+        let listed = list(&config);
+
+        // The stand-in records a request before it answers, so every request the listing made is in
+        // the channel by the time it returns.
+        let bearer = Some(format!("Bearer {KEY}"));
+        assert_eq!(
+            asked.try_iter().collect::<Vec<_>>(),
+            [
+                ("/v1/models/user".to_string(), bearer.clone()),
+                ("/v1/models".to_string(), bearer)
+            ]
+        );
+
+        let rows: Vec<(&str, &str)> = listed["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter(|row| row["provider"] == "openai")
+            .map(|row| {
+                (
+                    row["id"].as_str().expect("an id"),
+                    row["name"].as_str().expect("a name"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("openai/gpt-4o-mini", "gpt-4o-mini"),
+                ("openai/o3-pro", "o3-pro"),
+                ("openai/text-embedding-3-small", "text-embedding-3-small"),
+                ("openai/tts-1", "tts-1"),
+            ]
+        );
+        assert_eq!(listed["warnings"], json!([]));
+        assert!(
+            !listed.to_string().contains(KEY),
+            "the key is in the answer"
+        );
+    }
+
+    /// The AWS tier `opus-arn` and two gateways, `one` and `two`, that name no models, at the
+    /// addresses given.
+    fn a_config_with_two_gateways_naming_no_models(one: &str, two: &str) -> Config {
+        use bravebot_config::env_var;
+
+        let mut config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            _ => None,
+        })
+        .expect("an account named on its own is a working configuration");
+        config.providers = bravebot_config::Settings::parse(&format!(
+            r#"{{"provider": {{
+                "one": {{"options": {{"baseURL": "{one}/v1"}}}},
+                "two": {{"options": {{"baseURL": "{two}/v1"}}}}
+            }}}}"#
+        ))
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 2, "a block configured no gateway");
+        config
+    }
+
+    /// A loopback gateway listing the one model `id` with a window of 65,536 tokens. It answers only
+    /// once `expected` requests to the gateways sharing `gate` are in flight at once, or after five
+    /// seconds, so asking them one after the next fails a test and does not hang it. Each request
+    /// it receives is reported on `met`, as true where the meeting was reached. `lag` is how long
+    /// it then waits to answer.
+    fn a_gateway_that_waits_for_its_peers(
+        id: &'static str,
+        gate: &std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+        expected: usize,
+        met: &std::sync::mpsc::Sender<bool>,
+        lag: std::time::Duration,
+    ) -> String {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = format!("http://{}", listener.local_addr().expect("an address"));
+        let (gate, met) = (gate.clone(), met.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (gate, met) = (gate.clone(), met.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut header = String::new();
+                    while matches!(reader.read_line(&mut header), Ok(read) if read > 2) {
+                        header.clear();
+                    }
+                    let (arrived, signal) = &*gate;
+                    let mut here = arrived.lock().expect("the count");
+                    *here += 1;
+                    signal.notify_all();
+                    let (count, waited) = signal
+                        .wait_timeout_while(here, std::time::Duration::from_secs(5), |here| {
+                            *here < expected
+                        })
+                        .expect("the count");
+                    drop(count);
+                    let _ = met.send(!waited.timed_out());
+                    std::thread::sleep(lag);
+                    let body =
+                        format!(r#"{{"data": [{{"id": "{id}", "context_length": 65536}}]}}"#);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = reader.into_inner().write_all(response.as_bytes());
+                });
+            }
+        });
+        address
+    }
+
+    /// BACKEND-64 in the window: the models list asks every gateway at once, and offers their rows in
+    /// the order the configuration lists them whichever answered first.
+    ///
+    /// Neither stand-in answers until the other has been asked, so a list that asks them one after
+    /// the next fails by the first finding itself alone. The first lags, so the second answers first.
+    #[test]
+    fn the_window_asks_every_gateway_at_once_and_lists_them_in_the_configurations_order() {
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
+        let (met, together) = std::sync::mpsc::channel();
+        let one = a_gateway_that_waits_for_its_peers(
+            "one-model",
+            &gate,
+            2,
+            &met,
+            std::time::Duration::from_millis(100),
+        );
+        let two = a_gateway_that_waits_for_its_peers(
+            "two-model",
+            &gate,
+            2,
+            &met,
+            std::time::Duration::ZERO,
+        );
+        let config = a_config_with_two_gateways_naming_no_models(&one, &two);
+
+        let listed = list(&config);
+
+        assert_eq!(
+            together.try_iter().collect::<Vec<_>>(),
+            [true, true],
+            "the gateways were asked one after the next"
+        );
+        let ids: Vec<&str> = listed["models"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(ids, ["opus-arn", "one/one-model", "two/two-model"]);
+        assert_eq!(listed["warnings"], json!([]));
+    }
+
+    /// BACKEND-64 in the window: the window of the model a turn runs on is read from the gateway
+    /// that serves that model alone. A turn on `two`'s model waits on `two`, takes its window, and
+    /// never asks `one`.
+    #[test]
+    fn a_turn_in_the_window_asks_only_the_gateway_that_serves_its_model() {
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
+        let (met, asked) = std::sync::mpsc::channel();
+        // One request is all that may arrive, so a meeting of one is reached at once.
+        let one = a_gateway_that_waits_for_its_peers(
+            "one-model",
+            &gate,
+            1,
+            &met,
+            std::time::Duration::ZERO,
+        );
+        let two = a_gateway_that_waits_for_its_peers(
+            "two-model",
+            &gate,
+            1,
+            &met,
+            std::time::Duration::ZERO,
+        );
+        let mut config = a_config_with_two_gateways_naming_no_models(&one, &two);
+        assert_eq!(
+            config.context_budget,
+            bravebot_config::DEFAULT_CONTEXT_BUDGET
+        );
+
+        adopt_window(&mut config, Some("two/two-model"));
+
+        assert_eq!(config.context_budget, 65_536);
+        assert_eq!(
+            asked.try_iter().count(),
+            1,
+            "a gateway that does not serve the model was asked"
+        );
+    }
+
+    #[test]
+    fn model_ids_are_validated_without_losing_provider_qualification() {
+        assert_eq!(selection(None).unwrap(), None);
+        assert_eq!(selection(Some(&Value::Null)).unwrap(), None);
+        assert_eq!(
+            selection(Some(&json!("openrouter/anthropic/claude-haiku-4.5"))).unwrap(),
+            Some("openrouter/anthropic/claude-haiku-4.5".into())
+        );
+        for value in [
+            json!(""),
+            json!("  "),
+            json!("bad\nmodel"),
+            json!(42),
+            json!({}),
+            json!("a".repeat(1025)),
+        ] {
+            assert!(selection(Some(&value)).is_err());
+        }
+    }
+}

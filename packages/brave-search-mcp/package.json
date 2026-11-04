@@ -1,0 +1,36 @@
+{
+  "name": "@yolo-web/brave-search-mcp",
+  "mcpName": "io.github.brave/brave-search-mcp-server",
+  "version": "2.1.4",
+  "description": "Pure Bun port of Brave Search MCP Server: web results, images, videos, rich results, AI summaries, and local search.",
+  "keywords": [
+    "api",
+    "brave",
+    "bun",
+    "mcp",
+    "search"
+  ],
+  "license": "MIT",
+  "author": "Brave Software, Inc. (https://brave.com)",
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "bin": {
+    "brave-search-mcp-server": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run ./src/index.ts",
+    "serve:http": "bun run ./src/index.ts --transport http",
+    "format": "bun fmt",
+    "format:check": "bun fmt --check",
+    "lint": "bun lint",
+    "check": "bun check",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "commander": "14.0.3",
+    "zod": "4.6.7"
+  }
+}

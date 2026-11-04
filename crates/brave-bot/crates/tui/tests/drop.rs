@@ -1,0 +1,353 @@
+//! Dropping a file on the box, end to end through the session.
+//!
+//! Real files in a real directory, because the whole question a drop asks is whether a path names
+//! something, and a fake filesystem would answer it for free.
+
+use bravebot_filetype::by_name::Kind;
+use bravebot_tui::state::Session;
+use std::path::PathBuf;
+
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("bravebot-drop-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch");
+        Self { path }
+    }
+
+    fn file(&self, name: &str) -> String {
+        let at = self.path.join(name);
+        std::fs::write(&at, [0x89u8, 0x50]).expect("write");
+        at.to_string_lossy().to_string()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn session_in(scratch: &Scratch) -> Session {
+    Session::new("none").in_workspace(&scratch.path)
+}
+
+/// The behaviour asked for: a supported type inside the workspace becomes a marker.
+#[test]
+fn dropping_an_image_puts_a_marker_in_the_line() {
+    let scratch = Scratch::new("image");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    assert!(session.drop_files(&path), "not recognised as a drop");
+    assert_eq!(session.input(), "[Image #1] ");
+    assert_eq!(session.attached().len(), 1);
+    assert_eq!(session.attached()[0].name, "shot.png");
+    assert_eq!(session.attached()[0].kind, Kind::Attachment("image/png"));
+}
+
+/// And the other half of it: an unsupported type writes out its path, as dropping one always did.
+#[test]
+fn dropping_an_unsupported_type_writes_out_the_path() {
+    let scratch = Scratch::new("dmg");
+    let path = scratch.file("installer.dmg");
+    let mut session = session_in(&scratch);
+
+    assert!(session.drop_files(&path));
+    assert_eq!(session.input(), format!("{path} "));
+    assert!(session.attached().is_empty(), "a .dmg was attached");
+}
+
+/// The name given to the task is workspace-relative, because that is the only form the workspace
+/// resolves against its root. An absolute path there is refused.
+#[test]
+fn the_name_handed_to_the_task_is_relative_to_the_workspace() {
+    let scratch = Scratch::new("relative");
+    std::fs::create_dir_all(scratch.path.join("shots")).unwrap();
+    let path = scratch.file("shots/a.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    assert_eq!(session.attached()[0].name, "shots/a.png");
+}
+
+/// The case the feature exists for. A drop is nearly always from ~/Downloads or ~/Desktop, and
+/// refusing those would refuse nearly every drop there is: what makes an attachment safe is the
+/// gesture a person made, not where the file happens to sit.
+#[test]
+fn a_drop_from_outside_the_workspace_is_attached_all_the_same() {
+    let outside = Scratch::new("outside");
+    let path = outside.file("shot.png");
+
+    let workspace = Scratch::new("inside");
+    let mut session = session_in(&workspace);
+
+    assert!(session.drop_files(&path));
+    assert_eq!(session.input(), "[Image #1] ");
+    assert_eq!(session.attached().len(), 1);
+    // Absolute, since there is no root to be relative to.
+    assert!(
+        session.attached()[0].name.starts_with('/'),
+        "{}",
+        session.attached()[0].name
+    );
+}
+
+/// A directory is a plausible thing to drop by accident, and it is not a file.
+#[test]
+fn dropping_a_directory_attaches_nothing() {
+    let outside = Scratch::new("directory");
+    let inner = outside.path.join("stuff.png");
+    std::fs::create_dir_all(&inner).expect("a directory that looks like a file");
+
+    let workspace = Scratch::new("directory-workspace");
+    let mut session = session_in(&workspace);
+
+    session.drop_files(&inner.to_string_lossy());
+    assert!(
+        session.attached().is_empty(),
+        "a directory was attached as an image"
+    );
+}
+
+/// Deleting the marker is the only way a user has to take an attachment off, since the marker is
+/// the only part of it they can see.
+#[test]
+fn deleting_the_marker_takes_the_attachment_off() {
+    let scratch = Scratch::new("deleted");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    for c in " look".chars() {
+        session.type_char(c);
+    }
+
+    // Sent as typed: the attachment goes.
+    let mut kept = session_in(&scratch);
+    kept.drop_files(&path);
+    kept.submit();
+    assert_eq!(kept.sent_attachments().len(), 1);
+
+    // The marker rubbed out, the way a user rubs it out: it does not.
+    while !session.input().is_empty() {
+        session.backspace();
+    }
+    for c in "look".chars() {
+        session.type_char(c);
+    }
+    session.submit();
+    assert!(
+        session.sent_attachments().is_empty(),
+        "a deleted marker still sent its file"
+    );
+}
+
+/// Two presses, not thirteen: the trailing space a drop leaves, and then the marker whole. A
+/// marker is one thing on the screen, and a user who starts rubbing one out has already decided.
+#[test]
+fn one_backspace_takes_the_whole_marker() {
+    let scratch = Scratch::new("whole");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    assert_eq!(session.input(), "[Image #1] ");
+
+    session.backspace();
+    session.backspace();
+
+    assert_eq!(session.input(), "");
+    session.submit();
+    assert!(
+        session.sent_attachments().is_empty(),
+        "a file whose marker was deleted was still sent"
+    );
+}
+
+/// Markers are never reused, or deleting one would renumber the marker sitting in the line the
+/// user is looking at.
+#[test]
+fn a_second_drop_gets_its_own_number() {
+    let scratch = Scratch::new("numbering");
+    let first = scratch.file("a.png");
+    let second = scratch.file("b.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&first);
+    session.drop_files(&second);
+    assert_eq!(session.input(), "[Image #1] [Image #2] ");
+}
+
+/// The load-bearing one, again at this level: a paste that merely mentions a real file is a paste.
+#[test]
+fn pasting_prose_about_a_real_file_is_still_prose() {
+    let scratch = Scratch::new("prose");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    let prose = format!("have a look at {path} please");
+    assert!(!session.drop_files(&prose), "prose was taken as a drop");
+    assert!(session.attached().is_empty());
+}
+
+/// A dropped text file is context, which is what @ and --file already make of one.
+#[test]
+fn a_dropped_text_file_is_context_rather_than_an_attachment() {
+    let scratch = Scratch::new("text");
+    let path = scratch.file("notes.md");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    assert_eq!(session.attached()[0].kind, Kind::Text);
+    assert_eq!(session.input(), "[File #1] ");
+}
+
+/// A text file comes from ~/Downloads as often as a screenshot does, and it has to reach the turn
+/// from there too: carried as a named file, its read is confined to the workspace and the whole
+/// turn fails instead.
+#[test]
+fn a_text_file_from_outside_the_workspace_is_dropped_all_the_same() {
+    let outside = Scratch::new("text-outside");
+    let path = outside.file("notes.md");
+
+    let workspace = Scratch::new("text-inside");
+    let mut session = session_in(&workspace);
+
+    assert!(session.drop_files(&path));
+    assert_eq!(session.attached()[0].kind, Kind::Text);
+    assert!(
+        session.attached()[0].name.starts_with('/'),
+        "{}",
+        session.attached()[0].name
+    );
+}
+
+/// Several files at once, which is what dropping a selection does.
+#[test]
+fn several_files_dropped_together_each_get_a_marker() {
+    let scratch = Scratch::new("several");
+    let a = scratch.file("a.png");
+    let b = scratch.file("b.pdf");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&format!("{a} {b}"));
+    assert_eq!(session.input(), "[Image #1] [PDF #2] ");
+    assert_eq!(session.attached().len(), 2);
+}
+
+/// A supported file beside one nothing takes: the marker and the path sit side by side, in the
+/// order they were dropped.
+#[test]
+fn a_mixed_drop_keeps_each_in_its_place() {
+    let scratch = Scratch::new("mixed");
+    let a = scratch.file("a.png");
+    let b = scratch.file("b.dmg");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&format!("{a} {b}"));
+    assert_eq!(session.input(), format!("[Image #1] {b} "));
+}
+
+/// Sending clears them, or the next line would carry the last line's files.
+#[test]
+fn sending_a_line_clears_what_was_attached_to_it() {
+    let scratch = Scratch::new("cleared");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    session.submit();
+    assert!(session.attached().is_empty(), "the next line inherits them");
+    assert_eq!(session.sent_attachments().len(), 1);
+}
+
+/// A drop leaves a trailing space, which is what a terminal does when a file is dropped into a
+/// shell: whatever is typed next, or dropped next, does not run into the marker.
+#[test]
+fn a_drop_leaves_room_after_itself() {
+    let scratch = Scratch::new("spacing");
+    let path = scratch.file("a.png");
+    let mut session = session_in(&scratch);
+
+    session.drop_files(&path);
+    for c in "what is this".chars() {
+        session.type_char(c);
+    }
+    assert_eq!(session.input(), "[Image #1] what is this");
+}
+
+/// A file dropped onto a line queued mid-turn reaches the planner as its name.
+///
+/// It cannot reach it as contents: routing was precommitted before the turn read anything, so a
+/// file admitted now would be context whose shape the turn never fixed. The name is enough, and it
+/// is what the person meant by dropping it: the planner reads it and goes to the file through the
+/// same gate it reads anything else through.
+#[test]
+fn a_file_dropped_into_a_queued_line_is_named_to_the_planner() {
+    let scratch = Scratch::new("queued-drop");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    session.type_char('a');
+    session.submit();
+    let reaching = session.interjections();
+
+    session.drop_files(&path);
+    for c in "what is wrong here".chars() {
+        session.type_char(c);
+    }
+    assert!(session.queue(), "nothing was queued");
+
+    assert_eq!(
+        reaching.take().as_deref(),
+        Some("shot.png what is wrong here"),
+        "the marker reached the planner as a marker, standing for nothing it can use"
+    );
+}
+
+/// What the person sees is still what they typed. Only the thing that talks to the model is given
+/// the resolved words, exactly as a folded paste works: the transcript and the box keep the marker,
+/// because that is what was on their screen.
+#[test]
+fn resolving_a_queued_line_does_not_rewrite_what_the_person_sees() {
+    let scratch = Scratch::new("queued-drop-display");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    session.type_char('a');
+    session.submit();
+    session.drop_files(&path);
+    assert!(session.queue(), "nothing was queued");
+
+    assert_eq!(
+        session.queued[0].prompt, "[Image #1]",
+        "the person's own line was rewritten under them"
+    );
+}
+
+/// A marker stands for a file staged beside the line, and nothing staged outlives the session
+/// that staged it. Remembered as the marker, the prompt comes back naming nothing at all;
+/// remembered as the name, it comes back saying which file it was about, and the planner can go
+/// and read that file through the gate it reads any other through.
+#[test]
+fn a_dropped_file_is_recalled_by_name_rather_than_by_its_marker() {
+    let scratch = Scratch::new("recall-name");
+    let path = scratch.file("shot.png");
+    let mut session = session_in(&scratch);
+
+    for c in "look at ".chars() {
+        session.type_char(c);
+    }
+    assert!(session.drop_files(&path), "not recognised as a drop");
+    assert_eq!(session.input(), "look at [Image #1] ");
+
+    session.submit().expect("submitted");
+    session.recall_older();
+    assert_eq!(session.input(), "look at shot.png");
+}

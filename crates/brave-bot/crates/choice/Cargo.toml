@@ -1,0 +1,12 @@
+[package]
+name = "bravebot-choice"
+description = "Which whole number a processor's answer chose, read outside the driver"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-core = { path = "../core" }

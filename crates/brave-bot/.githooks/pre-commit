@@ -1,0 +1,59 @@
+#!/bin/sh
+# Refuse a commit that the fast half of `make check` would fail.
+#
+# Not the tests: those are slow enough that running them on every commit would make people
+# reach for --no-verify, and a hook everyone bypasses guards nothing. Formatting and clippy
+# are seconds, and they are what a commit most often lands broken on, since there is no
+# change small enough to be exempt from them: a comment, a document, or a rename fails these
+# as readily as anything else.
+#
+# `make check` is still the thing that has to pass before a commit. This only catches the
+# half of it that is cheap enough to check here, and it reads the working tree rather than
+# what is staged, so a partial `git add` can still commit something these did not see.
+
+# A commit that stages only documents and agent files has nothing for fmt or clippy to read: no
+# build script or include! in crates/ names a path under docs/ or agents/. Anything else, or a
+# commit staging nothing, runs the checks, so a path this list does not know about is never skipped.
+only_prose=1
+staged="$(git diff --cached --name-only --no-renames)"
+if [ -z "$staged" ]; then
+    only_prose=0
+fi
+while IFS= read -r path; do
+    case "$path" in
+        docs/*|agents/*|*.md|LICENSE|.github/CODEOWNERS) ;;
+        *) only_prose=0; break ;;
+    esac
+done <<EOF
+$staged
+EOF
+if [ "$only_prose" = 1 ]; then
+    exit 0
+fi
+
+# Git hooks do not inherit direnv. Without this, `cargo clippy` rebuilds `bravebot-config`
+# with no SERVICES_KEY_* and the build script refuses, which looks like a clippy failure.
+if command -v direnv >/dev/null 2>&1; then
+    eval "$(direnv export bash)"
+fi
+
+# A commit made through bravebot's own `run` has these withheld (RUN-12), and direnv, having
+# loaded this directory already, does not put them back. Clippy lints the same code without them.
+# Set only when one is missing: a change to this switch rebuilds every crate above the config.
+if [ -z "$SERVICES_KEY_AICHAT" ] || [ -z "$BRAVE_SERVICES_KEY_ID" ] ||
+    [ -z "$BRAVE_AI_CHAT_ENDPOINT" ]; then
+    BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1
+    export BRAVEBOT_ALLOW_UNCONFIGURED_BUILD
+fi
+
+if ! cargo fmt --all -- --check; then
+    echo >&2
+    echo "pre-commit: formatting. Run 'make fmt' and stage the result." >&2
+    exit 1
+fi
+
+if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    echo >&2
+    echo "pre-commit: clippy. Fix the warnings above." >&2
+    exit 1
+fi

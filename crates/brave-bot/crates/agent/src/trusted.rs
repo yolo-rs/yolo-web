@@ -1,0 +1,1171 @@
+//! Where the answer to the startup question is kept, for the person who asked it to be.
+//!
+//! One file per working directory under `~/.bravebot/trusted`, keyed the way the session store, the
+//! remembered command lines and the granted rules are keyed ([`crate::home::key_for`]). An entry is
+//! the tree rule a yes writes, for one exact directory, and a later session begun in that directory
+//! starts with it rather than being asked ([TRUST-23]). So does one begun below the root of a git
+//! worktree when that root was the directory answered about.
+//!
+//! # The one record here that decides what is trusted
+//!
+//! Every other record under `~/.bravebot` decides whether somebody is asked. This one decides what
+//! a session reads as trusted, which is why it covers less than the answer it keeps: the directory
+//! itself and what is below it where it is a git worktree's root, never what is above it, only while
+//! that directory is the one that was answered about, and nothing a session recorded after the
+//! answer.
+//!
+//! # Which directory, and not only which path
+//!
+//! An entry holds the path and what the filesystem says about the directory at it: when it was
+//! made, and its number on the volume where the platform has one. A clone deleted and another made
+//! at the same path is a different directory with the same name, and an answer about the first is
+//! not one about the second. Where the filesystem cannot say when a directory was made there is
+//! nothing to hold the answer to, so nothing is offered and nothing is honoured.
+//!
+//! # One line per entry, appended
+//!
+//! JSON, one object per line, added rather than the file rewritten, so two sessions answering at
+//! once cannot lose each other's answers. Withdrawing is the one rewrite, and it keeps every line
+//! about another directory as it found it.
+//!
+//! # Everything degrades to asking
+//!
+//! No home, an unreadable file, a directory that is not the one answered about, a line naming this
+//! directory that this build cannot read: each means the record says nothing, and a record that says
+//! nothing is a session that asks. That last is stricter than the other records here, which skip such
+//! a line and let the rest answer. A later build narrows an entry by adding a field, and an older one
+//! answering from an entry before it would be honouring an answer the newer one withdrew.
+//!
+//! [TRUST-23]: ../../../docs/specs/trust-map.md
+
+use crate::granted::WrittenPath;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// The directory the per-directory records live in, inside the state directory.
+const TRUSTED: &str = "trusted";
+
+/// Whether this session may write to a record, which is adding an answer or withdrawing one.
+///
+/// False in a session that adds nothing to `~/.bravebot` ([INCOG-5]). Reading is unchanged there, as
+/// it is for the other records: an answer an ordinary session kept still answers, and the session
+/// says so.
+///
+/// [INCOG-5]: ../../../docs/specs/incognito.md
+pub fn may_be_written() -> bool {
+    !bravebot_core::incognito::engaged()
+}
+
+/// Whether an answer about `directory` may be kept or honoured at all.
+///
+/// Not about a filesystem root, and not about the user's home or any directory holding it. A tree
+/// rule covers everything below it, so an answer kept about `~` would trust every repository cloned
+/// under it afterwards, none of which anybody was asked about. Refused on reading as well as on
+/// offering, so an entry written by hand is no way around it.
+pub fn may_be_remembered(directory: &Path, profile: Option<&Path>) -> bool {
+    // Each as given and as resolved: a working directory is resolved through links and `$HOME`
+    // often is not (`/tmp` is one on macOS), and a comparison of one form with the other would let
+    // a directory holding the home through a link be remembered.
+    let forms = |path: &Path| {
+        let mut forms = vec![path.to_path_buf()];
+        forms.extend(std::fs::canonicalize(path).ok());
+        forms
+    };
+    let directories = forms(directory);
+    directories
+        .iter()
+        .all(|directory| directory.parent().is_some())
+        && !profile.is_some_and(|home| {
+            forms(home).iter().any(|home| {
+                directories
+                    .iter()
+                    .any(|directory| home.starts_with(directory))
+            })
+        })
+}
+
+/// The record of a remembered answer about `directory` inside the state directory `home`, and which
+/// directory is at `directory` now.
+///
+/// `None` where no answer about it may be kept or honoured: no state directory, a root, the user's
+/// home `profile` or anything holding it, or a filesystem that cannot tell this directory from the
+/// next one made at the same path. Every front end asks here, so none honours an answer another
+/// would refuse. Read in an incognito session too, as the other records are ([INCOG-5]); what it
+/// may not do there is write.
+///
+/// [INCOG-5]: ../../../docs/specs/incognito.md
+pub fn record_for(
+    home: Option<&Path>,
+    profile: Option<&Path>,
+    directory: &Path,
+) -> Option<(Store, Identity)> {
+    let home = home?;
+    if !may_be_remembered(directory, profile) {
+        return None;
+    }
+    let identity = Identity::of(directory)?;
+    Some((Store::new(home, directory), identity))
+}
+
+/// The record a yes is kept in, where it may be kept and this session may write it.
+///
+/// [`record_for`] in a session that adds to `~/.bravebot`. An incognito session reads the record
+/// and writes nothing ([`may_be_written`]), so a yes given there is not offered as one that is
+/// kept. Every front end asks here when it puts the startup question, so none says a yes is kept
+/// where another would write nothing.
+pub fn record_to_keep(
+    home: Option<&Path>,
+    profile: Option<&Path>,
+    directory: &Path,
+) -> Option<(Store, Identity)> {
+    if !may_be_written() {
+        return None;
+    }
+    record_for(home, profile, directory)
+}
+
+/// The rule trusting the workspace records: the root, which covers everything beneath it.
+///
+/// Shared by every front end that turns a yes into a map, the terminal, a session in lines and the
+/// desktop's bridge, so none has a reading of TRUST-7 of its own.
+///
+/// One place, so the map reached without the question is the map a yes would have written. It does
+/// not say that confined lines run without asking ([`trusting_the_workspace_and_confined_lines`]):
+/// only a yes to a question that said so does, so a map reached any other way keeps asking about
+/// every line (RUN-5).
+pub fn trusting_the_workspace(directory: &Path) -> bravebot_core::trust::TrustStore {
+    let mut trust = crate::workspace::trust_store(directory);
+    trust.trust(".");
+    trust
+}
+
+/// [`trusting_the_workspace`] for a yes to the startup question as it is asked now, which says that
+/// confined lines in the directory run without asking, or for a kept answer whose entry says so
+/// ([`Kept::confined_lines`]).
+pub fn trusting_the_workspace_and_confined_lines(
+    directory: &Path,
+) -> bravebot_core::trust::TrustStore {
+    let mut trust = trusting_the_workspace(directory);
+    trust.allow_confined_lines();
+    trust
+}
+
+/// The map a kept answer starts a session with: the rule a yes writes, and the answer about
+/// confined lines only where the entry says the question said so.
+pub fn trusting_as_kept(directory: &Path, kept: &Kept) -> bravebot_core::trust::TrustStore {
+    // An entry about the root of the worktree is honoured for a package below it (TRUST-23), but its
+    // answer covers the root it was given for and not a directory beneath it (RUN-5).
+    let about_this_directory = kept.root == directory
+        || matches!(
+            (kept.root.canonicalize(), directory.canonicalize()),
+            (Ok(kept), Ok(here)) if kept == here
+        );
+    match kept.confined_lines && about_this_directory {
+        true => trusting_the_workspace_and_confined_lines(directory),
+        false => trusting_the_workspace(directory),
+    }
+}
+
+/// The sentence a startup question carries about what a yes grants beyond the files (RUN-5), in the
+/// words every front end shows, so the one a person reads in a window is the one a terminal draws.
+///
+/// A front end whose question carries it, and tells the session so, gets the answer about confined
+/// lines when the person says yes ([`trusting_the_workspace_and_confined_lines`]).
+pub fn confined_lines_notice() -> &'static str {
+    bravebot_i18n::t!(trust_directory_confined_lines)
+}
+
+/// Write a yes down in `record` for later sessions, and say whether it was written, or `None` where
+/// nothing is kept: a no, or a yes with no record to write it in ([`record_to_keep`]).
+///
+/// The step every front end takes when the startup question is answered, with the one clock that
+/// dates the entry, so each of them is left only to put the result into its own words. `session`
+/// names the session in the entry and decides nothing; it is empty where the session has no name.
+///
+/// `confined_lines` is whether the question this yes answered said that confined lines in the
+/// directory run without asking ([RUN-5]), which the entry then says for the sessions it answers
+/// for. A front end whose question does not say so passes false.
+///
+/// [RUN-5]: ../../../docs/specs/tools/run.md
+pub fn keep_a_yes(
+    record: Option<&(Store, Identity)>,
+    yes: bool,
+    session: &str,
+    confined_lines: bool,
+) -> Option<bool> {
+    let (store, identity) = record?;
+    yes.then(|| store.keep(identity, session, seconds_now(), confined_lines))
+}
+
+/// Seconds since the epoch, which is how a kept answer says when it was given and an addressed
+/// turn's opening line says when it was sent.
+pub(crate) fn seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// A kept answer that settles a session, and the record it is in.
+///
+/// [`Kept::root`] is the session's own directory where the answer was kept there, and the root of
+/// the git worktree around it where the answer was kept about that ([TRUST-23]).
+///
+/// [TRUST-23]: ../../../docs/specs/trust-map.md
+#[derive(Debug, Clone)]
+pub struct Honoured {
+    /// The record the answer is in.
+    pub store: Store,
+    /// The answer.
+    pub kept: Kept,
+}
+
+/// The kept answer that settles a session started in `directory`, or `None` where it is asked.
+///
+/// An answer about `directory` itself, or failing that one about the root of the git worktree
+/// `directory` is inside ([`worktree_root_above`]). Both go through [`record_for`], so the refusals
+/// of a root and of the home directory apply to the root as they apply to the directory.
+pub fn honoured(home: Option<&Path>, profile: Option<&Path>, directory: &Path) -> Option<Honoured> {
+    let exact = || {
+        let (store, identity) = record_for(home, profile, directory)?;
+        let kept = store.kept(&identity)?;
+        Some(Honoured { store, kept })
+    };
+    exact().or_else(|| honoured_by_root(home, profile, directory))
+}
+
+/// The answer kept about the root of the worktree `directory` is inside, where `directory` is not
+/// that root. Never an answer about a directory above the root.
+pub fn honoured_by_root(
+    home: Option<&Path>,
+    profile: Option<&Path>,
+    directory: &Path,
+) -> Option<Honoured> {
+    let root = worktree_root_above(directory)?;
+    let (store, identity) = record_for(home, profile, &root)?;
+    let kept = store.kept(&identity)?;
+    Some(Honoured { store, kept })
+}
+
+/// The root of the git worktree `directory` is inside, where that root is a directory above it.
+///
+/// The nearest directory from `directory` upward holding a `.git` entry, which is how a nested
+/// repository or a submodule ends the walk at itself: a session started inside one is below its own
+/// root, and an answer about the repository around it is not an answer about it. `None` where
+/// `directory` is itself the root, where no directory above it holds `.git`, and wherever the
+/// answer cannot be told: a directory that cannot be resolved, or an entry whose presence cannot be
+/// read. Only whether the entry exists is read, never what is in it.
+pub fn worktree_root_above(directory: &Path) -> Option<PathBuf> {
+    // Resolved, so the parents walked are the filesystem's and not those a link spells, and the
+    // root found is under the name a turn there resolves directories to.
+    let resolved = std::fs::canonicalize(directory).ok()?;
+    for candidate in resolved.ancestors() {
+        match std::fs::symlink_metadata(candidate.join(".git")) {
+            Ok(_) => {
+                return (candidate != resolved).then(|| candidate.to_path_buf());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// What the filesystem says about a directory that another directory at the same path would not.
+///
+/// When it was made, to the nanosecond where the filesystem keeps that, and its number on the volume
+/// where the platform has one. Neither alone is enough. Linux gives a freed number to the next
+/// directory made, so there the time is what tells a replacement apart: one made after the answer
+/// was made after the directory answered about, and nobody can set that time. macOS lets a
+/// directory's owner set it, so there the number is what holds, and APFS does not give one out twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Identity {
+    made: u64,
+    made_nanos: u32,
+    inode: Option<u64>,
+}
+
+impl Identity {
+    /// The directory at `directory` as it is now, or `None` where the filesystem cannot say when it
+    /// was made, or there is no directory there.
+    pub fn of(directory: &Path) -> Option<Self> {
+        let found = std::fs::metadata(directory).ok()?;
+        if !found.is_dir() {
+            return None;
+        }
+        let made = found
+            .created()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            Some(found.ino())
+        };
+        #[cfg(not(unix))]
+        let inode = None;
+        Some(Self {
+            made: made.as_secs(),
+            made_nanos: made.subsec_nanos(),
+            inode,
+        })
+    }
+}
+
+/// A kept answer, as a session starting from it says where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    /// The session the key was pressed in.
+    pub session: String,
+    /// When, in seconds since the epoch.
+    pub at: u64,
+    /// The directory the answer is about.
+    pub root: PathBuf,
+    /// Whether the question this yes answered said that confined lines in the directory run
+    /// without asking ([RUN-5]). False for an answer kept before it did, which is what makes such a
+    /// directory ask about every line until the person answers again.
+    ///
+    /// [RUN-5]: ../../../docs/specs/tools/run.md
+    pub confined_lines: bool,
+}
+
+/// The record for one working directory.
+///
+/// Holds where the file is rather than what it says: every session begun in the directory shares it,
+/// so it is read when the question would be asked rather than kept.
+#[derive(Debug, Clone)]
+pub struct Store {
+    path: PathBuf,
+    /// The directory the answer is about, written into each entry, since the key is lossy.
+    directory: PathBuf,
+}
+
+impl Store {
+    /// The record for `directory` inside `home`.
+    ///
+    /// Takes the state directory rather than resolving it, as every store in this crate does, so a
+    /// test depends on nothing the developer happens to have installed.
+    pub fn new(home: &Path, directory: &Path) -> Self {
+        Self {
+            path: home
+                .join(TRUSTED)
+                .join(format!("{}.jsonl", crate::home::key_for(directory))),
+            directory: directory.to_path_buf(),
+        }
+    }
+
+    /// Where the record is, which the question offering to write it names.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The answer kept for this directory as it is now, or `None` where it is to be asked about.
+    ///
+    /// The newest entry naming exactly this directory and `now`. An entry about another directory
+    /// sharing the key, or about an earlier directory at this path, answers nothing. A line naming
+    /// this directory that this build cannot read stops the record answering at all.
+    pub fn kept(&self, now: &Identity) -> Option<Kept> {
+        // As bytes, so a line cut inside a character is one line that is not an entry rather than a
+        // file that is not text.
+        let contents = std::fs::read(&self.path).ok()?;
+        let mut kept = None;
+        for line in contents.split(|byte| *byte == b'\n') {
+            let Ok(entry) = serde_json::from_slice::<serde_json::Value>(line) else {
+                // A half-written line names nothing, so it is nobody's answer.
+                continue;
+            };
+            if !self.is_about_this_directory(&entry) {
+                continue;
+            }
+            let Ok(written) = serde_json::from_value::<Written>(entry) else {
+                return None;
+            };
+            if written.identity == *now {
+                kept = Some(Kept {
+                    session: written.session,
+                    at: written.at,
+                    root: self.directory.clone(),
+                    confined_lines: written.confined_lines,
+                });
+            }
+        }
+        kept
+    }
+
+    /// Keep the answer, for the directory as it is now, given in the session named at `at`.
+    ///
+    /// Appended, never rewritten. Best effort, and says whether it was written: a home that is full
+    /// or read-only means the answer lasts this session, which is what a yes grants anyway.
+    ///
+    /// `confined_lines` is written into the entry only where it is true ([`keep_a_yes`]).
+    pub fn keep(&self, identity: &Identity, session: &str, at: u64, confined_lines: bool) -> bool {
+        if !may_be_written() {
+            return false;
+        }
+        let Some(parent) = self.path.parent() else {
+            return false;
+        };
+        if crate::home::create_directory(parent).is_err() {
+            return false;
+        }
+        let Ok(mut encoded) = serde_json::to_string(&Written {
+            directory: WrittenPath::of(&self.directory),
+            identity: *identity,
+            session: session.to_string(),
+            at,
+            confined_lines,
+        }) else {
+            return false;
+        };
+        encoded.push('\n');
+        // After a line a full disk cut short, this one starts a line of its own. Appended to the end
+        // of that one it would be unreadable, and the session would have said it was kept.
+        let cut_short = std::fs::read(&self.path)
+            .is_ok_and(|written| written.last().is_some_and(|last| *last != b'\n'));
+        if cut_short {
+            encoded.insert(0, '\n');
+        }
+        crate::home::append_to_file(&self.path)
+            .and_then(|mut file| file.write_all(encoded.as_bytes()))
+            .is_ok()
+    }
+
+    /// Withdraw every answer kept for this directory, saying whether there was one.
+    ///
+    /// Every entry naming this directory goes, whichever directory was at the path when it was
+    /// written and whether or not this build can read the rest of it. Every other line stays as it was
+    /// found, and a file left with nothing in it is removed.
+    pub fn forget(&self) -> std::io::Result<bool> {
+        if !may_be_written() {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let contents = match std::fs::read(&self.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut left = Vec::new();
+        let mut forgot = false;
+        for line in contents.split(|byte| *byte == b'\n') {
+            let about_this = serde_json::from_slice::<serde_json::Value>(line)
+                .is_ok_and(|entry| self.is_about_this_directory(&entry));
+            if about_this {
+                forgot = true;
+            } else if !line.trim_ascii().is_empty() {
+                left.extend_from_slice(line);
+                left.push(b'\n');
+            }
+        }
+        if !forgot {
+            return Ok(false);
+        }
+        if left.is_empty() {
+            std::fs::remove_file(&self.path)?;
+        } else {
+            crate::home::replace(&self.path, left)?;
+        }
+        Ok(true)
+    }
+
+    /// Whether a line names this directory, read off its `directory` field alone.
+    ///
+    /// Alone, so a line this build cannot read the rest of is still known to be about this directory:
+    /// that is what lets reading refuse it and withdrawing remove it.
+    fn is_about_this_directory(&self, entry: &serde_json::Value) -> bool {
+        entry
+            .get("directory")
+            .and_then(|named| serde_json::from_value::<WrittenPath>(named.clone()).ok())
+            .and_then(|named| named.to_path())
+            .is_some_and(|named| named == self.directory)
+    }
+}
+
+/// One entry as it is spelled on disk.
+///
+/// A field this build does not know refuses the entry, and with it the record's answer for this
+/// directory. A later build narrows what an entry covers by adding a field, and ignoring one would
+/// trust what the newer build would ask about.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Written {
+    /// The directory the answer is about, in full.
+    directory: WrittenPath,
+    /// Which directory was at that path when the answer was given.
+    identity: Identity,
+    /// The session the key was pressed in. Decides nothing; it is what a reader sees.
+    session: String,
+    /// When, in seconds since the epoch. Decides nothing either.
+    at: u64,
+    /// Whether the question said confined lines run without asking, which a session honouring this
+    /// entry reads and acts on ([RUN-5]). Left out of an entry that did not say so, so such an entry
+    /// is spelled as it was before the field existed.
+    ///
+    /// [RUN-5]: ../../../docs/specs/tools/run.md
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    confined_lines: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A state directory of this test's own, removed with it.
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = crate::testutil::scratch_dir(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch state directory");
+            Self { path }
+        }
+
+        fn store(&self, directory: &str) -> Store {
+            Store::new(&self.path, Path::new(directory))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A directory as the filesystem might describe one, without a filesystem.
+    fn identity(made: u64) -> Identity {
+        Identity {
+            made,
+            made_nanos: 250,
+            inode: Some(42),
+        }
+    }
+
+    /// RUN-5: an entry says whether the question said confined lines run without asking. One kept
+    /// before it did, which is a line with no such field, reads as not saying so, and the newest
+    /// entry decides, so a person who answers again is the one a directory asks no more.
+    #[test]
+    fn an_answer_kept_before_the_question_said_so_does_not_say_so_until_answered_again() {
+        let scratch = Scratch::new("trusted-confined-lines");
+        let store = scratch.store("/work");
+        assert!(store.keep(&identity(1), "before", 1, false));
+        let written = std::fs::read_to_string(store.path()).expect("the record");
+        assert!(
+            !written.contains("confined_lines"),
+            "an answer that did not say so was written differently from one kept before the field"
+        );
+        assert!(!store.kept(&identity(1)).expect("kept").confined_lines);
+
+        assert!(store.keep(&identity(1), "after", 2, true));
+        assert!(
+            store.kept(&identity(1)).expect("kept").confined_lines,
+            "the newest answer said so and was not read as saying so"
+        );
+        assert!(store.keep(&identity(1), "later", 3, false));
+        assert!(
+            !store.kept(&identity(1)).expect("kept").confined_lines,
+            "an older answer that said so outvoted the newest"
+        );
+    }
+
+    /// TRUST-23: the answer outlives the session, which is the whole reason the file exists. One
+    /// session keeps it and the next in that directory reads it back, with who gave it and when.
+    #[test]
+    fn a_kept_answer_is_read_back_by_the_next_session_there() {
+        let scratch = Scratch::new("trusted-across-sessions");
+        assert!(
+            scratch
+                .store("/work")
+                .keep(&identity(1), "the-first", 1_000, false)
+        );
+
+        assert_eq!(
+            scratch.store("/work").kept(&identity(1)),
+            Some(Kept {
+                session: "the-first".to_string(),
+                at: 1_000,
+                root: PathBuf::from("/work"),
+                confined_lines: false,
+            })
+        );
+    }
+
+    /// TRUST-23: a yes given to the question is the answer that is kept, dated by the clock the
+    /// helper owns, and the next session in the directory reads it back. Asked of the helper rather
+    /// than of `Store::keep`, since a helper that wrote nothing would pass a test that called the
+    /// store itself.
+    #[test]
+    fn a_yes_is_written_and_read_back_by_the_next_session_there() {
+        let scratch = Scratch::new("trusted-keep-a-yes");
+        let record = (scratch.store("/work"), identity(1));
+
+        assert_eq!(
+            keep_a_yes(Some(&record), true, "a-session", false),
+            Some(true)
+        );
+
+        let kept = record.0.kept(&identity(1)).expect("the yes was not kept");
+        assert_eq!(kept.session, "a-session");
+        assert!(kept.at > 0, "the entry carries no time");
+    }
+
+    /// TRUST-23: a no writes nothing, and neither does a yes with no record to write it in. The
+    /// regression it rejects is a no kept as a yes, which would trust a directory nobody vouched for.
+    #[test]
+    fn a_no_and_a_yes_with_no_record_write_nothing() {
+        let scratch = Scratch::new("trusted-keep-no");
+        let record = (scratch.store("/work"), identity(1));
+
+        assert_eq!(keep_a_yes(Some(&record), false, "a-session", false), None);
+        assert!(!record.0.path().exists(), "a no was written down");
+        assert_eq!(keep_a_yes(None, true, "a-session", false), None);
+    }
+
+    /// TRUST-23: a yes whose record cannot be written says so, so the front end can tell the person
+    /// the next session will ask. The state directory here is a file, which nothing can be created
+    /// inside.
+    #[test]
+    fn a_yes_that_cannot_be_written_says_so() {
+        let scratch = Scratch::new("trusted-keep-blocked");
+        let blocked = scratch.path.join("not-a-directory");
+        std::fs::write(&blocked, b"").expect("a file in the way");
+        let record = (Store::new(&blocked, Path::new("/work")), identity(1));
+
+        assert_eq!(
+            keep_a_yes(Some(&record), true, "a-session", false),
+            Some(false)
+        );
+    }
+
+    /// TRUST-23: an answer covers the exact directory it was given in. A tree rule covers what is
+    /// below it within a session, and carried across sessions that would trust every repository
+    /// cloned under a remembered directory later, none of which anybody was asked about.
+    #[test]
+    fn an_answer_kept_about_one_directory_answers_for_no_other() {
+        let scratch = Scratch::new("trusted-exact-directory");
+        scratch
+            .store("/work")
+            .keep(&identity(1), "a-session", 1, false);
+
+        for other in ["/work/inner", "/", "/other"] {
+            assert_eq!(
+                scratch.store(other).kept(&identity(1)),
+                None,
+                "an answer about /work answered for {other}"
+            );
+        }
+    }
+
+    /// TRUST-23: the key a directory reduces to is lossy, so two directories can share a file. The
+    /// full path in every entry is what keeps one directory's answer out of the other's session.
+    #[test]
+    fn a_directory_sharing_a_key_with_another_is_not_answered_by_its_lines() {
+        let scratch = Scratch::new("trusted-lossy-key");
+        let mine = "/a/b";
+        let theirs = "/a-b";
+        assert_eq!(
+            crate::home::key_for(Path::new(mine)),
+            crate::home::key_for(Path::new(theirs)),
+            "this test needs two paths that reduce to one key"
+        );
+        scratch
+            .store(theirs)
+            .keep(&identity(1), "a-session", 1, false);
+
+        assert_eq!(scratch.store(mine).kept(&identity(1)), None);
+    }
+
+    /// TRUST-23: a clone deleted and another made at the same path is a different directory with
+    /// the same name. The answer was about the first, so the second is asked about.
+    #[test]
+    fn another_directory_at_the_same_path_is_asked_about() {
+        let scratch = Scratch::new("trusted-remade");
+        scratch
+            .store("/work")
+            .keep(&identity(1), "a-session", 1, false);
+
+        assert_eq!(scratch.store("/work").kept(&identity(2)), None);
+        assert_eq!(
+            scratch.store("/work").kept(&Identity {
+                inode: Some(43),
+                ..identity(1)
+            }),
+            None,
+            "a directory made in the same instant with another number was taken for the first"
+        );
+    }
+
+    /// TRUST-23: and the identity is the one the filesystem gives. A directory removed and made
+    /// again at one path is told apart from the one that was there, on the platform the tests run on,
+    /// including a volume that hands the freed number straight back.
+    #[test]
+    fn a_directory_removed_and_made_again_has_another_identity() {
+        let scratch = Scratch::new("trusted-identity");
+        let directory = scratch.path.join("checkout");
+        std::fs::create_dir(&directory).expect("made");
+        let Some(first) = Identity::of(&directory) else {
+            // A filesystem that keeps no creation time offers nothing to keep, which
+            // `nothing_is_kept_about_a_directory_that_cannot_be_told_apart` covers.
+            return;
+        };
+        assert_eq!(
+            Identity::of(&directory),
+            Some(first),
+            "one directory read twice"
+        );
+
+        // A person answers between the first directory being made and the second, which is longer
+        // than the tick a coarse filesystem clock records. Without waiting it out, Linux makes both
+        // in one tick with one number, which no replacement made after an answer can be.
+        let first_made = std::fs::metadata(&directory)
+            .and_then(|found| found.created())
+            .expect("a creation time");
+        let probe = scratch.path.join("probe");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::fs::create_dir(&probe).expect("probe made");
+            let made = std::fs::metadata(&probe).and_then(|found| found.created());
+            std::fs::remove_dir(&probe).expect("probe removed");
+            if made.expect("a creation time") != first_made {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the filesystem's clock did not move"
+            );
+        }
+
+        std::fs::remove_dir(&directory).expect("removed");
+        std::fs::create_dir(&directory).expect("made again");
+
+        assert_ne!(Identity::of(&directory), Some(first));
+    }
+
+    /// TRUST-23: no directory there, or a file where one was, has nothing to hold an answer to.
+    #[test]
+    fn nothing_is_kept_about_a_directory_that_cannot_be_told_apart() {
+        let scratch = Scratch::new("trusted-no-identity");
+        assert_eq!(Identity::of(&scratch.path.join("absent")), None);
+
+        let file = scratch.path.join("a-file");
+        std::fs::write(&file, "").expect("written");
+        assert_eq!(Identity::of(&file), None);
+    }
+
+    /// TRUST-23: no answer is kept about a filesystem root, the home directory, or a directory
+    /// holding it, since every later checkout below one would be trusted unasked. A directory inside
+    /// the home is the ordinary case and may be.
+    #[test]
+    fn home_and_what_holds_it_are_never_remembered() {
+        let home = Path::new("/home/me");
+        assert!(!may_be_remembered(Path::new("/"), Some(home)));
+        assert!(!may_be_remembered(Path::new("/home"), Some(home)));
+        assert!(!may_be_remembered(home, Some(home)));
+        assert!(!may_be_remembered(Path::new("/"), None));
+        assert!(may_be_remembered(Path::new("/home/me/project"), Some(home)));
+        assert!(may_be_remembered(Path::new("/srv/project"), None));
+    }
+
+    /// TRUST-23: and the home is recognised however either path reaches it. `$HOME` named through a
+    /// link and the working directory resolved, or the other way round, is the same home.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_reached_through_a_link_is_still_never_remembered() {
+        let scratch = Scratch::new("trusted-linked-home");
+        let real = std::fs::canonicalize(&scratch.path).expect("resolved");
+        let holder = real.join("holder");
+        std::fs::create_dir_all(holder.join("me")).expect("made");
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&holder, &link).expect("linked");
+
+        let linked_home = link.join("me");
+        assert!(
+            !may_be_remembered(&holder, Some(&linked_home)),
+            "a directory holding a linked home was remembered"
+        );
+        assert!(!may_be_remembered(&holder.join("me"), Some(&linked_home)));
+        assert!(
+            !may_be_remembered(&link, Some(&holder.join("me"))),
+            "a linked directory holding the home was remembered"
+        );
+        assert!(may_be_remembered(
+            &holder.join("me/project"),
+            Some(&linked_home)
+        ));
+    }
+
+    /// TRUST-23: the refusals hold where a session reads the record, not only where remembering is
+    /// offered, so a line written by hand about the home directory or what holds it answers nothing.
+    #[test]
+    fn no_remembered_answer_is_read_about_the_home_or_what_holds_it() {
+        let scratch = Scratch::new("trusted-record-for-home");
+        let state = scratch.path.join("state");
+        let me = scratch.path.join("me");
+        let project = me.join("project");
+        std::fs::create_dir_all(&project).expect("create");
+        if Identity::of(&project).is_none() {
+            // A filesystem with no birth time keeps nothing, which a sibling test covers.
+            return;
+        }
+
+        assert!(record_for(Some(&state), Some(&me), &me).is_none());
+        assert!(record_for(Some(&state), Some(&me), &scratch.path).is_none());
+        assert!(
+            record_for(None, Some(&me), &project).is_none(),
+            "a record was read with no state directory"
+        );
+        let (store, _) = record_for(Some(&state), Some(&me), &project)
+            .expect("a directory inside the home is the ordinary case");
+        assert!(store.path().starts_with(state.join("trusted")));
+    }
+
+    /// TRUST-23: everything degrades to asking. A missing record or one nothing can read keeps no
+    /// answer.
+    #[test]
+    fn a_record_that_cannot_be_read_keeps_no_answer() {
+        let scratch = Scratch::new("trusted-unreadable");
+        let store = scratch.store("/work");
+        assert_eq!(store.kept(&identity(1)), None, "a missing file answered");
+
+        std::fs::create_dir_all(store.path().parent().expect("a parent")).expect("made");
+        std::fs::write(store.path(), "{ not json at all\n").expect("written");
+        assert_eq!(store.kept(&identity(1)), None);
+    }
+
+    /// TRUST-23: a line naming this directory that this build cannot read stops the record answering
+    /// for it, the answer before it included. A later build narrows an entry by adding a field, and
+    /// answering from the older one would trust what the newer build withdrew.
+    #[test]
+    fn a_line_about_this_directory_this_build_cannot_read_stops_the_answer() {
+        let scratch = Scratch::new("trusted-unknown-field");
+        let store = scratch.store("/work");
+        store.keep(&identity(1), "an-earlier-session", 1, false);
+        store.keep(&identity(1), "a-later-build", 2, false);
+
+        let written = std::fs::read_to_string(store.path()).expect("the record");
+        let (first, second) = written.split_once('\n').expect("two lines");
+        let narrowed = second.replacen(
+            r#"{"directory""#,
+            r#"{"something-later-builds-key-on":"x","directory""#,
+            1,
+        );
+        assert_ne!(
+            narrowed, second,
+            "the entry was not rewritten, so this test proves nothing"
+        );
+        std::fs::write(store.path(), format!("{first}\n{narrowed}")).expect("rewritten");
+
+        assert_eq!(
+            store.kept(&identity(1)),
+            None,
+            "an entry this build cannot account for left an older one answering"
+        );
+    }
+
+    /// TRUST-23: a line that is not an entry at all names no directory, so a half-written line from a
+    /// disk that filled leaves the answer before it standing.
+    #[test]
+    fn a_half_written_line_leaves_the_answer_before_it() {
+        let scratch = Scratch::new("trusted-partial-line");
+        let store = scratch.store("/work");
+        store.keep(&identity(1), "a-session", 1, false);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.path())
+            .expect("opened");
+        file.write_all(b"{\"directory\":\"/work\",\"sess")
+            .expect("written");
+        drop(file);
+
+        assert!(store.kept(&identity(1)).is_some());
+    }
+
+    /// TRUST-23: an answer kept after a line a full disk cut short starts a line of its own, so it
+    /// is read back, as the session that kept it said it would be.
+    #[test]
+    fn an_answer_kept_after_a_half_written_line_is_read_back() {
+        let scratch = Scratch::new("trusted-after-partial-line");
+        let store = scratch.store("/work");
+        std::fs::create_dir_all(store.path().parent().expect("a parent")).expect("made");
+        std::fs::write(store.path(), "{\"directory\":\"/work\",\"sess").expect("written");
+
+        assert!(store.keep(&identity(1), "a-session", 1, false));
+
+        assert!(
+            store.kept(&identity(1)).is_some(),
+            "the answer was joined to the line before it"
+        );
+    }
+
+    /// TRUST-23 and TRUST-24: a line cut inside a character is not text, and is skipped as any
+    /// half-written line is. The answer before it stands, withdrawing still works, and the cut line
+    /// is left as it was found.
+    #[test]
+    fn a_line_cut_inside_a_character_is_skipped_like_any_half_written_line() {
+        let scratch = Scratch::new("trusted-cut-character");
+        let store = scratch.store("/work");
+        store.keep(&identity(1), "a-session", 1, false);
+        let cut = b"{\"directory\":\"/caf\xC3";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.path())
+            .expect("opened");
+        file.write_all(cut).expect("written");
+        drop(file);
+
+        assert!(
+            store.kept(&identity(1)).is_some(),
+            "one cut character hid every answer in the file"
+        );
+        assert!(store.forget().expect("withdrawn"), "nothing was withdrawn");
+        assert_eq!(store.kept(&identity(1)), None);
+        assert_eq!(
+            std::fs::read(store.path()).expect("what is left"),
+            [&cut[..], b"\n"].concat()
+        );
+    }
+
+    /// TRUST-24: withdrawing removes every answer about this directory and nothing about another, so
+    /// the next session here is asked and one in a directory sharing the file is not.
+    #[test]
+    fn forgetting_removes_this_directorys_answers_and_keeps_the_rest() {
+        let scratch = Scratch::new("trusted-forget");
+        let mine = scratch.store("/a/b");
+        let theirs = scratch.store("/a-b");
+        mine.keep(&identity(1), "one", 1, false);
+        theirs.keep(&identity(7), "two", 2, false);
+        mine.keep(&identity(2), "three", 3, false);
+
+        assert!(mine.forget().expect("forgotten"), "nothing was withdrawn");
+
+        assert_eq!(mine.kept(&identity(1)), None);
+        assert_eq!(mine.kept(&identity(2)), None);
+        assert!(
+            theirs.kept(&identity(7)).is_some(),
+            "withdrawing one directory's answer took another's"
+        );
+        assert!(
+            !mine.forget().expect("nothing to forget"),
+            "a second withdrawal found something"
+        );
+    }
+
+    /// TRUST-24: a record left with nothing in it is removed rather than left empty, and one that
+    /// was never written is nothing to withdraw.
+    #[test]
+    fn forgetting_the_last_answer_removes_the_file() {
+        let scratch = Scratch::new("trusted-forget-last");
+        let store = scratch.store("/work");
+        assert!(!store.forget().expect("no record"));
+
+        store.keep(&identity(1), "a-session", 1, false);
+        assert!(store.forget().expect("forgotten"));
+        assert!(!store.path().exists(), "an empty record was left behind");
+    }
+
+    /// A repository whose root was answered about, with a package below it and a state directory.
+    struct Checkout {
+        scratch: Scratch,
+        root: PathBuf,
+        package: PathBuf,
+    }
+
+    impl Checkout {
+        fn new(name: &str) -> Self {
+            let scratch = Scratch::new(name);
+            let root = scratch.path.join("repo");
+            let package = root.join("packages").join("api");
+            std::fs::create_dir_all(root.join(".git")).expect("a repository");
+            std::fs::create_dir_all(&package).expect("a package");
+            Self {
+                scratch,
+                root,
+                package,
+            }
+        }
+
+        /// Answered about `directory` as it is now, which a filesystem with no creation time cannot
+        /// do, and then there is nothing to read back.
+        fn remember(&self, directory: &Path) -> Option<()> {
+            let identity = Identity::of(directory)?;
+            Store::new(&self.scratch.path.join("home"), directory)
+                .keep(&identity, "a-session", 5, false)
+                .then_some(())
+        }
+
+        fn honoured(&self, directory: &Path) -> Option<Honoured> {
+            honoured(Some(&self.scratch.path.join("home")), None, directory)
+        }
+    }
+
+    /// TRUST-23: a session started below the root of a worktree whose root was answered about is not
+    /// asked, and the answer says which directory it is about. A kept answer read only for the exact
+    /// directory asks again for every package.
+    #[test]
+    fn a_directory_below_a_remembered_worktree_root_is_not_asked() {
+        let checkout = Checkout::new("trusted-below-root");
+        if checkout.remember(&checkout.root).is_none() {
+            return;
+        }
+
+        let found = checkout
+            .honoured(&checkout.package)
+            .expect("a package of a remembered repository was asked");
+        let root = std::fs::canonicalize(&checkout.root).expect("resolved");
+        assert_eq!(found.kept.root, root, "the answer named another directory");
+        assert_eq!(found.kept.session, "a-session");
+        assert_eq!(
+            checkout
+                .honoured(&checkout.root)
+                .map(|found| found.kept.root),
+            Some(root),
+            "the root itself stopped being answered"
+        );
+    }
+
+    /// TRUST-23: a git repository inside the remembered one ends the walk at itself, so a session in
+    /// it is asked, whether the repository nested is a directory or a submodule's `.git` file.
+    #[test]
+    fn a_nested_repository_is_asked_about() {
+        let checkout = Checkout::new("trusted-nested-repository");
+        if checkout.remember(&checkout.root).is_none() {
+            return;
+        }
+        let by_directory = checkout.package.join("vendored");
+        std::fs::create_dir_all(by_directory.join(".git")).expect("a nested repository");
+        let by_file = checkout.package.join("submodule");
+        std::fs::create_dir_all(&by_file).expect("a submodule");
+        std::fs::write(by_file.join(".git"), "gitdir: ../../../.git/modules/s\n").expect("a file");
+
+        for nested in [&by_directory, &by_file] {
+            assert!(
+                checkout.honoured(nested).is_none(),
+                "{} was answered for by the repository around it",
+                nested.display()
+            );
+            let below = nested.join("src");
+            std::fs::create_dir_all(&below).expect("below");
+            assert!(
+                checkout.honoured(&below).is_none(),
+                "{} was answered for by the repository around the nested one",
+                below.display()
+            );
+        }
+    }
+
+    /// TRUST-23: a repository deleted and made again at the same path is not the one the answer was
+    /// about, and the packages of the new one are asked.
+    #[test]
+    fn a_repository_made_again_asks_for_its_packages() {
+        let checkout = Checkout::new("trusted-remade-root");
+        let home = checkout.scratch.path.join("home");
+        let Some(identity) = Identity::of(&checkout.root) else {
+            return;
+        };
+        // An answer about the directory that was there, which another one made since is not.
+        let before = Identity {
+            made: identity.made.saturating_sub(10),
+            ..identity
+        };
+        assert!(Store::new(&home, &checkout.root).keep(&before, "an-earlier-clone", 1, false));
+
+        assert!(
+            checkout.honoured(&checkout.package).is_none(),
+            "an answer about an earlier repository at this path answered for the new one"
+        );
+    }
+
+    /// TRUST-23: the directory above the remembered root is asked, since an answer about one
+    /// repository would otherwise answer for every clone made beside it later. So is a directory
+    /// below a remembered one that is not the root of a worktree.
+    #[test]
+    fn only_a_worktree_root_answers_for_what_is_below_it() {
+        let checkout = Checkout::new("trusted-only-the-root");
+        if checkout.remember(&checkout.root).is_none() {
+            return;
+        }
+        let beside = checkout.scratch.path.join("another-clone");
+        std::fs::create_dir_all(&beside).expect("a directory beside the repository");
+        for above in [checkout.scratch.path.as_path(), beside.as_path()] {
+            assert!(
+                checkout.honoured(above).is_none(),
+                "{} was answered for by a repository below or beside it",
+                above.display()
+            );
+        }
+
+        let plain = checkout.scratch.path.join("plain");
+        let inside = plain.join("inside");
+        std::fs::create_dir_all(&inside).expect("a directory with no repository");
+        if checkout.remember(&plain).is_some() {
+            assert!(
+                checkout.honoured(&inside).is_none(),
+                "an answer about a directory that is no worktree root answered for what is below it"
+            );
+        }
+    }
+
+    /// TRUST-23, PATH-003: an answer about a repository whose name is not UTF-8 does not settle a
+    /// package of the repository named by its lossy rendering, and the other way round.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_repository_and_its_lossy_lookalike_do_not_answer_for_each_other() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let scratch = Scratch::new("trusted-lossy-lookalike");
+        let home = scratch.path.join("home");
+        let bytes = scratch.path.join(OsStr::from_bytes(b"repo-\xff"));
+        let lookalike = scratch.path.join("repo-\u{FFFD}");
+        for root in [&bytes, &lookalike] {
+            std::fs::create_dir_all(root.join(".git")).expect("a repository");
+            std::fs::create_dir_all(root.join("pkg")).expect("a package");
+        }
+        assert_eq!(
+            crate::home::key_for(&bytes),
+            crate::home::key_for(&lookalike),
+            "this test needs two roots that reduce to one key"
+        );
+
+        for (answered, other) in [(&bytes, &lookalike), (&lookalike, &bytes)] {
+            let identity = Identity::of(answered).expect("an identity");
+            assert!(Store::new(&home, answered).keep(&identity, "a-session", 1, false));
+
+            let found = super::honoured(Some(&home), None, &answered.join("pkg"))
+                .expect("a package of the repository answered about was asked");
+            assert_eq!(
+                found.kept.root,
+                std::fs::canonicalize(answered).expect("resolved")
+            );
+            assert!(
+                super::honoured(Some(&home), None, &other.join("pkg")).is_none(),
+                "{} was answered for by {}",
+                other.display(),
+                answered.display()
+            );
+            std::fs::remove_dir_all(&home).expect("the answers cleared");
+        }
+    }
+
+    /// TRUST-23: where the root found is the home directory or a filesystem root, the answer is
+    /// refused as it is for the directory, so a dotfiles repository in the home answers for nothing
+    /// below it.
+    #[test]
+    fn a_home_that_is_a_worktree_answers_for_nothing_below_it() {
+        let checkout = Checkout::new("trusted-home-is-a-repository");
+        let home = checkout.scratch.path.join("home");
+        let Some(identity) = Identity::of(&checkout.root) else {
+            return;
+        };
+        assert!(Store::new(&home, &checkout.root).keep(&identity, "a-session", 1, false));
+
+        assert!(
+            super::honoured(Some(&home), Some(&checkout.root), &checkout.package).is_none(),
+            "a repository that is the user's home answered for the directories below it"
+        );
+    }
+}

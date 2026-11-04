@@ -1,0 +1,281 @@
+---
+id: OUTPUT
+title: read_output
+status: normative
+governs:
+  - crates/core/src/policy.rs
+guards:
+  - symbol: Policy::read_output
+documented-by:
+  - docs/website/docs/reference/tools.md
+  - docs/website/docs/security/permissions.md
+  - docs/website/docs/security/permission-modes.md
+---
+
+## Scope
+
+Letting the planner read what a program printed. The reference naming the result is routing; the
+only content argument is the `why` every tool takes ([TOOL-5](tool-surface.md#TOOL-5)). `offset` is
+a literal, a byte count that names no destination. `pattern` is a routing string, so it comes
+through the gate every routing string comes through rather than being read off the call. What a
+program's output is labelled in the first place is [run.md](run.md).
+
+## Clauses
+
+<a id="OUTPUT-1"></a>
+### OUTPUT-1: this is an assertion about bytes, and is not a relabel
+
+A person is shown the bytes themselves with the command that printed them, and decides. A
+character in them that draws as nothing is written out, so that what the person cannot see is
+among what they decide about ([prompting.md](../prompting.md)).
+
+```
+╭ let the model read this? ────────────────────────────────╮
+│Read 1 line  printed by find /Applications -name 'Brave…' │
+│                                                          │
+│  the check found no attempt to give instructions in this │
+│                                                          │
+│  the model has not seen this. Approving puts it in its   │
+│  context, and it will act on it.                         │
+│                                                          │
+│┃ /Applications/Brave Browser Nightly.app                 │
+│                                                          │
+│  y let it read this    n keep it back    ctrl-c stop     │
+╰──────────────────────────────────────────────────────────╯
+```
+
+The slot keeps the label it was quarantined at. What the planner receives is a **new value** whose
+first label comes from the provenance the policy layer tracked: a person having read it; or, where
+somebody turned auto-vetting on, a check having found nothing ([CHECK-12](../vetting.md#CHECK-12));
+or, in a run bypassing permissions with no screening asked for, the mode itself, with nobody shown
+the bytes and no check made about them ([MODE-4](../permission-modes.md#MODE-4)). Which of the three
+it was is named in the trail, and a release the mode made is never recorded as one of the other two:
+an entry crediting a person who was never shown the bytes is the one a reader cannot check, and one
+crediting a check names a call that was never placed. Whichever it was it covers one result, needs a
+single-use endorsement naming that slot, and the next run asks again.
+
+A release the mode makes, or a check makes, may come in the result of the run itself, where that run
+asked with `read` ([RUN-22](run.md#RUN-22)). It is this release, through the same path: the same
+endorsement, the same new value and the same trail entry, a round before a `read_output` call would
+have made it. Where a check makes it, the check is made at the run and nobody is asked.
+
+Only output from `run` can be read this way. A file's worth is the trust map's answer, and a second
+route to it would be a way to disagree with the first.
+
+**Nothing is released from a slot that holds no bytes.** `read_output` on a slot whose size is 0 makes
+no check, draws no prompt in any mode, writes no release, and answers in the driver's own words that
+the slot printed nothing. The size is the one the slot states for its reference ([LABEL-4](../labels.md#LABEL-4)),
+which the planner was shown, so no byte is read to decide. The trail records under `read_output`
+that the slot holds 0 bytes, so no check was made and nothing was released. A run that asked with
+`read` ([RUN-22](run.md#RUN-22)) over such a slot gets the same treatment in its own result
+([RUN-24](run.md#RUN-24)).
+
+**Why.** This is the strongest assertion in the system and the only one made about bytes rather
+than about a prediction: vouching guesses at output that does not exist yet, while this is a
+statement about text in front of the reader. Errors count: a run that failed put its explanation on
+stderr, and a planner that cannot see it will report that the command worked.
+
+`verified-by: bravebot_core::policy::output_a_person_vouched_for_comes_back_trusted`
+`verified-by: bravebot_core::policy::output_a_person_vouched_for_is_still_private`
+`verified-by: bravebot_core::policy::vouching_for_output_does_not_relabel_the_slot`
+`verified-by: bravebot_core::policy::an_approval_to_read_output_cannot_be_replayed`
+`verified-by: bravebot_core::policy::output_released_by_a_safe_verdict_is_no_wider`
+`verified-by: bravebot_core::policy::the_trail_says_which_of_the_three_released_the_output`
+`verified-by: bravebot_agent::permission_mode::an_unscreened_unattended_release_is_credited_to_the_mode`
+`verified-by: bravebot_agent::turn::an_unscreened_unattended_run_credits_the_mode_for_the_output`
+`verified-by: bravebot_agent::turn::an_unscreened_unattended_run_that_asks_to_read_is_handed_its_output_in_the_same_result`
+`verified-by: bravebot_agent::turn::a_run_that_asks_to_read_where_a_check_finds_nothing_is_handed_its_output_in_the_same_result`
+`verified-by: bravebot_agent::turn::read_output_over_a_slot_that_holds_no_bytes_checks_nothing_and_asks_nobody`
+`verified-by: bravebot_agent::turn::a_run_that_asks_to_read_where_the_check_cannot_be_made_leaves_the_output_quarantined`
+`verified-by: bravebot_agent::turn::output_a_person_reads_and_approves_reaches_the_planner`
+`verified-by: bravebot_agent::turn::output_a_person_refuses_stays_out_of_the_planner`
+`verified-by: bravebot_agent::turn::an_output_prompt_writes_out_what_draws_as_nothing_and_the_planner_gets_the_bytes`
+`verified-by: bravebot_cli::plain::every_line_of_an_output_is_shown_before_a_yes_releases_it`
+`verified-by: bravebot_ui_bridge::acp::an_editor_is_shown_every_line_of_an_output_before_a_yes_releases_it`
+
+<a id="OUTPUT-2"></a>
+### OUTPUT-2: only output from a program can be read this way
+
+A file's worth is the trust map's answer, and naming a file, opening a directory and the startup
+question already give it. A second route to the same decision would be a way to disagree with the
+first.
+
+This rule is about a file's worth and not about a slot's bytes. Promoting one slot after a check
+has read it is a different thing, single-use, writing no rule and leaving the trust map saying
+what it said, and it is [vetting.md](../vetting.md).
+
+`verified-by: bravebot_core::policy::a_file_cannot_be_promoted_by_reading_it_aloud`
+`verified-by: bravebot_agent::tools::a_refused_read_of_a_non_output_reference_names_vet_content_where_it_is_offered`
+`verified-by: bravebot_agent::tools::a_slot_that_holds_a_file_keeps_the_vet_content_refusal`
+
+<a id="OUTPUT-3"></a>
+### OUTPUT-3: the person is told what a check made of the output before they answer
+
+A confined check reads the slot before this prompt is drawn, and the word it gave and the sentence
+it wrote are on the screen with the bytes. This is [CHECK-10](../vetting.md#CHECK-10) and the
+reasoning is there; what is here is that a `read_output` prompt is one of the three it covers, and
+that the check runs before the question rather than after the answer.
+
+No expectation is sent with it. The planner asked for the output to be read, not for it to be
+checked, and it has said nothing about what the command printed.
+
+While auto-vetting is off, which is the default, the verdict decides nothing here: the word travels
+to the prompt, the prompt draws it, and the answer is what releases the bytes. Where somebody turned
+it on, a verdict of nothing found is what releases them, and every other verdict draws the prompt
+where there is one to draw. [CHECK-12](../vetting.md#CHECK-12) is that rule and the reasoning for it.
+Where nobody was asked, the row the call leaves says so, and says whether a check released the
+output, in the words [CHECK-12](../vetting.md#CHECK-12) gives.
+
+A run bypassing permissions draws none, and there the verdict is the whole of the answer: nothing
+found releases the output and every other verdict keeps it back, the refusal being what the screening
+was asked for. Without the screening asked for the output is released unshown and no check is made
+([MODE-4](../permission-modes.md#MODE-4)).
+
+Output shown to the planner is private content, so the description says that being shown output
+closes `spawn_processor` for the planner and for every delegate it starts afterwards
+([PROC-4](../processors.md#PROC-4), [DELEGATE-8](../delegation.md#DELEGATE-8)). A list that does not
+offer `spawn_processor` does not name it there.
+
+`verified-by: bravebot_agent::turn::an_output_offer_carries_what_a_check_said`
+`verified-by: bravebot_agent::turn::with_auto_vetting_the_row_says_a_check_released_the_output_unasked`
+`verified-by: bravebot_agent::turn::the_row_for_output_a_person_read_names_no_check`
+`verified-by: bravebot_agent::tools::the_planner_is_told_a_delegate_started_after_private_content_has_no_processors`
+`verified-by: bravebot_agent::turn::an_unscreened_unattended_run_says_on_the_row_that_nothing_checked_the_output`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_says_what_a_check_found`
+`verified-by: bravebot_agent::turn::with_auto_vetting_a_safe_verdict_releases_command_output_unasked`
+`verified-by: bravebot_agent::turn::with_auto_vetting_an_unsafe_verdict_still_asks_about_command_output`
+`verified-by: bravebot_agent::turn::with_auto_vetting_a_broken_check_still_asks_about_command_output`
+`verified-by: bravebot_agent::turn::screening_an_unattended_run_keeps_back_output_a_check_objected_to`
+`verified-by: bravebot_agent::turn::screening_an_unattended_run_keeps_back_output_no_check_could_be_made_about`
+
+<a id="OUTPUT-4"></a>
+### OUTPUT-4: output the planner may read, kept whole past a cap, is read a page at a time with nobody asked
+
+Where what a run or a job printed was output the planner may read and too long for its result, the
+planner was given the beginning and the end, and a reference to the whole
+([RUN-21](run.md#RUN-21)). `read_output` on that reference hands back one page, or the matching
+lines where the call names a `pattern` ([OUTPUT-5](#OUTPUT-5)). A page starts at the byte `offset`
+names, or at zero where it names none, and is no longer than the cap the result was cut to. A line
+after it says which bytes it holds and the offset the next page starts at, or that it reached the
+end. Both ends land on a character boundary. Nobody is asked, no check is made and nothing is
+endorsed. The page keeps the slot's label, and reaches the planner through the presentation that
+decides from the label alone, as the whole would have without the cap.
+
+What decides which of this and [OUTPUT-1](#OUTPUT-1) applies is the slot's label, never a byte it
+holds. An `offset` on a slot the planner may not read is refused before anybody is asked or anything
+is checked. The page the planner expects is not what `read_output` would hand it there, and a
+question put to a person on its behalf would be one it did not mean to ask.
+
+The reference to the whole says the planner may read it and how, not that it is quarantined. The
+sample says where its middle begins, so the first page can start there. A turn that is not offered
+`read_output` is told only that the length kept the rest out of the result, and the moves it does
+have ([TOOL-6](tool-surface.md#TOOL-6)).
+
+The refusals of `read_output` for a reference no program printed and for a `pattern`, and the refusal
+of `job_output` for a name no run handed back, still name `run` without reading the list. They are
+not yet written from it ([TOOL-6](tool-surface.md#TOOL-6)).
+
+**Why nobody is asked.** The cap is a budget and not an authority ([RUN-21](run.md#RUN-21)). The
+label on these bytes already let the planner read them, and the only thing that kept them out of the
+result was the room they would take. A person asked here would be answering for bytes the label had
+already answered for, and the trail would credit them with a release that was never theirs.
+
+**Why a page and not the whole.** The room the cap protects is the same whichever call spends it,
+so a page is held to the figure the result was. The planner that meets a 198 KB log wants a part of
+it, and paging hands over the part it names without running anything again.
+
+**Why the reference stopped saying quarantined.** Told "you will not be shown it" about a 198 KB
+`git log` whose beginning and end it had just read, a planner ran `git log` four more times through
+`awk`, and each was cut and called quarantined again. None of it was out of the planner's reach.
+
+`verified-by: bravebot_core::reference::kept_output_is_offered_page_by_page_and_not_called_quarantined`
+`verified-by: bravebot_core::reference::kept_output_made_for_a_run_without_read_output_names_no_read_output_and_keeps_the_other_moves`
+`verified-by: bravebot_agent::turn::a_reference_to_the_whole_of_a_long_output_names_read_output_only_if_offered`
+`verified-by: bravebot_core::policy::content_the_planner_saw_a_sample_of_is_kept_whole`
+`verified-by: bravebot_agent::tools::a_page_starts_and_stops_on_a_character_and_names_the_next`
+`verified-by: bravebot_agent::turn::output_too_long_for_its_result_is_read_page_by_page_with_nobody_asked`
+`verified-by: bravebot_agent::turn::an_offset_into_output_nobody_vouched_for_is_refused_and_nobody_is_asked`
+`verified-by: bravebot_agent::turn::what_an_ended_job_printed_is_capped_with_the_whole_of_it_kept`
+`verified-by: bravebot_agent::turn::output_a_person_reads_and_approves_reaches_the_planner`
+`verified-by: bravebot_agent::turn::a_page_of_output_the_planner_may_read_is_no_release_and_keeps_the_slots_label`
+
+<a id="OUTPUT-5"></a>
+### OUTPUT-5: a pattern searches output the planner may read, and is refused on output it may not
+
+`read_output` takes an optional `pattern`, one string or a list of them, in the regular-expression
+subset [SEARCH-1](search.md#SEARCH-1) gives. On a slot whose label already lets the planner read it
+([OUTPUT-4](#OUTPUT-4)) the call answers with the lines matching any of them instead of a page. Each
+line carries its line number and the byte it starts at, so a following call with that byte as
+`offset` reads the page from there. Two lines of context are drawn either side of a match and a run
+of lines left out is marked. At most 100 matches are drawn, and no more bytes than the cap the
+result was cut to; a closing line says how many lines matched, how many were drawn, and the byte
+the next undrawn match starts at. Where nothing matches the answer says so and gives the line and
+byte counts of the slot. Nobody is asked, no check is made and nothing is endorsed, for the reason
+[OUTPUT-4](#OUTPUT-4) gives.
+
+A `pattern` on a slot the planner may not read is refused before anybody is asked or anything is
+checked, as an `offset` is. The match set, the count and the point the result stopped at are all
+worked out from the bytes, so answering would hand the planner numbers nobody vouched for. The
+refusal says what to do instead: ask for the whole of it, or put the output through a program with
+`run`. It says who answers the way the `read_output` description does
+([RUN-14](run.md#RUN-14)): a person is shown the output only where one answers, and elsewhere it
+comes back as text or is reported kept back.
+
+The pattern is compiled before any byte of the slot is opened, as [SEARCH-4](search.md#SEARCH-4)
+requires, and a pattern that will not compile is reported as a pattern error. An empty pattern is
+refused. `pattern` with `offset` is refused: a pattern searches the whole of the output, and the
+byte it names for a match is what an `offset` call starts from.
+
+**Why.** Narrowing a long log with `run` asks a person about the line and hands back another capped
+result. The bytes here are ones the planner may already read, so a search over them releases nothing
+a page would not.
+
+`verified-by: bravebot_agent::turn::a_pattern_over_output_the_planner_may_read_answers_with_matching_lines_and_nobody_is_asked`
+`verified-by: bravebot_agent::turn::a_pattern_over_output_nobody_vouched_for_is_refused_and_nobody_is_asked`
+`verified-by: bravebot_agent::turn::a_refusal_of_a_pattern_or_offset_says_who_answers_for_the_session`
+`verified-by: bravebot_core::reference::a_description_does_not_say_the_user_is_asked_to_show_it`
+`verified-by: bravebot_agent::turn::an_empty_pattern_is_refused_before_the_slot_is_opened`
+`verified-by: bravebot_agent::turn::a_pattern_that_will_not_compile_is_refused_before_the_slot_is_opened`
+`verified-by: bravebot_agent::turn::a_pattern_list_holding_one_that_will_not_compile_is_refused_before_the_slot_is_opened`
+`verified-by: bravebot_agent::tools::matching_lines_carry_the_byte_each_starts_at`
+`verified-by: bravebot_agent::tools::a_match_whose_context_is_long_is_still_held_to_the_cap`
+
+<a id="OUTPUT-6"></a>
+### OUTPUT-6: a name no slot holds is refused with the form a reference is written in
+
+A `ref` that names no slot at all, such as `3` or `ref:99`, is a mistake in how the planner wrote the
+name and not a statement that the slot holds something other than output. A choice a processor made
+is no text, so a name that holds one is a name no slot holds wherever text is expected: it is refused
+in the same words and is not listed. The other way round, a name that holds text where a choice is
+expected, such as `ref:1` in an `mcp_call` argument filled from a reference, is a slot that exists
+and holds no choice, and is refused as that. Both answers come from which store holds the name and
+never from a byte of either. The refusal says that no
+reference is named that, echoing the planner's own argument escaped, and that a reference is
+written `ref:N`, for example `ref:3`. It then lists the references that hold what a program printed,
+the latest eight where there are more, or says that no run has printed anything under a reference.
+It does not say the name is not something a program printed and does not name `vet_content`, which
+is the route for a file and is named only for a slot that exists and holds one
+([OUTPUT-2](#OUTPUT-2)).
+
+The names listed are the ones the driver minted. Whether a name is a slot is read from the slot
+store, which answers from the names it holds and not from any byte they hold. The same refusal, with
+the list of every reference given in place of the list of outputs, answers a name no slot holds in
+`vet_content` `ref`, in `spawn_processor` `reads` and `about`, in `read_file`, `edit_file` and
+`write_file` `path_ref`, in `write_file` `contents_ref` and in `run` `stdin_ref`. In an `mcp_call`
+argument filled from a reference it lists the references that hold a choice. Each of these refusals
+is also recorded in the trail as a blocked `reference` gate naming the tool and the argument and not
+the name typed ([TRACE-2](../trace.md#TRACE-2)), so a turn that was refused is not recorded as clean.
+
+`verified-by: bravebot_agent::tools::a_name_no_slot_holds_is_refused_with_the_form_a_reference_is_written_in`
+`verified-by: bravebot_agent::tools::the_references_listed_for_an_unknown_name_are_the_ones_that_hold_output`
+`verified-by: bravebot_agent::tools::a_delegate_naming_no_slot_is_told_the_form_and_not_vet_content`
+`verified-by: bravebot_agent::tools::vet_content_naming_no_slot_is_told_how_a_reference_is_written`
+`verified-by: bravebot_agent::tools::a_processor_naming_no_slot_is_told_how_a_reference_is_written`
+`verified-by: bravebot_agent::tools::write_file_naming_no_slot_is_told_how_a_reference_is_written`
+`verified-by: bravebot_agent::tools::read_file_naming_no_slot_is_told_how_a_reference_is_written`
+`verified-by: bravebot_agent::tools::run_naming_no_slot_for_stdin_is_told_how_a_reference_is_written`
+`verified-by: bravebot_agent::tools::the_references_listed_for_an_unknown_name_are_the_latest_eight`
+`verified-by: bravebot_agent::tools::the_trail_names_the_argument_and_not_the_name_typed`
+`verified-by: bravebot_agent::turn::a_choice_cannot_be_a_path_a_body_or_a_document_for_a_processor`
+`verified-by: bravebot_agent::browser_group_servers::a_free_text_answer_cannot_be_named_as_a_choice`
+`verified-by: bravebot_agent::browser_group_servers::a_name_no_slot_holds_is_listed_the_choices_that_were_made`

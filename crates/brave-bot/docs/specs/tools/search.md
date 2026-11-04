@@ -1,0 +1,471 @@
+---
+id: SEARCH
+title: search
+status: normative
+governs:
+  - crates/agent/src/glob.rs
+  - crates/agent/src/regex.rs
+  - crates/agent/src/workspace.rs
+  - crates/agent/src/workspace/results.rs
+  - crates/config/src/settings.rs
+documented-by: docs/website/docs/reference/tools.md
+---
+
+## Scope
+
+Finding lines in the workspace that match a pattern. `pattern`, `directory`, `include`, `offset`,
+`case_sensitive`, `context` and `output` are routing: the first three name where to look and what to look for,
+the offset names which page of the matches to return, the flag decides which of the lines there
+match, and the context is a count of how many neighbouring lines to show with each, and the output names whether
+to return the lines, only the files they are in, or a count ([SEARCH-12](#SEARCH-12)). `directory` may
+name one file instead of a directory ([SEARCH-11](#SEARCH-11)).
+The only content argument is the `why` every tool takes ([TOOL-5](tool-surface.md#TOOL-5)). The result is
+the matching lines, the files or counts, or a reference.
+
+## Clauses
+
+<a id="SEARCH-1"></a>
+### SEARCH-1: the pattern is a regular expression, matched without backtracking
+
+Supported: literals, `.`, `*`, `+`, `?`, `|`, `(...)`, `(?:...)`, `[...]` with ranges and
+negation, `\d`, `\w`, `\s` and their negations, `^`, `$`, `\b`, `\B`, the case flags `(?i)` and
+`(?-i)` described in [SEARCH-6](#SEARCH-6), and a backslash before a metacharacter to match it
+literally.
+
+Counted repetition (`a{2,9}`) is absent and `{` is an ordinary character. Backreferences are
+absent, and so are lookaround, named groups and every flag but `i`. Captures are not extracted: a
+search reports the line, so whether the pattern matched is the whole question, and `(?:...)` is
+therefore the same group as `(...)`.
+
+`pattern` may be a list, and a line matching any of them matches. That is one more expression to
+try per line, so the work is the sum of the patterns rather than a power of anything.
+
+Most lines of a tree are nowhere near a match, so a line is looked through for literal text before
+the automaton runs. A pattern that is only an alternation of literal strings, with each escaped
+punctuation mark taken as itself, is answered by finding one of them in the line. Any other
+pattern that requires some text in every match, as `Command::new\([^)]*\)` requires
+`Command::new(`, rejects a line without it and runs the automaton on a line with it. Both give
+the answer the automaton gives and differ from it only in cost. Where the text looked for ignores
+case, a line holding a character that is not ASCII is handed to the automaton, because such a
+character can fold to an ASCII one.
+
+Case folding is done by the engine, never by lowercasing the pattern, which would rewrite `\D`,
+`\W` and `\S` into the classes they negate and invert what the search asked for.
+
+**Why.** A pattern arriving through a turn is attack surface, and the danger is catastrophic
+backtracking rather than regular expressions as such: `(a+)+$` costs exponential time on a
+backtracking engine and nothing unusual on one that does not backtrack. The engine simulates an
+NFA, advancing a set of states one character at a time, so matching costs the length of the line
+times the size of the pattern whatever the pattern is. Counted repetition is the one construct
+that would break that bound, because nesting two multiplies the states a short pattern expands
+to, and backreferences are not regular at all: matching one needs the backtracking this rules out.
+
+Hand-written rather than a dependency, for the reason the conventions give.
+
+Brace groups in `include` are **expanded before the walk**, not matched during it. Each alternative
+is an ordinary pattern applied once per path, so a group costs a multiple of the work rather than a
+power of it, and an expansion past the cap falls back to matching the pattern literally. A glob
+with a `/` in it may be written from `directory` or from the workspace root, as
+[LIST-3](list-files.md#LIST-3) reads a listing's.
+
+`verified-by: bravebot_agent::regex::a_pattern_built_to_backtrack_catastrophically_still_returns_promptly`
+`verified-by: bravebot_agent::regex::a_pattern_past_the_length_cap_is_refused`
+`verified-by: bravebot_agent::regex::a_pattern_nested_past_the_depth_cap_is_refused`
+`verified-by: bravebot_agent::regex::a_brace_is_an_ordinary_character`
+`verified-by: bravebot_agent::regex::a_folded_pattern_keeps_a_negated_shorthand_negated`
+`verified-by: bravebot_agent::regex::a_non_capturing_group_is_an_ordinary_group`
+`verified-by: bravebot_agent::regex::a_pattern_beginning_with_a_literal_matches_only_where_the_whole_pattern_does`
+`verified-by: bravebot_agent::regex::a_branch_that_can_begin_with_something_else_is_still_matched`
+`verified-by: bravebot_agent::regex::a_character_that_folds_across_the_ascii_boundary_still_matches`
+`verified-by: bravebot_agent::regex::the_automaton_runs_only_for_lines_that_could_match`
+`verified-by: bravebot_agent::regex::the_literal_shortcuts_give_the_answer_the_automaton_gives`
+`verified-by: bravebot_agent::regex::a_literal_that_ignores_case_is_found_in_either_case_and_a_wider_line_goes_to_the_automaton`
+`verified-by: bravebot_agent::regex::a_pattern_of_literals_over_megabytes_of_text_finishes_promptly`
+`verified-by: bravebot_agent::turn::a_search_for_a_regular_expression_finds_what_it_describes`
+`verified-by: bravebot_agent::glob::a_brace_group_matches_each_alternative`
+`verified-by: bravebot_agent::glob::an_oversized_expansion_falls_back_to_the_literal`
+`verified-by: bravebot_agent::glob::a_pathological_pattern_does_not_blow_up`
+`verified-by: bravebot_agent::workspace::a_search_takes_more_than_one_pattern`
+
+<a id="SEARCH-2"></a>
+### SEARCH-2: a result touching several files is trusted only if every one of them is
+
+Otherwise it is quarantined whole. Unlike a listing, a search returns one reference for the whole
+result rather than one per hit, so its hits are not addresses.
+
+The label comes from the paths the walk reached, before any file is opened. What a file holds does
+not change it: an unvouched file with no matching line, or one that is not valid text, taints the
+result as one full of matches does. The search still compares the pattern against such a file, so
+the file decides the counts the result reports, and [labels.md](../labels.md) records that among its
+known costs, with what an attacker who owns the file gains.
+
+`verified-by: bravebot_core::policy::a_read_over_several_paths_is_trusted_only_where_every_path_is`
+`verified-by: bravebot_agent::workspace::what_an_unvouched_file_holds_changes_a_searchs_counts_and_not_its_label`
+`verified-by: bravebot_agent::turn::a_search_touching_one_unvouched_file_is_quarantined_whole`
+`verified-by: bravebot_agent::turn::untrusted_search_results_never_reach_the_model`
+
+<a id="SEARCH-3"></a>
+### SEARCH-3: a truncated search tells the planner it is incomplete
+
+A complete one makes no such claim, so the planner can tell the difference between "nothing more"
+and "nothing more shown".
+
+Every cap counts: one that stopped at the limit on matches, one that stopped before it had opened
+every file, and one that ran out of time are equally partial. The last two are the more dangerous,
+because with nothing found there is nothing to look incomplete. The claim reaches the planner
+whether or not it may read the result, since a notice written inside a body the planner is never
+shown tells it nothing.
+
+The file cap is set for a search rather than for a listing, and far above it. A listing's paths are
+the answer and each one is spent on context; a search's paths are never shown, and only matching
+lines are, which have a cap of their own. Holding a search to a listing's budget bought no context
+back and cost whole subtrees.
+
+Which files a capped search kept must not depend on the order the filesystem handed them over. A
+walk sorts each directory and takes its own files before descending, so a partial answer is the
+same partial answer on every machine and is the shallow part of the tree rather than a scattering
+through it.
+
+The time cap is the one cap this does not hold for. It stops the search at a moment, not at a
+count, so a search it stops may have read more or fewer files on a slower or busier machine, and on
+a second run of the same call. The planner is told the search is incomplete either way.
+
+`verified-by: bravebot_agent::turn::a_truncated_search_tells_the_model_it_is_incomplete`
+`verified-by: bravebot_agent::turn::a_complete_search_makes_no_truncation_claim`
+`verified-by: bravebot_agent::turn::a_quarantined_search_still_tells_the_model_it_is_incomplete`
+`verified-by: bravebot_agent::turn::a_search_that_ran_out_of_time_tells_the_model_it_did_not_read_the_rest`
+`verified-by: bravebot_agent::turn::a_quarantined_search_that_ran_out_of_time_still_says_it_is_incomplete`
+`verified-by: bravebot_agent::workspace::a_search_that_could_not_reach_every_file_says_so`
+`verified-by: bravebot_agent::workspace::a_search_that_ran_out_of_time_says_so`
+`verified-by: bravebot_agent::workspace::a_search_that_reached_every_file_makes_no_claim`
+`verified-by: bravebot_agent::workspace::a_capped_search_keeps_the_same_files_every_time`
+`verified-by: bravebot_agent::workspace::a_capped_search_prefers_a_directorys_own_files`
+
+<a id="SEARCH-4"></a>
+### SEARCH-4: a pattern that will not compile is reported as such, never as an empty result
+
+The pattern is compiled before any file is opened, and a failure names what is wrong with it. A
+`(?` opening a construct the engine lacks is named as that, not reported as the repeat with
+nothing before it that its `?` would otherwise be.
+
+**Why.** The two answers mean opposite things. Reported as nothing found, a syntax error reads as
+proof the tree holds no match, and a planner that believes that stops looking: whole rounds went
+on rephrasing patterns against a matcher that never ran them. This is the same reason a truncated
+search says it is truncated, for the answer that looks most like a complete one.
+
+Compiling first is also what keeps the report free of anything read: the pattern is routing the
+planner proposed, so saying why it will not compile discloses nothing about the workspace.
+
+`verified-by: bravebot_agent::turn::a_search_whose_pattern_cannot_be_compiled_says_why`
+`verified-by: bravebot_agent::regex::an_unclosed_group_is_reported_rather_than_guessed_at`
+`verified-by: bravebot_agent::regex::an_unclosed_class_is_reported`
+`verified-by: bravebot_agent::regex::a_repeat_with_nothing_before_it_is_reported`
+`verified-by: bravebot_agent::regex::a_dangling_escape_is_reported`
+`verified-by: bravebot_agent::regex::a_backwards_range_is_reported`
+`verified-by: bravebot_agent::regex::a_group_form_the_engine_lacks_is_named_rather_than_blamed_on_a_repeat`
+`verified-by: bravebot_agent::workspace::a_pattern_that_will_not_compile_is_reported_when_no_file_is_opened`
+
+<a id="SEARCH-5"></a>
+### SEARCH-5: an empty result says whether anything was searched
+
+A search whose `include` selected no files reports that, and says so instead of reporting no
+matches. One that read files and found nothing reports no matches, as before.
+
+A search left with nothing to read because a permission rule covers what it selected reports the
+rule, and says that retrying is not the answer. The rule is stated, never which paths it reached:
+the names are what it is keeping back. A rule that covers nothing the `include` selected is not the
+reason, and the search reports the glob as it would with no rule in force. See
+[permissions.md](../permissions.md).
+
+**Why.** The two are opposite facts wearing the same sentence. Files were read and the pattern was
+not in them, which is evidence about the tree. Or nothing was read at all, which is evidence about
+the query and says nothing whatever about the tree. Rendered identically, a planner cannot tell
+them apart, and the failure is not hypothetical: a real turn wrote `**/*.{cc,h,mm}` when brace
+groups were unsupported, got "(no matches)", retreated to `**/*.cc`, and answered the question
+wrong because the files it needed were the two extensions it had just dropped.
+
+**Why the rule is a third answer.** A glob that selected nothing is a query to rewrite, and a rule
+is not: no spelling reaches past one. Reported as the first, it sends the planner through rounds of
+globs against a refusal none of them can satisfy, which is the same failure as the brace group and
+costs more, because there is no spelling that ends it.
+
+Where the glob also leans on syntax the matcher does not have, the result says which, for the same
+reason [SEARCH-4](#SEARCH-4) reports a pattern that will not compile and against the same failure.
+Advice is decided from the glob, which the planner proposed and the routing gate vouched for; the
+result decides only whether there was anything to advise about.
+
+`verified-by: bravebot_agent::workspace::a_search_says_when_its_include_selected_no_files`
+`verified-by: bravebot_agent::workspace::a_search_a_rule_emptied_is_not_reported_as_an_empty_glob`
+`verified-by: bravebot_agent::workspace::a_rule_covering_nothing_the_include_selected_is_not_blamed_for_an_empty_search`
+`verified-by: bravebot_agent::turn::a_search_a_rule_emptied_names_the_rule_and_not_the_glob`
+`verified-by: bravebot_agent::workspace::an_include_may_use_a_brace_group`
+`verified-by: bravebot_agent::tools::a_glob_leaning_on_missing_syntax_is_named`
+`verified-by: bravebot_agent::tools::a_glob_the_matcher_can_read_is_left_alone`
+`verified-by: bravebot_agent::turn::an_empty_search_says_whether_the_glob_or_the_pattern_is_why`
+
+<a id="SEARCH-6"></a>
+### SEARCH-6: case sensitivity is asked for, never inferred
+
+A search matches case exactly unless `case_sensitive` is false or the pattern says `(?i)`. The
+flag is the same request written in the pattern: `(?i)` folds case from where it is written to the
+end of the group it is in, `(?-i)` stops folding the same way, and `(?i:...)` and `(?-i:...)`
+apply to only what they enclose. A search with `case_sensitive` false starts folded, so `(?-i)`
+narrows it. Nothing else about the pattern widens it, whatever letters it holds, and a line is
+reported as it is written rather than as it was folded to match.
+
+**Why.** A search that quietly widened itself would report matches whose reason the caller cannot
+see. The alternative to offering the flag is worse than either: a planner that cannot ask for it
+mangles the pattern instead, and a real turn searched for `olicy` to get around a capital `P`. That
+finds the word it wanted and every other word ending in those letters, with nothing in the result
+to say so.
+
+**Why the pattern may ask too.** `(?i)` is how almost every other engine spells the request, and a
+planner writes it by habit. Refused, it cost a round each time it was written, and one real turn
+did not retry and answered without the search. The flag is an explicit request, which is all this
+clause asks of one; what it rules out is a search deciding for itself.
+
+`verified-by: bravebot_agent::workspace::a_search_can_ignore_case`
+`verified-by: bravebot_agent::workspace::a_search_pattern_may_ask_to_ignore_case_itself`
+`verified-by: bravebot_agent::regex::a_folded_pattern_matches_either_case`
+`verified-by: bravebot_agent::regex::folding_a_negated_class_widens_what_it_excludes`
+`verified-by: bravebot_agent::regex::an_inline_flag_ignores_case_for_the_rest_of_the_pattern`
+`verified-by: bravebot_agent::regex::a_flag_ends_with_the_group_it_is_in`
+`verified-by: bravebot_agent::regex::a_flag_carries_into_the_later_branches_of_its_group`
+`verified-by: bravebot_agent::regex::a_flag_can_turn_folding_off`
+`verified-by: bravebot_agent::regex::an_inline_flag_on_a_negated_class_widens_what_it_excludes`
+`verified-by: bravebot_agent::turn::the_search_tool_matches_case_exactly_unless_it_is_asked_not_to`
+
+<a id="SEARCH-7"></a>
+### SEARCH-7: vendored and generated directories are not walked
+
+A fixed list of directory names is skipped: version control, build output, caches, and dependencies
+fetched or vendored, and `.worktrees` and `.claude/worktrees`, where linked worktrees live: each is
+a full copy of the tree, so walking it reports every match twice and can spend the match cap before
+the walk reaches the tree the search is about. A search that names a directory inside it still
+reads it; only a walk from above skips it. This is size hygiene applied to **names**, and nothing is read to decide it.
+
+**Why.** A tree that mirrors its dependencies holds far more of them than of its own code, so a
+walk that counts them reaches its cap without reaching the project. A real search for a common word
+spent its entire budget inside a Rust crate mirror and reported documentation comments about the
+wrong meaning of the word.
+
+The project's own `.gitignore` would generalise better and is deliberately not used. It would
+decide what to walk from the contents of a file in the tree being walked, and a tree that can hide
+its own files from a search is a tree that can hide them from review. The names on the list are
+ones no project uses for its own sources, so skipping them needs nobody's word for it.
+
+A symbolic link is not a name on that list and is not skipped for size: it is not entered, and
+[SEARCH-13](#SEARCH-13) says how many were not.
+
+`verified-by: bravebot_agent::workspace::a_search_skips_vendored_dependencies`
+`verified-by: bravebot_agent::workspace::a_search_skips_a_linked_worktree_under_claude_worktrees`
+`verified-by: bravebot_agent::workspace::a_search_skips_a_linked_worktree_under_dot_worktrees`
+`verified-by: bravebot_agent::workspace::a_search_that_names_a_skipped_directory_reads_it`
+`verified-by: bravebot_agent::workspace::a_directory_called_worktrees_is_skipped_only_beneath_dot_claude`
+
+<a id="SEARCH-8"></a>
+### SEARCH-8: a search stopped by the match cap says where to continue from
+
+The result gives the offset of the first match left behind, and a further search asking for that
+offset returns the matches from there.
+
+Only the match cap can be asked past. A walk that stopped short of the tree or ran out of time
+reached neither the end of the matches nor a count of them, so it offers no later page and asks for
+a narrower search as before.
+
+An offset past the last match returns nothing and says how many matches there were, so that an
+empty page cannot be read as the pattern having gone from the tree between two calls. A pattern that
+is nowhere in the tree is an ordinary empty result at every offset: there is no page behind it to
+say is still there.
+
+Both of those reach the planner whether or not it may read the result, for the reason
+[SEARCH-3](#SEARCH-3) gives about a notice written inside a body nobody is shown. A search is
+quarantined by default, so a contract that held only for a trusted workspace would hold for the
+minority of them.
+
+**Why.** Narrowing the pattern or dropping to a subdirectory is otherwise the only way past the cap,
+and it is a guess about where the matches that were cut off are. A guess that misses drops exactly
+those, and nothing in the narrower result says so: it comes back complete, which reads as the whole
+answer. A common word in a large tree then has as many matches as the cap allows that can be read
+and an unknown number that cannot. This is the paging [read-file.md](read-file.md) gives a long
+file, applied to a long list of matches.
+
+The walk is repeated rather than resumed. A search holds no state between calls and visits files in
+a fixed order, so counting to the offset again reaches the same match. A cursor would have to
+survive between turns and still mean something after the tree changed underneath it. Reading every
+file again is the cost of not keeping one.
+
+`verified-by: bravebot_agent::workspace::a_capped_search_says_where_to_continue_from`
+`verified-by: bravebot_agent::workspace::the_reported_offset_returns_the_following_matches`
+`verified-by: bravebot_agent::workspace::a_search_that_could_not_reach_every_file_offers_no_later_page`
+`verified-by: bravebot_agent::workspace::a_walk_that_stopped_short_has_no_end_of_matches_count`
+`verified-by: bravebot_agent::workspace::a_search_that_ran_out_of_time_offers_no_page_and_no_count`
+`verified-by: bravebot_agent::workspace::an_offset_past_the_last_match_says_how_many_there_were`
+`verified-by: bravebot_agent::workspace::an_offset_into_a_pattern_that_is_absent_is_not_a_page_past_the_end`
+`verified-by: bravebot_agent::workspace::the_offset_a_cut_search_offers_does_not_depend_on_what_an_unvouched_file_holds`
+`verified-by: bravebot_agent::turn::the_model_can_ask_for_a_later_page_of_matches`
+`verified-by: bravebot_agent::turn::a_quarantined_capped_search_says_where_to_continue`
+`verified-by: bravebot_agent::turn::a_search_past_the_last_match_says_how_many_there_were`
+`verified-by: bravebot_agent::turn::a_quarantined_page_past_the_last_match_says_how_many_there_were`
+
+<a id="SEARCH-9"></a>
+### SEARCH-9: the caps a search runs under are configurable
+
+`search.maxFiles` and `search.maxSeconds`, in the settings files, name how many files a search may
+walk and how long it may spend opening them. Either may be raised as well as lowered, and a key
+nobody set leaves the built-in cap in force. The two are independent, so a file naming one says
+nothing about the other, in any layer.
+
+A cap of zero is absence rather than a search permitted to read nothing, as is any value that is
+not a whole count. Absence leaves the built-in cap in force, which is the cap a layer setting one
+of those values gets rather than the number a weaker layer had named.
+
+**Why.** The right number is a property of the tree, not of the program. The built-in caps are past
+what a repository a person usually works in holds, and a monorepo, a tree of generated sources, or
+a checkout on a network filesystem is where they are not: there every search comes back partial,
+and a partial search is the answer that reads like a complete one. Nothing the program can measure
+tells it which kind of tree it is in, which makes this configuration rather than a constant to pick
+better.
+
+Raising a cap does not unbound a search. The walk still stops at `maxFiles`, the reading still
+stops at `maxSeconds`, and the match cap holds regardless of both, so the result is still the
+bounded, deterministic, partial answer the clauses above describe.
+
+The clock bounds the reading and not the walk, so `maxFiles` is what a very large tree is paid for
+in: a walk of a million paths on a slow filesystem is a slow search rather than a truncated one,
+and it is the number a person chose. That is the right way round, because a walk cut off by a clock
+would keep a different part of the tree on every run, which is what the determinism above rules
+out.
+
+The caps are handed to the workspace by the caller that read the settings, rather than read by the
+workspace itself. A workspace that consulted them would answer differently on a machine whose owner
+had configured them, which is the one thing a test of a cap cannot have.
+
+`verified-by: bravebot_config::settings::a_file_may_cap_a_search_of_a_large_tree`
+`verified-by: bravebot_config::settings::one_search_cap_is_read_without_the_other`
+`verified-by: bravebot_config::settings::a_search_cap_of_zero_leaves_the_built_in_one_in_force`
+`verified-by: bravebot_config::settings::a_search_cap_that_is_not_a_whole_count_is_absence`
+`verified-by: bravebot_config::settings::a_layer_capping_one_side_of_a_search_leaves_the_other`
+`verified-by: bravebot_config::settings::a_layer_naming_no_usable_cap_leaves_the_built_in_one_over_a_weaker_layers_number`
+`verified-by: bravebot_agent::workspace::a_cap_nobody_named_stays_on_its_built_in_number`
+`verified-by: bravebot_ui_bridge::workspace::a_turn_searches_under_the_file_cap_the_project_settings_name`
+`verified-by: bravebot_ui_bridge::workspace::a_turn_searches_under_the_time_cap_the_project_settings_name`
+`verified-by: bravebot_ui_bridge::workspace::caps_nobody_named_leave_a_turn_on_the_built_in_ones`
+`verified-by: bravebot_ui_bridge::workspace::a_turns_search_runs_under_the_cap_the_settings_name`
+`verified-by: bravebot_agent::workspace::a_search_that_ran_out_of_time_says_so`
+
+<a id="SEARCH-10"></a>
+### SEARCH-10: a search may show the lines around each match
+
+`context` is a count of lines to show before and after every match, at most ten and none unless
+asked. The lines come from the file the walk already read, so the result keeps the label
+[SEARCH-2](#SEARCH-2) gives it and nothing is opened or decided for them. A line that is itself a
+match is shown once, as a match.
+
+Context lines are not matches. They count toward neither the match cap nor the offset
+([SEARCH-8](#SEARCH-8)), and a match skipped by an offset or left behind by the cap brings none. A
+cap of its own bounds how many are returned, and one that stopped the lines around later matches
+being added makes the search incomplete exactly as [SEARCH-3](#SEARCH-3) says of the other caps,
+whether or not the planner may read the result.
+
+A match is printed as `path:line:text` and a context line as `path-line-text`, with the text
+following the separator byte for byte, as `grep -n` and `grep -C` print them. A line that starts
+with one space shows that one space, as `read_file` shows it. Groups of context that are not
+adjacent in the file are divided by a `--` line.
+
+**Why.** Understanding a hit otherwise costs a second call per hit, a round trip and a read of a
+file the search had open. The match cap cannot bound the lines around matches: two hundred matches
+with ten lines either side is four thousand lines, which the planner pays for in every later round,
+hence a cap that is not the match cap. A cap that bit silently would leave later matches looking as
+though nothing lay near them.
+
+`verified-by: bravebot_agent::workspace::a_search_with_context_returns_the_lines_around_a_hit`
+`verified-by: bravebot_agent::workspace::context_does_not_count_toward_the_match_cap_or_the_offset`
+`verified-by: bravebot_agent::workspace::a_search_with_more_context_than_the_cap_allows_says_it_is_incomplete`
+`verified-by: bravebot_agent::workspace::a_context_past_the_maximum_is_held_to_it`
+`verified-by: bravebot_agent::turn::a_search_with_context_shows_the_lines_around_each_hit`
+`verified-by: bravebot_agent::turn::a_search_result_keeps_a_lines_indentation_as_read_file_shows_it`
+`verified-by: bravebot_agent::turn::a_quarantined_search_cut_short_of_its_context_still_says_it_is_incomplete`
+
+<a id="SEARCH-11"></a>
+### SEARCH-11: `directory` may name one file
+
+When `directory` resolves to a regular file inside the workspace, the search reads that file and
+nothing else, and `include` is not consulted. The routing and permission checks that apply to a
+walked file apply to it: the path must resolve inside the workspace, a `deny` rule covering it, under
+the name given or the one it lands on, leaves nothing to search and is reported as in
+[SEARCH-5](#SEARCH-5), and the result carries the label of that one file
+([SEARCH-2](#SEARCH-2)). A file that holds no match reports no matches, since it was read. A
+directory is searched as before.
+
+**Why.** Searching a file already known by name otherwise takes its parent as `directory` and its
+name as `include`, and a call that gives the file as `directory` fails. The argument stays routing:
+it says where to look, and what it names is decided from the metadata of a path the routing gate has
+already vouched for, never from the file's contents. A file named outright is searched even where a
+walk from above would skip its directory ([SEARCH-7](#SEARCH-7)), as a directory named outright is.
+
+`verified-by: bravebot_agent::workspace::a_search_may_name_one_file_as_its_target`
+`verified-by: bravebot_agent::workspace::a_search_of_a_named_file_without_the_pattern_reports_that_it_was_read`
+`verified-by: bravebot_agent::workspace::a_search_of_a_named_file_a_deny_rule_covers_reads_nothing`
+`verified-by: bravebot_agent::workspace::a_search_of_a_link_to_a_denied_file_reads_nothing`
+`verified-by: bravebot_agent::workspace::a_search_cannot_name_a_file_outside_the_workspace`
+`verified-by: bravebot_agent::turn::a_search_may_name_one_file_as_its_target_through_the_tool`
+`verified-by: bravebot_agent::workspace::a_file_named_outright_is_searched_where_a_walk_from_above_would_skip_its_directory`
+`verified-by: bravebot_agent::workspace::a_file_vouched_under_a_link_spelling_outside_every_opened_directory_keeps_that_trust_in_a_search`
+
+<a id="SEARCH-12"></a>
+### SEARCH-12: a search may return the files that match, or a count, instead of the lines
+
+`output` is `lines` (what a search returns without it), `files` or `count`. `files` lists each file
+holding a match once, and no line. `count` gives how many lines match in each such file and the
+total. The value is a name from that closed set and nothing else, so one off the list is refused
+rather than read as `lines`.
+
+Both come from the same walk and match loop as the lines, so the result keeps the label
+[SEARCH-2](#SEARCH-2) gives it: the paths and counts are computed from file contents by the
+workspace and carried, never branched on by the driver, and they stay in the body and are
+quarantined with it.
+
+The match cap, the offset ([SEARCH-8](#SEARCH-8)) and `context` ([SEARCH-10](#SEARCH-10)) do not
+apply, since no line is returned: a `count` totals every match the walk read, so it needs no offset
+probe to learn how many there are. The file cap and the time cap of [SEARCH-3](#SEARCH-3) do. A
+walk that stopped at either says the files and counts are a lower bound, whether or not the planner
+may read the result. The listing has a cap of its own, and one that cut it short makes the search
+incomplete; the total of a `count` is whole past it.
+
+**Why.** A survey asks which files mention something, or how many places do. With only lines the
+planner pays context for text it does not need and still reaches the match cap before it can say
+how many there were. A partial list reads as a complete one, which is why the lower bound is said
+and not left to be inferred.
+
+`verified-by: bravebot_agent::workspace::a_files_result_lists_each_matching_file_once`
+`verified-by: bravebot_agent::workspace::a_count_result_totals_every_match_beyond_the_match_cap`
+`verified-by: bravebot_agent::workspace::a_capped_walks_summary_says_it_is_partial`
+`verified-by: bravebot_agent::workspace::a_summary_past_the_listing_cap_keeps_the_whole_total`
+`verified-by: bravebot_agent::turn::a_search_asks_for_files_or_a_count_through_the_tool`
+`verified-by: bravebot_agent::turn::a_search_output_off_the_list_is_refused`
+`verified-by: bravebot_agent::turn::a_quarantined_capped_files_result_still_says_it_is_incomplete`
+`verified-by: bravebot_agent::workspace::a_files_or_count_result_is_not_cut_by_an_offset_or_context`
+
+<a id="SEARCH-13"></a>
+### SEARCH-13: a search says how many symbolic links it did not enter, as a number
+
+A search does not enter a symbolic link, to a file or to a directory, at any depth
+([permissions.md](../permissions.md)), so a file behind a link is not read. It counts the links it
+meets, and every result says how many were not entered and that the files behind them were not
+searched, whether it found matches or none. The count is a number and never a name, because a
+link's name is a filename ([LIST-2](list-files.md#LIST-2)). It is taken from the file type of each
+directory entry and not from any file's bytes, it is released the way the cap and the offset of
+[SEARCH-8](#SEARCH-8) are, and it travels beside the reference when the result is quarantined. The
+tool description says that a link is not entered and that a directory a link points to is searched
+by naming it.
+
+**Why.** A search whose files sit behind a link reads nothing there. Without the count that is
+indistinguishable from the pattern being absent, or, with an `include`, from a glob that is wrong
+([SEARCH-5](#SEARCH-5)), and the planner rewrites a pattern or a glob that was right. A note on a
+result that found matches says the answer may be partial. `repo_map` does not report the count:
+[repo-map.md](repo-map.md).
+
+`verified-by: bravebot_agent::tools::a_search_counts_the_links_it_did_not_enter_and_does_not_name_them`
+`verified-by: bravebot_agent::turn::sentences::links_not_entered_are_counted_beside_the_reference_and_no_note_means_none`
+`verified-by: bravebot_agent::tools::list_files_names_every_directory_its_walk_skips`

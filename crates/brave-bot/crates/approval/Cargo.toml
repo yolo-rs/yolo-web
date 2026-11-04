@@ -1,0 +1,13 @@
+[package]
+name = "bravebot-approval"
+description = "How a proposed write is read as plain lines before it is approved, shared by the terminal and the editor bridge"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-agent = { path = "../agent" }
+bravebot-i18n = { path = "../i18n" }

@@ -1,0 +1,3786 @@
+//! The MCP server declarations, `mcp.json` in the person's own state directory, and the record of
+//! which of them the person approved, `mcp-approved` beside it.
+//!
+//! A declaration says that a server exists: its alias, its transport, the program and arguments
+//! that start it or the url that reaches it, the variables it receives, the files it may read, and
+//! the directory it runs in. This module reads and writes that format and computes what an approval
+//! binds to. It starts nothing and reaches nothing: launching a server is the client's, and deciding
+//! whether one is offered to a session is the agent's.
+//!
+//! # Why not a settings layer
+//!
+//! A stdio declaration is a command to run, and BACKEND-1 forbids a settings file naming one. The
+//! stronger reason is that two of the settings layers sit in a checkout, and the agent can write
+//! files in a checkout, so a declaration read from one would be a road from an ordinary tool call to
+//! execution nobody approved. A file in the state directory is outside every directory a session can
+//! write. [`crate::Settings::mcp_declared`] is where a layer that tried anyway is reported.
+//!
+//! # Names, and the values a person gave
+//!
+//! `variables` lists the names of variables a server receives from the person's own environment
+//! at launch. `env` holds the ones the person gave a value when they declared it, in the shape
+//! Claude Code's `.mcp.json` uses, and a stored value is handed over as written. The file is the
+//! person's own, private to them inside the state directory, which is why a value may be kept in
+//! it and in no settings layer. Nothing said about an entry repeats a value: a problem names the
+//! variable at most. `reads` lists the files a value or an argument named, one grant each.
+//!
+//! # Every failure is per entry, except the file's own shape
+//!
+//! An entry this cannot use is kept, listed with what is wrong with it, and written back unchanged
+//! when another entry is added or removed. A file whose root is not the shape below cannot be
+//! rewritten without losing what is in it, so it is reported as unreadable and never overwritten.
+//!
+//! ```json
+//! { "servers": {
+//!     "weather": { "transport": "stdio", "argv": ["npx", "-y", "weather-mcp"], "variables": ["PATH"],
+//!         "env": { "WEATHER_KEY_FILE": "/home/me/keys/weather" }, "reads": ["/home/me/keys/weather"] },
+//!     "docs": { "transport": "http", "url": "https://docs.example.com/mcp" } } }
+//! ```
+
+use bravebot_sandbox::hosts::HostRule;
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// The declarations, inside the state directory.
+const DECLARATIONS_FILE: &str = "mcp.json";
+
+/// The approvals, one digest per line, inside the state directory.
+const APPROVALS_FILE: &str = "mcp-approved";
+
+/// The projects answer 2 was given in, one path per line, inside the state directory.
+const PROJECTS_FILE: &str = "mcp-projects";
+
+/// The tools answer 2 at a call was given about, one alias, tool and project per line.
+const TOOLS_FILE: &str = "mcp-tools";
+
+/// The directory holding one home per declaration a server was started from.
+const HOMES_DIRECTORY: &str = "mcp-home";
+
+/// The most of either file worth reading.
+///
+/// A handful of short argument vectors, or a handful of digests. Bounded so a file that grew by
+/// accident, or was replaced by something else entirely, is passed over rather than parsed.
+const MAX_BYTES: u64 = 64 * 1024;
+
+/// The longest alias, which is also the first half of every tool name a server offers.
+const MAX_ALIAS: usize = 64;
+
+/// What the digested form starts with, so a later change to that form cannot collide with this one.
+const DIGEST_FORM: &str = "bravebot-mcp-declaration-1";
+
+/// The longest word a server's tool may be offered under.
+pub const MAX_TOOL: usize = 64;
+
+/// The longest name of an argument that takes a choice, so that the name the planner is offered
+/// beside it, with `_ref` after it, is within [`MAX_TOOL`] and a name every backend takes.
+pub const MAX_CHOICE_ARGUMENT: usize = MAX_TOOL - "_ref".len();
+
+/// How long a server has to answer its handshake, where its declaration says nothing.
+///
+/// Long enough for a runner fetching a package on its first launch.
+pub const STARTUP_SECS: u64 = 60;
+
+/// How long a server has to answer one call, where its declaration says nothing.
+pub const TOOL_SECS: u64 = 120;
+
+/// The most a declaration may give either bound, an hour.
+pub const MAX_TIMEOUT_SECS: u64 = 3600;
+
+/// Where a person's servers are declared.
+pub fn declarations_file(directory: &Path) -> PathBuf {
+    directory.join(DECLARATIONS_FILE)
+}
+
+/// Where a person's approvals are recorded.
+pub fn approvals_file(directory: &Path) -> PathBuf {
+    directory.join(APPROVALS_FILE)
+}
+
+/// Where the projects answer 2 was given in are recorded.
+pub fn projects_file(directory: &Path) -> PathBuf {
+    directory.join(PROJECTS_FILE)
+}
+
+/// Where the tools answer 2 at a call was given about are recorded.
+pub fn tools_file(directory: &Path) -> PathBuf {
+    directory.join(TOOLS_FILE)
+}
+
+/// Where a local server started from the declaration digested as `declared` keeps its own files.
+///
+/// Keyed by the digest rather than the alias, so a declaration edited to run another program does
+/// not inherit what the one before it wrote.
+pub fn server_home(directory: &Path, declared: &Digest) -> PathBuf {
+    directory.join(HOMES_DIRECTORY).join(declared.to_string())
+}
+
+/// Whether `word` may be offered as a tool's name beneath an alias.
+///
+/// Letters, digits, `-` and `_`, which is what a function name may be on every backend this
+/// program speaks to. A server's word outside that is not rewritten into one: two words rewritten
+/// alike would be one name for two tools, and a word is the server's own text either way.
+pub fn is_tool_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= MAX_TOOL
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether `alias` may name a server.
+///
+/// Letters, digits, `-` and `_`, starting with a letter or a digit. The alias is the namespace a
+/// server's tools are offered under, `weather:get_forecast`, so a `:` in one would let two servers
+/// spell the same tool, and anything wider is a name a person cannot type back on a command line.
+pub fn is_alias(alias: &str) -> bool {
+    let mut characters = alias.chars();
+    alias.len() <= MAX_ALIAS
+        && characters.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether `name` may name a tool in a tool allow or deny filter.
+///
+/// Either a tool word alone, or qualified under an alias as `alias:tool`.
+pub fn is_tool_filter_name(name: &str) -> bool {
+    if is_tool_word(name) {
+        return true;
+    }
+    if let Some((alias, word)) = name.split_once(':') {
+        return is_alias(alias) && is_tool_word(word);
+    }
+    false
+}
+
+/// Whether `name` is a variable name.
+///
+/// The portable spelling, a letter or `_` and then letters, digits and `_`. Anything else is not
+/// taken for a name, which is what keeps a value pasted into the list from reaching a prompt as one.
+pub fn is_variable_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `name` is a valid HTTP header token (RFC 9110).
+pub fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// What is wrong with one entry, or with one flag that would have made it.
+///
+/// Nothing here carries a value. The variants that name a variable name one [`is_variable_name`]
+/// accepts, and never what it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Problem {
+    /// The alias is not one [`is_alias`] accepts.
+    Alias,
+    /// The entry is not a JSON object.
+    NotAnObject,
+    /// `transport` is missing, or names neither `stdio` nor `http`.
+    Transport,
+    /// A key this format does not have, as the file spelled it.
+    Key(String),
+    /// `argv` is missing or empty, names a blank program, or holds something that is not a string.
+    Program,
+    /// `variables` is not a list of names, or a key of `env` is not a name.
+    Name,
+    /// `env` is not an object.
+    Env,
+    /// The value `env` gives this variable is not a string, or holds a NUL no environment can.
+    Value(String),
+    /// This variable is given two answers: it is in `variables` and in `env`, or given two values.
+    Twice(String),
+    /// `reads` is not a list of absolute paths.
+    Reads,
+    /// `directory` is not an absolute path.
+    Directory,
+    /// `url` is missing, is not a string, is not `http` or `https`, names no host, or writes a
+    /// port that is not a number up to 65535.
+    Url,
+    /// `url` carries a user or a password.
+    Credentials,
+    /// A header name is not a valid HTTP token.
+    Header(String),
+    /// A remote server was given something only a process can use, and this is the key.
+    Remote(&'static str),
+    /// A timeout, by the key the file spells it with, is not a whole number of seconds from one to
+    /// [`MAX_TIMEOUT_SECS`].
+    Timeout(&'static str),
+    /// A tool name in a tool filter is not accepted by [`is_tool_filter_name`].
+    Tool(String),
+    /// `tools` or `exclude_tools` is not a list of tool names.
+    Tools(&'static str),
+    /// `allowed_hosts` is not a list of host names or `*.` domains, and this is the entry that is
+    /// not one, or empty where the value is not a list at all.
+    Hosts(String),
+    /// `ask_every_call` is not `true` or `false`.
+    AskEveryCall,
+    /// `choice_arguments` is not an object of tool words, each with a non-empty list of argument
+    /// words.
+    Choice,
+    /// `choice_arguments` names an argument to a server that does not ask about every call.
+    ChoiceWithoutAsking,
+}
+
+/// The arguments of a server's tools a declaration says take a choice, by tool (SERVERS-22). Each
+/// is a tool word with the argument words it names, in an order that carries no meaning.
+pub type ChoiceArguments = BTreeMap<String, BTreeSet<String>>;
+
+/// How long a server has for its handshake and for each call, where a declaration says.
+///
+/// Neither is part of what an approval binds to: a bound is a deadline this process keeps, grants
+/// nothing, and is read from no byte a server sends. A bound left unsaid is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Seconds for the handshake, where the declaration says.
+    pub startup: Option<u64>,
+    /// Seconds for one call, where the declaration says.
+    pub tool: Option<u64>,
+}
+
+impl Timeouts {
+    /// The key the file spells the startup bound with.
+    pub const STARTUP_KEY: &'static str = "startup_timeout_secs";
+    /// The key the file spells the call bound with.
+    pub const TOOL_KEY: &'static str = "tool_timeout_secs";
+
+    /// Bounds checked as a file's entry is.
+    pub fn new(startup: Option<u64>, tool: Option<u64>) -> Result<Self, Problem> {
+        let within = |secs: Option<u64>, key| match secs {
+            Some(secs) if !(1..=MAX_TIMEOUT_SECS).contains(&secs) => Err(Problem::Timeout(key)),
+            _ => Ok(()),
+        };
+        within(startup, Self::STARTUP_KEY)?;
+        within(tool, Self::TOOL_KEY)?;
+        Ok(Self { startup, tool })
+    }
+
+    /// How long the handshake may take.
+    pub fn startup(&self) -> Duration {
+        Duration::from_secs(self.startup.unwrap_or(STARTUP_SECS))
+    }
+
+    /// How long one call may take.
+    pub fn tool(&self) -> Duration {
+        Duration::from_secs(self.tool.unwrap_or(TOOL_SECS))
+    }
+
+    /// Whether the declaration says neither.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Read the two keys out of an entry.
+    fn from_entry(entry: &serde_json::Map<String, serde_json::Value>) -> Result<Self, Problem> {
+        let read = |key: &'static str| match entry.get(key) {
+            None => Ok(None),
+            Some(value) => value.as_u64().map(Some).ok_or(Problem::Timeout(key)),
+        };
+        Self::new(read(Self::STARTUP_KEY)?, read(Self::TOOL_KEY)?)
+    }
+
+    /// Write the keys the declaration says into an entry.
+    fn write_into(&self, entry: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(secs) = self.startup {
+            entry.insert(Self::STARTUP_KEY.into(), secs.into());
+        }
+        if let Some(secs) = self.tool {
+            entry.insert(Self::TOOL_KEY.into(), secs.into());
+        }
+    }
+}
+
+/// One server, as a person declared it.
+///
+/// Its `Debug` shows a stored value by its name alone, so no value reaches a log or a panic.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Declaration {
+    /// A program this machine starts, spoken to over its standard streams.
+    Stdio {
+        /// The program and its arguments, never a line. Never empty.
+        argv: Vec<String>,
+        /// The names of the variables it receives from the environment at launch, each once, in the
+        /// order they were written.
+        variables: Vec<String>,
+        /// The variables it receives with the value the person gave them, by name. None of them is
+        /// in `variables`, so the environment at launch is never read for one.
+        env: BTreeMap<String, String>,
+        /// The files it may read, each once, where the confinement would otherwise refuse them.
+        /// Absolute.
+        reads: Vec<String>,
+        /// Where it runs, where somebody said. Absolute.
+        directory: Option<String>,
+        /// How long it has for its handshake and for each call.
+        timeouts: Timeouts,
+        /// The tools this server offers where a filter was given, each once. Empty where every
+        /// tool is offered.
+        tools: Vec<String>,
+        /// The tools withheld from this server where a filter was given, each once.
+        exclude_tools: Vec<String>,
+        /// The hosts it may reach, each once, where the person wrote a list. `None` is no list of
+        /// its own, so it is held to the session's. `Some` of nothing refuses every host.
+        allowed_hosts: Option<Vec<String>>,
+        /// Whether every call to it is put to the person and no answer to one lasts (SERVERS-21).
+        ask_every_call: bool,
+        /// The arguments of its tools that take a choice. Empty unless `ask_every_call` is set,
+        /// since the person is shown the element the choice leads to at each call (SERVERS-22).
+        choice_arguments: ChoiceArguments,
+    },
+    /// A server somewhere else, reached over HTTP.
+    Http {
+        /// Where it is, as somebody wrote it.
+        url: String,
+        /// Headers to send to the server, mapping header name to the environment variable name
+        /// read at launch.
+        env_http_headers: BTreeMap<String, String>,
+        /// Environment variable name for a bearer token to send in `Authorization: Bearer <token>`.
+        bearer_env: Option<String>,
+        /// How long it has for its handshake and for each call.
+        timeouts: Timeouts,
+        /// The tools this server offers where a filter was given, each once. Empty where every
+        /// tool is offered.
+        tools: Vec<String>,
+        /// The tools withheld from this server where a filter was given, each once.
+        exclude_tools: Vec<String>,
+        /// Whether every call to it is put to the person and no answer to one lasts (SERVERS-21).
+        ask_every_call: bool,
+    },
+}
+
+impl std::fmt::Debug for Declaration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+            } => f
+                .debug_struct("Stdio")
+                .field("argv", argv)
+                .field("variables", variables)
+                .field("env", &env.keys().collect::<Vec<_>>())
+                .field("reads", reads)
+                .field("directory", directory)
+                .field("timeouts", timeouts)
+                .field("tools", tools)
+                .field("exclude_tools", exclude_tools)
+                .field("allowed_hosts", allowed_hosts)
+                .field("ask_every_call", ask_every_call)
+                .field("choice_arguments", choice_arguments)
+                .finish(),
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                tools,
+                exclude_tools,
+                ask_every_call,
+            } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("env_http_headers", env_http_headers)
+                .field("bearer_env", bearer_env)
+                .field("timeouts", timeouts)
+                .field("tools", tools)
+                .field("exclude_tools", exclude_tools)
+                .field("ask_every_call", ask_every_call)
+                .finish(),
+        }
+    }
+}
+
+/// A field of a declaration, for saying which of them changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Field {
+    Transport,
+    Argv,
+    Variables,
+    /// The stored values, with the name of each variable whose value was added, changed or
+    /// removed. Names only: saying which value changed is saying the values.
+    Env(Vec<String>),
+    Reads,
+    Directory,
+    Url,
+    /// The headers for a remote server, with the name of each header whose mapping was added,
+    /// changed or removed.
+    Headers(Vec<String>),
+    Tools,
+    ExcludeTools,
+    AllowedHosts,
+    AskEveryCall,
+    ChoiceArguments,
+}
+
+impl Field {
+    /// The key the file spells it with.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Argv => "argv",
+            Self::Variables => "variables",
+            Self::Env(_) => "env",
+            Self::Reads => "reads",
+            Self::Directory => "directory",
+            Self::Url => "url",
+            Self::Headers(_) => "env_http_headers",
+            Self::Tools => "tools",
+            Self::ExcludeTools => "exclude_tools",
+            Self::AllowedHosts => "allowed_hosts",
+            Self::AskEveryCall => "ask_every_call",
+            Self::ChoiceArguments => "choice_arguments",
+        }
+    }
+}
+
+impl Declaration {
+    /// A stdio declaration, checked as a file's entry is.
+    ///
+    /// A name listed twice is kept once, since the set of names is what the server receives.
+    pub fn stdio(
+        argv: Vec<String>,
+        variables: Vec<String>,
+        directory: Option<String>,
+    ) -> Result<Self, Problem> {
+        program(&argv)?;
+        let variables = names(variables)?;
+        if let Some(directory) = &directory {
+            absolute(directory)?;
+        }
+        Ok(Self::Stdio {
+            argv,
+            variables,
+            env: BTreeMap::new(),
+            reads: Vec::new(),
+            directory,
+            timeouts: Timeouts::default(),
+            tools: Vec::new(),
+            exclude_tools: Vec::new(),
+            allowed_hosts: None,
+            ask_every_call: false,
+            choice_arguments: ChoiceArguments::new(),
+        })
+    }
+
+    /// This declaration with `env` as the values the person gave, checked as a file's entry is.
+    ///
+    /// A stored name also in `variables` would be two answers to where its value comes from, so it
+    /// is refused rather than one of them winning.
+    pub fn storing(self, env: BTreeMap<String, String>) -> Result<Self, Problem> {
+        let Self::Stdio {
+            argv,
+            variables,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments,
+            ..
+        } = self
+        else {
+            return match env.is_empty() {
+                true => Ok(self),
+                false => Err(Problem::Remote("env")),
+            };
+        };
+        for (name, value) in &env {
+            if !is_variable_name(name) {
+                return Err(Problem::Name);
+            }
+            if value.contains('\0') {
+                return Err(Problem::Value(name.clone()));
+            }
+            if variables.contains(name) {
+                return Err(Problem::Twice(name.clone()));
+            }
+        }
+        Ok(Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments,
+        })
+    }
+
+    /// This declaration with `reads` as the files it may read, each absolute and each kept once.
+    pub fn reading(self, reads: Vec<String>) -> Result<Self, Problem> {
+        let Self::Stdio {
+            argv,
+            variables,
+            env,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments,
+            ..
+        } = self
+        else {
+            return match reads.is_empty() {
+                true => Ok(self),
+                false => Err(Problem::Remote("reads")),
+            };
+        };
+        let mut kept: Vec<String> = Vec::with_capacity(reads.len());
+        for file in reads {
+            if file.contains('\0') || !Path::new(&file).is_absolute() {
+                return Err(Problem::Reads);
+            }
+            if !kept.contains(&file) {
+                kept.push(file);
+            }
+        }
+        Ok(Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads: kept,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments,
+        })
+    }
+
+    /// This declaration with `timeouts` as the bounds it was given.
+    pub fn timing(self, timeouts: Timeouts) -> Self {
+        match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+                ..
+            } => Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+            },
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                tools,
+                exclude_tools,
+                ask_every_call,
+                ..
+            } => Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                tools,
+                exclude_tools,
+                ask_every_call,
+            },
+        }
+    }
+
+    /// The tool names this server offers where a filter was given, or empty where every tool is
+    /// offered.
+    pub fn tools(&self) -> &[String] {
+        match self {
+            Self::Stdio { tools, .. } | Self::Http { tools, .. } => tools,
+        }
+    }
+
+    /// The tool names withheld from this server where a filter was given.
+    pub fn exclude_tools(&self) -> &[String] {
+        match self {
+            Self::Stdio { exclude_tools, .. } | Self::Http { exclude_tools, .. } => exclude_tools,
+        }
+    }
+
+    /// This declaration with `tools` as the allowed tool names and `exclude_tools` as the denied
+    /// tool names.
+    pub fn filtering(
+        self,
+        tools: Vec<String>,
+        exclude_tools: Vec<String>,
+    ) -> Result<Self, Problem> {
+        let tools = tool_filters(tools, "tools")?;
+        let exclude_tools = tool_filters(exclude_tools, "exclude_tools")?;
+        Ok(match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+                ..
+            } => Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+            },
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                ask_every_call,
+                ..
+            } => Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                tools,
+                exclude_tools,
+                ask_every_call,
+            },
+        })
+    }
+
+    /// How long this server has for its handshake and for each call.
+    pub fn timeouts(&self) -> Timeouts {
+        match self {
+            Self::Stdio { timeouts, .. } | Self::Http { timeouts, .. } => *timeouts,
+        }
+    }
+
+    /// The hosts this server may reach where the declaration lists them, or `None` where it holds
+    /// no list of its own. Always `None` for a remote one.
+    pub fn allowed_hosts(&self) -> Option<&[String]> {
+        match self {
+            Self::Stdio { allowed_hosts, .. } => allowed_hosts.as_deref(),
+            Self::Http { .. } => None,
+        }
+    }
+
+    /// This declaration with `hosts` as the only hosts it may reach, each a host name or a `*.`
+    /// domain as [`HostRule`] reads one, and each kept once. `None` leaves it with no list of its
+    /// own. A list on a remote declaration is refused, since that server is not started here.
+    pub fn hosting(self, hosts: Option<Vec<String>>) -> Result<Self, Problem> {
+        let Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            ask_every_call,
+            choice_arguments,
+            ..
+        } = self
+        else {
+            return match hosts {
+                None => Ok(self),
+                Some(_) => Err(Problem::Remote("allowed_hosts")),
+            };
+        };
+        let allowed_hosts = match hosts {
+            None => None,
+            Some(entries) => {
+                let mut kept: Vec<String> = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let rule =
+                        HostRule::parse(&entry).ok_or_else(|| Problem::Hosts(entry.clone()))?;
+                    let entry = rule.spelling();
+                    if !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
+                Some(kept)
+            }
+        };
+        Ok(Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments,
+        })
+    }
+
+    /// Whether every call to this server is put to the person, whatever a rule or an earlier
+    /// answer says, and no answer to one lasts (SERVERS-21).
+    pub fn asks_every_call(&self) -> bool {
+        match self {
+            Self::Stdio { ask_every_call, .. } | Self::Http { ask_every_call, .. } => {
+                *ask_every_call
+            }
+        }
+    }
+
+    /// This declaration with `ask` as whether every call to it is asked about. A local server
+    /// that is no longer asked about every call names no argument that takes a choice
+    /// (SERVERS-22).
+    pub fn asking_every_call(self, ask: bool) -> Self {
+        match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                choice_arguments,
+                ..
+            } => Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                timeouts,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call: ask,
+                // The choices need the asking (SERVERS-22), so they do not outlast it.
+                choice_arguments: match ask {
+                    true => choice_arguments,
+                    false => ChoiceArguments::new(),
+                },
+            },
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                tools,
+                exclude_tools,
+                ..
+            } => Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                timeouts,
+                tools,
+                exclude_tools,
+                ask_every_call: ask,
+            },
+        }
+    }
+
+    /// The arguments of this server's tools that take a choice, by tool. Empty for a remote
+    /// server and for one that does not ask about every call (SERVERS-22).
+    pub fn choice_arguments(&self) -> &ChoiceArguments {
+        static NONE: ChoiceArguments = BTreeMap::new();
+        match self {
+            Self::Stdio {
+                choice_arguments, ..
+            } => choice_arguments,
+            Self::Http { .. } => &NONE,
+        }
+    }
+
+    /// This declaration with `choices` as the arguments of its tools that take a choice, checked
+    /// as a file's entry is.
+    ///
+    /// Each tool and each argument is a word a tool may be offered under, an argument at most
+    /// [`MAX_CHOICE_ARGUMENT`] long, and a tool names at least one argument. A remote server takes none, and a local one takes them only where it asks
+    /// about every call, so the declaration is built with [`Declaration::asking_every_call`]
+    /// before this (SERVERS-22).
+    pub fn choosing(self, choices: ChoiceArguments) -> Result<Self, Problem> {
+        let Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            ..
+        } = self
+        else {
+            return match choices.is_empty() {
+                true => Ok(self),
+                false => Err(Problem::Remote("choice_arguments")),
+            };
+        };
+        for (tool, arguments) in &choices {
+            let words = arguments
+                .iter()
+                .all(|argument| is_tool_word(argument) && argument.len() <= MAX_CHOICE_ARGUMENT);
+            if !is_tool_word(tool) || arguments.is_empty() || !words {
+                return Err(Problem::Choice);
+            }
+        }
+        if !choices.is_empty() && !ask_every_call {
+            return Err(Problem::ChoiceWithoutAsking);
+        }
+        Ok(Self::Stdio {
+            argv,
+            variables,
+            env,
+            reads,
+            directory,
+            timeouts,
+            tools,
+            exclude_tools,
+            allowed_hosts,
+            ask_every_call,
+            choice_arguments: choices,
+        })
+    }
+
+    /// An HTTP declaration, checked as a file's entry is.
+    pub fn http(url: String) -> Result<Self, Problem> {
+        remote(&url)?;
+        Ok(Self::Http {
+            url,
+            env_http_headers: BTreeMap::new(),
+            bearer_env: None,
+            timeouts: Timeouts::default(),
+            tools: Vec::new(),
+            exclude_tools: Vec::new(),
+            ask_every_call: false,
+        })
+    }
+
+    /// This remote declaration at `url` and nothing else changed: the variables that name its
+    /// headers and its bearer token, its tool filters, its bounds and whether every call to it is
+    /// asked about stay as they were (SERVERS-11).
+    ///
+    /// The url is checked as a file's entry is. A stdio declaration has no address to move, so it
+    /// is refused as the wrong transport.
+    pub fn moved_to(self, url: String) -> Result<Self, Problem> {
+        let Self::Http {
+            env_http_headers,
+            bearer_env,
+            timeouts,
+            tools,
+            exclude_tools,
+            ask_every_call,
+            ..
+        } = self
+        else {
+            return Err(Problem::Transport);
+        };
+        remote(&url)?;
+        Ok(Self::Http {
+            url,
+            env_http_headers,
+            bearer_env,
+            timeouts,
+            tools,
+            exclude_tools,
+            ask_every_call,
+        })
+    }
+
+    /// This declaration with headers to send over HTTP, each mapping a header name to an
+    /// environment variable name, and an optional variable name for a Bearer authorization header.
+    ///
+    /// The names are checked as a file's entry is. Setting headers on a stdio declaration is refused.
+    pub fn heading(
+        self,
+        env_http_headers: BTreeMap<String, String>,
+        bearer_env: Option<String>,
+    ) -> Result<Self, Problem> {
+        let Self::Http {
+            url,
+            timeouts,
+            tools,
+            exclude_tools,
+            ask_every_call,
+            ..
+        } = self
+        else {
+            return match env_http_headers.is_empty() && bearer_env.is_none() {
+                true => Ok(self),
+                false => Err(Problem::Remote("env_http_headers")),
+            };
+        };
+        let mut seen = BTreeSet::new();
+        for (header, var) in &env_http_headers {
+            if !is_header_name(header) {
+                return Err(Problem::Header(header.clone()));
+            }
+            if !is_variable_name(var) {
+                return Err(Problem::Name);
+            }
+            if !seen.insert(header.to_ascii_lowercase()) {
+                return Err(Problem::Twice(header.clone()));
+            }
+        }
+        if let Some(var) = &bearer_env {
+            if !is_variable_name(var) {
+                return Err(Problem::Name);
+            }
+            if seen.contains("authorization") {
+                return Err(Problem::Twice("Authorization".to_string()));
+            }
+        }
+        Ok(Self::Http {
+            url,
+            env_http_headers,
+            bearer_env,
+            timeouts,
+            tools,
+            exclude_tools,
+            ask_every_call,
+        })
+    }
+
+    /// The headers this remote server receives, mapping each header name to an environment
+    /// variable name.
+    pub fn env_http_headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        let headers = match self {
+            Self::Http {
+                env_http_headers, ..
+            } => Some(env_http_headers),
+            Self::Stdio { .. } => None,
+        };
+        headers
+            .into_iter()
+            .flat_map(|headers| headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+    }
+
+    /// The environment variable name for a Bearer authorization header. None for a stdio server
+    /// or where not declared.
+    pub fn bearer_env(&self) -> Option<&str> {
+        match self {
+            Self::Http { bearer_env, .. } => bearer_env.as_deref(),
+            Self::Stdio { .. } => None,
+        }
+    }
+
+    /// The transport's name, as the file spells it.
+    pub fn transport(&self) -> &'static str {
+        match self {
+            Self::Stdio { .. } => "stdio",
+            Self::Http { .. } => "http",
+        }
+    }
+
+    /// The names of the variables this server receives from the environment at launch. None for a
+    /// remote one.
+    pub fn variables(&self) -> &[String] {
+        match self {
+            Self::Stdio { variables, .. } => variables,
+            Self::Http { .. } => &[],
+        }
+    }
+
+    /// The names of the variables this server receives with a stored value, never the values.
+    pub fn stored(&self) -> impl Iterator<Item = &str> {
+        let env = match self {
+            Self::Stdio { env, .. } => Some(env),
+            Self::Http { .. } => None,
+        };
+        env.into_iter()
+            .flat_map(|env| env.keys().map(String::as_str))
+    }
+
+    /// The files this server may read beyond what its confinement grants. None for a remote one.
+    pub fn reads(&self) -> &[String] {
+        match self {
+            Self::Stdio { reads, .. } => reads,
+            Self::Http { .. } => &[],
+        }
+    }
+
+    /// What an approval of this declaration binds to.
+    ///
+    /// The transport, the program and every argument or the url, the set of variable names, the
+    /// directory, and every stored value and the set of files it may read, and whether every call
+    /// is asked about and the arguments that take a choice, which a declaration that does not say
+    /// so leaves out. Not the alias: an alias is a label a person chose, and an approval keyed on
+    /// it would let an edit to the argv inherit an answer given about a different program. Not the
+    /// order the names were written in either, since the set is what the server receives.
+    pub fn digest(&self) -> Digest {
+        let form = match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                tools,
+                exclude_tools,
+                allowed_hosts,
+                ask_every_call,
+                choice_arguments,
+                ..
+            } => {
+                let variables: BTreeSet<&String> = variables.iter().collect();
+                let mut form = vec![
+                    DIGEST_FORM.into(),
+                    "stdio".into(),
+                    serde_json::json!(argv),
+                    serde_json::json!(variables),
+                    serde_json::json!(directory),
+                ];
+                // Only where there is one, so a declaration that stores nothing digests as it did
+                // before anything could be stored, and the approval given it still stands.
+                if !env.is_empty() || !reads.is_empty() {
+                    let reads: BTreeSet<&String> = reads.iter().collect();
+                    form.push(serde_json::json!({ "env": env, "reads": reads }));
+                }
+                if !tools.is_empty() || !exclude_tools.is_empty() {
+                    let tools: BTreeSet<&String> = tools.iter().collect();
+                    let exclude_tools: BTreeSet<&String> = exclude_tools.iter().collect();
+                    form.push(
+                        serde_json::json!({ "tools": tools, "exclude_tools": exclude_tools }),
+                    );
+                }
+                // Only where a list was written, so a declaration without one digests as it did
+                // before there was one. An empty list is a list, and digests apart from none.
+                if let Some(hosts) = allowed_hosts {
+                    let hosts: BTreeSet<&String> = hosts.iter().collect();
+                    form.push(serde_json::json!({ "allowed_hosts": hosts }));
+                }
+                if *ask_every_call {
+                    form.push(serde_json::json!({ "ask_every_call": true }));
+                }
+                if !choice_arguments.is_empty() {
+                    form.push(serde_json::json!({ "choice_arguments": choice_arguments }));
+                }
+                serde_json::Value::Array(form)
+            }
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                tools,
+                exclude_tools,
+                ask_every_call,
+                ..
+            } => {
+                let mut form = vec![DIGEST_FORM.into(), "http".into(), serde_json::json!(url)];
+                if !env_http_headers.is_empty() || bearer_env.is_some() {
+                    let mut extra = serde_json::Map::new();
+                    if !env_http_headers.is_empty() {
+                        extra.insert(
+                            "env_http_headers".into(),
+                            serde_json::json!(env_http_headers),
+                        );
+                    }
+                    if let Some(bearer) = bearer_env {
+                        extra.insert("bearer_env".into(), serde_json::json!(bearer));
+                    }
+                    form.push(serde_json::Value::Object(extra));
+                }
+                if !tools.is_empty() || !exclude_tools.is_empty() {
+                    let tools: BTreeSet<&String> = tools.iter().collect();
+                    let exclude_tools: BTreeSet<&String> = exclude_tools.iter().collect();
+                    form.push(
+                        serde_json::json!({ "tools": tools, "exclude_tools": exclude_tools }),
+                    );
+                }
+                if *ask_every_call {
+                    form.push(serde_json::json!({ "ask_every_call": true }));
+                }
+                serde_json::Value::Array(form)
+            }
+        };
+        Digest(Sha256::digest(form.to_string().as_bytes()).into())
+    }
+
+    /// The fields that differ between this declaration and `other`, in the file's order.
+    ///
+    /// A change of transport is that one field, since nothing else of one transport compares with
+    /// the other.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one comparison for each field of each transport"
+    )]
+    pub fn changes(&self, other: &Self) -> Vec<Field> {
+        match (self, other) {
+            (
+                Self::Stdio {
+                    argv,
+                    variables,
+                    env,
+                    reads,
+                    directory,
+                    tools,
+                    exclude_tools,
+                    allowed_hosts,
+                    ask_every_call,
+                    choice_arguments,
+                    ..
+                },
+                Self::Stdio {
+                    argv: other_argv,
+                    variables: other_variables,
+                    env: other_env,
+                    reads: other_reads,
+                    directory: other_directory,
+                    tools: other_tools,
+                    exclude_tools: other_exclude_tools,
+                    allowed_hosts: other_allowed_hosts,
+                    ask_every_call: other_ask_every_call,
+                    choice_arguments: other_choice_arguments,
+                    ..
+                },
+            ) => {
+                let set = |names: &[String]| names.iter().cloned().collect::<BTreeSet<_>>();
+                let hosts = |list: &Option<Vec<String>>| list.as_deref().map(set);
+                let restored = changed_values(env, other_env);
+                [
+                    (argv != other_argv, Field::Argv),
+                    (set(variables) != set(other_variables), Field::Variables),
+                    (!restored.is_empty(), Field::Env(restored)),
+                    (set(reads) != set(other_reads), Field::Reads),
+                    (directory != other_directory, Field::Directory),
+                    (set(tools) != set(other_tools), Field::Tools),
+                    (
+                        set(exclude_tools) != set(other_exclude_tools),
+                        Field::ExcludeTools,
+                    ),
+                    (
+                        hosts(allowed_hosts) != hosts(other_allowed_hosts),
+                        Field::AllowedHosts,
+                    ),
+                    (ask_every_call != other_ask_every_call, Field::AskEveryCall),
+                    (
+                        choice_arguments != other_choice_arguments,
+                        Field::ChoiceArguments,
+                    ),
+                ]
+                .into_iter()
+                .filter_map(|(changed, field)| changed.then_some(field))
+                .collect()
+            }
+            (
+                Self::Http {
+                    url,
+                    env_http_headers,
+                    bearer_env,
+                    tools,
+                    exclude_tools,
+                    ask_every_call,
+                    ..
+                },
+                Self::Http {
+                    url: other_url,
+                    env_http_headers: other_env_http_headers,
+                    bearer_env: other_bearer_env,
+                    tools: other_tools,
+                    exclude_tools: other_exclude_tools,
+                    ask_every_call: other_ask_every_call,
+                    ..
+                },
+            ) => {
+                let set = |names: &[String]| names.iter().cloned().collect::<BTreeSet<_>>();
+                let mut changed = Vec::new();
+                if url != other_url {
+                    changed.push(Field::Url);
+                }
+                let mut header_diffs = BTreeSet::new();
+                for (k, v) in env_http_headers {
+                    if other_env_http_headers.get(k) != Some(v) {
+                        header_diffs.insert(k.clone());
+                    }
+                }
+                for k in other_env_http_headers.keys() {
+                    if !env_http_headers.contains_key(k) {
+                        header_diffs.insert(k.clone());
+                    }
+                }
+                if bearer_env != other_bearer_env {
+                    header_diffs.insert("Authorization".to_string());
+                }
+                if !header_diffs.is_empty() {
+                    changed.push(Field::Headers(header_diffs.into_iter().collect()));
+                }
+                if set(tools) != set(other_tools) {
+                    changed.push(Field::Tools);
+                }
+                if set(exclude_tools) != set(other_exclude_tools) {
+                    changed.push(Field::ExcludeTools);
+                }
+                if ask_every_call != other_ask_every_call {
+                    changed.push(Field::AskEveryCall);
+                }
+                changed
+            }
+            _ => vec![Field::Transport],
+        }
+    }
+
+    /// The entry this is written as.
+    fn to_value(&self) -> serde_json::Value {
+        let mut entry = serde_json::Map::new();
+        entry.insert("transport".into(), self.transport().into());
+        match self {
+            Self::Stdio {
+                argv,
+                variables,
+                env,
+                reads,
+                directory,
+                allowed_hosts,
+                choice_arguments,
+                ..
+            } => {
+                entry.insert("argv".into(), argv.clone().into());
+                if !variables.is_empty() {
+                    entry.insert("variables".into(), variables.clone().into());
+                }
+                if !env.is_empty() {
+                    let env = env
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone().into()))
+                        .collect();
+                    entry.insert("env".into(), serde_json::Value::Object(env));
+                }
+                if !reads.is_empty() {
+                    entry.insert("reads".into(), reads.clone().into());
+                }
+                if let Some(directory) = directory {
+                    entry.insert("directory".into(), directory.clone().into());
+                }
+                if let Some(hosts) = allowed_hosts {
+                    entry.insert("allowed_hosts".into(), hosts.clone().into());
+                }
+                if !choice_arguments.is_empty() {
+                    entry.insert(
+                        "choice_arguments".into(),
+                        serde_json::json!(choice_arguments),
+                    );
+                }
+            }
+            Self::Http {
+                url,
+                env_http_headers,
+                bearer_env,
+                ..
+            } => {
+                entry.insert("url".into(), url.clone().into());
+                if !env_http_headers.is_empty() {
+                    let headers = env_http_headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone().into()))
+                        .collect();
+                    entry.insert(
+                        "env_http_headers".into(),
+                        serde_json::Value::Object(headers),
+                    );
+                }
+                if let Some(bearer) = bearer_env {
+                    entry.insert("bearer_env".into(), bearer.clone().into());
+                }
+            }
+        }
+        if !self.tools().is_empty() {
+            entry.insert("tools".into(), self.tools().to_vec().into());
+        }
+        if !self.exclude_tools().is_empty() {
+            entry.insert("exclude_tools".into(), self.exclude_tools().to_vec().into());
+        }
+        if self.asks_every_call() {
+            entry.insert("ask_every_call".into(), true.into());
+        }
+        self.timeouts().write_into(&mut entry);
+        serde_json::Value::Object(entry)
+    }
+
+    /// The declaration an entry states, or what is wrong with it.
+    fn from_value(value: &serde_json::Value) -> Result<Self, Problem> {
+        let entry = value.as_object().ok_or(Problem::NotAnObject)?;
+        const LOCAL: [&str; 6] = [
+            "variables",
+            "env",
+            "reads",
+            "directory",
+            "allowed_hosts",
+            "choice_arguments",
+        ];
+        let allowed: &[&str] = match entry.get("transport").and_then(|word| word.as_str()) {
+            Some("stdio") => &[
+                "transport",
+                "argv",
+                "variables",
+                "env",
+                "reads",
+                "directory",
+                "allowed_hosts",
+                "tools",
+                "exclude_tools",
+                "ask_every_call",
+                "choice_arguments",
+                Timeouts::STARTUP_KEY,
+                Timeouts::TOOL_KEY,
+            ],
+            Some("http") => &[
+                "transport",
+                "url",
+                "env_http_headers",
+                "bearer_env",
+                "tools",
+                "exclude_tools",
+                "ask_every_call",
+                Timeouts::STARTUP_KEY,
+                Timeouts::TOOL_KEY,
+            ],
+            _ => return Err(Problem::Transport),
+        };
+        for key in entry.keys() {
+            if allowed.contains(&key.as_str()) {
+                continue;
+            }
+            return Err(match LOCAL.into_iter().find(|local| local == key) {
+                Some(local) => Problem::Remote(local),
+                None => Problem::Key(key.clone()),
+            });
+        }
+        let timeouts = Timeouts::from_entry(entry)?;
+        let parse_tools = |key: &'static str| -> Result<Vec<String>, Problem> {
+            match entry.get(key) {
+                None => Ok(Vec::new()),
+                Some(serde_json::Value::Array(names)) => {
+                    let mut list = Vec::new();
+                    for name in names {
+                        let text = name.as_str().ok_or(Problem::Tools(key))?;
+                        list.push(text.to_string());
+                    }
+                    Ok(list)
+                }
+                Some(_) => Err(Problem::Tools(key)),
+            }
+        };
+        let tools = parse_tools("tools")?;
+        let exclude_tools = parse_tools("exclude_tools")?;
+        let ask_every_call = match entry.get("ask_every_call") {
+            None => false,
+            Some(serde_json::Value::Bool(ask)) => *ask,
+            Some(_) => return Err(Problem::AskEveryCall),
+        };
+        if allowed.contains(&"url") {
+            let url = entry.get("url").and_then(|url| url.as_str());
+            let env_http_headers = match entry.get("env_http_headers") {
+                None => BTreeMap::new(),
+                Some(serde_json::Value::Object(headers)) => {
+                    let mut map = BTreeMap::new();
+                    for (header, var) in headers {
+                        let var_str = var.as_str().ok_or(Problem::Name)?;
+                        map.insert(header.clone(), var_str.to_string());
+                    }
+                    map
+                }
+                Some(_) => return Err(Problem::Header("env_http_headers".to_string())),
+            };
+            let bearer_env = match entry.get("bearer_env") {
+                None => None,
+                Some(serde_json::Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(Problem::Name),
+            };
+            return Ok(Self::http(url.ok_or(Problem::Url)?.to_string())?
+                .heading(env_http_headers, bearer_env)?
+                .filtering(tools, exclude_tools)?
+                .asking_every_call(ask_every_call)
+                .timing(timeouts));
+        }
+        let argv = match entry.get("argv") {
+            Some(serde_json::Value::Array(words)) => words
+                .iter()
+                .map(|word| word.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(Problem::Program)?,
+            _ => return Err(Problem::Program),
+        };
+        let variables = match entry.get("variables") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(names)) => names
+                .iter()
+                .map(|name| name.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(Problem::Name)?,
+            Some(_) => return Err(Problem::Name),
+        };
+        let env = match entry.get("env") {
+            None => BTreeMap::new(),
+            Some(serde_json::Value::Object(values)) => values
+                .iter()
+                .map(
+                    |(name, value)| match (is_variable_name(name), value.as_str()) {
+                        (false, _) => Err(Problem::Name),
+                        (true, None) => Err(Problem::Value(name.clone())),
+                        (true, Some(value)) => Ok((name.clone(), value.to_string())),
+                    },
+                )
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(Problem::Env),
+        };
+        let reads = match entry.get("reads") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(files)) => files
+                .iter()
+                .map(|file| file.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(Problem::Reads)?,
+            Some(_) => return Err(Problem::Reads),
+        };
+        let directory = match entry.get("directory") {
+            None => None,
+            Some(serde_json::Value::String(directory)) => Some(directory.clone()),
+            Some(_) => return Err(Problem::Directory),
+        };
+        let allowed_hosts = hosts_in(entry)?;
+        let choices = match entry.get("choice_arguments") {
+            None => ChoiceArguments::new(),
+            Some(serde_json::Value::Object(by_tool)) => by_tool
+                .iter()
+                .map(|(tool, arguments)| {
+                    let names = arguments.as_array().ok_or(Problem::Choice)?;
+                    let names = names
+                        .iter()
+                        .map(|name| name.as_str().map(str::to_string))
+                        .collect::<Option<BTreeSet<_>>>()
+                        .ok_or(Problem::Choice)?;
+                    Ok((tool.clone(), names))
+                })
+                .collect::<Result<_, Problem>>()?,
+            Some(_) => return Err(Problem::Choice),
+        };
+        Ok(Self::stdio(argv, variables, directory)?
+            .storing(env)?
+            .reading(reads)?
+            .hosting(allowed_hosts)?
+            .filtering(tools, exclude_tools)?
+            .asking_every_call(ask_every_call)
+            .choosing(choices)?
+            .timing(timeouts))
+    }
+}
+
+/// The names whose stored value is added, changed or removed between `env` and `other`.
+fn changed_values(env: &BTreeMap<String, String>, other: &BTreeMap<String, String>) -> Vec<String> {
+    env.keys()
+        .chain(other.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| env.get(*name) != other.get(*name))
+        .cloned()
+        .collect()
+}
+
+/// The list of hosts an entry writes, where it writes one. Each is checked when it is given to
+/// [`Declaration::hosting`].
+fn hosts_in(
+    entry: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<Vec<String>>, Problem> {
+    match entry.get("allowed_hosts") {
+        None => Ok(None),
+        Some(serde_json::Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| entry.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .map(Some)
+            .ok_or_else(|| Problem::Hosts(String::new())),
+        Some(_) => Err(Problem::Hosts(String::new())),
+    }
+}
+
+/// Validate and deduplicate tool filter names.
+fn tool_filters(names: Vec<String>, _key: &'static str) -> Result<Vec<String>, Problem> {
+    let mut kept: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        if !is_tool_filter_name(&name) {
+            return Err(Problem::Tool(name));
+        }
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+    }
+    Ok(kept)
+}
+
+/// A program to run is a non-empty argument vector whose first word is not blank.
+fn program(argv: &[String]) -> Result<(), Problem> {
+    match argv.first() {
+        Some(program) if !program.trim().is_empty() => Ok(()),
+        _ => Err(Problem::Program),
+    }
+}
+
+/// The names, each checked and each kept once.
+///
+/// `NAME=value` is not a name, and is refused as one that is not, so nothing repeats its value.
+fn names(variables: Vec<String>) -> Result<Vec<String>, Problem> {
+    let mut kept: Vec<String> = Vec::with_capacity(variables.len());
+    for name in variables {
+        if !is_variable_name(&name) {
+            return Err(Problem::Name);
+        }
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+    }
+    Ok(kept)
+}
+
+/// A directory to run in is an absolute path.
+///
+/// Absolute because a relative one would be relative to wherever a session happened to start, and
+/// the digest would then bind to a spelling rather than to a place.
+fn absolute(directory: &str) -> Result<(), Problem> {
+    match Path::new(directory).is_absolute() {
+        true => Ok(()),
+        false => Err(Problem::Directory),
+    }
+}
+
+/// A url to reach a server at: `http` or `https`, a host, a port where it writes one that is a
+/// number up to 65535, and no user or password.
+///
+/// A `:` with no port after it, or with something else, is refused. The client connects to the
+/// scheme's default there, which is not the socket the url spells.
+///
+/// No credential in the url: the url is drawn wherever the declaration is, at the question and in
+/// `get`, so a token written into it is a token on the screen. A stored value is drawn only where it
+/// names a file the server may read, since that read is a grant.
+fn remote(url: &str) -> Result<(), Problem> {
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Problem::Url);
+    }
+    let rest = ["http://", "https://"]
+        .iter()
+        .find_map(|scheme| {
+            url.get(..scheme.len())
+                .filter(|head| head.eq_ignore_ascii_case(scheme))
+                .map(|_| &url[scheme.len()..])
+        })
+        .ok_or(Problem::Url)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(Problem::Credentials);
+    }
+    let (host, _) = crate::provider::host_and_port(authority).map_err(|_| Problem::Url)?;
+    match host.is_empty() {
+        true => Err(Problem::Url),
+        false => Ok(()),
+    }
+}
+
+/// What an approval binds to: SHA-256 over the digested form of a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Digest([u8; 32]);
+
+impl Digest {
+    /// The digest a line of the approvals file spells, or `None` for a line that spells none.
+    pub fn parse(hex: &str) -> Option<Self> {
+        let hex = hex.as_bytes();
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (byte, pair) in bytes.iter_mut().zip(hex.chunks(2)) {
+            let pair = std::str::from_utf8(pair).ok()?;
+            if !pair.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            *byte = u8::from_str_radix(pair, 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+
+    /// The first eight hex characters, which is what a prompt shows.
+    pub fn short(&self) -> String {
+        self.to_string()[..8].to_string()
+    }
+}
+
+impl std::fmt::Display for Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+/// Why the declarations file cannot be read, and so cannot be rewritten either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unreadable {
+    /// Larger than a declarations file has any reason to be.
+    TooLarge,
+    /// There, and not readable as text.
+    NotRead,
+    /// Not JSON.
+    NotJson,
+    /// JSON, and the root is not an object.
+    NotAnObject,
+    /// `servers` is there and is not an object.
+    Servers,
+    /// The root holds a key other than `servers`, as the file spelled it.
+    Key(String),
+}
+
+/// One alias and what its entry states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub alias: String,
+    pub declaration: Result<Declaration, Problem>,
+}
+
+/// The declarations file, as it is written.
+///
+/// Held as the entries the file had rather than as the declarations read out of them, so an entry
+/// this cannot use is written back as it was when another one changes. Its `Debug` names the
+/// aliases alone, since an entry holds the values stored for it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Declarations {
+    servers: serde_json::Map<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for Declarations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.servers.keys()).finish()
+    }
+}
+
+impl Declarations {
+    /// Read the declarations in a state directory. No file is no declarations.
+    pub fn read(home: &Path) -> Result<Self, Unreadable> {
+        let path = declarations_file(home);
+        match std::fs::metadata(&path) {
+            Ok(found) if found.len() > MAX_BYTES => return Err(Unreadable::TooLarge),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(_) => return Err(Unreadable::NotRead),
+        }
+        let text = std::fs::read_to_string(&path).map_err(|_| Unreadable::NotRead)?;
+        Self::parse(&text)
+    }
+
+    /// Read declarations out of the file's text.
+    pub fn parse(text: &str) -> Result<Self, Unreadable> {
+        let root = match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Object(root)) => root,
+            Ok(_) => return Err(Unreadable::NotAnObject),
+            Err(_) => return Err(Unreadable::NotJson),
+        };
+        if let Some(key) = root.keys().find(|key| *key != "servers") {
+            return Err(Unreadable::Key(key.clone()));
+        }
+        match root.get("servers") {
+            None => Ok(Self::default()),
+            Some(serde_json::Value::Object(servers)) => Ok(Self {
+                servers: servers.clone(),
+            }),
+            Some(_) => Err(Unreadable::Servers),
+        }
+    }
+
+    /// Every entry, by alias, with what each states or what is wrong with it.
+    pub fn entries(&self) -> Vec<Entry> {
+        self.servers
+            .iter()
+            .map(|(alias, value)| entry(alias, value))
+            .collect()
+    }
+
+    /// The entry for one alias, where the file has one.
+    pub fn get(&self, alias: &str) -> Option<Entry> {
+        self.servers.get(alias).map(|value| entry(alias, value))
+    }
+
+    /// Declare `alias`, replacing whatever the file said about it.
+    pub fn insert(&mut self, alias: &str, declaration: &Declaration) {
+        self.servers
+            .insert(alias.to_string(), declaration.to_value());
+    }
+
+    /// Take `alias` out, whatever its entry says. Whether there was one.
+    pub fn remove(&mut self, alias: &str) -> bool {
+        self.servers.remove(alias).is_some()
+    }
+
+    /// The digest of every entry that states a declaration.
+    pub fn digests(&self) -> BTreeSet<Digest> {
+        self.entries()
+            .into_iter()
+            .filter_map(|entry| entry.declaration.ok())
+            .map(|declaration| declaration.digest())
+            .collect()
+    }
+
+    /// The file's text.
+    pub fn to_text(&self) -> String {
+        let root = serde_json::json!({ "servers": self.servers });
+        let mut text = serde_json::to_string_pretty(&root).unwrap_or_default();
+        text.push('\n');
+        text
+    }
+}
+
+/// One alias's entry, read. An alias that is not one is the problem before anything in its entry.
+fn entry(alias: &str, value: &serde_json::Value) -> Entry {
+    let declaration = match is_alias(alias) {
+        true => Declaration::from_value(value),
+        false => Err(Problem::Alias),
+    };
+    Entry {
+        alias: alias.to_string(),
+        declaration,
+    }
+}
+
+/// The digests the person approved, each with the aliases it was approved under, and the aliases
+/// whose approved declaration has changed since.
+///
+/// A line that spells neither is passed over rather than refused, and an unreadable file approves
+/// nothing, which is the direction to be wrong in: a server nobody can show was approved is asked
+/// about again.
+///
+/// ```text
+/// 4f1c9a2e...  weather
+/// changed docs
+/// ```
+///
+/// The alias is not what was approved: [`Approvals::approves`] asks about a digest and nothing else,
+/// for the reason [`Declaration::digest`] leaves the alias out. It is kept so a session can tell a
+/// server nobody has been asked about from one that changed since somebody answered, which a
+/// project path recorded by answer 2 may pre-answer and this may not (SERVERS-5).
+///
+/// A `tools` line, which an earlier version wrote as a vouch for a tool list, is passed over and
+/// dropped the next time the file is written: a list is asked about every session (SERVERS-8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Approvals {
+    approved: BTreeMap<Digest, BTreeSet<String>>,
+    changed: BTreeSet<String>,
+}
+
+/// The word a line recording a changed declaration starts with.
+const CHANGED: &str = "changed";
+
+impl Approvals {
+    /// Read the approvals in a state directory.
+    pub fn read(home: &Path) -> Self {
+        bounded(&approvals_file(home))
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Read the approvals to change and write back, refusing a file that is there and unreadable.
+    pub fn to_change(home: &Path) -> Result<Self, Unreadable> {
+        to_change(&approvals_file(home)).map(|text| Self::parse(&text))
+    }
+
+    /// Read approvals out of the file's text.
+    ///
+    /// A digest alone on its line is an approval under no alias, which is how the file was written
+    /// before an alias was kept beside one.
+    pub fn parse(text: &str) -> Self {
+        let mut approvals = Self::default();
+        for line in text.lines() {
+            let words: Vec<&str> = line.split_whitespace().take(4).collect();
+            match words.as_slice() {
+                [CHANGED, alias] if is_alias(alias) => {
+                    approvals.changed.insert(alias.to_string());
+                }
+                [hex, alias @ ..] if alias.len() <= 1 && alias.iter().all(|a| is_alias(a)) => {
+                    let Some(digest) = Digest::parse(hex) else {
+                        continue;
+                    };
+                    let aliases = approvals.approved.entry(digest).or_default();
+                    aliases.extend(alias.iter().map(|alias| alias.to_string()));
+                }
+                _ => {}
+            }
+        }
+        approvals
+    }
+
+    /// Whether this digest was approved.
+    pub fn approves(&self, digest: &Digest) -> bool {
+        self.approved.contains_key(digest)
+    }
+
+    /// Whether `alias` was approved as something other than `digest`, so the declaration it names
+    /// now is one the person has not seen.
+    pub fn changed(&self, alias: &str, digest: &Digest) -> bool {
+        !self.approves(digest)
+            && (self.changed.contains(alias)
+                || self
+                    .approved
+                    .values()
+                    .any(|aliases| aliases.contains(alias)))
+    }
+
+    /// Record an approval of this digest, given about `alias`.
+    pub fn approve(&mut self, alias: &str, digest: Digest) {
+        self.approved
+            .entry(digest)
+            .or_default()
+            .insert(alias.to_string());
+        self.changed.remove(alias);
+    }
+
+    /// Keep only the approvals a declaration still resolves to, each under the aliases that resolve
+    /// to it, and record every alias whose approved declaration has changed.
+    ///
+    /// An approval outliving its declaration is a digest nothing resolves, and one that would answer
+    /// for a declaration written back to exactly what it was, unseen. So a changed declaration's old
+    /// digest is dropped here, and what is kept of it is that its alias changed, which approves
+    /// nothing. Called whenever the declarations are rewritten, so the two files agree about what
+    /// is approved.
+    pub fn keep_only(&mut self, declarations: &Declarations) {
+        let mut kept = Self::default();
+        for Entry { alias, declaration } in declarations.entries() {
+            let digest = declaration.as_ref().ok().map(Declaration::digest);
+            match digest {
+                Some(digest) if self.approves(&digest) => {
+                    kept.approved.entry(digest).or_default().insert(alias);
+                }
+                _ if self.changed.contains(&alias)
+                    || self
+                        .approved
+                        .values()
+                        .any(|aliases| aliases.contains(&alias)) =>
+                {
+                    kept.changed.insert(alias);
+                }
+                _ => {}
+            }
+        }
+        *self = kept;
+    }
+
+    /// The file's text, one approval per line, then one changed alias per line.
+    pub fn to_text(&self) -> String {
+        let mut text = String::new();
+        for (digest, aliases) in &self.approved {
+            match aliases.is_empty() {
+                true => text.push_str(&format!("{digest}\n")),
+                false => {
+                    for alias in aliases {
+                        text.push_str(&format!("{digest} {alias}\n"));
+                    }
+                }
+            }
+        }
+        for alias in &self.changed {
+            text.push_str(&format!("{CHANGED} {alias}\n"));
+        }
+        text
+    }
+}
+
+/// The projects in which answer 2 said to use every future server, one path per line.
+///
+/// Pre-answers [SERVERS-4]'s question for a server a checkout in one of these requested, and
+/// nothing else: not a capability, not a call, not a server whose declaration changed since it was
+/// approved. A line that is not an absolute path is passed over.
+///
+/// [SERVERS-4]: ../../../docs/specs/mcp-servers.md#SERVERS-4
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Projects {
+    paths: BTreeSet<PathBuf>,
+}
+
+impl Projects {
+    /// Read the projects recorded in a state directory.
+    pub fn read(home: &Path) -> Self {
+        bounded(&projects_file(home))
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Read the projects to change and write back, refusing a file that is there and unreadable.
+    pub fn to_change(home: &Path) -> Result<Self, Unreadable> {
+        to_change(&projects_file(home)).map(|text| Self::parse(&text))
+    }
+
+    /// Read projects out of the file's text.
+    pub fn parse(text: &str) -> Self {
+        Self {
+            paths: text
+                .lines()
+                .map(Path::new)
+                .filter(|path| path.is_absolute())
+                .map(Path::to_path_buf)
+                .collect(),
+        }
+    }
+
+    /// Whether `project` was recorded, as the path it was recorded as.
+    pub fn contains(&self, project: &Path) -> bool {
+        self.paths.contains(project)
+    }
+
+    /// Record `project`, where it is a path a line can hold. Whether it was recorded.
+    pub fn add(&mut self, project: &Path) -> bool {
+        let writable = project.is_absolute()
+            && project
+                .to_str()
+                .is_some_and(|text| !text.contains(['\n', '\r']));
+        if writable {
+            self.paths.insert(project.to_path_buf());
+        }
+        writable
+    }
+
+    /// Drop `project`. Whether it was recorded.
+    pub fn remove(&mut self, project: &Path) -> bool {
+        self.paths.remove(project)
+    }
+
+    /// The file's text.
+    pub fn to_text(&self) -> String {
+        self.paths
+            .iter()
+            .filter_map(|path| path.to_str())
+            .map(|path| format!("{path}\n"))
+            .collect()
+    }
+}
+
+/// One tool answer 2 was given about at a call: the alias, the tool's word, and the project.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StandingAnswer {
+    alias: String,
+    tool: String,
+    project: PathBuf,
+}
+
+/// The tools a person said to stop asking about, each in the one project they said it in.
+///
+/// ```text
+/// weather get_current_conditions /Users/someone/work/app
+/// ```
+///
+/// Removes the default question for that one tool of that one server in that one project, and
+/// nothing else: not another tool, not the same tool elsewhere, not a rule a person wrote, and not
+/// a call carrying private data (SERVERS-7). The path is the rest of the line, so a project whose
+/// path has a space in it is recorded whole. A line naming no alias, no tool word or no absolute
+/// path is passed over.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Standing {
+    answers: BTreeSet<StandingAnswer>,
+}
+
+impl Standing {
+    /// Read the standing answers recorded in a state directory.
+    pub fn read(home: &Path) -> Self {
+        bounded(&tools_file(home))
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Read the standing answers to change and write back, refusing a file that is there and
+    /// unreadable.
+    pub fn to_change(home: &Path) -> Result<Self, Unreadable> {
+        to_change(&tools_file(home)).map(|text| Self::parse(&text))
+    }
+
+    /// Read standing answers out of the file's text.
+    pub fn parse(text: &str) -> Self {
+        let answers = text
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, ' ');
+                let (alias, tool, project) = (parts.next()?, parts.next()?, parts.next()?);
+                let project = Path::new(project);
+                (is_alias(alias) && is_tool_word(tool) && project.is_absolute()).then(|| {
+                    StandingAnswer {
+                        alias: alias.to_string(),
+                        tool: tool.to_string(),
+                        project: project.to_path_buf(),
+                    }
+                })
+            })
+            .collect();
+        Self { answers }
+    }
+
+    /// Whether answer 2 was given about this tool of this server in `project`.
+    pub fn covers(&self, alias: &str, tool: &str, project: &Path) -> bool {
+        self.answers
+            .iter()
+            .any(|answer| answer.alias == alias && answer.tool == tool && answer.project == project)
+    }
+
+    /// Record answer 2 about this tool in `project`, where a line can hold all three. Whether it
+    /// was recorded.
+    pub fn add(&mut self, alias: &str, tool: &str, project: &Path) -> bool {
+        let writable = is_alias(alias)
+            && is_tool_word(tool)
+            && project.is_absolute()
+            && project
+                .to_str()
+                .is_some_and(|text| !text.contains(['\n', '\r']));
+        if writable {
+            self.answers.insert(StandingAnswer {
+                alias: alias.to_string(),
+                tool: tool.to_string(),
+                project: project.to_path_buf(),
+            });
+        }
+        writable
+    }
+
+    /// Drop every answer given in `project`. How many there were.
+    pub fn forget(&mut self, project: &Path) -> usize {
+        let before = self.answers.len();
+        self.answers.retain(|answer| answer.project != project);
+        before - self.answers.len()
+    }
+
+    /// The tools answered for in `project`, as `alias:tool`, in order.
+    pub fn in_project(&self, project: &Path) -> Vec<String> {
+        self.answers
+            .iter()
+            .filter(|answer| answer.project == project)
+            .map(|answer| format!("{}:{}", answer.alias, answer.tool))
+            .collect()
+    }
+
+    /// The file's text.
+    pub fn to_text(&self) -> String {
+        self.answers
+            .iter()
+            .filter_map(|answer| {
+                let project = answer.project.to_str()?;
+                Some(format!("{} {} {project}\n", answer.alias, answer.tool))
+            })
+            .collect()
+    }
+}
+
+/// A small file's text, or `None` for one that is missing, too large, or not text.
+fn bounded(path: &Path) -> Option<String> {
+    match std::fs::metadata(path) {
+        Ok(found) if found.len() <= MAX_BYTES => std::fs::read_to_string(path).ok(),
+        _ => None,
+    }
+}
+
+/// A record's text, to be changed and written back: nothing where there is no file yet, and an
+/// error where there is one this cannot read, which written over would lose every line it holds.
+fn to_change(path: &Path) -> Result<String, Unreadable> {
+    match std::fs::metadata(path) {
+        Ok(found) if found.len() > MAX_BYTES => Err(Unreadable::TooLarge),
+        Ok(_) => std::fs::read_to_string(path).map_err(|_| Unreadable::NotRead),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(_) => Err(Unreadable::NotRead),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// A directory that is absolute on the platform the test runs on, which `/srv` is not on Windows.
+    fn somewhere() -> String {
+        env!("CARGO_MANIFEST_DIR").to_string()
+    }
+
+    fn weather() -> Declaration {
+        Declaration::stdio(
+            words(&["npx", "-y", "@dangahagan/weather-mcp@latest"]),
+            words(&["PATH"]),
+            None,
+        )
+        .expect("a declaration")
+    }
+
+    #[test]
+    fn a_digest_covers_the_program_every_argument_the_names_and_the_directory() {
+        let approved = weather().digest();
+        let changed = [
+            Declaration::stdio(
+                words(&["npx", "-y", "@dangahagan/weather-mcp@1.2.0"]),
+                words(&["PATH"]),
+                None,
+            ),
+            Declaration::stdio(
+                words(&["npx", "@dangahagan/weather-mcp@latest"]),
+                words(&["PATH"]),
+                None,
+            ),
+            Declaration::stdio(
+                words(&["npx", "-y", "@dangahagan/weather-mcp@latest"]),
+                words(&["PATH", "HOME"]),
+                None,
+            ),
+            Declaration::stdio(
+                words(&["npx", "-y", "@dangahagan/weather-mcp@latest"]),
+                words(&["PATH"]),
+                Some(somewhere()),
+            ),
+            Declaration::http("https://weather.example.com/mcp".into()),
+        ];
+        for declaration in changed {
+            let declaration = declaration.expect("a declaration");
+            assert_ne!(
+                declaration.digest(),
+                approved,
+                "{declaration:?} digests as the approved declaration does"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_storing_no_value_digests_as_it_did_before_values_could_be_stored() {
+        assert_eq!(
+            weather().digest().to_string(),
+            "25edc5e806956f3254b5ff2b116f1c07ae5ad8d4a5df00f6d15c0f8aadfec43f"
+        );
+    }
+
+    #[test]
+    fn two_arguments_digest_apart_from_one_holding_the_same_characters() {
+        let two = Declaration::stdio(words(&["run", "a", "b"]), Vec::new(), None).unwrap();
+        let one = Declaration::stdio(words(&["run", "a b"]), Vec::new(), None).unwrap();
+        assert_ne!(two.digest(), one.digest());
+    }
+
+    #[test]
+    fn a_digest_is_the_same_whatever_the_alias_or_the_order_of_the_names() {
+        let mut first = Declarations::default();
+        first.insert(
+            "weather",
+            &Declaration::stdio(words(&["server"]), words(&["PATH", "HOME"]), None).unwrap(),
+        );
+        let mut second = Declarations::default();
+        second.insert(
+            "forecast",
+            &Declaration::stdio(words(&["server"]), words(&["HOME", "PATH"]), None).unwrap(),
+        );
+        assert_eq!(first.digests(), second.digests());
+    }
+
+    fn reaching(hosts: Option<&[&str]>) -> Declaration {
+        weather()
+            .hosting(hosts.map(words))
+            .expect("a declaration with a host list")
+    }
+
+    /// SERVERS-5: a list of hosts is part of what an approval binds to, so adding one, changing it
+    /// or emptying it asks again, an empty list is not no list, and the order written is not read.
+    #[test]
+    fn a_host_list_is_part_of_the_digest_and_an_empty_list_is_not_no_list() {
+        let approved = reaching(Some(&["api.weather.example"])).digest();
+        for changed in [
+            reaching(None),
+            reaching(Some(&[])),
+            reaching(Some(&["api.weather.example", "cdn.weather.example"])),
+            reaching(Some(&["*.weather.example"])),
+        ] {
+            assert_ne!(changed.digest(), approved, "{changed:?}");
+        }
+        assert_ne!(reaching(Some(&[])).digest(), reaching(None).digest());
+        assert_eq!(
+            reaching(Some(&["b.example", "a.example", "B.example"])).digest(),
+            reaching(Some(&["a.example", "b.example"])).digest()
+        );
+        assert_eq!(reaching(None).digest(), weather().digest());
+    }
+
+    #[test]
+    fn a_host_list_names_the_field_that_changed_and_survives_the_file() {
+        let before = reaching(Some(&["a.example"]));
+        let after = reaching(Some(&["a.example", "b.example"]));
+        assert_eq!(before.changes(&after), vec![Field::AllowedHosts]);
+        assert_eq!(before.changes(&reaching(None)), vec![Field::AllowedHosts]);
+        assert!(
+            reaching(Some(&["b.example", "a.example"]))
+                .changes(&reaching(Some(&["a.example", "b.example"])))
+                .is_empty()
+        );
+        for declaration in [after, reaching(Some(&[])), reaching(None)] {
+            let written = declaration.to_value();
+            let read = Declaration::from_value(&written).expect("what was written reads back");
+            assert_eq!(read, declaration);
+            assert_eq!(read.allowed_hosts(), declaration.allowed_hosts());
+        }
+    }
+
+    #[test]
+    fn a_host_list_holds_only_hosts_and_belongs_to_a_local_server() {
+        for entry in [
+            "*",
+            "a.*.example",
+            "*example.com",
+            "https://a.example",
+            "a b",
+            "",
+        ] {
+            assert_eq!(
+                weather().hosting(Some(words(&[entry]))).unwrap_err(),
+                Problem::Hosts(entry.to_string()),
+                "{entry:?}"
+            );
+        }
+        let remote = Declaration::http("https://weather.example.com/mcp".into()).unwrap();
+        assert_eq!(
+            remote.hosting(Some(Vec::new())).unwrap_err(),
+            Problem::Remote("allowed_hosts")
+        );
+        let in_a_file = |hosts: serde_json::Value| {
+            Declaration::from_value(&serde_json::json!({
+                "transport": "stdio", "argv": ["server"], "allowed_hosts": hosts
+            }))
+        };
+        assert_eq!(
+            in_a_file(serde_json::json!("a.example")).unwrap_err(),
+            Problem::Hosts(String::new())
+        );
+        assert_eq!(
+            in_a_file(serde_json::json!([1])).unwrap_err(),
+            Problem::Hosts(String::new())
+        );
+        assert_eq!(
+            Declaration::from_value(&serde_json::json!({
+                "transport": "http", "url": "https://a.example/mcp", "allowed_hosts": []
+            }))
+            .unwrap_err(),
+            Problem::Remote("allowed_hosts")
+        );
+    }
+
+    fn stored(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_value_is_stored_under_its_name_and_one_written_as_a_name_is_refused_unrepeated() {
+        let declaration = Declaration::stdio(words(&["server"]), words(&["PATH"]), None)
+            .unwrap()
+            .storing(stored(&[("WEATHER_TOKEN", "sk-live-0123456789")]))
+            .unwrap();
+        assert_eq!(
+            declaration.stored().collect::<Vec<_>>(),
+            vec!["WEATHER_TOKEN"]
+        );
+        assert_eq!(declaration.variables(), ["PATH"]);
+
+        let refused = Declaration::stdio(
+            words(&["server"]),
+            words(&["WEATHER_TOKEN=sk-live-0123456789"]),
+            None,
+        );
+        assert_eq!(refused, Err(Problem::Name));
+        assert!(!format!("{refused:?}").contains("sk-live"));
+    }
+
+    #[test]
+    fn an_env_block_is_stored_values_and_an_object_of_variables_is_not_a_list_of_names() {
+        let text = r#"{"servers": {"weather": {"transport": "stdio", "argv": ["server"], "env": {"TOKEN": "sk-live"}}}}"#;
+        let entry = Declarations::parse(text).unwrap().get("weather").unwrap();
+        assert_eq!(
+            entry.declaration,
+            Declaration::stdio(words(&["server"]), Vec::new(), None)
+                .unwrap()
+                .storing(stored(&[("TOKEN", "sk-live")]))
+        );
+
+        let text = r#"{"servers": {"weather": {"transport": "stdio", "argv": ["server"], "variables": {"TOKEN": "sk-live"}}}}"#;
+        let entry = Declarations::parse(text).unwrap().get("weather").unwrap();
+        assert_eq!(entry.declaration, Err(Problem::Name));
+        assert!(!format!("{:?}", entry.declaration).contains("sk-live"));
+    }
+
+    #[test]
+    fn a_stored_value_no_environment_could_hold_or_a_second_answer_is_refused_by_its_name() {
+        let plain = || Declaration::stdio(words(&["server"]), words(&["PATH"]), None).unwrap();
+        assert_eq!(
+            plain().storing(stored(&[("TOKEN", "sk-live\0tail")])),
+            Err(Problem::Value("TOKEN".into()))
+        );
+        assert_eq!(
+            plain().storing(stored(&[("PATH", "/usr/bin")])),
+            Err(Problem::Twice("PATH".into()))
+        );
+        assert_eq!(
+            plain().storing(stored(&[("sk-live", "TOKEN")])),
+            Err(Problem::Name)
+        );
+        assert!(plain().storing(stored(&[("EMPTY", "")])).is_ok());
+
+        for (entry, problem) in [
+            (r#""env": {"TOKEN": 5}"#, Problem::Value("TOKEN".into())),
+            (r#""env": {"sk-live": "x"}"#, Problem::Name),
+            (r#""env": ["TOKEN=sk-live"]"#, Problem::Env),
+            (r#""reads": ["keys/weather"]"#, Problem::Reads),
+            (r#""reads": "/keys/weather""#, Problem::Reads),
+            (
+                r#""variables": ["TOKEN"], "env": {"TOKEN": "x"}"#,
+                Problem::Twice("TOKEN".into()),
+            ),
+        ] {
+            let text = format!(
+                r#"{{"servers": {{"weather": {{"transport": "stdio", "argv": ["server"], {entry}}}}}}}"#
+            );
+            let parsed = Declarations::parse(&text).unwrap();
+            assert_eq!(
+                parsed.get("weather").unwrap().declaration,
+                Err(problem),
+                "{entry}"
+            );
+        }
+    }
+
+    /// SERVERS-10: a stored value is debugged by its name and never as itself, as a declaration, as
+    /// the entry the file holds and as the file, so none reaches a log or a panic.
+    #[test]
+    fn a_stored_value_is_debugged_by_its_name_alone() {
+        let declaration = weather()
+            .storing(stored(&[("WEATHER_TOKEN", "hunter2-token")]))
+            .expect("a declaration");
+        let mut file = Declarations::default();
+        file.insert("weather", &declaration);
+        let entry = file.get("weather").expect("the entry");
+        for (debugged, named) in [
+            (format!("{declaration:?}"), "WEATHER_TOKEN"),
+            (format!("{declaration:#?}"), "WEATHER_TOKEN"),
+            (format!("{entry:?}"), "WEATHER_TOKEN"),
+            (format!("{file:?}"), "weather"),
+        ] {
+            assert!(debugged.contains(named), "{debugged}");
+            assert!(!debugged.contains("hunter2"), "{debugged}");
+        }
+    }
+
+    #[test]
+    fn a_digest_covers_every_stored_value_and_every_file_it_may_read() {
+        let storing = |pairs: &[(&str, &str)], reads: &[&str]| {
+            weather()
+                .storing(stored(pairs))
+                .and_then(|declaration| declaration.reading(words(reads)))
+                .expect("a declaration")
+        };
+        let key = somewhere();
+        let other = Path::new(&key).join("other").display().to_string();
+        let approved = storing(&[("KEY_FILE", &key)], &[&key]).digest();
+        for changed in [
+            weather(),
+            storing(&[("KEY_FILE", &other)], &[&key]),
+            storing(&[("KEY_PATH", &key)], &[&key]),
+            storing(&[("KEY_FILE", &key), ("REGION", "eu")], &[&key]),
+            storing(&[("KEY_FILE", &key)], &[]),
+            storing(&[("KEY_FILE", &key)], &[&key, &other]),
+        ] {
+            assert_ne!(changed.digest(), approved, "{changed:?}");
+        }
+        assert_eq!(
+            storing(&[], &[&key, &other]).digest(),
+            storing(&[], &[&other, &key]).digest(),
+            "the files are a set, whatever order they were found in"
+        );
+        assert_ne!(storing(&[], &[&key]).digest(), weather().digest());
+    }
+
+    #[test]
+    fn a_name_that_is_not_one_is_refused() {
+        for name in ["", "1PATH", "MY-NAME", "A B", "=value"] {
+            assert_eq!(
+                Declaration::stdio(words(&["server"]), words(&[name]), None),
+                Err(Problem::Name),
+                "{name:?} was taken for a name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_carrying_a_user_or_a_password_is_refused() {
+        for url in [
+            "https://token@weather.example.com/mcp",
+            "https://user:secret@weather.example.com/mcp",
+        ] {
+            assert_eq!(
+                Declaration::http(url.into()),
+                Err(Problem::Credentials),
+                "{url}"
+            );
+        }
+        assert!(Declaration::http("https://weather.example.com/mcp?to=a@b".into()).is_ok());
+    }
+
+    #[test]
+    fn a_url_is_http_or_https_with_a_host() {
+        for url in [
+            "ftp://weather.example.com",
+            "https://",
+            "https:///mcp",
+            "https://:8080/mcp",
+            "weather.example.com",
+            "https://weather example.com",
+        ] {
+            assert_eq!(Declaration::http(url.into()), Err(Problem::Url), "{url}");
+        }
+        for url in [
+            "http://127.0.0.1:8080/mcp",
+            "HTTPS://Weather.Example.com",
+            "http://[::1]:9000",
+        ] {
+            assert!(Declaration::http(url.into()).is_ok(), "{url}");
+        }
+    }
+
+    /// The client connects to the scheme's default where a url writes a `:` and no port after it,
+    /// or one that is not a number up to 65535. A declaration like that would name a socket other
+    /// than the one it spells, and the person approving it would have read the wrong one.
+    #[test]
+    fn a_url_writing_a_port_that_is_not_one_is_refused() {
+        for url in [
+            "http://127.0.0.1:/mcp",
+            "https://127.0.0.1:/mcp",
+            "http://h:",
+            "http://h:?x=1",
+            "http://h:abc/mcp",
+            "http://h:99999/mcp",
+            "http://h:65536/mcp",
+            "http://h:+80/mcp",
+            "http://h:-80/mcp",
+            "http://h:80:90/mcp",
+            "http://[::1]:/mcp",
+            "http://[::1]:abc/mcp",
+            "http://[::1]:99999/mcp",
+            "http://[::1]8080/mcp",
+            "http://[::1/mcp",
+        ] {
+            assert_eq!(Declaration::http(url.into()), Err(Problem::Url), "{url}");
+        }
+        for url in [
+            "http://h/mcp",
+            "http://h:8080/mcp",
+            "http://h:0080/mcp",
+            "http://h:65535/mcp",
+            "http://h:80?x=1",
+            "http://[::1]/mcp",
+            "http://[::1]:65535/mcp",
+        ] {
+            assert!(Declaration::http(url.into()).is_ok(), "{url}");
+        }
+    }
+
+    /// A file an earlier version wrote can hold a url with a `:` and no port. The entry is no longer
+    /// a declaration, and it is listed with that and kept as it was written, so that editing the
+    /// url in the file is the way forward and nothing the person wrote is lost.
+    #[test]
+    fn a_stored_url_with_a_colon_and_no_port_is_reported_and_kept_as_written() {
+        let stored = r#"{"transport": "http", "url": "https://weather.example.com:/mcp"}"#;
+        let text = format!(r#"{{"servers": {{"weather": {stored}}}}}"#);
+        let mut declarations = Declarations::parse(&text).unwrap();
+        assert_eq!(
+            declarations.get("weather").unwrap().declaration,
+            Err(Problem::Url)
+        );
+
+        let other = Declaration::http("https://other.example.com".into()).unwrap();
+        declarations.insert("other", &other);
+        let rewritten = Declarations::parse(&declarations.to_text()).unwrap();
+        assert_eq!(
+            rewritten.servers.get("weather"),
+            Some(&serde_json::from_str::<serde_json::Value>(stored).unwrap())
+        );
+        assert_eq!(rewritten.get("other").unwrap().declaration, Ok(other));
+    }
+
+    #[test]
+    fn a_directory_is_absolute() {
+        assert_eq!(
+            Declaration::stdio(words(&["server"]), Vec::new(), Some("srv/weather".into())),
+            Err(Problem::Directory)
+        );
+    }
+
+    #[test]
+    fn a_remote_server_takes_no_variables_values_reads_or_directory() {
+        let text = r#"{"servers": {
+            "a": {"transport": "http", "url": "https://a.example.com", "variables": ["PATH"]},
+            "b": {"transport": "http", "url": "https://b.example.com", "directory": "/srv"},
+            "c": {"transport": "http", "url": "https://c.example.com", "env": {"TOKEN": "x"}},
+            "d": {"transport": "http", "url": "https://d.example.com", "reads": ["/srv/key"]}}}"#;
+        let declarations = Declarations::parse(text).unwrap();
+        for (alias, key) in [
+            ("a", "variables"),
+            ("b", "directory"),
+            ("c", "env"),
+            ("d", "reads"),
+        ] {
+            assert_eq!(
+                declarations.get(alias).unwrap().declaration,
+                Err(Problem::Remote(key))
+            );
+        }
+        let remote = || Declaration::http("https://a.example.com".into()).unwrap();
+        assert_eq!(
+            remote().storing(stored(&[("TOKEN", "x")])),
+            Err(Problem::Remote("env"))
+        );
+        assert_eq!(
+            remote().reading(words(&["/srv/key"])),
+            Err(Problem::Remote("reads"))
+        );
+    }
+
+    /// A declaration states its bounds in whole seconds under the keys the spec names, on either
+    /// transport, and what it states is what is read back and what is written back.
+    #[test]
+    fn declared_timeouts_are_read_written_and_kept_on_either_transport() {
+        let text = r#"{"servers": {
+            "local": {"transport": "stdio", "argv": ["server"], "startup_timeout_secs": 5, "tool_timeout_secs": 300},
+            "remote": {"transport": "http", "url": "https://a.example.com", "tool_timeout_secs": 9},
+            "plain": {"transport": "http", "url": "https://b.example.com"}}}"#;
+        let declarations = Declarations::parse(text).unwrap();
+        let timeouts = |alias: &str| {
+            declarations
+                .get(alias)
+                .unwrap()
+                .declaration
+                .unwrap()
+                .timeouts()
+        };
+
+        assert_eq!(timeouts("local").startup(), Duration::from_secs(5));
+        assert_eq!(timeouts("local").tool(), Duration::from_secs(300));
+        assert_eq!(
+            timeouts("remote").startup(),
+            Duration::from_secs(STARTUP_SECS)
+        );
+        assert_eq!(timeouts("remote").tool(), Duration::from_secs(9));
+        assert!(timeouts("plain").is_default());
+        assert_eq!(timeouts("plain").tool(), Duration::from_secs(TOOL_SECS));
+
+        let again = Declarations::parse(&declarations.to_text()).unwrap();
+        for alias in ["local", "remote", "plain"] {
+            assert_eq!(again.get(alias), declarations.get(alias), "{alias}");
+        }
+        let only_plain = Declarations::parse(
+            r#"{"servers": {"plain": {"transport": "http", "url": "https://b.example.com"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            !only_plain.to_text().contains("timeout"),
+            "a bound nobody gave was written"
+        );
+    }
+
+    /// A bound is a number of seconds from one to an hour, and anything else makes that entry a
+    /// problem naming the key, so a bound of nothing cannot be a call that fails at once.
+    #[test]
+    fn a_timeout_that_is_not_a_whole_number_of_seconds_in_range_is_a_problem() {
+        for value in ["0", "3601", "-1", "1.5", "\"60\"", "null"] {
+            let text = format!(
+                r#"{{"servers": {{"a": {{"transport": "http", "url": "https://a.example.com", "startup_timeout_secs": {value}}}}}}}"#
+            );
+            assert_eq!(
+                Declarations::parse(&text)
+                    .unwrap()
+                    .get("a")
+                    .unwrap()
+                    .declaration,
+                Err(Problem::Timeout("startup_timeout_secs")),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            Timeouts::new(None, Some(0)),
+            Err(Problem::Timeout("tool_timeout_secs"))
+        );
+        assert!(Timeouts::new(Some(MAX_TIMEOUT_SECS), Some(1)).is_ok());
+    }
+
+    /// A bound is a deadline this process keeps and grants nothing, so changing one leaves what an
+    /// approval binds to alone: the answer already given about the server still stands.
+    #[test]
+    fn a_timeout_is_not_part_of_what_an_approval_binds_to() {
+        let timed = weather().timing(Timeouts::new(Some(5), Some(500)).unwrap());
+
+        assert_eq!(timed.digest(), weather().digest());
+        assert_eq!(timed.changes(&weather()), Vec::new());
+        let remote = Declaration::http("https://a.example.com".into()).unwrap();
+        assert_eq!(
+            remote
+                .clone()
+                .timing(Timeouts::new(None, Some(5)).unwrap())
+                .digest(),
+            remote.digest()
+        );
+    }
+
+    #[test]
+    fn a_key_the_format_does_not_have_makes_that_entry_a_problem_and_no_other() {
+        let text = r#"{"servers": {
+            "weather": {"transport": "stdio", "argv": ["server"], "enabled": true},
+            "docs": {"transport": "http", "url": "https://docs.example.com/mcp"}}}"#;
+        let declarations = Declarations::parse(text).unwrap();
+        assert_eq!(
+            declarations.get("weather").unwrap().declaration,
+            Err(Problem::Key("enabled".into()))
+        );
+        assert!(declarations.get("docs").unwrap().declaration.is_ok());
+    }
+
+    #[test]
+    fn an_alias_that_could_not_name_a_tool_namespace_is_a_problem() {
+        for alias in ["", "weather:get", "-weather", "a b", &"a".repeat(65)] {
+            assert!(!is_alias(alias), "{alias:?} was taken for an alias");
+        }
+        let text = r#"{"servers": {"weather:get": {"transport": "stdio", "argv": ["server"]}}}"#;
+        let entry = Declarations::parse(text)
+            .unwrap()
+            .get("weather:get")
+            .unwrap();
+        assert_eq!(entry.declaration, Err(Problem::Alias));
+    }
+
+    #[test]
+    fn a_root_holding_more_than_servers_is_unreadable() {
+        assert_eq!(
+            Declarations::parse(r#"{"servers": {}, "mcpServers": {}}"#),
+            Err(Unreadable::Key("mcpServers".into()))
+        );
+        assert_eq!(
+            Declarations::parse(r#"{"servers": []}"#),
+            Err(Unreadable::Servers)
+        );
+        assert_eq!(Declarations::parse("[]"), Err(Unreadable::NotAnObject));
+        assert_eq!(Declarations::parse("{"), Err(Unreadable::NotJson));
+        assert_eq!(Declarations::parse("{}"), Ok(Declarations::default()));
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_used_is_written_back_as_it_was() {
+        let broken = r#"{"transport": "stdio", "argv": "npx -y weather-mcp"}"#;
+        let text = format!(r#"{{"servers": {{"broken": {broken}}}}}"#);
+        let mut declarations = Declarations::parse(&text).unwrap();
+        declarations.insert("weather", &weather());
+
+        let rewritten = Declarations::parse(&declarations.to_text()).unwrap();
+        assert_eq!(
+            rewritten.get("broken").unwrap().declaration,
+            Err(Problem::Program)
+        );
+        assert_eq!(
+            rewritten.servers.get("broken"),
+            Some(&serde_json::from_str::<serde_json::Value>(broken).unwrap())
+        );
+        assert_eq!(rewritten.get("weather").unwrap().declaration, Ok(weather()));
+    }
+
+    #[test]
+    fn a_written_declaration_reads_back_as_the_same_declaration() {
+        let declaration = Declaration::stdio(
+            words(&["uvx", "server", "--port", ""]),
+            words(&["PATH", "HOME"]),
+            Some(somewhere()),
+        )
+        .unwrap()
+        .storing(stored(&[("KEY_FILE", &somewhere()), ("EMPTY", "")]))
+        .unwrap()
+        .reading(vec![somewhere()])
+        .unwrap();
+        let mut declarations = Declarations::default();
+        declarations.insert("weather", &declaration);
+        let read = Declarations::parse(&declarations.to_text()).unwrap();
+        assert_eq!(read.get("weather").unwrap().declaration, Ok(declaration));
+    }
+
+    #[test]
+    fn what_changed_is_named_by_field() {
+        let pinned = Declaration::stdio(
+            words(&["npx", "-y", "@dangahagan/weather-mcp@1.2.0"]),
+            words(&["PATH"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(weather().changes(&pinned), vec![Field::Argv]);
+        let naming =
+            |names: &[&str]| Declaration::stdio(words(&["server"]), words(names), None).unwrap();
+        assert_eq!(
+            naming(&["PATH", "HOME"]).changes(&naming(&["HOME", "PATH"])),
+            Vec::new()
+        );
+        assert_eq!(
+            naming(&["PATH"]).changes(&naming(&["PATH", "HOME"])),
+            vec![Field::Variables]
+        );
+        let storing = |pairs: &[(&str, &str)]| naming(&[]).storing(stored(pairs)).unwrap();
+        assert_eq!(
+            storing(&[("KEY", "old"), ("REGION", "eu"), ("GONE", "x")]).changes(&storing(&[
+                ("KEY", "new"),
+                ("REGION", "eu"),
+                ("ADDED", "y")
+            ])),
+            vec![Field::Env(words(&["ADDED", "GONE", "KEY"]))]
+        );
+        let reading = |files: &[&str]| {
+            let files = files.iter().map(|file| format!("{}{file}", somewhere()));
+            naming(&[]).reading(files.collect()).unwrap()
+        };
+        assert_eq!(
+            reading(&["/a", "/b"]).changes(&reading(&["/b", "/a"])),
+            Vec::new()
+        );
+        assert_eq!(
+            reading(&["/a"]).changes(&reading(&["/b"])),
+            vec![Field::Reads]
+        );
+        let remote = Declaration::http("https://weather.example.com".into()).unwrap();
+        assert_eq!(weather().changes(&remote), vec![Field::Transport]);
+        let with_headers = remote
+            .clone()
+            .heading(
+                BTreeMap::from([("X-Key".into(), "KEY_VAR".into())]),
+                Some("TOKEN_VAR".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            remote.changes(&with_headers),
+            vec![Field::Headers(words(&["Authorization", "X-Key"]))]
+        );
+    }
+
+    #[test]
+    fn a_header_name_is_an_http_token() {
+        assert!(is_header_name("Authorization"));
+        assert!(is_header_name("X-Api-Key"));
+        assert!(is_header_name("content-type"));
+        assert!(is_header_name("Accept"));
+        assert!(is_header_name("custom_header"));
+        assert!(is_header_name("my-header.v1"));
+        for refused in [
+            "",
+            "header with spaces",
+            "header:colon",
+            "header/slash",
+            "header@at",
+            "header?query",
+            "header=value",
+            "non-ascii-é",
+            "\t",
+            "\n",
+        ] {
+            assert!(
+                !is_header_name(refused),
+                "{refused:?} was taken for a header token"
+            );
+        }
+    }
+
+    #[test]
+    fn http_headers_and_bearer_env_are_validated_digested_and_roundtripped() {
+        let remote = Declaration::http("https://api.example.com/mcp".into()).unwrap();
+
+        // Stdio rejects heading
+        assert_eq!(
+            weather().heading(BTreeMap::from([("X-Key".into(), "VAR".into())]), None,),
+            Err(Problem::Remote("env_http_headers"))
+        );
+
+        // Invalid header name
+        assert_eq!(
+            remote
+                .clone()
+                .heading(BTreeMap::from([("Bad:Header".into(), "VAR".into())]), None,),
+            Err(Problem::Header("Bad:Header".into()))
+        );
+
+        // Invalid env variable name
+        assert_eq!(
+            remote
+                .clone()
+                .heading(BTreeMap::from([("X-Key".into(), "BAD-VAR".into())]), None,),
+            Err(Problem::Name)
+        );
+
+        // Invalid bearer env variable name
+        assert_eq!(
+            remote
+                .clone()
+                .heading(BTreeMap::new(), Some("BAD-VAR".into()),),
+            Err(Problem::Name)
+        );
+
+        // Duplicate header under different casing
+        assert_eq!(
+            remote.clone().heading(
+                BTreeMap::from([
+                    ("X-Key".into(), "VAR1".into()),
+                    ("x-key".into(), "VAR2".into()),
+                ]),
+                None,
+            ),
+            Err(Problem::Twice("x-key".into()))
+        );
+
+        // Bearer env conflicting with Authorization header
+        assert_eq!(
+            remote.clone().heading(
+                BTreeMap::from([("authorization".into(), "AUTH_VAR".into())]),
+                Some("BEARER_VAR".into()),
+            ),
+            Err(Problem::Twice("Authorization".into()))
+        );
+
+        // Digest backward compatibility when no headers are declared
+        let legacy_json = serde_json::json!([DIGEST_FORM, "http", "https://api.example.com/mcp"]);
+        let expected_legacy = Digest(Sha256::digest(legacy_json.to_string().as_bytes()).into());
+        assert_eq!(remote.digest(), expected_legacy);
+
+        // Valid headers and bearer env
+        let configured = remote
+            .clone()
+            .heading(
+                BTreeMap::from([("X-Api-Key".into(), "API_KEY".into())]),
+                Some("BEARER_TOKEN".into()),
+            )
+            .unwrap();
+        assert_ne!(configured.digest(), remote.digest());
+        assert_eq!(configured.bearer_env(), Some("BEARER_TOKEN"));
+        assert_eq!(
+            configured.env_http_headers().collect::<Vec<_>>(),
+            [("X-Api-Key", "API_KEY")]
+        );
+
+        // JSON serialization and deserialization roundtrip
+        let mut declarations = Declarations::default();
+        declarations.insert("api", &configured);
+        let parsed = Declarations::parse(&declarations.to_text()).unwrap();
+        assert_eq!(parsed.get("api").unwrap().declaration, Ok(configured));
+    }
+
+    #[test]
+    fn a_digest_reads_back_from_the_line_it_is_written_as() {
+        let digest = weather().digest();
+        let approvals = Approvals::parse(&format!("not a digest\n{digest}\n\n"));
+        assert!(approvals.approves(&digest));
+        assert_eq!(approvals.to_text(), format!("{digest}\n"));
+        assert_eq!(digest.short(), digest.to_string()[..8]);
+        assert_eq!(Digest::parse(&digest.short()), None);
+    }
+
+    #[test]
+    fn an_approval_reads_back_with_the_alias_it_was_given_about() {
+        let digest = weather().digest();
+        let mut approvals = Approvals::default();
+        approvals.approve("weather", digest);
+        let text = approvals.to_text();
+        assert_eq!(text, format!("{digest} weather\n"));
+        assert_eq!(Approvals::parse(&text), approvals);
+        let spoiled = Approvals::parse(&format!("{digest} not:an:alias\nchanged\n"));
+        assert_eq!(spoiled, Approvals::default());
+    }
+
+    #[test]
+    fn an_approval_nothing_resolves_to_is_dropped() {
+        let other = Declaration::http("https://docs.example.com".into()).unwrap();
+        let mut approvals = Approvals::default();
+        approvals.approve("weather", weather().digest());
+        approvals.approve("docs", other.digest());
+
+        let mut declarations = Declarations::default();
+        declarations.insert("docs", &other);
+        approvals.keep_only(&declarations);
+
+        assert!(!approvals.approves(&weather().digest()));
+        assert!(approvals.approves(&other.digest()));
+        assert!(!approvals.changed("weather", &weather().digest()));
+        assert_eq!(approvals.to_text(), format!("{} docs\n", other.digest()));
+    }
+
+    /// SERVERS-5: a declaration changed since it was approved is recorded as changed, and the
+    /// record approves nothing, so writing the declaration back to what it was asks again.
+    #[test]
+    fn a_declaration_changed_since_its_approval_is_recorded_as_changed_and_approves_nothing() {
+        let pinned =
+            Declaration::stdio(words(&["npx", "-y", "weather-mcp@1.2.0"]), Vec::new(), None)
+                .unwrap();
+        let mut approvals = Approvals::default();
+        approvals.approve("weather", weather().digest());
+        let mut declarations = Declarations::default();
+        declarations.insert("weather", &pinned);
+
+        assert!(approvals.changed("weather", &pinned.digest()));
+        approvals.keep_only(&declarations);
+        assert!(approvals.changed("weather", &pinned.digest()));
+        assert!(!approvals.approves(&weather().digest()));
+        assert_eq!(approvals.to_text(), "changed weather\n");
+
+        declarations.insert("weather", &weather());
+        approvals.keep_only(&declarations);
+        assert!(!approvals.approves(&weather().digest()));
+        assert!(approvals.changed("weather", &weather().digest()));
+
+        approvals.approve("weather", weather().digest());
+        assert!(!approvals.changed("weather", &weather().digest()));
+        assert!(!approvals.changed("docs", &pinned.digest()));
+    }
+
+    /// A digest written before aliases were kept is still an approval, and takes the alias that
+    /// resolves to it the first time the file is rewritten.
+    #[test]
+    fn a_digest_alone_on_its_line_takes_its_alias_when_rewritten() {
+        let digest = weather().digest();
+        let mut approvals = Approvals::parse(&format!("{digest}\n"));
+        let mut declarations = Declarations::default();
+        declarations.insert("weather", &weather());
+        approvals.keep_only(&declarations);
+        assert_eq!(approvals.to_text(), format!("{digest} weather\n"));
+    }
+
+    /// SERVERS-4's answer 2 is recorded as the project's path and read back as it, and a path a
+    /// line cannot hold is not recorded as some other path.
+    #[test]
+    fn a_project_reads_back_as_the_path_it_was_recorded_as() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut projects = Projects::default();
+        assert!(projects.add(project));
+        assert!(!projects.add(Path::new("relative/checkout")));
+        assert!(!projects.add(&project.join("two\nlines")));
+        let read = Projects::parse(&format!("{}not absolute\n", projects.to_text()));
+        assert_eq!(read, projects);
+        assert!(read.contains(project));
+        assert!(!read.contains(&project.join("src")));
+    }
+
+    #[test]
+    fn forgetting_a_project_drops_it_and_no_other() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let other = project.join("src");
+        let mut projects = Projects::default();
+        assert!(projects.add(project) && projects.add(&other));
+        assert!(projects.remove(project));
+        assert!(!projects.remove(project), "a project was dropped twice");
+        assert!(!projects.contains(project));
+        assert!(projects.contains(&other));
+    }
+
+    /// A file an earlier version wrote carries a `tools` line per vouched list. The approval beside
+    /// it still reads, the line is passed over, and the next write drops it, so nothing is left to
+    /// vouch for a list nobody was asked about.
+    #[test]
+    fn a_tools_line_an_earlier_version_wrote_is_passed_over_and_dropped() {
+        let digest = weather().digest();
+        let before = format!("{digest} weather\ntools {digest} {digest}\nchanged docs\n");
+        let read = Approvals::parse(&before);
+
+        assert!(read.approves(&digest));
+        assert!(read.changed("docs", &Digest::parse(&"0".repeat(64)).expect("a digest")));
+        assert_eq!(read.to_text(), format!("{digest} weather\nchanged docs\n"));
+    }
+
+    #[test]
+    fn a_standing_answer_reaches_one_tool_of_one_server_in_one_project() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let other = project.join("src");
+        let mut standing = Standing::default();
+        assert!(standing.add("weather", "get_current_conditions", project));
+        assert!(standing.covers("weather", "get_current_conditions", project));
+        assert!(!standing.covers("weather", "get_forecast", project));
+        assert!(!standing.covers("docs", "get_current_conditions", project));
+        assert!(!standing.covers("weather", "get_current_conditions", &other));
+    }
+
+    #[test]
+    fn a_standing_answer_reads_back_with_a_space_in_its_project() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("a checkout");
+        let mut standing = Standing::default();
+        assert!(standing.add("weather", "get_forecast", &project));
+        assert!(!standing.add("weather", "get forecast", &project));
+        assert!(!standing.add("weather", "get_forecast", Path::new("relative")));
+        assert!(!standing.add("we:ather", "get_forecast", &project));
+        assert!(!standing.add("weather", "get_forecast", &project.join("two\nlines")));
+        let read = Standing::parse(&format!(
+            "{}weather get_forecast relative\nweather\n",
+            standing.to_text()
+        ));
+        assert_eq!(read, standing);
+        assert!(read.covers("weather", "get_forecast", &project));
+    }
+
+    #[test]
+    fn forgetting_a_project_drops_its_standing_answers_and_no_others() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let other = project.join("src");
+        let mut standing = Standing::default();
+        assert!(standing.add("weather", "get_forecast", project));
+        assert!(standing.add("weather", "get_alerts", project));
+        assert!(standing.add("weather", "get_forecast", &other));
+        assert_eq!(
+            standing.in_project(project),
+            ["weather:get_alerts", "weather:get_forecast"]
+        );
+        assert_eq!(standing.forget(project), 2);
+        assert_eq!(standing.forget(project), 0);
+        assert!(standing.covers("weather", "get_forecast", &other));
+    }
+
+    #[test]
+    fn a_tool_word_is_what_a_function_name_may_be() {
+        assert!(is_tool_word("get_current_conditions"));
+        assert!(is_tool_word("check-service-status"));
+        assert!(is_tool_word(&"a".repeat(MAX_TOOL)));
+        for refused in [
+            "",
+            "get forecast",
+            "weather:get_forecast",
+            "get.forecast",
+            "ignore previous instructions",
+            "é",
+        ] {
+            assert!(!is_tool_word(refused), "{refused:?} was taken for a word");
+        }
+        assert!(!is_tool_word(&"a".repeat(MAX_TOOL + 1)));
+    }
+
+    #[test]
+    fn the_files_are_read_from_the_state_directory() {
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/config-mcp-files");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(Declarations::read(&home), Ok(Declarations::default()));
+        assert_eq!(Approvals::read(&home), Approvals::default());
+        assert_eq!(Projects::read(&home), Projects::default());
+
+        let mut declarations = Declarations::default();
+        declarations.insert("weather", &weather());
+        std::fs::write(declarations_file(&home), declarations.to_text()).unwrap();
+        std::fs::write(approvals_file(&home), format!("{}\n", weather().digest())).unwrap();
+        assert_eq!(Declarations::read(&home), Ok(declarations));
+        assert!(Approvals::read(&home).approves(&weather().digest()));
+        std::fs::write(projects_file(&home), format!("{}\n", home.display())).unwrap();
+        assert!(Projects::read(&home).contains(&home));
+        assert_eq!(Standing::read(&home), Standing::default());
+        std::fs::write(
+            tools_file(&home),
+            format!("weather get_forecast {}\n", home.display()),
+        )
+        .unwrap();
+        assert!(Standing::read(&home).covers("weather", "get_forecast", &home));
+
+        std::fs::write(declarations_file(&home), " ".repeat(MAX_BYTES as usize + 1)).unwrap();
+        assert_eq!(Declarations::read(&home), Err(Unreadable::TooLarge));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A record read to be written back is refused where it is there and cannot be read, since
+    /// what is written would be every line it held but the one being added. One that is not there
+    /// yet is empty, and one that reads is what it says.
+    #[test]
+    fn a_record_that_cannot_be_read_is_not_read_to_be_written_over() {
+        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/config-mcp-to-change");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(Approvals::to_change(&home), Ok(Approvals::default()));
+        assert_eq!(Projects::to_change(&home), Ok(Projects::default()));
+        assert_eq!(Standing::to_change(&home), Ok(Standing::default()));
+
+        let answer = format!("weather get_forecast {}\n", home.display());
+        std::fs::write(tools_file(&home), &answer).unwrap();
+        let read = Standing::to_change(&home).expect("a record that reads");
+        assert!(read.covers("weather", "get_forecast", &home));
+
+        let too_large = " ".repeat(MAX_BYTES as usize + 1);
+        for file in [
+            approvals_file(&home),
+            projects_file(&home),
+            tools_file(&home),
+        ] {
+            std::fs::write(&file, &too_large).unwrap();
+        }
+        assert_eq!(Approvals::to_change(&home), Err(Unreadable::TooLarge));
+        assert_eq!(Projects::to_change(&home), Err(Unreadable::TooLarge));
+        assert_eq!(Standing::to_change(&home), Err(Unreadable::TooLarge));
+
+        std::fs::write(tools_file(&home), [0xff, 0xfe, b'\n']).unwrap();
+        assert_eq!(Standing::to_change(&home), Err(Unreadable::NotRead));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_tool_filter_name_is_a_tool_word_or_alias_qualified() {
+        for valid in [
+            "get_current_conditions",
+            "weather:get_forecast",
+            "fetch-data_1",
+            "srv:tool-name",
+        ] {
+            assert!(is_tool_filter_name(valid), "{valid} should be valid");
+        }
+        for invalid in [
+            "",
+            "not a tool",
+            "alias:tool:extra",
+            "alias:",
+            ":tool",
+            "tool@name",
+        ] {
+            assert!(!is_tool_filter_name(invalid), "{invalid} should be invalid");
+        }
+    }
+
+    #[test]
+    fn a_digest_covers_tool_filters_and_order_does_not_matter() {
+        let base = weather();
+        let with_tools = base
+            .clone()
+            .filtering(words(&["get_weather", "get_alerts"]), Vec::new())
+            .unwrap();
+        let with_tools_reordered = base
+            .clone()
+            .filtering(words(&["get_alerts", "get_weather"]), Vec::new())
+            .unwrap();
+        let with_exclude = base
+            .clone()
+            .filtering(Vec::new(), words(&["get_alerts"]))
+            .unwrap();
+        let with_both = base
+            .clone()
+            .filtering(words(&["get_weather"]), words(&["get_alerts"]))
+            .unwrap();
+
+        assert_ne!(base.digest(), with_tools.digest());
+        assert_ne!(base.digest(), with_exclude.digest());
+        assert_ne!(with_tools.digest(), with_exclude.digest());
+        assert_ne!(with_tools.digest(), with_both.digest());
+        assert_eq!(with_tools.digest(), with_tools_reordered.digest());
+    }
+
+    #[test]
+    fn a_declaration_with_no_tool_filters_digests_as_it_did_before() {
+        let plain_stdio = Declaration::stdio(words(&["server"]), Vec::new(), None).unwrap();
+        let filtered_empty_stdio = plain_stdio
+            .clone()
+            .filtering(Vec::new(), Vec::new())
+            .unwrap();
+        assert_eq!(plain_stdio.digest(), filtered_empty_stdio.digest());
+
+        let plain_http = Declaration::http("https://example.com/mcp".into()).unwrap();
+        let filtered_empty_http = plain_http
+            .clone()
+            .filtering(Vec::new(), Vec::new())
+            .unwrap();
+        assert_eq!(plain_http.digest(), filtered_empty_http.digest());
+    }
+
+    #[test]
+    fn tool_filters_are_read_written_and_roundtripped() {
+        let text = r#"{"servers": {
+            "stdio": {
+                "transport": "stdio",
+                "argv": ["weather-mcp"],
+                "tools": ["get_forecast", "get_alerts"],
+                "exclude_tools": ["get_radar"]
+            },
+            "http": {
+                "transport": "http",
+                "url": "https://api.github.com/mcp",
+                "tools": ["create_issue"],
+                "exclude_tools": ["delete_repo"]
+            }
+        }}"#;
+        let declarations = Declarations::parse(text).unwrap();
+        let stdio = declarations.get("stdio").unwrap().declaration.unwrap();
+        assert_eq!(stdio.tools(), ["get_forecast", "get_alerts"]);
+        assert_eq!(stdio.exclude_tools(), ["get_radar"]);
+
+        let http = declarations.get("http").unwrap().declaration.unwrap();
+        assert_eq!(http.tools(), ["create_issue"]);
+        assert_eq!(http.exclude_tools(), ["delete_repo"]);
+
+        let serialized = declarations.to_text();
+        let parsed = Declarations::parse(&serialized).unwrap();
+        assert_eq!(parsed, declarations);
+    }
+
+    #[test]
+    fn tool_filter_changes_are_named_by_field() {
+        let base = weather();
+        let with_tools = base
+            .clone()
+            .filtering(words(&["get_forecast"]), Vec::new())
+            .unwrap();
+        let with_exclude = base
+            .clone()
+            .filtering(Vec::new(), words(&["get_alerts"]))
+            .unwrap();
+
+        assert_eq!(base.changes(&with_tools), vec![Field::Tools]);
+        assert_eq!(base.changes(&with_exclude), vec![Field::ExcludeTools]);
+
+        let remote = Declaration::http("https://example.com/mcp".into()).unwrap();
+        let remote_tools = remote
+            .clone()
+            .filtering(words(&["create_issue"]), Vec::new())
+            .unwrap();
+        let remote_exclude = remote
+            .clone()
+            .filtering(Vec::new(), words(&["delete_repo"]))
+            .unwrap();
+        assert_eq!(remote.changes(&remote_tools), vec![Field::Tools]);
+        assert_eq!(remote.changes(&remote_exclude), vec![Field::ExcludeTools]);
+    }
+
+    #[test]
+    fn tools_and_exclude_tools_require_lists_of_valid_tool_names() {
+        let cases = [
+            (
+                r#"{"servers": {"srv": {"transport": "stdio", "argv": ["tool"], "tools": "not-a-list"}}}"#,
+                Err(Problem::Tools("tools")),
+            ),
+            (
+                r#"{"servers": {"srv": {"transport": "stdio", "argv": ["tool"], "tools": [123]}}}"#,
+                Err(Problem::Tools("tools")),
+            ),
+            (
+                r#"{"servers": {"srv": {"transport": "http", "url": "https://example.com/mcp", "exclude_tools": 42}}}"#,
+                Err(Problem::Tools("exclude_tools")),
+            ),
+            (
+                r#"{"servers": {"srv": {"transport": "http", "url": "https://example.com/mcp", "exclude_tools": [true]}}}"#,
+                Err(Problem::Tools("exclude_tools")),
+            ),
+            (
+                r#"{"servers": {"srv": {"transport": "stdio", "argv": ["tool"], "tools": ["bad tool name"]}}}"#,
+                Err(Problem::Tool("bad tool name".into())),
+            ),
+            (
+                r#"{"servers": {"srv": {"transport": "http", "url": "https://example.com/mcp", "exclude_tools": [":empty-alias"]}}}"#,
+                Err(Problem::Tool(":empty-alias".into())),
+            ),
+        ];
+        for (json, expected) in cases {
+            let declarations = Declarations::parse(json).unwrap();
+            let entry = declarations.get("srv").unwrap();
+            assert_eq!(entry.declaration, expected, "testing json: {json}");
+        }
+    }
+
+    /// SERVERS-21. A declaration that says `ask_every_call` keeps it through the file, on either
+    /// transport, and one that does not say it does not ask and writes no key. The regression it
+    /// rejects is a key the reader accepts and the writer drops, which would turn the property off
+    /// the next time the file is written.
+    #[test]
+    fn asking_every_call_is_read_written_and_roundtripped_on_either_transport() {
+        let text = r#"{"servers": {
+            "asks": {"transport": "stdio", "argv": ["browser", "mcp"], "ask_every_call": true},
+            "asks-remote": {"transport": "http", "url": "https://example.com/mcp", "ask_every_call": true},
+            "says-no": {"transport": "stdio", "argv": ["browser", "mcp"], "ask_every_call": false},
+            "silent": {"transport": "http", "url": "https://example.com/mcp"}
+        }}"#;
+        let read = Declarations::parse(text).unwrap();
+        let asks = |declarations: &Declarations, alias: &str| {
+            declarations
+                .get(alias)
+                .unwrap()
+                .declaration
+                .unwrap()
+                .asks_every_call()
+        };
+        assert!(asks(&read, "asks"));
+        assert!(asks(&read, "asks-remote"));
+        assert!(!asks(&read, "says-no"));
+        assert!(!asks(&read, "silent"));
+
+        let mut rewritten = Declarations::default();
+        for alias in ["asks", "asks-remote", "says-no", "silent"] {
+            rewritten.insert(alias, &read.get(alias).unwrap().declaration.unwrap());
+        }
+        let written = rewritten.to_text();
+        assert_eq!(written.matches("ask_every_call").count(), 2, "{written}");
+        let back = Declarations::parse(&written).unwrap();
+        for alias in ["asks", "asks-remote"] {
+            assert!(asks(&back, alias), "{alias}");
+        }
+        for alias in ["says-no", "silent"] {
+            assert!(!asks(&back, alias), "{alias}");
+        }
+    }
+
+    /// SERVERS-21. Only a boolean is read, so a word that is not one cannot be taken for a yes or
+    /// a no. The regression it rejects is a reader that treats any present value as true.
+    #[test]
+    fn ask_every_call_that_is_not_a_boolean_is_a_problem_of_that_entry() {
+        for value in ["\"true\"", "1", "null", "[]"] {
+            let text = format!(
+                r#"{{"servers": {{"srv": {{"transport": "stdio", "argv": ["tool"], "ask_every_call": {value}}}}}}}"#
+            );
+            let declarations = Declarations::parse(&text).unwrap();
+            assert_eq!(
+                declarations.get("srv").unwrap().declaration,
+                Err(Problem::AskEveryCall),
+                "{value}"
+            );
+        }
+    }
+
+    /// SERVERS-21. The property is part of what an approval binds to, so adding it to an approved
+    /// declaration asks again, and a declaration that does not ask digests exactly as it did
+    /// before the property existed. The pinned digests are the ones the earlier form produced,
+    /// so a form that always wrote the property would move them.
+    #[test]
+    fn asking_every_call_is_in_the_digest_and_a_declaration_that_does_not_ask_digests_as_before() {
+        let stdio = weather();
+        assert_eq!(
+            stdio.digest().to_string(),
+            "25edc5e806956f3254b5ff2b116f1c07ae5ad8d4a5df00f6d15c0f8aadfec43f"
+        );
+        assert_eq!(
+            stdio.clone().asking_every_call(false).digest(),
+            stdio.digest()
+        );
+        assert_ne!(
+            stdio.clone().asking_every_call(true).digest(),
+            stdio.digest()
+        );
+
+        let http = Declaration::http("https://example.com/mcp".into()).unwrap();
+        assert_eq!(
+            http.digest().to_string(),
+            "41f9016c26f4e52b7d388ee241fc2d53cfb6933d92777d5055b0b3bd5357224c"
+        );
+        assert_ne!(http.clone().asking_every_call(true).digest(), http.digest());
+
+        let filtered = stdio
+            .clone()
+            .filtering(words(&["get_forecast"]), Vec::new())
+            .unwrap();
+        assert_ne!(
+            filtered.clone().asking_every_call(true).digest(),
+            filtered.digest()
+        );
+    }
+
+    /// SERVERS-21. The question that asks again after an edit names the property when it is the
+    /// field that differs, on either transport, and the other builders keep it.
+    #[test]
+    fn a_change_to_asking_every_call_is_named_and_the_other_builders_keep_it() {
+        let base = weather();
+        let asking = base.clone().asking_every_call(true);
+        assert_eq!(base.changes(&asking), vec![Field::AskEveryCall]);
+        assert_eq!(asking.changes(&base), vec![Field::AskEveryCall]);
+        assert_eq!(asking.changes(&asking.clone()), Vec::<Field>::new());
+
+        let remote = Declaration::http("https://example.com/mcp".into()).unwrap();
+        let remote_asking = remote.clone().asking_every_call(true);
+        assert_eq!(remote.changes(&remote_asking), vec![Field::AskEveryCall]);
+
+        let built = asking
+            .storing(stored(&[("TOKEN", "x")]))
+            .and_then(|declaration| declaration.reading(vec![somewhere()]))
+            .and_then(|declaration| declaration.filtering(words(&["a"]), Vec::new()))
+            .map(|declaration| declaration.timing(Timeouts::default()))
+            .unwrap();
+        assert!(built.asks_every_call());
+        let remote_built = remote_asking
+            .heading(BTreeMap::new(), Some("TOKEN".into()))
+            .and_then(|declaration| declaration.filtering(words(&["a"]), Vec::new()))
+            .map(|declaration| declaration.timing(Timeouts::default()))
+            .unwrap();
+        assert!(remote_built.asks_every_call());
+    }
+
+    /// The pairs of the browser's `input` group, as a declaration spells them.
+    fn element_choices() -> ChoiceArguments {
+        ["click_element", "type_text", "select_option"]
+            .into_iter()
+            .map(|tool| {
+                (
+                    tool.to_string(),
+                    BTreeSet::from(["element_number".to_string()]),
+                )
+            })
+            .collect()
+    }
+
+    fn choosing_element_numbers() -> Declaration {
+        weather()
+            .asking_every_call(true)
+            .choosing(element_choices())
+            .expect("a declaration")
+    }
+
+    /// SERVERS-22. The arguments that take a choice are kept through the file, each tool once with
+    /// its arguments in an order that carries no meaning, and a declaration that names none writes
+    /// no key. The regression it rejects is a key the reader accepts and the writer drops, which
+    /// would take the choices off the next time the file is written, and a writer that keeps the
+    /// order or a repeat the person wrote.
+    #[test]
+    fn choice_arguments_are_read_written_and_roundtripped_on_a_server_that_asks_every_call() {
+        let text = r#"{"servers": {
+            "input": {"transport": "stdio", "argv": ["browser", "mcp"], "ask_every_call": true,
+                "choice_arguments": {"type_text": ["text", "element_number", "text"],
+                    "click_element": ["element_number"]}},
+            "plain": {"transport": "stdio", "argv": ["browser", "mcp"], "ask_every_call": true},
+            "empty": {"transport": "stdio", "argv": ["browser", "mcp"], "ask_every_call": true,
+                "choice_arguments": {}}
+        }}"#;
+        let read = Declarations::parse(text).unwrap();
+        let declared = |declarations: &Declarations, alias: &str| {
+            declarations.get(alias).unwrap().declaration.unwrap()
+        };
+        let expected: ChoiceArguments = BTreeMap::from([
+            (
+                "click_element".to_string(),
+                BTreeSet::from(["element_number".to_string()]),
+            ),
+            (
+                "type_text".to_string(),
+                BTreeSet::from(["element_number".to_string(), "text".to_string()]),
+            ),
+        ]);
+        assert_eq!(declared(&read, "input").choice_arguments(), &expected);
+        assert!(declared(&read, "plain").choice_arguments().is_empty());
+        assert!(declared(&read, "empty").choice_arguments().is_empty());
+
+        let mut rewritten = Declarations::default();
+        for alias in ["input", "plain", "empty"] {
+            rewritten.insert(alias, &declared(&read, alias));
+        }
+        let written = rewritten.to_text();
+        assert_eq!(written.matches("choice_arguments").count(), 1, "{written}");
+        let file: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            file["servers"]["input"]["choice_arguments"],
+            serde_json::json!({
+                "click_element": ["element_number"],
+                "type_text": ["element_number", "text"]
+            }),
+            "{written}"
+        );
+        let back = Declarations::parse(&written).unwrap();
+        assert_eq!(declared(&back, "input"), declared(&read, "input"));
+        assert_eq!(declared(&back, "input").choice_arguments(), &expected);
+        assert!(declared(&back, "plain").choice_arguments().is_empty());
+    }
+
+    /// SERVERS-22. The shape is an object of tool words, each with a non-empty list of argument
+    /// words of at most 60 characters, and anything else is a problem of that entry. The
+    /// regression it rejects is a reader that takes any value, or a name the planner could not be
+    /// offered under on every backend, which is an argument whose name with `_ref` after it is
+    /// longer than a tool's.
+    #[test]
+    fn choice_arguments_that_are_not_tools_with_argument_words_are_a_problem_of_that_entry() {
+        let long = "a".repeat(MAX_TOOL + 1);
+        let too_long_to_offer_beside = "a".repeat(MAX_CHOICE_ARGUMENT + 1);
+        for value in [
+            r#""click_element:element_number""#.to_string(),
+            "null".to_string(),
+            "[]".to_string(),
+            r#"["click_element"]"#.to_string(),
+            r#"{"click_element": "element_number"}"#.to_string(),
+            r#"{"click_element": []}"#.to_string(),
+            r#"{"click_element": [1]}"#.to_string(),
+            r#"{"click_element": [null]}"#.to_string(),
+            r#"{"click_element": [""]}"#.to_string(),
+            r#"{"click_element": ["element number"]}"#.to_string(),
+            r#"{"click_element": ["element:number"]}"#.to_string(),
+            r#"{"": ["element_number"]}"#.to_string(),
+            r#"{"click element": ["element_number"]}"#.to_string(),
+            r#"{"alias:click_element": ["element_number"]}"#.to_string(),
+            format!(r#"{{"click_element": ["{long}"]}}"#),
+            format!(r#"{{"click_element": ["{too_long_to_offer_beside}"]}}"#),
+            format!(r#"{{"{long}": ["element_number"]}}"#),
+        ] {
+            let text = format!(
+                r#"{{"servers": {{"srv": {{"transport": "stdio", "argv": ["tool"],
+                    "ask_every_call": true, "choice_arguments": {value}}}}}}}"#
+            );
+            let declarations = Declarations::parse(&text).unwrap();
+            assert_eq!(
+                declarations.get("srv").unwrap().declaration,
+                Err(Problem::Choice),
+                "{value}"
+            );
+        }
+
+        let longest = "a".repeat(MAX_CHOICE_ARGUMENT);
+        let choices = BTreeMap::from([("click_element".to_string(), BTreeSet::from([longest]))]);
+        assert!(weather().asking_every_call(true).choosing(choices).is_ok());
+    }
+
+    /// SERVERS-22. A remote server cannot declare an argument that takes a choice, and neither can
+    /// a local one that does not ask about every call, since the person is shown the element a
+    /// choice leads to at each call and not before. The regressions it rejects are a remote server
+    /// that takes the key, a local one that takes it with the property false or missing, and a
+    /// builder that checks neither.
+    #[test]
+    fn a_choice_on_a_remote_server_or_one_that_does_not_ask_every_call_is_a_problem_of_that_entry()
+    {
+        let named = r#""choice_arguments": {"click_element": ["element_number"]}"#;
+        for (entry, expected) in [
+            (
+                format!(
+                    r#"{{"transport": "http", "url": "https://example.com/mcp", "ask_every_call": true, {named}}}"#
+                ),
+                Problem::Remote("choice_arguments"),
+            ),
+            (
+                format!(r#"{{"transport": "http", "url": "https://example.com/mcp", {named}}}"#),
+                Problem::Remote("choice_arguments"),
+            ),
+            (
+                format!(r#"{{"transport": "stdio", "argv": ["tool"], {named}}}"#),
+                Problem::ChoiceWithoutAsking,
+            ),
+            (
+                format!(
+                    r#"{{"transport": "stdio", "argv": ["tool"], "ask_every_call": false, {named}}}"#
+                ),
+                Problem::ChoiceWithoutAsking,
+            ),
+        ] {
+            let text = format!(r#"{{"servers": {{"srv": {entry}}}}}"#);
+            let declarations = Declarations::parse(&text).unwrap();
+            assert_eq!(
+                declarations.get("srv").unwrap().declaration,
+                Err(expected),
+                "{entry}"
+            );
+        }
+
+        assert_eq!(
+            weather().choosing(element_choices()),
+            Err(Problem::ChoiceWithoutAsking)
+        );
+        let remote = Declaration::http("https://example.com/mcp".into())
+            .unwrap()
+            .asking_every_call(true);
+        assert_eq!(
+            remote.clone().choosing(element_choices()),
+            Err(Problem::Remote("choice_arguments"))
+        );
+        assert_eq!(remote.clone().choosing(ChoiceArguments::new()), Ok(remote));
+        assert!(weather().choosing(ChoiceArguments::new()).is_ok());
+    }
+
+    /// SERVERS-22. The arguments are part of what an approval binds to only where there are any, so
+    /// a declaration that asks every call and names none digests as it did before, and the order
+    /// they were written in is not part of it while the pairing of a tool with an argument is. The
+    /// pinned digests were computed apart from this code, from the form the digest hashes. The
+    /// regressions it rejects are a digest that leaves the pairs out, which would let an edit add a
+    /// choice and keep the approval, one that always writes the key, one that hashes an order, and
+    /// one that cannot tell a tool from an argument.
+    #[test]
+    fn choice_arguments_are_in_the_digest_only_where_there_are_any() {
+        let asking = weather().asking_every_call(true);
+        assert_eq!(
+            asking.digest().to_string(),
+            "b6a12e67ef664f519f4b78954e1964affeaddc5d7b78e3110b4bea214167f95a"
+        );
+        assert_eq!(
+            asking
+                .clone()
+                .choosing(ChoiceArguments::new())
+                .unwrap()
+                .digest(),
+            asking.digest()
+        );
+        assert_eq!(
+            choosing_element_numbers().digest().to_string(),
+            "21b292bb2e565f3b286e9b76e59ba770e2601347e00421ad77b3952b500bcb16"
+        );
+
+        let pairs = |pairs: &[(&str, &[&str])]| -> ChoiceArguments {
+            pairs
+                .iter()
+                .map(|(tool, arguments)| {
+                    (
+                        tool.to_string(),
+                        arguments.iter().map(|word| word.to_string()).collect(),
+                    )
+                })
+                .collect()
+        };
+        let digest = |choices: ChoiceArguments| asking.clone().choosing(choices).unwrap().digest();
+        assert_eq!(
+            digest(pairs(&[("a", &["x", "y"]), ("b", &["x"])])),
+            digest(pairs(&[("b", &["x"]), ("a", &["y", "x", "y"])])),
+        );
+        let digests = [
+            digest(pairs(&[("a", &["x"])])),
+            digest(pairs(&[("x", &["a"])])),
+            digest(pairs(&[("a", &["y"])])),
+            digest(pairs(&[("a", &["x", "y"])])),
+            digest(pairs(&[("a", &["x"]), ("y", &["x"])])),
+            asking.digest(),
+        ];
+        let distinct: BTreeSet<_> = digests.iter().collect();
+        assert_eq!(distinct.len(), digests.len(), "{digests:?}");
+    }
+
+    /// SERVERS-22. Adding the arguments to an approved declaration asks again and names
+    /// `choice_arguments` among the fields that changed, as any key of the declaration does, and the
+    /// other builders keep them. The regressions it rejects are a change the question does not
+    /// name, an approval the added arguments inherit, and a builder that rebuilds the declaration
+    /// without them. Turning asking off takes them off, since they need it.
+    #[test]
+    fn a_change_to_choice_arguments_is_named_asks_again_and_the_other_builders_keep_them() {
+        let asking = weather().asking_every_call(true);
+        let choosing = choosing_element_numbers();
+        assert_eq!(asking.changes(&choosing), vec![Field::ChoiceArguments]);
+        assert_eq!(choosing.changes(&asking), vec![Field::ChoiceArguments]);
+        assert_eq!(choosing.changes(&choosing.clone()), Vec::<Field>::new());
+        assert_eq!(Field::ChoiceArguments.key(), "choice_arguments");
+        let one = asking
+            .clone()
+            .choosing(BTreeMap::from([(
+                "click_element".to_string(),
+                BTreeSet::from(["element_number".to_string()]),
+            )]))
+            .unwrap();
+        assert_eq!(one.changes(&choosing), vec![Field::ChoiceArguments]);
+
+        let mut approvals = Approvals::default();
+        approvals.approve("input", asking.digest());
+        let mut declarations = Declarations::default();
+        declarations.insert("input", &choosing);
+        assert!(!approvals.approves(&choosing.digest()));
+        assert!(approvals.changed("input", &choosing.digest()));
+        approvals.keep_only(&declarations);
+        assert_eq!(approvals.to_text(), "changed input\n");
+
+        let built = choosing
+            .clone()
+            .storing(stored(&[("TOKEN", "x")]))
+            .and_then(|declaration| declaration.reading(vec![somewhere()]))
+            .and_then(|declaration| declaration.filtering(words(&["a"]), Vec::new()))
+            .map(|declaration| declaration.timing(Timeouts::default()))
+            .map(|declaration| declaration.asking_every_call(true))
+            .unwrap();
+        assert_eq!(built.choice_arguments(), &element_choices());
+        let off = choosing.asking_every_call(false);
+        assert!(off.choice_arguments().is_empty());
+        assert_eq!(off.digest(), weather().digest());
+    }
+
+    /// SERVERS-11. A move changes the address and nothing else, and what it moves to is held to
+    /// what a declared address is. The regressions it rejects are a move that builds the
+    /// declaration anew, which drops the filters, the variable names and the bounds, one that
+    /// accepts an address a file's entry would refuse, and one that gives a stdio declaration an
+    /// address.
+    #[test]
+    fn a_move_changes_the_address_of_a_remote_declaration_and_nothing_else() {
+        let was = Declaration::http("https://a.example.com/mcp".into())
+            .unwrap()
+            .heading(
+                BTreeMap::from([("X-Team".to_string(), "TEAM_HEADER".to_string())]),
+                Some("TOKEN".into()),
+            )
+            .and_then(|declaration| {
+                declaration.filtering(words(&["get_forecast"]), words(&["delete_city"]))
+            })
+            .map(|declaration| declaration.timing(Timeouts::new(Some(7), Some(300)).unwrap()))
+            .map(|declaration| declaration.asking_every_call(true))
+            .unwrap();
+
+        let moved = was
+            .clone()
+            .moved_to("https://b.example.com/mcp".into())
+            .unwrap();
+
+        let expected = Declaration::http("https://b.example.com/mcp".into())
+            .unwrap()
+            .heading(
+                BTreeMap::from([("X-Team".to_string(), "TEAM_HEADER".to_string())]),
+                Some("TOKEN".into()),
+            )
+            .and_then(|declaration| {
+                declaration.filtering(words(&["get_forecast"]), words(&["delete_city"]))
+            })
+            .map(|declaration| declaration.timing(Timeouts::new(Some(7), Some(300)).unwrap()))
+            .map(|declaration| declaration.asking_every_call(true))
+            .unwrap();
+        assert_eq!(moved, expected);
+        assert_eq!(moved.changes(&was), vec![Field::Url]);
+        assert_eq!(
+            was.clone().moved_to("ftp://b.example.com".into()),
+            Err(Problem::Url)
+        );
+        assert_eq!(
+            was.moved_to("https://user:pass@b.example.com".into()),
+            Err(Problem::Credentials)
+        );
+        assert_eq!(
+            weather().moved_to("https://b.example.com".into()),
+            Err(Problem::Transport)
+        );
+    }
+}

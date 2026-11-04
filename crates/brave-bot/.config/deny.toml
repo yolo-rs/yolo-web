@@ -1,0 +1,116 @@
+# What a dependency is allowed to be: whether an advisory is out against it, what it is
+# licensed under, how many versions of it the build compiles, and where it came from.
+#
+# `make check-deps` runs this, and CI runs that same target on every pull request, on main,
+# and once a day. The schedule is there for the advisories half, which has a cost that
+# accrues without a commit: an advisory against a version that is already pinned lands on a
+# day nobody touched this repository, and a check that only runs on a pull request never
+# sees it.
+#
+# What a new crate buys, and what writing it by hand would cost, is a judgement a person
+# makes: DEP-001 in docs/best-practices/dependencies.md. This file is the half of that rule
+# a tool can decide. `make check-deps` first runs contrib/check-deny-reasons.py, which fails an
+# `ignore`, `skip`, `skip-tree` or `deny` entry that has no `reason`, and a licence exception that
+# has no comment. It then runs cargo-deny over the root graph and over the fuzz package's, which
+# is a workspace of its own.
+
+[graph]
+# The feature set clippy is run under here, and the widest one anything ships with. A
+# dependency that only arrives with a feature enabled is one this has to see.
+all-features = true
+
+[advisories]
+# Empty, and worth keeping empty: an entry is a published advisory this binary ships with
+# anyway. Each takes an id and a reason, and the reason is what a reviewer agrees to.
+ignore = []
+# A yanked version is one the people who published it withdrew, which says something about it
+# whether or not an advisory follows. This defaults to a warning, and a warning in a CI log is
+# read by nobody, which is the state this file exists to replace.
+yanked = "deny"
+
+[licenses]
+# The binary ships under MPL-2.0 and everything linked into it has to be permissive. Nothing
+# copyleft is listed, which is the point: a GPL or LGPL crate arriving as a Renovate bump
+# fails here instead of reaching a release. Dev-dependencies are held to the same list, which
+# costs nothing today because no crate here declares one, and is the right default anyway: a
+# test-only crate still runs on every machine that builds this.
+#
+# Every entry is a licence some crate in the graph offers no permissive alternative to.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",         # subtle
+    "CDLA-Permissive-2.0",  # webpki-roots
+    "ISC",                  # untrusted and rustls-webpki, plus ring, which is Apache-2.0 AND ISC
+    "MIT",
+    "MPL-2.0",              # this workspace
+    "Unicode-3.0",          # unicode-ident, which is (MIT OR Apache-2.0) AND Unicode-3.0
+    "Zlib",                 # foldhash
+]
+# A crate that needs a licence none of the above covers is named here with the licence it is
+# allowed, and a comment above it saying why. cargo-deny takes no `reason` on an exception, so
+# contrib/check-deny-reasons.py reads the comment as it reads a `reason` elsewhere.
+exceptions = [
+    # libfuzzer-sys vendors LLVM's libFuzzer, which is under the University of Illinois/NCSA licence.
+    # That licence is permissive, and no other crate here has it. libfuzzer-sys is a dependency of
+    # the fuzz package alone, a test harness that is never linked into a binary that ships, and
+    # `make check-deps` reads that package's graph with this policy.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+
+[bans]
+# Two versions of a crate are two copies of its code in the binary and two sets of its bugs,
+# and a type from one is not the type from the other. Not automatically wrong, which is why
+# every one of them is recorded below rather than left to be counted by hand.
+multiple-versions = "deny"
+# The gitoxide crates that start a process, or that reach one through what they depend on.
+# `read_git` answers from a repository's own files because git runs programs `.git/config`
+# names, so the plumbing it is built on must not be able to either, and a ban makes a crate that
+# could a failing build rather than something a reviewer has to notice.
+deny = [
+    { crate = "gix", reason = "depends on gix-protocol and gix-transport whatever features are chosen" },
+    { crate = "gix-command", reason = "starts programs: diff drivers, textconv, credential helpers" },
+    { crate = "gix-credentials", reason = "runs credential helpers" },
+    { crate = "gix-filter", reason = "runs clean and smudge filter drivers" },
+    { crate = "gix-protocol", reason = "the network half of git, which is how gix-transport is reached" },
+    { crate = "gix-transport", reason = "starts ssh and git-upload-pack" },
+    # A pattern can arrive through a turn, so the engine that runs it is attack surface.
+    # crates/agent/src/regex.rs matches without backtracking and is what `search` uses.
+    { crate = "regex", reason = "a pattern that arrives through a turn is run by the engine, so match literally or with crates/agent/src/regex.rs" },
+    { crate = "regex-lite", reason = "a second regex engine" },
+    { crate = "fancy-regex", reason = "a backtracking regex engine, which a crafted pattern can make exponential" },
+]
+# `wildcards` is left at its default. It reads every intra-workspace path dependency here as
+# a `*` requirement, and `allow-wildcard-paths` does not apply to them because no crate in
+# the workspace declares `publish = false`, so enabling it means declaring that across the
+# workspace first, before it can say anything about a real `*`.
+
+# Every duplicate the build compiles, and why it cannot be unified here. Cargo.lock lists
+# sixteen crates at more than one version; the four not here are reachable only through
+# dev-dependencies of dependencies or through an optional feature no crate here turns on, so
+# no build of this workspace resolves them.
+#
+# An entry that no longer matches anything is a reason left behind to be believed, so the
+# command in `make check-deps` raises that from a warning to an error. Each version is
+# written with a `:`, which is a requirement rather than the exact pin `@` means: every
+# reason below is about which minor versions sit side by side, and a patch bump that leaves
+# that unchanged should not have to be signed off again.
+skip = [
+    { crate = "base64:0.22", reason = "the version the workspace pins; ureq 3.4 is on 0.23 internally" },
+    { crate = "getrandom:0.2", reason = "rand 0.8 is on it; gix-utils, under read_git's plumbing, is on 0.4" },
+    { crate = "hashbrown:0.16", reason = "kasuari 0.4 pins it while the rest of ratatui 0.30 is on 0.17; neither is a dependency of this workspace" },
+    { crate = "linux-raw-sys:0.4", reason = "Linux only; rustix 0.38, which ratatui-image pins, is on it while rustix 1 is on 0.12" },
+    { crate = "miniz_oxide:0.8", reason = "png 0.18 pins it while flate2 1.1 is on 0.9; both come in with the picture decoders, PNG only" },
+    { crate = "rand:0.8", reason = "the version ratatui-image asks for; quantette, under icy_sixel, is on 0.10" },
+    { crate = "rand_core:0.6", reason = "goes with rand 0.8; rand 0.10 is on 0.10" },
+    { crate = "rustix:0.38", reason = "ratatui-image pins it for the terminal query; the rest of the workspace is on 1" },
+    { crate = "syn:2", reason = "proc macros only, so nothing of either version is in the binary; ratatui's macro crates are on 2 and serde_derive is on 3" },
+    { crate = "thiserror:1", reason = "ratatui-image is on 1 while icy_sixel and the rest of the workspace are on 2" },
+    { crate = "thiserror-impl:1", reason = "the derive half of thiserror 1; proc macro only, so nothing of it is in the binary" },
+    { crate = "windows-sys:0.52", reason = "compiled for the Windows targets only; ring 0.17 pins it while rustix and mio are on 0.61" },
+]
+
+[sources]
+# crates.io and nothing else. A git dependency is the one supply-chain route no version pin
+# covers, and both of these default to a warning, which nothing reads.
+unknown-registry = "deny"
+unknown-git = "deny"

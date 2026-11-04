@@ -1,0 +1,1318 @@
+//! Talking to the main thread from a worker.
+//!
+//! A turn runs off the main thread so the indicator keeps animating while the model is slow.
+//! But only the main thread owns the terminal, so the turn can neither draw an approval prompt
+//! nor update a display itself. Both travel over one channel, because the main thread waits on
+//! exactly one thing and `mpsc` has no way to select across two.
+//!
+//! The messages behave in two ways, and the difference is consent:
+//!
+//! - A write, a run, and a question **ask**. The worker blocks until an answer arrives, and every
+//!   failure resolves to the negative one: a channel that cannot carry the question cannot carry
+//!   consent either, and a reply that never came is not an answer to report as the user's.
+//! - Progress **announces**. There is no reply to wait for and nothing to refuse, so a listener
+//!   that has gone away is simply not drawing. Failing a turn because nobody was watching would
+//!   let the display outrank the work.
+//!
+//! Replies come back over one channel too, tagged with what they answer. The worker asks one
+//! thing at a time and blocks, so a reply of the wrong kind means the two ends have lost step
+//! with each other; that resolves to the negative answer rather than to a retry, because a
+//! decision taken against a question nobody matched is worse than no decision at all.
+
+use bravebot_agent::confirm::{
+    CallDecision, Confirmer, Decision, ExposureRequest, FetchRequest, HostRequest, ManifestRequest,
+    McpCallRequest, MoveRequest, OutputRequest, PathRequest, RunDecision, RunRequest,
+    ServerRequest, ToolListRequest, VetRequest, VouchRequest, WriteDecision, WriteRequest,
+};
+use bravebot_agent::report::{
+    Activity, DelegateId, Delegation, Landing, Phase, Printed, Reported, Reporter, Returned, Shown,
+};
+use bravebot_core::ask::{Answer, Asking};
+use bravebot_core::todo::Row;
+use std::sync::mpsc::{Receiver, Sender};
+
+/// Prompts typed while a turn runs are held in the shared buffer of `bravebot_agent`, which both
+/// the terminal and the desktop bridge use. The buffer is shared between the two threads rather
+/// than sent down a channel because a queued prompt can be taken back (`Interjections::forget_last`).
+pub use bravebot_agent::interjections::Interjections;
+
+/// What a worker sends the main thread.
+#[derive(Debug)]
+pub enum ToMain {
+    /// The submitted prompt entered the conversation at this recounted position.
+    PromptRecorded(usize),
+    /// The request the turn is about to send the planner. No reply.
+    RequestBuilt(Box<bravebot_agent::request_view::RequestView>),
+    /// The conversation as the turn is about to send it, for a question typed beside the turn
+    /// to be asked over (CMD-8). No reply.
+    Forked(Box<bravebot_agent::aside::Fork>),
+    /// A write needs approval. The main thread must reply.
+    Write(WriteRequest),
+    /// A pipeline needs approval before it runs. The main thread must reply.
+    Run(RunRequest),
+    /// A command's output needs a person to read it before the planner may. The main thread
+    /// must reply.
+    ReadOutput(OutputRequest),
+    /// A quarantined slot the planner asked to be shown, with what a check made of it. The main
+    /// thread must reply.
+    Vet(VetRequest),
+    /// A URL the planner wants fetched. The main thread must reply.
+    Fetch(FetchRequest),
+    /// A quarantined file the model would like to read. The main thread must reply.
+    Vouch(VouchRequest),
+    /// A file the model may read that holds what the scan took for a credential. The main thread
+    /// must reply.
+    Exposure(ExposureRequest),
+    /// A language server the planner would like started. The main thread must reply.
+    Server(ServerRequest),
+    /// A frozen plan that will not run until somebody approves it. The main thread must reply.
+    Manifest(ManifestRequest),
+    /// The tools an MCP server offers, before any is offered to the planner. The main thread must
+    /// reply.
+    ToolList(ToolListRequest),
+    /// A call to an MCP server's tool. The main thread must reply.
+    McpCall(McpCallRequest),
+    /// A remote MCP server's reply pointed somewhere it is not declared. The main thread must
+    /// reply.
+    Move(MoveRequest),
+    /// The planner is asking for programs to reach one more path. The main thread must reply.
+    Path(PathRequest),
+    /// Programs a line started asked for hosts the allowed-hosts list does not cover. The main
+    /// thread must reply.
+    Host(HostRequest),
+    /// The planner is asking the user something. The main thread must reply.
+    Ask(Asking),
+    /// The task list changed. No reply.
+    Todos(Vec<Row>),
+    /// The model has written this many output tokens so far. No reply.
+    Written(u64),
+    /// Cumulative usage from completed requests.
+    Spent(bravebot_agent::Spent),
+    /// The turn is waiting on the model again. No reply.
+    Phase(Phase),
+    /// The model said something between tool calls. No reply.
+    Narration(String),
+    /// What loaded before the turn started, and what did not. No reply.
+    Notice(String),
+    /// What the model has written since the last frame. No reply.
+    Streaming(String),
+    /// What the model has thought since the last frame. No reply.
+    Thinking(String),
+    /// The call the model is writing, by the word its row will start with, or none once the
+    /// attempt writing it was thrown away. No reply.
+    Composing(Option<&'static str>),
+    /// A tool call has begun. No reply.
+    Started(Activity),
+    /// The tool call last announced has finished. No reply.
+    Finished(Activity),
+    /// The command the call last announced runs can be moved to the background with this token.
+    /// No reply.
+    Movable(bravebot_core::cancel::Handoff),
+    /// A background job started, ended, or is being stopped with its turn. No reply.
+    Job(bravebot_agent::report::JobEvent),
+    /// A check has begun over this many lines of quarantined content. No reply.
+    CheckStarted(bravebot_core::vetting::Checking),
+    /// The check last announced is over, whatever it decided. No reply.
+    CheckFinished,
+    /// A hook is about to start, for this moment, running this program. No reply.
+    HookStarted(&'static str, String),
+    /// The hook last announced is over, however it ended. No reply.
+    HookFinished,
+    /// Quarantined content, for the person watching to read. No reply.
+    Quarantined(Shown),
+    /// What a command printed, for the view a person can open over it. No reply.
+    Printed(Printed),
+    /// A few lines of what the last call handed the planner. No reply.
+    Returned(Returned),
+    /// Where the result of the last call ended up. No reply.
+    Landed(Landing),
+    /// A prompt the person typed mid-turn has reached the planner. No reply.
+    Interjected(String),
+    /// The turn is about to wait on this delegate's report. No reply.
+    DelegateWaiting(DelegateId),
+    /// A delegate has begun. No reply.
+    DelegateStarted(Delegation),
+    /// One delegate has finished, with what the turn was told and what it reported. No reply.
+    DelegateFinished {
+        id: DelegateId,
+        note: String,
+        failed: bool,
+        reported: Option<Reported>,
+    },
+    /// Whose work the reports that follow are: one delegate, or the turn itself. No reply.
+    ///
+    /// Sent before each report rather than worked out at the other end. Several runs report at
+    /// once, so the order lines arrive in says nothing about whose they are.
+    ReportingFor(Option<DelegateId>),
+}
+
+/// What the main thread sends back, tagged with what it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    Write(WriteDecision),
+    Run(RunDecision),
+    ReadOutput(Decision),
+    Vet(Decision),
+    Fetch(Decision),
+    Vouch(Decision),
+    Exposure(Decision),
+    Server(Decision),
+    Manifest(Decision),
+    ToolList(Decision),
+    McpCall(CallDecision),
+    Move(Decision),
+    Path(Decision),
+    Host(Decision),
+    Ask(Vec<Answer>),
+}
+
+/// The worker's end for questions: sends one, waits for the answer.
+pub struct RemoteConfirmer {
+    outbound: Sender<ToMain>,
+    answers: Receiver<Reply>,
+    /// Prompts typed while the turn ran, in the order they were typed.
+    ///
+    /// Not a [`Reply`], because this is the one thing crossing here that nobody asked for: a reply
+    /// is matched to a question the worker is blocked on, and this arrives whenever a person felt
+    /// like typing.
+    typed: Interjections,
+}
+
+impl RemoteConfirmer {
+    pub fn new(outbound: Sender<ToMain>, answers: Receiver<Reply>, typed: Interjections) -> Self {
+        Self {
+            outbound,
+            answers,
+            typed,
+        }
+    }
+
+    /// Send a question and block for its reply.
+    fn exchange(&mut self, message: ToMain) -> Option<Reply> {
+        // A channel that cannot carry the question cannot carry consent either.
+        self.outbound.send(message).ok()?;
+        self.answers.recv().ok()
+    }
+}
+
+impl Confirmer for RemoteConfirmer {
+    fn confirm_write(&mut self, request: &WriteRequest) -> WriteDecision {
+        match self.exchange(ToMain::Write(request.clone())) {
+            Some(Reply::Write(decision)) => decision,
+            // No reply, or a reply to something else. Neither is consent.
+            _ => WriteDecision::reject(),
+        }
+    }
+
+    fn confirm_run(&mut self, request: &RunRequest) -> RunDecision {
+        match self.exchange(ToMain::Run(request.clone())) {
+            Some(Reply::Run(decision)) => decision,
+            // A reply tagged as answering the write question is not an answer to this one, and
+            // running a program on it would be acting on consent nobody gave.
+            _ => RunDecision::reject(),
+        }
+    }
+
+    fn confirm_read_output(&mut self, request: &OutputRequest) -> Decision {
+        match self.exchange(ToMain::ReadOutput(request.clone())) {
+            Some(Reply::ReadOutput(decision)) => decision,
+            // A reply to a different question is not consent to put these bytes in the planner's
+            // context.
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_vetted_read(&mut self, request: &VetRequest) -> Decision {
+        match self.exchange(ToMain::Vet(request.clone())) {
+            Some(Reply::Vet(decision)) => decision,
+            // A reply to a different question is not consent to put these bytes in the planner's
+            // context, and neither is the verdict that travelled out with the question.
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_fetch(&mut self, request: &FetchRequest) -> Decision {
+        match self.exchange(ToMain::Fetch(request.clone())) {
+            Some(Reply::Fetch(decision)) => decision,
+            // A reply to another question is not consent to leave this machine.
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_vouch(&mut self, request: &VouchRequest) -> Decision {
+        match self.exchange(ToMain::Vouch(request.clone())) {
+            Some(Reply::Vouch(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// A reply to any other question is not an answer to this one. Vouching for a file and
+    /// sending one are opposite questions about the same path, so taking one answer for the other
+    /// would disclose a credential on the strength of a yes about something else.
+    fn confirm_exposing_read(&mut self, request: &ExposureRequest) -> Decision {
+        match self.exchange(ToMain::Exposure(request.clone())) {
+            Some(Reply::Exposure(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_server(&mut self, request: &ServerRequest) -> Decision {
+        match self.exchange(ToMain::Server(request.clone())) {
+            Some(Reply::Server(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// A reply to any other question is not an answer to this one. Every other question is about
+    /// one effect and this is about a whole run, so taking a write's yes for it would run steps
+    /// nobody was shown.
+    fn confirm_manifest(&mut self, request: &ManifestRequest) -> Decision {
+        match self.exchange(ToMain::Manifest(request.clone())) {
+            Some(Reply::Manifest(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_tool_list(&mut self, request: &ToolListRequest) -> Decision {
+        match self.exchange(ToMain::ToolList(request.clone())) {
+            Some(Reply::ToolList(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// A yes to a list is not a yes to one of its tools' calls, nor the other way round.
+    fn confirm_mcp_call(&mut self, request: &McpCallRequest) -> CallDecision {
+        match self.exchange(ToMain::McpCall(request.clone())) {
+            Some(Reply::McpCall(decision)) => decision,
+            _ => CallDecision::reject(),
+        }
+    }
+
+    fn confirm_path(&mut self, request: &PathRequest) -> Decision {
+        match self.exchange(ToMain::Path(request.clone())) {
+            Some(Reply::Path(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    fn confirm_host(&mut self, request: &HostRequest) -> Decision {
+        match self.exchange(ToMain::Host(request.clone())) {
+            Some(Reply::Host(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    /// Declined without asking: a session in a terminal is offered no way to send (MSG-3).
+    fn confirm_message(
+        &mut self,
+        _request: &bravebot_agent::confirm::MessageRequest,
+    ) -> bravebot_agent::confirm::MessageDecision {
+        bravebot_agent::confirm::MessageDecision::Decline
+    }
+
+    /// A yes to the call is not a yes to where its reply pointed.
+    fn confirm_move(&mut self, request: &MoveRequest) -> Decision {
+        match self.exchange(ToMain::Move(request.clone())) {
+            Some(Reply::Move(decision)) => decision,
+            _ => Decision::Reject,
+        }
+    }
+
+    fn ask_user(&mut self, asking: &Asking) -> Vec<Answer> {
+        match self.exchange(ToMain::Ask(asking.clone())) {
+            Some(Reply::Ask(answers)) => answers,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whatever is waiting, without waiting for anything to arrive. Nothing there is the ordinary
+    /// answer and not a failure: a turn must never be held up by this.
+    fn interjection(&mut self) -> Option<String> {
+        self.typed.take()
+    }
+
+    /// Whether the person has typed a line for the turn since it last took one, which the turn
+    /// reads while it waits on a reply (INPUT-10).
+    fn arrival(&self) -> bravebot_agent::interjections::Arrival {
+        self.typed.arrival()
+    }
+}
+
+/// The worker's end for progress: sends and moves on.
+///
+/// A separate handle from [`RemoteConfirmer`] over a clone of the same sender, because a turn holds
+/// both at once and one object cannot be borrowed mutably twice. They stay distinct types for a
+/// better reason than that, though: nothing that only announces should be able to answer a
+/// question about a write.
+pub struct RemoteReporter {
+    outbound: Sender<ToMain>,
+}
+
+impl RemoteReporter {
+    pub fn new(outbound: Sender<ToMain>) -> Self {
+        Self { outbound }
+    }
+}
+
+impl Reporter for RemoteReporter {
+    fn wants_request_view(&self) -> bool {
+        true
+    }
+
+    fn request_built(&mut self, view: bravebot_agent::request_view::RequestView) {
+        let _ = self.outbound.send(ToMain::RequestBuilt(Box::new(view)));
+    }
+
+    fn wants_fork(&self) -> bool {
+        true
+    }
+
+    fn exchange_forked(&mut self, fork: bravebot_agent::aside::Fork) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a closed channel means the display is gone, and nothing rests on the fork arriving"
+        )]
+        let _ = self.outbound.send(ToMain::Forked(Box::new(fork)));
+    }
+
+    fn prompt_recorded(&mut self, at: usize) {
+        let _ = self.outbound.send(ToMain::PromptRecorded(at));
+    }
+
+    fn spent(&mut self, spent: bravebot_agent::Spent) {
+        let _ = self.outbound.send(ToMain::Spent(spent));
+    }
+
+    fn todos(&mut self, rows: Vec<Row>) {
+        // Deliberately ignored. Unlike a write, there is no decision resting on this arriving,
+        // so a closed channel means the display is gone, not that the turn should stop.
+        let _ = self.outbound.send(ToMain::Todos(rows));
+    }
+
+    fn output_tokens(&mut self, written: u64) {
+        let _ = self.outbound.send(ToMain::Written(written));
+    }
+
+    fn phase(&mut self, phase: Phase) {
+        let _ = self.outbound.send(ToMain::Phase(phase));
+    }
+
+    fn narration(&mut self, text: String) {
+        let _ = self.outbound.send(ToMain::Narration(text));
+    }
+
+    fn notice(&mut self, text: String) {
+        let _ = self.outbound.send(ToMain::Notice(text));
+    }
+
+    fn streaming(&mut self, text: String) {
+        let _ = self.outbound.send(ToMain::Streaming(text));
+    }
+
+    fn thinking(&mut self, text: String) {
+        let _ = self.outbound.send(ToMain::Thinking(text));
+    }
+
+    fn composing(&mut self, call: Option<&'static str>) {
+        let _ = self.outbound.send(ToMain::Composing(call));
+    }
+
+    fn tool_started(&mut self, activity: Activity) {
+        let _ = self.outbound.send(ToMain::Started(activity));
+    }
+
+    fn tool_finished(&mut self, activity: Activity) {
+        let _ = self.outbound.send(ToMain::Finished(activity));
+    }
+
+    fn movable(&mut self, handoff: bravebot_core::cancel::Handoff) {
+        let _ = self.outbound.send(ToMain::Movable(handoff));
+    }
+
+    fn job(&mut self, event: bravebot_agent::report::JobEvent) {
+        let _ = self.outbound.send(ToMain::Job(event));
+    }
+
+    fn check_started(&mut self, checking: bravebot_core::vetting::Checking) {
+        let _ = self.outbound.send(ToMain::CheckStarted(checking));
+    }
+
+    fn check_finished(&mut self) {
+        let _ = self.outbound.send(ToMain::CheckFinished);
+    }
+
+    fn hook_started(&mut self, moment: &'static str, program: String) {
+        let _ = self.outbound.send(ToMain::HookStarted(moment, program));
+    }
+
+    fn hook_finished(&mut self) {
+        let _ = self.outbound.send(ToMain::HookFinished);
+    }
+
+    fn quarantined(&mut self, shown: Shown) {
+        let _ = self.outbound.send(ToMain::Quarantined(shown));
+    }
+
+    fn printed(&mut self, output: Printed) {
+        let _ = self.outbound.send(ToMain::Printed(output));
+    }
+
+    fn returned(&mut self, returned: Returned) {
+        let _ = self.outbound.send(ToMain::Returned(returned));
+    }
+
+    fn landed(&mut self, _call: Option<bravebot_agent::report::CallId>, landing: Landing) {
+        let _ = self.outbound.send(ToMain::Landed(landing));
+    }
+
+    fn interjected(&mut self, said: String) {
+        let _ = self.outbound.send(ToMain::Interjected(said));
+    }
+
+    fn reporting_for(&mut self, delegate: Option<DelegateId>) {
+        let _ = self.outbound.send(ToMain::ReportingFor(delegate));
+    }
+
+    fn delegate_waiting(&mut self, delegate: DelegateId) {
+        let _ = self.outbound.send(ToMain::DelegateWaiting(delegate));
+    }
+
+    fn delegate_started(&mut self, delegation: Delegation) {
+        let _ = self.outbound.send(ToMain::DelegateStarted(delegation));
+    }
+
+    fn delegate_finished(
+        &mut self,
+        id: DelegateId,
+        note: String,
+        failed: bool,
+        reported: Option<Reported>,
+    ) {
+        let _ = self.outbound.send(ToMain::DelegateFinished {
+            id,
+            note,
+            failed,
+            reported,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bravebot_agent::confirm::Intent;
+    use bravebot_agent::diff::Diff;
+    use bravebot_core::todo::{Item, List, Status, rows};
+    use std::sync::mpsc::channel;
+    use std::thread;
+
+    fn request() -> WriteRequest {
+        WriteRequest {
+            written_since_checkout: false,
+            path: "notes.md".into(),
+            contents: "body\n".into(),
+            existing: None,
+            diff: Diff::compute("", "body\n"),
+            intent: Intent::Create,
+            untrusted: false,
+            remark: None,
+            protected: false,
+            credentials: Vec::new(),
+            may_always: false,
+            record: None,
+            may_edit: false,
+        }
+    }
+
+    /// The question reaches the other side and the answer comes back.
+    #[test]
+    fn an_answer_travels_back_to_the_worker() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            match inbound.recv().expect("a message arrived") {
+                ToMain::Write(asked) => assert_eq!(asked.path, "notes.md"),
+                other => panic!("expected a write question, got {other:?}"),
+            }
+            answer_tx
+                .send(Reply::Write(WriteDecision::approve()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_write(&request()),
+            WriteDecision::approve()
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// The confirmer a turn is handed reports the lines the terminal adds to the buffer it was made
+    /// from, as they arrive, and stops reporting once the turn has taken them (INPUT-10). Rejects a
+    /// confirmer that leaves the handle at its default, which never reports a line, so a turn
+    /// waiting on a reply that is still thinking would wait it out.
+    #[test]
+    fn the_turns_confirmer_sees_a_line_as_the_terminal_adds_it() {
+        let (outbound, _inbound) = channel::<ToMain>();
+        let (_answer_tx, answer_rx) = channel();
+        let typed = Interjections::new();
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, typed.clone());
+
+        let arrival = confirmer.arrival();
+        assert!(arrival.is_listening());
+        assert!(!arrival.is_waiting());
+        assert!(typed.push("no, the other one".into()));
+        assert!(
+            arrival.is_waiting(),
+            "a line the terminal added was not seen"
+        );
+        assert_eq!(
+            confirmer.interjection().as_deref(),
+            Some("no, the other one")
+        );
+        assert!(
+            !arrival.is_waiting(),
+            "a line the turn took still read as waiting"
+        );
+    }
+
+    fn a_run() -> RunRequest {
+        RunRequest::from_pipeline(
+            &bravebot_core::Pipeline::new(vec![bravebot_core::Stage::new(
+                "git",
+                vec!["log".into()],
+            )]),
+            &["/usr/bin/git".into()],
+            "/tmp/project",
+        )
+    }
+
+    fn a_plan() -> ManifestRequest {
+        ManifestRequest {
+            task: "tidy the notes".into(),
+            steps: vec![
+                "1. [fetch] read notes.md into notes".into(),
+                "2. [act] write notes to summary.md".into(),
+            ],
+        }
+    }
+
+    /// Every step crosses to the terminal, since the person is answering for all of them, and the
+    /// answer crosses back.
+    #[test]
+    fn a_plan_crosses_with_every_step_and_the_answer_comes_back() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            match inbound.recv().expect("a message arrived") {
+                ToMain::Manifest(asked) => {
+                    assert_eq!(asked.task, "tidy the notes");
+                    assert_eq!(asked.steps.len(), 2);
+                }
+                other => panic!("expected a plan question, got {other:?}"),
+            }
+            answer_tx
+                .send(Reply::Manifest(Decision::Approve))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(confirmer.confirm_manifest(&a_plan()), Decision::Approve);
+        responder.join().expect("responder finished");
+    }
+
+    /// A yes to a write is not a yes to the plan the write is in. Every other question is about one
+    /// effect and this one is about a whole run, so taking one for the other would walk steps nobody
+    /// was ever shown.
+    #[test]
+    fn an_approved_write_does_not_approve_a_plan() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::approve()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_manifest(&a_plan()),
+            Decision::Reject,
+            "consent to a write was taken as consent to a whole plan"
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// SANDBOX-24: the hosts cross to the terminal and the answer comes back, and a yes to a path is
+    /// not a yes to the hosts, since a path and a host widen different things.
+    #[test]
+    fn hosts_cross_with_every_name_and_only_their_own_yes_comes_back() {
+        for (reply, expected) in [
+            (Reply::Host(Decision::Approve), Decision::Approve),
+            (Reply::Path(Decision::Approve), Decision::Reject),
+        ] {
+            let (outbound, inbound) = channel::<ToMain>();
+            let (answer_tx, answer_rx) = channel();
+            let responder = thread::spawn(move || {
+                match inbound.recv().expect("a message arrived") {
+                    ToMain::Host(asked) => assert_eq!(asked.hosts, ["a.example", "b.example"]),
+                    other => panic!("expected a host question, got {other:?}"),
+                }
+                answer_tx.send(reply).expect("answered");
+            });
+            let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+            let request = HostRequest {
+                hosts: vec!["a.example".to_string(), "b.example".to_string()],
+            };
+            assert_eq!(confirmer.confirm_host(&request), expected);
+            responder.join().expect("responder finished");
+        }
+    }
+
+    fn a_list() -> ToolListRequest {
+        ToolListRequest {
+            alias: "weather".into(),
+            tools: Vec::new(),
+            refused: 0,
+            withheld: 0,
+            verdict: bravebot_core::vetting::Verdict::Safe,
+            reason: None,
+        }
+    }
+
+    fn a_call() -> McpCallRequest {
+        McpCallRequest {
+            alias: "weather".into(),
+            tool: "get_forecast".into(),
+            arguments: vec![("city".into(), "\"Paris\"".into())],
+            description: None,
+            may_stand: true,
+            asked_every_call: false,
+            asked_for_private_arguments: false,
+            also: Vec::new(),
+        }
+    }
+
+    /// Answer 2 at a call crosses back whole, so the stand is the person's and nobody else's.
+    #[test]
+    fn a_call_answer_travels_back_with_its_stand() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            match inbound.recv().expect("a message arrived") {
+                ToMain::McpCall(asked) => assert_eq!(asked.name(), "weather:get_forecast"),
+                other => panic!("expected a call question, got {other:?}"),
+            }
+            answer_tx
+                .send(Reply::McpCall(CallDecision::approve_and_stand()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_mcp_call(&a_call()),
+            CallDecision::approve_and_stand()
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// PROMPT-12: the words a person typed at the terminal beside an answer cross back to the worker
+    /// with it, for a write, a run and a call alike, since the worker is where the turn that tells
+    /// the planner runs.
+    #[test]
+    fn a_note_travels_back_to_the_worker_with_its_answer() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("a write question arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::reject().with_note("use b.txt")))
+                .expect("answered");
+            inbound.recv().expect("a run question arrived");
+            answer_tx
+                .send(Reply::Run(RunDecision::approve().with_note("go on")))
+                .expect("answered");
+            inbound.recv().expect("a call question arrived");
+            answer_tx
+                .send(Reply::McpCall(
+                    CallDecision::reject().with_note("ask Paris"),
+                ))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        let write = confirmer.confirm_write(&request());
+        assert!(!write.approved());
+        assert_eq!(write.note(), Some("use b.txt"));
+        let run = confirmer.confirm_run(&a_run());
+        assert!(run.approved());
+        assert_eq!(run.note(), Some("go on"));
+        let call = confirmer.confirm_mcp_call(&a_call());
+        assert_eq!(call.decision, Decision::Reject);
+        assert_eq!(call.note(), Some("ask Paris"));
+        responder.join().expect("responder finished");
+    }
+
+    /// WRITE-7: the text a person saved from their editor travels back to the worker as the answer
+    /// to the write, since the worker is where the turn puts the question again. It is no approval.
+    #[test]
+    fn saved_text_travels_back_to_the_worker_and_approves_nothing() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("a write question arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::edit(
+                    "the saved text\n".to_string(),
+                )))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        let write = confirmer.confirm_write(&request());
+        assert!(!write.approved());
+        assert_eq!(write.edited(), Some("the saved text\n"));
+        responder.join().expect("responder finished");
+    }
+
+    /// A yes to a server's list is not a yes to a call of one of its tools, nor the other way round:
+    /// one promotes the server's words and the other sends the planner's to it.
+    #[test]
+    fn a_yes_to_a_list_and_a_yes_to_a_call_do_not_stand_in_for_each_other() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("the call arrived");
+            answer_tx
+                .send(Reply::ToolList(Decision::Approve))
+                .expect("answered");
+            inbound.recv().expect("the list arrived");
+            answer_tx
+                .send(Reply::McpCall(CallDecision::approve()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_mcp_call(&a_call()),
+            CallDecision::reject(),
+            "a yes to a list was taken as a yes to a call"
+        );
+        assert_eq!(
+            confirmer.confirm_tool_list(&a_list()),
+            Decision::Reject,
+            "a yes to a call was taken as a yes to a list"
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// The run question reaches the other side and the answer comes back.
+    #[test]
+    fn a_run_answer_travels_back_to_the_worker() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            match inbound.recv().expect("a message arrived") {
+                ToMain::Run(asked) => assert_eq!(asked.plan.steps().len(), 1),
+                other => panic!("expected a run question, got {other:?}"),
+            }
+            answer_tx
+                .send(Reply::Run(RunDecision::approve_always()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        let answer = confirmer.confirm_run(&a_run());
+        assert!(answer.approved());
+        assert!(
+            answer.remember,
+            "the standing permission was lost in transit"
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// An approval for a write is not an approval to run a program. The two questions are
+    /// different, so a reply tagged as answering one must not settle the other.
+    #[test]
+    fn an_approved_write_does_not_approve_a_run() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::approve()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        let answer = confirmer.confirm_run(&a_run());
+        assert!(
+            !answer.approved(),
+            "consent to a write was taken as consent to run a program"
+        );
+        assert!(!answer.remember);
+        responder.join().expect("responder finished");
+    }
+
+    /// Nobody is there to ask, so nothing runs.
+    #[test]
+    fn a_closed_channel_refuses_a_run() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (_answer_tx, answer_rx) = channel::<Reply>();
+        drop(inbound);
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        let answer = confirmer.confirm_run(&a_run());
+        assert!(!answer.approved());
+        assert!(
+            !answer.remember,
+            "a standing permission was inferred from a channel nobody answered"
+        );
+    }
+
+    fn a_vetting() -> VetRequest {
+        VetRequest {
+            origin: "example.com/notes".into(),
+            expects: "the release notes".into(),
+            content: "the notes".into(),
+            lines: 1,
+            hidden: 0,
+            verdict: bravebot_core::vetting::Verdict::Safe,
+            reason: None,
+            picture: None,
+            label: None,
+            reason_label: None,
+        }
+    }
+
+    /// An approval to read what a program printed is not an approval to promote a slot. The two
+    /// cover different things, so a reply tagged as answering one must not settle the other.
+    #[test]
+    fn an_approved_output_read_does_not_approve_a_vetted_read() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::ReadOutput(Decision::Approve))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_vetted_read(&a_vetting()),
+            Decision::Reject,
+            "consent to read a command's output was taken as consent to promote a slot"
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// Nobody is there to ask, so nothing is promoted. The verdict travelling out with the
+    /// question does not answer it: a word from a model is not a person having read something.
+    #[test]
+    fn a_closed_channel_refuses_a_vetted_read() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (_answer_tx, answer_rx) = channel::<Reply>();
+        drop(inbound);
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_vetted_read(&a_vetting()),
+            Decision::Reject
+        );
+    }
+
+    fn a_series() -> Asking {
+        bravebot_core::ask::asking(&bravebot_core::ask::Series::new(vec![
+            bravebot_core::ask::Question::new(
+                "Cache",
+                "Which cache layer?",
+                vec![bravebot_core::ask::Choice::new("HTTP", None)],
+                false,
+            ),
+        ]))
+    }
+
+    #[test]
+    fn every_answer_in_a_series_travels_back_to_the_worker() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        let responder = thread::spawn(move || {
+            match inbound.recv().expect("a message arrived") {
+                ToMain::Ask(asked) => assert_eq!(asked.prompts.len(), 1),
+                other => panic!("expected a question, got {other:?}"),
+            }
+            answer_tx
+                .send(Reply::Ask(vec![Answer::Chosen(vec![0]), Answer::Declined]))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.ask_user(&a_series()),
+            vec![Answer::Chosen(vec![0]), Answer::Declined]
+        );
+        responder.join().expect("responder finished");
+    }
+
+    /// An interface that has gone away cannot be asked, so nothing is reported as its answer.
+    #[test]
+    fn a_closed_channel_answers_no_question() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (_answer_tx, answer_rx) = channel::<Reply>();
+        drop(inbound);
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert!(confirmer.ask_user(&a_series()).is_empty());
+    }
+
+    /// And an answer channel that closes without replying answers nothing, rather than hanging.
+    #[test]
+    fn a_dropped_answer_channel_answers_no_question() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel::<Reply>();
+        thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            drop(answer_tx);
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert!(confirmer.ask_user(&a_series()).is_empty());
+    }
+
+    /// The two ends ask one thing at a time, so a reply of the wrong kind means they have lost
+    /// step with each other. Taking it as the answer would report a decision against a question
+    /// nobody matched.
+    #[test]
+    fn a_write_approval_is_not_taken_as_an_answer_to_a_question() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel::<Reply>();
+        thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::approve()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert!(confirmer.ask_user(&a_series()).is_empty());
+    }
+
+    /// And the other way round: an answer to a question is not consent to a write.
+    #[test]
+    fn an_answer_to_a_question_is_not_taken_as_consent_to_a_write() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel::<Reply>();
+        thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::Ask(vec![Answer::Chosen(vec![0])]))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(confirmer.confirm_write(&request()), WriteDecision::reject());
+    }
+
+    #[test]
+    fn a_refusal_travels_back_too() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            answer_tx
+                .send(Reply::Write(WriteDecision::reject()))
+                .expect("answered");
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(confirmer.confirm_write(&request()), WriteDecision::reject());
+    }
+
+    /// An interface that has gone away cannot consent, so the write is refused rather than
+    /// applied unseen.
+    #[test]
+    fn a_closed_channel_refuses_a_write() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (_answer_tx, answer_rx) = channel::<Reply>();
+        drop(inbound);
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(confirmer.confirm_write(&request()), WriteDecision::reject());
+    }
+
+    /// And an answer channel that closes without replying is a refusal, not a hang.
+    #[test]
+    fn a_dropped_answer_channel_refuses() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel::<Reply>();
+
+        thread::spawn(move || {
+            inbound.recv().expect("a message arrived");
+            // Goes away without answering, as it would if the interface exited.
+            drop(answer_tx);
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(confirmer.confirm_write(&request()), WriteDecision::reject());
+    }
+
+    /// Several writes in one turn are answered independently and in order.
+    #[test]
+    fn each_write_gets_its_own_answer() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel();
+
+        thread::spawn(move || {
+            for decision in [
+                WriteDecision::approve(),
+                WriteDecision::reject(),
+                WriteDecision::approve(),
+            ] {
+                inbound.recv().expect("a message arrived");
+                answer_tx.send(Reply::Write(decision)).expect("answered");
+            }
+        });
+
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+        assert_eq!(
+            confirmer.confirm_write(&request()),
+            WriteDecision::approve()
+        );
+        assert_eq!(confirmer.confirm_write(&request()), WriteDecision::reject());
+        assert_eq!(
+            confirmer.confirm_write(&request()),
+            WriteDecision::approve()
+        );
+    }
+
+    #[test]
+    fn a_task_list_travels_without_an_answer() {
+        let (outbound, inbound) = channel::<ToMain>();
+
+        let mut reporter = RemoteReporter::new(outbound);
+        reporter.todos(rows(&List::new(vec![Item::new("step", Status::Active)])));
+
+        match inbound.recv().expect("a message arrived") {
+            ToMain::Todos(rows) => assert_eq!(rows[0].content, "step"),
+            other => panic!("expected a task list, got {other:?}"),
+        }
+    }
+
+    /// The worker hands the request across as it was built, for the thread that draws it.
+    #[test]
+    fn the_request_a_turn_built_travels_to_the_thread_that_draws_it() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let mut reporter = RemoteReporter::new(outbound);
+        assert!(reporter.wants_request_view());
+        let view = bravebot_agent::request_view::RequestView {
+            model: "m".to_string(),
+            spans: Vec::new(),
+            tools: vec!["read_file".to_string()],
+            tools_bytes: 0,
+        };
+        reporter.request_built(view.clone());
+        match inbound.recv().expect("a message arrived") {
+            ToMain::RequestBuilt(sent) => assert_eq!(*sent, view),
+            other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    /// The asymmetry that matters: nobody watching is not a failure. A write refuses when the
+    /// channel is gone, but a report has no answer to withhold and must not block or panic.
+    #[test]
+    fn a_closed_channel_drops_a_task_list_without_failing() {
+        let (outbound, inbound) = channel::<ToMain>();
+        drop(inbound);
+
+        let mut reporter = RemoteReporter::new(outbound);
+        reporter.todos(rows(&List::new(vec![Item::new("step", Status::Done)])));
+        reporter.phase(Phase::Thinking);
+        reporter.narration("nobody is listening".into());
+        reporter.notice("nobody is listening to this either".into());
+        reporter.streaming("nor this".into());
+        reporter.composing(Some("Read"));
+        reporter.tool_started(Activity::running("Read", "a.rs"));
+        reporter.tool_finished(Activity::running("Read", "a.rs").done("1 line"));
+        reporter.check_started(bravebot_core::vetting::Checking::Lines(40));
+        reporter.check_finished();
+    }
+
+    /// Both handles share one channel, and a write still gets its answer with reports interleaved.
+    #[test]
+    fn questions_and_reports_share_the_channel() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let (answer_tx, answer_rx) = channel::<Reply>();
+
+        let mut reporter = RemoteReporter::new(outbound.clone());
+        let mut confirmer = RemoteConfirmer::new(outbound, answer_rx, Interjections::new());
+
+        let responder = thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(message) = inbound.recv() {
+                match message {
+                    ToMain::Ask(_) => seen.push("ask"),
+                    ToMain::Run(_) => seen.push("run"),
+                    ToMain::ReadOutput(_) => seen.push("read_output"),
+                    ToMain::Vet(_) => seen.push("vet"),
+                    ToMain::Fetch(_) => seen.push("fetch"),
+                    ToMain::Vouch(_) => seen.push("vouch"),
+                    ToMain::Exposure(_) => seen.push("exposure"),
+                    ToMain::Server(_) => seen.push("server"),
+                    ToMain::Manifest(_) => seen.push("manifest"),
+                    ToMain::ToolList(_) => seen.push("tool list"),
+                    ToMain::McpCall(_) => seen.push("mcp call"),
+                    ToMain::Move(_) => seen.push("move"),
+                    ToMain::Path(_) => seen.push("path"),
+                    ToMain::Host(_) => seen.push("host"),
+                    ToMain::Todos(_) => seen.push("todos"),
+                    ToMain::Spent(_) => seen.push("spent"),
+                    ToMain::PromptRecorded(_) => seen.push("prompt"),
+                    ToMain::RequestBuilt(_) => seen.push("request"),
+                    ToMain::Forked(_) => seen.push("forked"),
+                    ToMain::Written(_) => seen.push("written"),
+                    ToMain::Phase(_) => seen.push("phase"),
+                    ToMain::Narration(_) => seen.push("narration"),
+                    ToMain::Notice(_) => seen.push("notice"),
+                    ToMain::Streaming(_) => seen.push("streaming"),
+                    ToMain::Thinking(_) => seen.push("thinking"),
+                    ToMain::Composing(_) => seen.push("composing"),
+                    ToMain::Started(_) => seen.push("started"),
+                    ToMain::Finished(_) => seen.push("finished"),
+                    ToMain::Movable(_) => seen.push("movable"),
+                    ToMain::Job(_) => seen.push("job"),
+                    ToMain::CheckStarted(_) => seen.push("check started"),
+                    ToMain::CheckFinished => seen.push("check finished"),
+                    ToMain::HookStarted(..) => seen.push("hook started"),
+                    ToMain::HookFinished => seen.push("hook finished"),
+                    ToMain::Quarantined(_) => seen.push("quarantined"),
+                    ToMain::Printed(_) => seen.push("printed"),
+                    ToMain::Returned(_) => seen.push("returned"),
+                    ToMain::Landed(_) => seen.push("landed"),
+                    ToMain::Interjected(_) => seen.push("interjected"),
+                    ToMain::DelegateWaiting(_) => seen.push("delegate waiting"),
+                    ToMain::DelegateStarted(_) => seen.push("delegate started"),
+                    ToMain::DelegateFinished { .. } => seen.push("delegate finished"),
+                    ToMain::ReportingFor(_) => seen.push("reporting for"),
+                    ToMain::Write(_) => {
+                        seen.push("write");
+                        answer_tx
+                            .send(Reply::Write(WriteDecision::approve()))
+                            .expect("answered");
+                        return seen;
+                    }
+                }
+            }
+            seen
+        });
+
+        reporter.todos(rows(&List::new(vec![Item::new("step", Status::Active)])));
+        reporter.output_tokens(42);
+        reporter.phase(Phase::Planning);
+        reporter.narration("about to write".into());
+        reporter.notice("AGENTS.md was not loaded".into());
+        reporter.streaming("about".into());
+        reporter.thinking("weighing it".into());
+        reporter.composing(Some("Write"));
+        reporter.delegate_waiting(DelegateId::nth(1));
+        reporter.tool_started(Activity::running("Write", "notes.md"));
+        reporter.tool_finished(Activity::running("Write", "notes.md").done("1 line"));
+        assert_eq!(
+            confirmer.confirm_write(&request()),
+            WriteDecision::approve()
+        );
+        assert_eq!(
+            responder.join().expect("finished"),
+            vec![
+                "todos",
+                "written",
+                "phase",
+                "narration",
+                "notice",
+                "streaming",
+                "thinking",
+                "composing",
+                "delegate waiting",
+                "started",
+                "finished",
+                "write"
+            ]
+        );
+    }
+
+    /// A count travels with no reply, like a task list: there is nothing to answer.
+    #[test]
+    fn a_written_count_travels_without_an_answer() {
+        let (outbound, inbound) = channel::<ToMain>();
+
+        let mut reporter = RemoteReporter::new(outbound);
+        reporter.output_tokens(512);
+
+        match inbound.recv().expect("a message arrived") {
+            ToMain::Written(written) => assert_eq!(written, 512),
+            other => panic!("expected a count, got {other:?}"),
+        }
+    }
+
+    /// And a closed channel drops it rather than failing the turn: nobody watching is not an error.
+    #[test]
+    fn a_closed_channel_drops_a_written_count_without_failing() {
+        let (outbound, inbound) = channel::<ToMain>();
+        drop(inbound);
+
+        let mut reporter = RemoteReporter::new(outbound);
+        reporter.output_tokens(7);
+    }
+
+    /// A job's events cross whole, since the row a job gets on this side is made from them alone.
+    #[test]
+    fn a_job_event_travels_without_an_answer() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let event = bravebot_agent::report::JobEvent::Started {
+            name: "job:1".to_string(),
+            line: "cargo build".to_string(),
+            moved_after: Some(std::time::Duration::from_secs(3)),
+            stop: bravebot_core::cancel::JobStop::new(),
+        };
+
+        let mut reporter = RemoteReporter::new(outbound);
+        reporter.job(event.clone());
+        drop(reporter);
+
+        match inbound.recv().expect("a message arrived") {
+            ToMain::Job(arrived) => assert_eq!(arrived, event),
+            other => panic!("expected a job event, got {other:?}"),
+        }
+    }
+
+    /// A worker can finish with an error after sending progress, so totals travel on their own.
+    #[test]
+    fn cumulative_usage_reaches_the_main_thread_unchanged() {
+        let (outbound, inbound) = channel::<ToMain>();
+        let mut reporter = RemoteReporter::new(outbound);
+        let spent = bravebot_agent::Spent {
+            tokens: 120,
+            ..Default::default()
+        };
+        reporter.spent(spent);
+        reporter.spent(spent);
+        drop(reporter);
+        for _ in 0..2 {
+            assert!(matches!(inbound.recv().unwrap(), ToMain::Spent(total) if total == spent));
+        }
+        assert!(inbound.recv().is_err());
+    }
+}

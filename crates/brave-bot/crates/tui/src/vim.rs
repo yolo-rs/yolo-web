@@ -1,0 +1,1723 @@
+//! Editing the line the way vi does, for somebody who has the habit.
+//!
+//! Two modes over the same box. INSERT is what the box has always been: a character typed lands at
+//! the caret. NORMAL takes the letters as instructions instead, so `i` opens INSERT before the
+//! caret and `A` opens it at the end of the line.
+//!
+//! Nothing labelled passes through here. This decides where a caret goes and which of the person's
+//! own characters move, on a line they are typing; no workspace content and no model output reaches
+//! it.
+//!
+//! # Why the mode is not a flag on the box
+//!
+//! Shell mode is a `bool` because there are two states and one of them is the absence of the other.
+//! Here there is a third thing to say: whether the person asked for vi editing at all. Somebody who
+//! did not is in neither mode, and their `i` is the letter i. So the state is an `Option`, absent
+//! for the box everybody else has, and the two modes exist only inside it.
+
+/// Which mode the box is in, for somebody editing the way vi does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Typing text, which is what the box does for everybody.
+    #[default]
+    Insert,
+    /// Taking the letters as instructions.
+    Normal,
+    /// Marking out a stretch for the next instruction to act on.
+    ///
+    /// Line-wise where the flag says so, which is `V` against `v`: the selection is then whole lines
+    /// however far along one either end happens to sit.
+    Visual { lines: bool },
+    /// Typing over the line rather than into it, which is what `R` opens: each character takes the
+    /// place of the one under the caret.
+    Replace,
+}
+
+impl Mode {
+    /// The word this mode is drawn as.
+    ///
+    /// Untranslated and upper case, which is what every vi draws in the corner: it is the word
+    /// somebody already knows, and `NORMAL` is not a sentence to be read but a state to be
+    /// recognised.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Insert => "INSERT",
+            Mode::Normal => "NORMAL",
+            Mode::Visual { lines: false } => "VISUAL",
+            Mode::Visual { lines: true } => "VISUAL LINE",
+            Mode::Replace => "REPLACE",
+        }
+    }
+
+    /// Whether a letter typed now is an instruction rather than a letter.
+    ///
+    /// NORMAL and VISUAL, so the one guard covers them: the difference between those two is what an
+    /// instruction acts on, not whether a letter is one. REPLACE types its letters, as INSERT does,
+    /// and differs only in where they go.
+    pub fn takes_instructions(self) -> bool {
+        !matches!(self, Mode::Insert | Mode::Replace)
+    }
+}
+
+/// Which style of editing the box does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Editing {
+    /// The box everybody has: arrows and the readline chords, and no modes at all.
+    #[default]
+    Ordinary,
+    /// The box for somebody who edits the way vi does.
+    Vi,
+}
+
+impl Editing {
+    /// Every style, the ordinary box first, which is the order a picker offers them in.
+    pub const ALL: [Editing; 2] = [Editing::Ordinary, Editing::Vi];
+
+    /// The word this style is stored and configured as.
+    ///
+    /// `vim` rather than `vi`, because that is the word the settings files of the tools people
+    /// already configure use, and a word somebody copies from one of those has to work here.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Editing::Ordinary => "emacs",
+            Editing::Vi => "vim",
+        }
+    }
+
+    /// The style a word names, or `None` for a word that names none of them.
+    ///
+    /// Case-insensitive, because this reads a word from a file somebody may have edited by hand.
+    /// An unrecognised word is no choice at all rather than a choice of something, so a mistyped
+    /// setting leaves the box everybody has rather than a box whose keys do something unexplained.
+    pub fn named(word: &str) -> Option<Editing> {
+        let word = word.trim();
+        Editing::ALL
+            .into_iter()
+            .find(|style| style.as_str().eq_ignore_ascii_case(word))
+    }
+}
+
+/// What a key press in NORMAL mode asks the box to do.
+///
+/// Returned rather than applied, because the line lives on the session and this module holds no
+/// reference to it. One place decides, and one place mutates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Open INSERT mode, having first moved the caret where the key says.
+    Insert(Opening),
+    /// Move the caret, and nothing else.
+    Move(Motion),
+    /// Change the line, over the stretch of it the second half names.
+    Change(Operator, Extent),
+    /// Wait for one more key, which the instruction needs before it means anything.
+    Wait(Pending),
+    /// Put back what the last change took, which is `u`.
+    Undo,
+    /// Do the last change again, at the caret, which is `.`.
+    Again,
+    /// Put the register into the line, before or after the caret: `P` and `p`.
+    Paste { before: bool },
+    /// Put the register where the selection is, which is `p` there, and `P` keeping the register as
+    /// it was rather than filling it with what the selection held.
+    PutOver { keep: bool },
+    /// Join this line and the one below into one: `J` with a single space where the newline was,
+    /// and `gJ` with nothing there and the blanks left as they were.
+    Join { spaced: bool },
+    /// Mark out a stretch for the next instruction, character-wise or line-wise: `v` and `V`.
+    Select { lines: bool },
+    /// Mark out the last selection again, which is `gv`.
+    Reselect,
+    /// Type over the line from the caret until Escape, which is `R`.
+    TypeOver,
+    /// Swap which end of the selection the caret is at, which is `o`.
+    SwapEnds,
+    /// Replace every character of the selection with one, which is `r` once its character arrives.
+    Replace(char),
+    /// Change the case of the selection: `~` swaps it, `u` lowers and `U` raises.
+    Case(Case),
+    /// The key means nothing in this mode, and nothing at all should happen.
+    ///
+    /// Not "fall through to the ordinary bindings": a letter that vi does not use is a letter that
+    /// does nothing, and typing it into the line would be the box acting on an instruction it did
+    /// not understand.
+    Nothing,
+}
+
+/// What happens to the case of a stretch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    /// `~`: each letter becomes the other case.
+    Swapped,
+    /// `u`: every letter lower.
+    Lower,
+    /// `U`: every letter upper.
+    Upper,
+}
+
+impl Case {
+    /// The letter that spells this change after `g`, and doubled there is the whole line: `guu`.
+    fn letter(self) -> char {
+        match self {
+            Case::Swapped => '~',
+            Case::Lower => 'u',
+            Case::Upper => 'U',
+        }
+    }
+
+    /// The text with its case changed, one character for one as vim changes it.
+    ///
+    /// vim's rule is that a letter with a capital of its own is lower case, so it is raised and never
+    /// lowered, and only another letter is lowered. That is what makes the title-case `ǅ` raised by
+    /// `~` and left by `gu`. vim's one exception is kept too: `ß` raised is `SS`, where swapping it
+    /// leaves it. Lowering takes the first character of the small form, since the one letter whose
+    /// small form is two, `İ`, is an `i` and a dot vim leaves off.
+    pub fn applied_to(self, text: &str) -> String {
+        let mut changed = String::with_capacity(text.len());
+        for c in text.chars() {
+            let lower = capital(c) != c;
+            match self {
+                Case::Upper if c == 'ß' => changed.push_str("SS"),
+                Case::Upper | Case::Swapped if lower => changed.push(capital(c)),
+                Case::Lower | Case::Swapped if !lower => changed.extend(c.to_lowercase().next()),
+                _ => changed.push(c),
+            }
+        }
+        changed
+    }
+}
+
+/// The one character vim raises a letter to, which is Unicode's simple mapping rather than the full
+/// one Rust gives.
+///
+/// A letter whose full capital is two characters, the `ﬀ` ligature, has no simple one and stays as it
+/// is rather than becoming the first half of its capital. The Greek small letters with a subscript
+/// iota are the ones that do have a simple capital, the title-case letter eight or nine code points on.
+fn capital(c: char) -> char {
+    let mut full = c.to_uppercase();
+    match (full.next(), full.next()) {
+        (Some(one), None) => one,
+        _ => {
+            let on = match c {
+                '\u{1F80}'..='\u{1F87}' | '\u{1F90}'..='\u{1F97}' | '\u{1FA0}'..='\u{1FA7}' => 8,
+                '\u{1FB3}' | '\u{1FC3}' | '\u{1FF3}' => 9,
+                _ => 0,
+            };
+            char::from_u32(u32::from(c) + on).unwrap_or(c)
+        }
+    }
+}
+
+/// What is done to a stretch of the line.
+///
+/// A few operators over one set of extents, which is what makes `dw`, `cw` and `yw` one idea rather
+/// than three bindings: the letter says what happens and the rest says where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operator {
+    /// `d`: take it out, keeping it in the register.
+    Delete,
+    /// `c`: take it out and open INSERT mode where it was.
+    Change,
+    /// `y`: keep it in the register and leave the line alone.
+    Yank,
+    /// `>`: move the line a step further from the margin.
+    Indent,
+    /// `<`: move the line a step back towards the margin.
+    Dedent,
+    /// `gu`, `gU` and `g~`, and `~` alone over the character under the caret.
+    Case(Case),
+    /// `r` then a character: every character of the stretch becomes that one.
+    Replace(char),
+}
+
+impl Operator {
+    /// Whether the line is left as it was.
+    ///
+    /// The one operator that reads without writing, which is why undo has nothing to record for it.
+    pub fn reads_only(self) -> bool {
+        matches!(self, Operator::Yank)
+    }
+
+    /// Whether the stretch goes into the register.
+    ///
+    /// Only where the operator takes it or keeps it, which is vi's rule: a shift, a case change and a
+    /// replaced character leave what they acted on in the line, so a register they had filled would
+    /// have lost the yank somebody was about to put back for nothing.
+    pub fn fills_the_register(self) -> bool {
+        matches!(self, Operator::Delete | Operator::Change | Operator::Yank)
+    }
+
+    /// The letter that, typed again straight after the operator, is the whole line: the second `d` of
+    /// `dd` and the second `U` of `gUU`. `None` for the one no letter waits after.
+    fn doubled(self) -> Option<char> {
+        match self {
+            Operator::Delete => Some('d'),
+            Operator::Change => Some('c'),
+            Operator::Yank => Some('y'),
+            Operator::Indent => Some('>'),
+            Operator::Dedent => Some('<'),
+            Operator::Case(case) => Some(case.letter()),
+            Operator::Replace(_) => None,
+        }
+    }
+}
+
+/// Which stretch of the line an operator acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Extent {
+    /// From the caret to wherever a motion would take it: `dw`, `d$`, `df,`.
+    To(Motion),
+    /// The whole line, newline and all: `dd`, `cc`, `yy`.
+    Line,
+    /// From the caret to the end of the line: `D`, `C`, `Y`.
+    ToLineEnd,
+    /// The character under the caret: `x`, and `s` with a change.
+    Character,
+    /// A thing the line is made of rather than a distance: `diw`, `da"`, `ci(`.
+    Object(Object),
+    /// What VISUAL mode has marked out, which is the whole of what an operator there acts on.
+    Selection,
+    /// Every row the selection crosses, whole, whichever kind of selection it is: `D`, `X`, `Y`,
+    /// `C`, `S` and `R` there.
+    SelectedRows,
+}
+
+/// A stretch named by what it is rather than by how far away its end is.
+///
+/// The reason these exist: `ci(` is what somebody means when they want the arguments replaced, and
+/// the alternative is counting characters to a closing bracket they can see perfectly well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Object {
+    /// What kind of thing.
+    pub kind: Kind,
+    /// Whether to take what surrounds it too: the blank after a word, or the brackets themselves.
+    /// `a` against `i`.
+    pub around: bool,
+}
+
+/// Which kind of thing a text object is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `w`: a run of word characters, or a run of blanks where the caret is on one.
+    Word,
+    /// `W`: a run of anything that is not a blank, so a path or a flag is one thing.
+    Bigword,
+    /// A pair of delimiters and what lies between them, named by either of the pair.
+    Pair(char, char),
+}
+
+impl Kind {
+    /// The kind a character names as a text object, or `None` for one that names none.
+    ///
+    /// Either half of a pair names it, since `di(` and `di)` are the same request and nobody wants to
+    /// think about which one they typed.
+    pub fn named(c: char) -> Option<Kind> {
+        match c {
+            'w' => Some(Kind::Word),
+            'W' => Some(Kind::Bigword),
+            '"' => Some(Kind::Pair('"', '"')),
+            '\'' => Some(Kind::Pair('\'', '\'')),
+            '`' => Some(Kind::Pair('`', '`')),
+            // `b` and `B` are vi's names for the two pairs a block is written in.
+            '(' | ')' | 'b' => Some(Kind::Pair('(', ')')),
+            '[' | ']' => Some(Kind::Pair('[', ']')),
+            '{' | '}' | 'B' => Some(Kind::Pair('{', '}')),
+            '<' | '>' => Some(Kind::Pair('<', '>')),
+            _ => None,
+        }
+    }
+}
+
+/// Where a motion takes the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// `h`: one character left.
+    Left,
+    /// `l` and Space: one character right.
+    Right,
+    /// `w`: the start of the next word.
+    WordRight,
+    /// `e`: the end of this word, or of the next one.
+    WordEnd,
+    /// `b`: the start of this word, or of the one before.
+    WordLeft,
+    /// `ge`: the end of the word before.
+    WordEndLeft,
+    /// `W`: the start of the next run of anything that is not a blank.
+    BigwordRight,
+    /// `E`: the end of this run, or of the next one.
+    BigwordEnd,
+    /// `B`: the start of this run, or of the one before.
+    BigwordLeft,
+    /// `gE`: the end of the run before.
+    BigwordEndLeft,
+    /// `0`: the first column of the line.
+    LineStart,
+    /// `$`: the last character of the line.
+    LineEnd,
+    /// `^`: the first character of the line that is not a blank.
+    FirstNonBlank,
+    /// `_`: the first character that is not a blank, on the row the count names counting this one
+    /// as the first.
+    FirstNonBlankBelow,
+    /// `|`: the column the count names, counting the first as one.
+    Column,
+    /// `%`: the bracket that pairs with the first one at or after the caret on its row.
+    MatchingBracket,
+    /// `gg`: the first character of the first line of the input that is not a blank.
+    InputStart,
+    /// `G`: the first character of the last line of the input that is not a blank.
+    InputEnd,
+    /// `j` after an operator: the row below.
+    Down,
+    /// `k` after an operator: the row above.
+    Up,
+    /// `f`, `F`, `t`, `T` once their character has arrived, and `;` and `,` repeating one.
+    ToChar(Find),
+    /// A text object, which in VISUAL mode is a stretch to select rather than one to act on.
+    Object(Object),
+}
+
+impl Motion {
+    /// Whether an operator over this motion takes the character it landed on.
+    ///
+    /// Vi's distinction, and it is not decoration: `dw` from the start of a word takes the word and the
+    /// blank after it, stopping before the next word's first letter, while `de` takes the word and
+    /// stops having taken its last. Both are what the keys mean, and the difference is exactly this.
+    ///
+    /// The forward-looking motions that land *on* something are inclusive. The ones that land where the
+    /// next thing begins are not, since that character is the start of what was not asked for. `ge`
+    /// is vim's exception, and going back it takes the character the caret was on as well: `dge` on
+    /// the first letter of a word takes that letter and the end of the word before.
+    pub fn takes_what_it_lands_on(self) -> bool {
+        match self {
+            Motion::WordEnd
+            | Motion::BigwordEnd
+            | Motion::WordEndLeft
+            | Motion::BigwordEndLeft
+            | Motion::LineEnd
+            | Motion::MatchingBracket => true,
+            // `f` lands on the character and takes it; `t` stops one short and takes that one.
+            Motion::ToChar(find) => find.forwards,
+            // An object names both its ends, so there is no character beyond it to take or leave.
+            Motion::Object(_)
+            | Motion::Left
+            | Motion::Right
+            | Motion::WordRight
+            | Motion::WordLeft
+            | Motion::BigwordRight
+            | Motion::BigwordLeft
+            | Motion::LineStart
+            | Motion::FirstNonBlank
+            | Motion::FirstNonBlankBelow
+            | Motion::Column
+            | Motion::InputStart
+            | Motion::InputEnd
+            | Motion::Down
+            | Motion::Up => false,
+        }
+    }
+
+    /// Whether an operator over this motion takes every row from the caret's to the one it lands on,
+    /// whole.
+    ///
+    /// Vi's other distinction, for the keys whose unit is a row: `dj` is two lines out and `dG` every
+    /// line from here down, not the characters between the caret and wherever the column landed. Read
+    /// by the character, `dG` would leave the last row standing and join what was above the caret onto
+    /// it.
+    pub fn line_wise(self) -> bool {
+        matches!(
+            self,
+            Motion::Down
+                | Motion::Up
+                | Motion::FirstNonBlankBelow
+                | Motion::InputStart
+                | Motion::InputEnd
+        )
+    }
+}
+
+/// A jump to a character on the line, which is the shape `f`, `F`, `t` and `T` share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Find {
+    /// The character to look for.
+    pub target: char,
+    /// Whether to look towards the end of the line rather than the start.
+    pub forwards: bool,
+    /// Whether to stop short of the character rather than landing on it: `t` and `T` against `f`
+    /// and `F`.
+    pub short: bool,
+}
+
+impl Find {
+    /// The same jump the other way, which is what `,` asks for.
+    pub fn reversed(self) -> Self {
+        Self {
+            forwards: !self.forwards,
+            ..self
+        }
+    }
+}
+
+/// An instruction that has arrived without everything it needs.
+///
+/// Held rather than acted on, because `f` alone says to jump to a character nobody has named yet.
+/// The next key press names it, and until then nothing has happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    /// `f`, `F`, `t` or `T`, waiting for the character to jump to.
+    Find { forwards: bool, short: bool },
+    /// `g`, which means nothing alone and `gg` with the second press.
+    G,
+    /// `g` in VISUAL mode, where the selection is already the stretch an operator under `g` acts on.
+    VisualG,
+    /// `r` in VISUAL mode, waiting for the character every selected one becomes.
+    ReplaceWith,
+    /// `r` in NORMAL mode, waiting for the character the one under the caret becomes.
+    ReplaceUnder,
+    /// `i` or `a` in VISUAL mode, waiting for the kind of thing to select.
+    SelectObject { around: bool },
+    /// An operator waiting for the stretch to act on: the motion in `dw`, or the doubled letter in
+    /// `dd`.
+    Operate(Operator),
+    /// An operator waiting for the second `g` of `dgg`, having already taken the first.
+    OperateG(Operator),
+    /// An operator waiting for the character in `df,` or `ct)`, having already taken the `f` or `t`.
+    OperateToChar {
+        operator: Operator,
+        forwards: bool,
+        short: bool,
+    },
+    /// An operator waiting for the kind of thing in `diw` or `ca"`, having already taken the `i` or
+    /// `a`.
+    OperateObject { operator: Operator, around: bool },
+    /// One of vi's prefixes this box has no instruction for, waiting for the key vi would give it:
+    /// the register in `"a`, the mark in `ma`, the scroll in `zz`. That key is taken, and nothing
+    /// happens.
+    Unclaimed,
+    /// An operator vi spells after `g` that this box has no instruction for, waiting for the stretch
+    /// it would act on. `g?iw` takes the `iw` the way `diw` does, and changes nothing.
+    UnclaimedStretch,
+}
+
+/// How large a count may be, whatever is typed in front of an instruction.
+///
+/// What a count reaches is bounded by the line rather than by this: every counted instruction stops
+/// at the first step that moves nothing, so `999l` costs the length of a line. The cap is here
+/// because the digits are read before the instruction they belong to is, and somebody leaning on a
+/// key would otherwise leave a ten-digit number for the box to walk out one step at a time. A
+/// thousand is past the end of any line a prompt box holds.
+pub const COUNT_CAP: u32 = 1000;
+
+/// The count a digit makes of the one typed so far, or `None` where the digit is not part of one.
+///
+/// `1` to `9` begin a count and every digit continues one, which is what leaves `0` as the key for
+/// the first column: a `0` with nothing in front of it is a motion, and the one in `10` is the
+/// second digit of ten.
+pub fn counted(so_far: Option<u32>, c: char) -> Option<u32> {
+    let digit = c.to_digit(10)?;
+    if digit == 0 && so_far.is_none() {
+        return None;
+    }
+    Some(
+        so_far
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .min(COUNT_CAP),
+    )
+}
+
+/// Whether a digit typed now is part of a count rather than the key an instruction is waiting for.
+///
+/// With nothing waiting, and with an operator waiting for the stretch to act on: `3w` is three words
+/// and `d3w` deletes them. An operator vi spells after `g` that this box lacks waits for its stretch
+/// the same way, so the `2` of `g?2iw` is a count. Everywhere else the wait is for one particular
+/// character and a digit is that character, so `f3` jumps to a `3` and `"3` swallows one.
+pub fn takes_a_count(waiting: Option<Pending>) -> bool {
+    matches!(
+        waiting,
+        None | Some(Pending::Operate(_) | Pending::UnclaimedStretch)
+    )
+}
+
+/// The count an instruction carries, from the one in front of the operator and the one in front of
+/// the motion it acts over.
+///
+/// They multiply, which is vi's rule: `2d3w` is `d6w` rather than a question about which of the two
+/// digits won.
+pub fn multiplied(operator: Option<u32>, motion: Option<u32>) -> Option<u32> {
+    match (operator, motion) {
+        (None, None) => None,
+        (first, second) => Some(
+            first
+                .unwrap_or(1)
+                .saturating_mul(second.unwrap_or(1))
+                .min(COUNT_CAP),
+        ),
+    }
+}
+
+impl Pending {
+    /// What the key that arrived after this one means, or `Nothing` where the pair is not an
+    /// instruction.
+    ///
+    /// A pair that means nothing abandons the wait rather than holding it open for a third key. The
+    /// alternative is a box where one stray press swallows every letter after it until something
+    /// happens to match.
+    pub fn then(self, c: char) -> Command {
+        match self {
+            Pending::Find { forwards, short } => Command::Move(Motion::ToChar(Find {
+                target: c,
+                forwards,
+                short,
+            })),
+            Pending::G => match case_under_g(c) {
+                Some(case) => Command::Wait(Pending::Operate(Operator::Case(case))),
+                None if c == 'g' => Command::Move(Motion::InputStart),
+                None if c == 'e' => Command::Move(Motion::WordEndLeft),
+                None if c == 'E' => Command::Move(Motion::BigwordEndLeft),
+                None if c == 'J' => Command::Join { spaced: false },
+                None if c == 'v' => Command::Reselect,
+                // vi's other operators under `g`: rot13, formatting and the operator function. Each
+                // takes a stretch, so the keys naming one are not left to run on their own and open
+                // INSERT mode on the `i` of `g?iw`.
+                None if operates_under_g(c) => Command::Wait(Pending::UnclaimedStretch),
+                // vi's `gr` is its `r` counted in screen columns, which are characters here.
+                None if c == 'r' => Command::Wait(Pending::ReplaceUnder),
+                // The pair vi reads one more key after: a mark reached without the jump list.
+                None if matches!(c, '\'' | '`') => Command::Wait(Pending::Unclaimed),
+                None => Command::Nothing,
+            },
+            Pending::VisualG => match case_under_g(c) {
+                // With a selection on the screen there is no stretch left to name, so `vgU` is `vU`.
+                Some(case) => Command::Case(case),
+                // The other operators under `g` are whole for the same reason and change nothing, so
+                // the `l` after `vg?` moves the end of the selection as it would have without the `g?`.
+                None if operates_under_g(c) => Command::Nothing,
+                // vi's `gr` over a selection is its `r`.
+                None if c == 'r' => Command::Wait(Pending::ReplaceWith),
+                None => Pending::G.then(c),
+            },
+            Pending::OperateToChar {
+                operator,
+                forwards,
+                short,
+            } => Command::Change(
+                operator,
+                Extent::To(Motion::ToChar(Find {
+                    target: c,
+                    forwards,
+                    short,
+                })),
+            ),
+            Pending::OperateObject { operator, around } => match Kind::named(c) {
+                Some(kind) => Command::Change(operator, Extent::Object(Object { kind, around })),
+                None => Command::Nothing,
+            },
+            Pending::Operate(operator) => operated(operator, c),
+            Pending::OperateG(operator) => match c {
+                'g' => Command::Change(operator, Extent::To(Motion::InputStart)),
+                'e' => Command::Change(operator, Extent::To(Motion::WordEndLeft)),
+                'E' => Command::Change(operator, Extent::To(Motion::BigwordEndLeft)),
+                // `gugu` is `guu`, spelled with the `g` again, which vi takes as well. Only for the
+                // operators under `g`: `dgd` is nothing in vi, and a line out would be a surprise.
+                c if matches!(operator, Operator::Case(_)) && Some(c) == operator.doubled() => {
+                    Command::Change(operator, Extent::Line)
+                }
+                // A mark reached without the jump list, which is a stretch in vi and still has its
+                // mark to take.
+                '\'' | '`' => Command::Wait(Pending::Unclaimed),
+                _ => Command::Nothing,
+            },
+            Pending::ReplaceWith => Command::Replace(c),
+            Pending::ReplaceUnder => Command::Change(Operator::Replace(c), Extent::Character),
+            Pending::SelectObject { around } => match Kind::named(c) {
+                // The selection becomes the object, which is what makes `vi(` and `ci(` reach the same
+                // stretch by two routes: one shows it first.
+                Some(kind) => Command::Move(Motion::Object(Object { kind, around })),
+                None => Command::Nothing,
+            },
+            Pending::Unclaimed => Command::Nothing,
+            Pending::UnclaimedStretch => match c {
+                // The stretches two keys long, which are the ones `operated` waits again for, and
+                // `gg`.
+                'i' | 'a' | 'f' | 'F' | 't' | 'T' | 'g' => Command::Wait(Pending::Unclaimed),
+                _ => unclaimed_after_an_operator(c),
+            },
+        }
+    }
+}
+
+/// The case change a key after `g` spells, or `None` for one that spells none.
+fn case_under_g(c: char) -> Option<Case> {
+    match c {
+        'u' => Some(Case::Lower),
+        'U' => Some(Case::Upper),
+        '~' => Some(Case::Swapped),
+        _ => None,
+    }
+}
+
+/// Whether a key after `g` is one of vi's operators this box does not have there: rot13, formatting
+/// and the operator function.
+fn operates_under_g(c: char) -> bool {
+    matches!(c, '?' | 'q' | 'w' | '@')
+}
+
+/// What a key that names no motion means after an operator.
+///
+/// Nothing, and the prefixes vi reads a key after even with an operator waiting take that key as
+/// well: `d'a` is a stretch to a mark, and ending the wait at the `'` would leave the `a` to open
+/// INSERT mode. The rest vi reads a key after only on their own. The `m` of `dm` ends the operator
+/// there in vi, and the key after it is read on its own, so here too.
+fn unclaimed_after_an_operator(c: char) -> Command {
+    match c {
+        '\'' | '`' | '[' | ']' | 'z' => Command::Wait(Pending::Unclaimed),
+        _ => Command::Nothing,
+    }
+}
+
+/// What an operator does to the stretch the next key names.
+///
+/// The doubled letter is the whole line, which is why `dd` and `cc` are spelled that way and why the
+/// letter has to be compared against the operator that is waiting: `dy` is not a line.
+///
+/// The jump keys wait again rather than resolving here, since `df` still needs the character, and so
+/// do the prefixes vi reads a key after even with an operator waiting, since `d'a` still has its mark
+/// to take.
+fn operated(operator: Operator, c: char) -> Command {
+    if Some(c) == operator.doubled() {
+        return Command::Change(operator, Extent::Line);
+    }
+    match c {
+        // `i` and `a` here are not the keys that open INSERT mode: after an operator they say the
+        // stretch is a thing rather than a distance, and the next press says which thing.
+        'i' => Command::Wait(Pending::OperateObject {
+            operator,
+            around: false,
+        }),
+        'a' => Command::Wait(Pending::OperateObject {
+            operator,
+            around: true,
+        }),
+        'f' => Command::Wait(Pending::OperateToChar {
+            operator,
+            forwards: true,
+            short: false,
+        }),
+        'F' => Command::Wait(Pending::OperateToChar {
+            operator,
+            forwards: false,
+            short: false,
+        }),
+        't' => Command::Wait(Pending::OperateToChar {
+            operator,
+            forwards: true,
+            short: true,
+        }),
+        'T' => Command::Wait(Pending::OperateToChar {
+            operator,
+            forwards: false,
+            short: true,
+        }),
+        // The row keys, which are not in the table below: alone they walk the prompt history once
+        // the input runs out (INPUT-27), and only after an operator are they the row above or below.
+        'j' => Command::Change(operator, Extent::To(Motion::Down)),
+        'k' => Command::Change(operator, Extent::To(Motion::Up)),
+        'g' => Command::Wait(Pending::OperateG(operator)),
+        // Any other motion names a stretch, so `d$` and `de` work for the reason `dw` does rather
+        // than because they were listed. A key that is not a motion is not a stretch, and the pair
+        // means nothing.
+        _ => match command(c) {
+            Command::Move(motion) => Command::Change(operator, Extent::To(motion)),
+            _ => unclaimed_after_an_operator(c),
+        },
+    }
+}
+
+/// Where the caret goes as INSERT mode opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    /// `i`: at the caret, before the character it is on.
+    Here,
+    /// `I`: at the first character of the line.
+    LineStart,
+    /// `a`: after the character the caret is on.
+    After,
+    /// `A`: at the end of the line.
+    LineEnd,
+    /// `o`: on a new line below this one.
+    LineBelow,
+    /// `O`: on a new line above this one.
+    LineAbove,
+}
+
+/// What a key press in NORMAL mode means.
+///
+/// `None` for a key this module does not claim, which leaves it to whatever answered it before vi
+/// editing existed: the arrows still move the caret, Enter still sends, and Ctrl-C still stops.
+/// Those are not vi's keys, and taking them would make the mode a place where the rest of the
+/// interface stops working.
+pub fn command(c: char) -> Command {
+    match c {
+        'i' => Command::Insert(Opening::Here),
+        'I' => Command::Insert(Opening::LineStart),
+        'a' => Command::Insert(Opening::After),
+        'A' => Command::Insert(Opening::LineEnd),
+        'o' => Command::Insert(Opening::LineBelow),
+        'O' => Command::Insert(Opening::LineAbove),
+        'h' => Command::Move(Motion::Left),
+        // Space among them, which is what vi does with it: a key wider than any other, for the
+        // motion people press most.
+        'l' | ' ' => Command::Move(Motion::Right),
+        'w' => Command::Move(Motion::WordRight),
+        'e' => Command::Move(Motion::WordEnd),
+        'b' => Command::Move(Motion::WordLeft),
+        'W' => Command::Move(Motion::BigwordRight),
+        'E' => Command::Move(Motion::BigwordEnd),
+        'B' => Command::Move(Motion::BigwordLeft),
+        '0' => Command::Move(Motion::LineStart),
+        '$' => Command::Move(Motion::LineEnd),
+        '^' => Command::Move(Motion::FirstNonBlank),
+        '_' => Command::Move(Motion::FirstNonBlankBelow),
+        '|' => Command::Move(Motion::Column),
+        '%' => Command::Move(Motion::MatchingBracket),
+        'G' => Command::Move(Motion::InputEnd),
+        'g' => Command::Wait(Pending::G),
+        'f' => Command::Wait(Pending::Find {
+            forwards: true,
+            short: false,
+        }),
+        'F' => Command::Wait(Pending::Find {
+            forwards: false,
+            short: false,
+        }),
+        't' => Command::Wait(Pending::Find {
+            forwards: true,
+            short: true,
+        }),
+        'T' => Command::Wait(Pending::Find {
+            forwards: false,
+            short: true,
+        }),
+        // The operators, each waiting for the stretch to act on.
+        'd' => Command::Wait(Pending::Operate(Operator::Delete)),
+        'c' => Command::Wait(Pending::Operate(Operator::Change)),
+        'y' => Command::Wait(Pending::Operate(Operator::Yank)),
+        '>' => Command::Wait(Pending::Operate(Operator::Indent)),
+        '<' => Command::Wait(Pending::Operate(Operator::Dedent)),
+        // The capitals are the same operators to the end of the line, which is the one stretch common
+        // enough to have a key of its own.
+        'D' => Command::Change(Operator::Delete, Extent::ToLineEnd),
+        'C' => Command::Change(Operator::Change, Extent::ToLineEnd),
+        // `Y` is the line rather than the rest of it, which is vi's own inconsistency and the one
+        // people's hands expect: `yy` and `Y` are the same key twice.
+        'Y' => Command::Change(Operator::Yank, Extent::Line),
+        // The character under the caret. `x` takes it and stays, `s` takes it and starts typing, `~`
+        // changes its case and moves on, and `r` makes it the next key typed.
+        'x' => Command::Change(Operator::Delete, Extent::Character),
+        's' => Command::Change(Operator::Change, Extent::Character),
+        '~' => Command::Change(Operator::Case(Case::Swapped), Extent::Character),
+        'r' => Command::Wait(Pending::ReplaceUnder),
+        // The character before the caret, which is `dh` with a key of its own.
+        'X' => Command::Change(Operator::Delete, Extent::To(Motion::Left)),
+        'S' => Command::Change(Operator::Change, Extent::Line),
+        'p' => Command::Paste { before: false },
+        'P' => Command::Paste { before: true },
+        'J' => Command::Join { spaced: true },
+        'u' => Command::Undo,
+        '.' => Command::Again,
+        // Marking a stretch out before saying what to do with it, which is the other way round from an
+        // operator and the reason to have both: the selection is on the screen while it is chosen.
+        'v' => Command::Select { lines: false },
+        'V' => Command::Select { lines: true },
+        'R' => Command::TypeOver,
+        // vi's prefixes with no instruction here: a register, a macro, a mark, the scrolls and the
+        // bracket jumps. Each takes the key vi would give it, since a prefix that did nothing alone
+        // would leave the `a` of `ma` to open INSERT mode.
+        '"' | 'q' | '@' | 'm' | '\'' | '`' | 'z' | 'Z' | '[' | ']' => {
+            Command::Wait(Pending::Unclaimed)
+        }
+        _ => Command::Nothing,
+    }
+}
+
+/// What a key press in VISUAL mode means.
+///
+/// The stretch is already marked out, so an operator needs no extent and acts on the selection: `d` is
+/// the whole instruction where in NORMAL mode it is half of one. Motions extend the selection instead
+/// of moving a bare caret, and a few keys exist only here.
+///
+/// A separate table rather than a flag threaded through the other one, because the two modes disagree
+/// about what most of the letters mean. `u` lowers the case of a selection where in NORMAL mode it
+/// undoes, and one function answering both would be a column of conditions.
+pub fn visual_command(c: char) -> Command {
+    match c {
+        // An operator with nothing to wait for. `x` is `d` and `s` is `c`, which is what vi does: with
+        // a selection on the screen the distinction those keys draw in NORMAL mode has nothing left to
+        // draw.
+        'd' | 'x' => Command::Change(Operator::Delete, Extent::Selection),
+        'c' | 's' => Command::Change(Operator::Change, Extent::Selection),
+        'y' => Command::Change(Operator::Yank, Extent::Selection),
+        // The capitals are the same operators over every row the selection crosses, as they are in
+        // vi. `R` is one of them: vi's replace mode has no meaning over a stretch already marked out.
+        'D' | 'X' => Command::Change(Operator::Delete, Extent::SelectedRows),
+        'C' | 'S' | 'R' => Command::Change(Operator::Change, Extent::SelectedRows),
+        'Y' => Command::Change(Operator::Yank, Extent::SelectedRows),
+        '>' => Command::Change(Operator::Indent, Extent::Selection),
+        '<' => Command::Change(Operator::Dedent, Extent::Selection),
+        'p' => Command::PutOver { keep: false },
+        'P' => Command::PutOver { keep: true },
+        'J' => Command::Join { spaced: true },
+        'r' => Command::Wait(Pending::ReplaceWith),
+        '~' => Command::Case(Case::Swapped),
+        // Not undo, which is what these letters mean in NORMAL mode: with a selection on the screen
+        // they are what to do to it.
+        'u' => Command::Case(Case::Lower),
+        'U' => Command::Case(Case::Upper),
+        'o' => Command::SwapEnds,
+        // A text object selects rather than being acted on, so `vi(` shows the stretch that `ci(` would
+        // have taken.
+        'i' => Command::Wait(Pending::SelectObject { around: false }),
+        'a' => Command::Wait(Pending::SelectObject { around: true }),
+        // Toggling between the two kinds, and leaving where the press repeats the mode already in force.
+        // Which of those it is depends on the mode, so the caller decides and this only says the key was
+        // one of them.
+        'v' => Command::Select { lines: false },
+        'V' => Command::Select { lines: true },
+        'g' => Command::Wait(Pending::VisualG),
+        // Everything else means what it means in NORMAL mode, which is nearly all of the motions. A key
+        // that is not a motion there is not one here either, and the `Nothing` it returns is the answer.
+        _ => match command(c) {
+            Command::Move(motion) => Command::Move(motion),
+            Command::Wait(pending) => Command::Wait(pending),
+            _ => Command::Nothing,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The word in a settings file is the one the tools people already configure use, so a line
+    /// copied from one of those works here rather than being read as a name this program does not
+    /// know.
+    #[test]
+    fn the_configured_word_for_vi_editing_is_the_one_other_tools_use() {
+        assert_eq!(Editing::named("vim"), Some(Editing::Vi));
+        assert_eq!(Editing::named("emacs"), Some(Editing::Ordinary));
+    }
+
+    /// A file edited by hand is where this word comes from, and `Vim` is the same request as `vim`.
+    #[test]
+    fn the_configured_word_is_read_whatever_its_case() {
+        assert_eq!(Editing::named("VIM"), Some(Editing::Vi));
+        assert_eq!(Editing::named("  Vim  "), Some(Editing::Vi));
+    }
+
+    /// A mistyped setting must leave the box everybody has. Reading an unknown word as vi editing
+    /// would give somebody a box whose letters do things they did not ask for, and the only clue
+    /// would be the typo they cannot see.
+    #[test]
+    fn a_word_naming_no_style_is_no_choice_at_all() {
+        assert_eq!(Editing::named("vi"), None);
+        assert_eq!(Editing::named(""), None);
+        assert_eq!(Editing::named("nano"), None);
+    }
+
+    /// The six keys that open INSERT mode, each with the place the caret goes. They differ only in
+    /// that, which is why one enum covers them.
+    #[test]
+    fn the_keys_that_open_insert_mode_say_where_the_caret_lands() {
+        assert_eq!(command('i'), Command::Insert(Opening::Here));
+        assert_eq!(command('I'), Command::Insert(Opening::LineStart));
+        assert_eq!(command('a'), Command::Insert(Opening::After));
+        assert_eq!(command('A'), Command::Insert(Opening::LineEnd));
+        assert_eq!(command('o'), Command::Insert(Opening::LineBelow));
+        assert_eq!(command('O'), Command::Insert(Opening::LineAbove));
+    }
+
+    /// A letter vi does not use does nothing, rather than being typed. Falling through to the line
+    /// would make NORMAL mode a place where half the alphabet quietly edits the prompt.
+    #[test]
+    fn a_letter_that_means_nothing_in_normal_mode_types_nothing() {
+        assert_eq!(command('K'), Command::Nothing);
+        assert_eq!(command('Q'), Command::Nothing);
+    }
+
+    /// vi's prefixes this box has no instruction for wait for the key vi would give them, and that key
+    /// does nothing. A prefix that did nothing alone would leave the key after it to run on its own,
+    /// which is the `a` of `ma` opening INSERT mode.
+    #[test]
+    fn a_prefix_this_box_has_no_instruction_for_waits_for_its_key_and_then_does_nothing() {
+        for c in ['"', 'q', '@', 'm', '\'', '`', 'z', 'Z', '[', ']'] {
+            assert_eq!(command(c), Command::Wait(Pending::Unclaimed), "{c}");
+        }
+        for c in ' '..='~' {
+            assert_eq!(Pending::Unclaimed.then(c), Command::Nothing, "{c}");
+        }
+    }
+
+    /// Space is a motion rather than a character, which is what vi does with it: the widest key on the
+    /// board, for the motion pressed most.
+    #[test]
+    fn space_moves_right_like_the_letter_does() {
+        assert_eq!(command(' '), Command::Move(Motion::Right));
+        assert_eq!(command('l'), Command::Move(Motion::Right));
+    }
+
+    /// The four jumps differ in two ways and nothing else: which direction they look, and whether they
+    /// land on the character or stop short of it. One shape covers all four.
+    #[test]
+    fn the_four_jumps_to_a_character_differ_only_in_direction_and_where_they_stop() {
+        let waiting = |c: char| match command(c) {
+            Command::Wait(Pending::Find { forwards, short }) => (forwards, short),
+            other => panic!("{c} was {other:?} rather than a jump waiting for its character"),
+        };
+        assert_eq!(waiting('f'), (true, false));
+        assert_eq!(waiting('F'), (false, false));
+        assert_eq!(waiting('t'), (true, true));
+        assert_eq!(waiting('T'), (false, true));
+    }
+
+    /// The character that arrives after one of those keys is the target, whatever it is: `f$` jumps to
+    /// a dollar rather than being read as the key that ends a line.
+    #[test]
+    fn the_press_after_a_jump_key_is_the_character_to_jump_to() {
+        let pending = Pending::Find {
+            forwards: true,
+            short: false,
+        };
+        assert_eq!(
+            pending.then('$'),
+            Command::Move(Motion::ToChar(Find {
+                target: '$',
+                forwards: true,
+                short: false,
+            }))
+        );
+    }
+
+    /// `,` is the last jump the other way, which is the whole of what it means. Reversing the direction
+    /// and nothing else is what makes `f` then `,` land back where the caret came from.
+    #[test]
+    fn reversing_a_jump_changes_its_direction_and_nothing_else() {
+        let find = Find {
+            target: 'x',
+            forwards: true,
+            short: true,
+        };
+        assert_eq!(
+            find.reversed(),
+            Find {
+                target: 'x',
+                forwards: false,
+                short: true,
+            }
+        );
+    }
+
+    /// `g` means nothing alone and `gg` is the first line. A pair that means nothing abandons the wait
+    /// rather than holding it open for a third key, which would let one stray press swallow every
+    /// letter after it until something happened to match.
+    #[test]
+    fn a_pair_beginning_with_g_is_the_start_of_the_input_or_nothing() {
+        assert_eq!(command('g'), Command::Wait(Pending::G));
+        assert_eq!(Pending::G.then('g'), Command::Move(Motion::InputStart));
+        assert_eq!(Pending::G.then('x'), Command::Nothing);
+    }
+
+    /// `ge` and `gE` are motions wherever a motion is read: alone, after an operator's `g`, and in
+    /// VISUAL mode. After an operator the `g` is already waiting for `gg`, so the `e` has to be read
+    /// there too, or `dge` would mean nothing.
+    #[test]
+    fn ge_and_g_capital_e_are_motions_alone_after_an_operator_and_in_visual_mode() {
+        assert_eq!(Pending::G.then('e'), Command::Move(Motion::WordEndLeft));
+        assert_eq!(Pending::G.then('E'), Command::Move(Motion::BigwordEndLeft));
+        assert_eq!(
+            Pending::VisualG.then('e'),
+            Command::Move(Motion::WordEndLeft)
+        );
+        assert_eq!(
+            Pending::VisualG.then('E'),
+            Command::Move(Motion::BigwordEndLeft)
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Delete).then('e'),
+            Command::Change(Operator::Delete, Extent::To(Motion::WordEndLeft))
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Change).then('E'),
+            Command::Change(Operator::Change, Extent::To(Motion::BigwordEndLeft))
+        );
+    }
+
+    /// `W`, `E` and `B` are the word motions again, over runs of anything that is not a blank, and an
+    /// operator takes them as it takes any motion.
+    #[test]
+    fn the_capital_word_keys_are_motions_of_their_own() {
+        assert_eq!(command('W'), Command::Move(Motion::BigwordRight));
+        assert_eq!(command('E'), Command::Move(Motion::BigwordEnd));
+        assert_eq!(command('B'), Command::Move(Motion::BigwordLeft));
+        assert_eq!(
+            Pending::Operate(Operator::Delete).then('W'),
+            Command::Change(Operator::Delete, Extent::To(Motion::BigwordRight))
+        );
+    }
+
+    /// The operators vi spells after `g` that this box has none of take a stretch the way `d` does, so
+    /// the keys naming one go with them: `g?iw` takes the `iw`, and `g?gg` the second `g`. `g'` and
+    /// `` g` `` take one key more, as they do in vi. Any other pair is whole, and one that means
+    /// nothing still ends the wait.
+    #[test]
+    fn an_operator_vi_spells_after_g_waits_for_the_stretch_it_would_take() {
+        for c in ['?', 'q', 'w', '@'] {
+            assert_eq!(
+                Pending::G.then(c),
+                Command::Wait(Pending::UnclaimedStretch),
+                "g{c}"
+            );
+        }
+        for c in ['\'', '`'] {
+            assert_eq!(
+                Pending::G.then(c),
+                Command::Wait(Pending::Unclaimed),
+                "g{c}"
+            );
+        }
+        for c in ['i', 'a', 'f', 'F', 't', 'T', 'g', '\'', '`', '[', ']', 'z'] {
+            assert_eq!(
+                Pending::UnclaimedStretch.then(c),
+                Command::Wait(Pending::Unclaimed),
+                "g?{c}"
+            );
+        }
+        for c in ['w', '$', 'u', 'x', 'd', 'm', '"', 'r'] {
+            assert_eq!(Pending::UnclaimedStretch.then(c), Command::Nothing, "g?{c}");
+        }
+    }
+
+    /// `J` joins with a space and `gJ` with nothing, in NORMAL mode and in VISUAL mode alike. Read
+    /// as one join, `gJ` would put a space in the middle of the word or the path the break split.
+    #[test]
+    fn j_joins_with_a_space_and_gj_with_nothing() {
+        assert_eq!(command('J'), Command::Join { spaced: true });
+        assert_eq!(visual_command('J'), Command::Join { spaced: true });
+        assert_eq!(Pending::G.then('J'), Command::Join { spaced: false });
+        assert_eq!(Pending::VisualG.then('J'), Command::Join { spaced: false });
+    }
+
+    /// `%`, `_` and `|` are motions, so an operator takes them as it takes any motion: `d%` is the
+    /// pair, `d_` the row and `d|` back to a column.
+    #[test]
+    fn the_bracket_underscore_and_bar_keys_are_motions() {
+        for (c, motion) in [
+            ('%', Motion::MatchingBracket),
+            ('_', Motion::FirstNonBlankBelow),
+            ('|', Motion::Column),
+        ] {
+            assert_eq!(command(c), Command::Move(motion), "{c}");
+            assert_eq!(visual_command(c), Command::Move(motion), "v{c}");
+            assert_eq!(
+                Pending::Operate(Operator::Delete).then(c),
+                Command::Change(Operator::Delete, Extent::To(motion)),
+                "d{c}"
+            );
+        }
+    }
+
+    /// `b` is vi's name for the round pair and `B` for the curly one, so `dib` is `di(` and `daB` is
+    /// `da{`.
+    #[test]
+    fn the_block_letters_name_the_round_and_curly_pairs() {
+        assert_eq!(Kind::named('b'), Kind::named('('));
+        assert_eq!(Kind::named('B'), Kind::named('{'));
+        assert_ne!(Kind::named('b'), Kind::named('{'));
+    }
+
+    /// `gu`, `gU` and `g~` are operators like `d`, waiting for the stretch whose case they change,
+    /// and each doubled is the line: `guu`, and `gugu` spelled with the `g` again as vi also takes
+    /// it. Only the letter of the case change waiting is its line, so `gUu` is not `gUU`, and only
+    /// under `g` does the `g` come again, so `dgd` is still nothing.
+    #[test]
+    fn a_case_change_under_g_is_an_operator_and_doubled_is_the_line() {
+        for (c, case) in [('u', Case::Lower), ('U', Case::Upper), ('~', Case::Swapped)] {
+            let operator = Operator::Case(case);
+            assert_eq!(
+                Pending::G.then(c),
+                Command::Wait(Pending::Operate(operator)),
+                "g{c}"
+            );
+            assert_eq!(
+                Pending::Operate(operator).then(c),
+                Command::Change(operator, Extent::Line),
+                "g{c}{c}"
+            );
+            assert_eq!(
+                Pending::Operate(operator).then('g'),
+                Command::Wait(Pending::OperateG(operator)),
+                "g{c}g"
+            );
+            assert_eq!(
+                Pending::OperateG(operator).then(c),
+                Command::Change(operator, Extent::Line),
+                "g{c}g{c}"
+            );
+            assert_eq!(
+                Pending::Operate(operator).then('w'),
+                Command::Change(operator, Extent::To(Motion::WordRight)),
+                "g{c}w"
+            );
+        }
+        assert_eq!(
+            Pending::Operate(Operator::Case(Case::Upper)).then('u'),
+            Command::Nothing
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Delete).then('d'),
+            Command::Nothing
+        );
+    }
+
+    /// `~` is the case of the character under the caret, `X` the character before it, and `r` waits
+    /// for the character to put there, which is the key after it whatever that key is: `r3` makes a
+    /// `3`, so the digit is not a count. `rr` is an `r`, since nothing waits for a doubled `r`. `gr` is
+    /// `r` too, as vim's is where a screen column is a character.
+    #[test]
+    fn the_keys_for_one_character_name_it_and_r_waits_for_what_it_becomes() {
+        assert_eq!(
+            command('~'),
+            Command::Change(Operator::Case(Case::Swapped), Extent::Character)
+        );
+        assert_eq!(
+            command('X'),
+            Command::Change(Operator::Delete, Extent::To(Motion::Left))
+        );
+        assert_eq!(command('r'), Command::Wait(Pending::ReplaceUnder));
+        assert_eq!(Pending::G.then('r'), Command::Wait(Pending::ReplaceUnder));
+        assert!(!takes_a_count(Some(Pending::ReplaceUnder)));
+        for c in ['3', 'r', ' ', 'é'] {
+            assert_eq!(
+                Pending::ReplaceUnder.then(c),
+                Command::Change(Operator::Replace(c), Extent::Character),
+                "r{c}"
+            );
+        }
+    }
+
+    /// A selection is already the stretch, so in VISUAL mode an operator under `g` is whole: the key
+    /// after it is the next instruction, as it is in vi. The case changes under `g` act on the
+    /// selection there as `u`, `U` and `~` do, and the operators this box has none of change nothing.
+    #[test]
+    fn visual_mode_gives_an_operator_under_g_no_stretch() {
+        assert_eq!(visual_command('g'), Command::Wait(Pending::VisualG));
+        for c in ['u', 'U', '~'] {
+            assert_eq!(Pending::VisualG.then(c), visual_command(c), "vg{c}");
+        }
+        for c in ['?', 'q', 'w', '@'] {
+            assert_eq!(Pending::VisualG.then(c), Command::Nothing, "vg{c}");
+        }
+        assert_eq!(
+            Pending::VisualG.then('g'),
+            Command::Move(Motion::InputStart)
+        );
+        assert_eq!(
+            Pending::VisualG.then('r'),
+            Command::Wait(Pending::ReplaceWith)
+        );
+        assert_eq!(
+            Pending::VisualG.then('\''),
+            Command::Wait(Pending::Unclaimed)
+        );
+    }
+
+    /// Any motion at all names a stretch, which is what makes `dw`, `d$` and `dG` one idea rather than
+    /// three bindings. A key that is not a motion names no stretch, and the pair means nothing.
+    #[test]
+    fn an_operator_takes_any_motion_as_its_stretch() {
+        let after = |c: char| Pending::Operate(Operator::Delete).then(c);
+        assert_eq!(
+            after('w'),
+            Command::Change(Operator::Delete, Extent::To(Motion::WordRight))
+        );
+        assert_eq!(
+            after('$'),
+            Command::Change(Operator::Delete, Extent::To(Motion::LineEnd))
+        );
+        assert_eq!(after('K'), Command::Nothing);
+    }
+
+    /// Alone, `j` and `k` walk the prompt history and are not in the motion table, so an operator
+    /// claims them itself or `dj` means nothing. `dg` waits for its second `g` rather than reading the
+    /// first as a `g` of its own, which ends the operator and leaves `dgg` a bare `g`.
+    #[test]
+    fn an_operator_takes_the_row_keys_as_its_stretch() {
+        let after = |c: char| Pending::Operate(Operator::Delete).then(c);
+        assert_eq!(
+            after('j'),
+            Command::Change(Operator::Delete, Extent::To(Motion::Down))
+        );
+        assert_eq!(
+            after('k'),
+            Command::Change(Operator::Delete, Extent::To(Motion::Up))
+        );
+        assert_eq!(
+            after('g'),
+            Command::Wait(Pending::OperateG(Operator::Delete))
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Yank).then('g'),
+            Command::Change(Operator::Yank, Extent::To(Motion::InputStart))
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Delete).then('\''),
+            Command::Wait(Pending::Unclaimed)
+        );
+        assert_eq!(
+            Pending::OperateG(Operator::Delete).then('x'),
+            Command::Nothing
+        );
+    }
+
+    /// `dj` and `dG` take whole rows where `dw` and `d$` take the characters between, which is the
+    /// whole of the difference between a line-wise motion and one read by the character.
+    #[test]
+    fn a_motion_says_whether_an_operator_takes_whole_rows() {
+        for motion in [
+            Motion::Down,
+            Motion::Up,
+            Motion::InputStart,
+            Motion::InputEnd,
+            Motion::FirstNonBlankBelow,
+        ] {
+            assert!(motion.line_wise(), "{motion:?}");
+        }
+        for motion in [
+            Motion::Left,
+            Motion::Right,
+            Motion::WordRight,
+            Motion::WordEnd,
+            Motion::WordLeft,
+            Motion::WordEndLeft,
+            Motion::BigwordRight,
+            Motion::BigwordEnd,
+            Motion::BigwordLeft,
+            Motion::BigwordEndLeft,
+            Motion::LineStart,
+            Motion::LineEnd,
+            Motion::FirstNonBlank,
+            Motion::Column,
+            Motion::MatchingBracket,
+        ] {
+            assert!(!motion.line_wise(), "{motion:?}");
+        }
+    }
+
+    /// After an operator, the prefixes vi still reads a key after take it: `d'a` must not leave the
+    /// `a` to open INSERT mode. The rest end the operator there, as they do in vi, so the key after
+    /// `dm` is read on its own.
+    #[test]
+    fn an_operator_waits_for_the_key_after_a_prefix_only_where_vi_reads_one() {
+        for operator in [Operator::Delete, Operator::Change, Operator::Yank] {
+            for c in ['\'', '`', '[', ']', 'z'] {
+                assert_eq!(
+                    Pending::Operate(operator).then(c),
+                    Command::Wait(Pending::Unclaimed),
+                    "{operator:?} {c}"
+                );
+            }
+            for c in ['"', 'q', '@', 'm', 'r', 'Z', 'R'] {
+                assert_eq!(
+                    Pending::Operate(operator).then(c),
+                    Command::Nothing,
+                    "{operator:?} {c}"
+                );
+            }
+        }
+    }
+
+    /// The doubled letter is the whole line, and it is compared against the operator that is waiting:
+    /// `dy` is not a line, and reading any second letter as one would make every mistyped pair take a
+    /// line out.
+    #[test]
+    fn the_doubled_letter_is_the_whole_line_and_only_its_own() {
+        assert_eq!(
+            Pending::Operate(Operator::Delete).then('d'),
+            Command::Change(Operator::Delete, Extent::Line)
+        );
+        assert_eq!(
+            Pending::Operate(Operator::Yank).then('y'),
+            Command::Change(Operator::Yank, Extent::Line)
+        );
+        assert_eq!(
+            Pending::Operate(Operator::Delete).then('y'),
+            Command::Nothing
+        );
+    }
+
+    /// `df,` is two keys before anything can happen, which is the only place a wait stacks on a wait:
+    /// the operator has its motion and the motion still needs its character.
+    #[test]
+    fn an_operator_over_a_jump_waits_again_for_the_character() {
+        let pending = match Pending::Operate(Operator::Delete).then('f') {
+            Command::Wait(pending) => pending,
+            other => panic!("df was {other:?} rather than a wait"),
+        };
+        assert_eq!(
+            pending.then(','),
+            Command::Change(
+                Operator::Delete,
+                Extent::To(Motion::ToChar(Find {
+                    target: ',',
+                    forwards: true,
+                    short: false,
+                }))
+            )
+        );
+    }
+
+    /// `de` takes the word's last letter and `dw` stops before the next word's first, which is the whole
+    /// of the difference between an inclusive motion and an exclusive one. `ge` is inclusive too, as
+    /// it is in vim.
+    #[test]
+    fn a_motion_says_whether_an_operator_takes_the_character_it_landed_on() {
+        for motion in [
+            Motion::WordEnd,
+            Motion::BigwordEnd,
+            Motion::WordEndLeft,
+            Motion::BigwordEndLeft,
+            Motion::LineEnd,
+            Motion::MatchingBracket,
+        ] {
+            assert!(motion.takes_what_it_lands_on(), "{motion:?}");
+        }
+        for motion in [
+            Motion::WordRight,
+            Motion::WordLeft,
+            Motion::BigwordRight,
+            Motion::BigwordLeft,
+            Motion::Column,
+            Motion::FirstNonBlankBelow,
+        ] {
+            assert!(!motion.takes_what_it_lands_on(), "{motion:?}");
+        }
+    }
+
+    /// `i` and `a` after an operator are not the keys that open INSERT mode: they say the stretch is a
+    /// thing rather than a distance, and the next press says which thing.
+    #[test]
+    fn i_and_a_after_an_operator_name_a_text_object() {
+        let pending = |c: char| match Pending::Operate(Operator::Delete).then(c) {
+            Command::Wait(pending) => pending,
+            other => panic!("d{c} was {other:?} rather than a wait"),
+        };
+        assert_eq!(
+            pending('i').then('w'),
+            Command::Change(
+                Operator::Delete,
+                Extent::Object(Object {
+                    kind: Kind::Word,
+                    around: false
+                })
+            )
+        );
+        assert_eq!(
+            pending('a').then('w'),
+            Command::Change(
+                Operator::Delete,
+                Extent::Object(Object {
+                    kind: Kind::Word,
+                    around: true
+                })
+            )
+        );
+    }
+
+    /// Either half of a pair names it, since `di(` and `di)` are the same request and nobody wants to
+    /// have to think about which one they typed.
+    #[test]
+    fn either_half_of_a_pair_names_the_same_object() {
+        assert_eq!(Kind::named('('), Some(Kind::Pair('(', ')')));
+        assert_eq!(Kind::named(')'), Some(Kind::Pair('(', ')')));
+        assert_eq!(Kind::named('{'), Kind::named('}'));
+        assert_eq!(Kind::named('['), Kind::named(']'));
+    }
+
+    /// A quote is its own closing mark, which is why it is one kind with the same character twice
+    /// rather than a case of its own.
+    #[test]
+    fn a_quote_closes_itself() {
+        assert_eq!(Kind::named('"'), Some(Kind::Pair('"', '"')));
+        assert_eq!(Kind::named('\''), Some(Kind::Pair('\'', '\'')));
+    }
+
+    /// A key naming no kind of thing ends the wait rather than holding it open for a third press.
+    #[test]
+    fn a_key_naming_no_kind_of_object_means_nothing() {
+        assert_eq!(Kind::named('z'), None);
+        assert_eq!(
+            Pending::OperateObject {
+                operator: Operator::Delete,
+                around: false
+            }
+            .then('z'),
+            Command::Nothing
+        );
+    }
+
+    /// With a stretch already marked out an operator needs no extent and acts on the selection: `d` is
+    /// the whole instruction where in NORMAL mode it is half of one.
+    #[test]
+    fn an_operator_in_visual_mode_acts_on_the_selection() {
+        assert_eq!(
+            visual_command('d'),
+            Command::Change(Operator::Delete, Extent::Selection)
+        );
+        assert_eq!(
+            visual_command('y'),
+            Command::Change(Operator::Yank, Extent::Selection)
+        );
+        // `x` is `d` and `s` is `c` here: with a selection on the screen, the distinction those keys
+        // draw in NORMAL mode has nothing left to draw.
+        assert_eq!(visual_command('x'), visual_command('d'));
+        assert_eq!(visual_command('s'), visual_command('c'));
+    }
+
+    /// The capitals are the operators over every row the selection crosses, whichever kind it is,
+    /// which is what they are in vi. `R` is one of them and takes no key: replace mode over a
+    /// stretch already marked out has nothing to replace that `c` would not.
+    #[test]
+    fn a_capital_in_visual_mode_acts_on_the_rows_the_selection_crosses() {
+        for (c, operator) in [
+            ('D', Operator::Delete),
+            ('X', Operator::Delete),
+            ('Y', Operator::Yank),
+            ('C', Operator::Change),
+            ('S', Operator::Change),
+            ('R', Operator::Change),
+        ] {
+            assert_eq!(
+                visual_command(c),
+                Command::Change(operator, Extent::SelectedRows),
+                "v{c}"
+            );
+        }
+    }
+
+    /// `p` and `P` put the register where the selection is rather than beside the caret, and differ
+    /// in what the register holds afterwards rather than in which side they put it: with the stretch
+    /// already named, there is no side left to choose.
+    #[test]
+    fn putting_in_visual_mode_goes_over_the_selection() {
+        assert_eq!(command('p'), Command::Paste { before: false });
+        assert_eq!(visual_command('p'), Command::PutOver { keep: false });
+        assert_eq!(visual_command('P'), Command::PutOver { keep: true });
+    }
+
+    /// The two modes disagree about what several letters mean, which is why each reads its own table.
+    /// `u` is the plainest case: it lowers the case of a selection and undoes without one.
+    #[test]
+    fn the_letters_the_two_modes_disagree_about() {
+        assert_eq!(command('u'), Command::Undo);
+        assert_eq!(visual_command('u'), Command::Case(Case::Lower));
+        assert_eq!(visual_command('U'), Command::Case(Case::Upper));
+        assert_eq!(visual_command('~'), Command::Case(Case::Swapped));
+        assert_eq!(command('o'), Command::Insert(Opening::LineBelow));
+        assert_eq!(visual_command('o'), Command::SwapEnds);
+    }
+
+    /// Nearly every motion means the same thing in both, so the visual table falls through to the other
+    /// rather than restating them: a motion added to one would otherwise be missing from the other.
+    #[test]
+    fn the_motions_mean_the_same_thing_in_both_modes() {
+        for c in ['h', 'l', 'w', 'e', 'b', 'W', 'E', 'B', '0', '$', '^', 'G'] {
+            assert_eq!(
+                visual_command(c),
+                command(c),
+                "{c} differed between the modes"
+            );
+        }
+        assert_eq!(visual_command('K'), Command::Nothing);
+    }
+
+    /// A text object selects rather than being acted on, so `vi(` shows the stretch `ci(` would take.
+    #[test]
+    fn a_text_object_in_visual_mode_selects() {
+        let pending = match visual_command('i') {
+            Command::Wait(pending) => pending,
+            other => panic!("i was {other:?} rather than a wait"),
+        };
+        assert_eq!(
+            pending.then('w'),
+            Command::Move(Motion::Object(Object {
+                kind: Kind::Word,
+                around: false
+            }))
+        );
+    }
+
+    /// `r` needs the character every selected one becomes, so it waits as the jump keys do.
+    #[test]
+    fn replacing_a_selection_waits_for_the_character() {
+        assert_eq!(visual_command('r'), Command::Wait(Pending::ReplaceWith));
+        assert_eq!(Pending::ReplaceWith.then('z'), Command::Replace('z'));
+    }
+
+    /// An object names both its ends, so unlike a motion there is no character beyond it to take or
+    /// leave and the inclusive question does not arise.
+    #[test]
+    fn an_object_has_no_character_beyond_it() {
+        assert!(
+            !Motion::Object(Object {
+                kind: Kind::Word,
+                around: false
+            })
+            .takes_what_it_lands_on()
+        );
+    }
+
+    /// NORMAL and VISUAL take a letter as an instruction, so one guard covers them: what differs
+    /// between the two is what an instruction acts on. REPLACE types its letters, and a guard that
+    /// read it as a third mode of instructions would take the `x` of `Rx` as a delete.
+    #[test]
+    fn only_normal_and_visual_mode_take_letters_as_instructions() {
+        assert!(!Mode::Insert.takes_instructions());
+        assert!(!Mode::Replace.takes_instructions());
+        assert!(Mode::Normal.takes_instructions());
+        assert!(Mode::Visual { lines: false }.takes_instructions());
+        assert!(Mode::Visual { lines: true }.takes_instructions());
+    }
+
+    /// `R` opens REPLACE mode rather than waiting for one key the way `r` does, so everything typed
+    /// up to Escape goes over the line. `gv` marks the last selection out again, and is the same
+    /// pair in VISUAL mode, where `g` is read from a table of its own.
+    #[test]
+    fn replace_mode_and_the_last_selection_have_keys_of_their_own() {
+        assert_eq!(command('R'), Command::TypeOver);
+        assert_eq!(Pending::G.then('v'), Command::Reselect);
+        assert_eq!(Pending::VisualG.then('v'), Command::Reselect);
+        assert_eq!(Mode::Replace.as_str(), "REPLACE");
+    }
+
+    /// A yank reads without writing, which is why there is nothing for undo to put back after one and
+    /// why it is the operator that records no change.
+    #[test]
+    fn the_yank_is_the_operator_that_only_reads() {
+        assert!(Operator::Yank.reads_only());
+        assert!(!Operator::Delete.reads_only());
+        assert!(!Operator::Change.reads_only());
+        assert!(!Operator::Indent.reads_only());
+        assert!(!Operator::Case(Case::Upper).reads_only());
+        assert!(!Operator::Replace('x').reads_only());
+    }
+
+    /// Only what takes the stretch away or copies it goes into the register, which is vi's rule. A
+    /// shift, a case change and a replaced character leave what they acted on in the line, and a
+    /// register they filled would lose the yank somebody was about to put back.
+    #[test]
+    fn only_the_operators_that_take_or_copy_the_stretch_fill_the_register() {
+        for operator in [Operator::Delete, Operator::Change, Operator::Yank] {
+            assert!(operator.fills_the_register(), "{operator:?}");
+        }
+        for operator in [
+            Operator::Indent,
+            Operator::Dedent,
+            Operator::Case(Case::Lower),
+            Operator::Case(Case::Upper),
+            Operator::Case(Case::Swapped),
+            Operator::Replace('x'),
+        ] {
+            assert!(!operator.fills_the_register(), "{operator:?}");
+        }
+    }
+
+    /// One character for one, as vim changes case, so a letter whose capital is two characters is
+    /// left whole rather than cut to the first of them, which is how `ß` became an `S` that had lost
+    /// a letter. vim raises `ß` to `SS` and swaps it to itself, and so does this. Swapping reads each
+    /// character's own case, and what has no case is left as it was.
+    #[test]
+    fn a_case_change_is_one_character_for_one_as_vim_makes_it() {
+        assert_eq!(Case::Upper.applied_to("Straße 1"), "STRASSE 1");
+        assert_eq!(Case::Swapped.applied_to("ß"), "ß");
+        assert_eq!(Case::Upper.applied_to("ﬀab"), "ﬀAB");
+        assert_eq!(Case::Swapped.applied_to("ﬀab"), "ﬀAB");
+        assert_eq!(Case::Lower.applied_to("HeLLo, İ"), "hello, i");
+        assert_eq!(Case::Swapped.applied_to("Hello World!"), "hELLO wORLD!");
+        assert_eq!(Case::Swapped.applied_to("ıⱥ"), "IȺ");
+    }
+
+    /// vim raises a letter to Unicode's simple capital, which Rust's full one is not: a Greek small
+    /// letter with a subscript iota has a capital of its own, though the full mapping spells it as two
+    /// letters. And a letter with a capital is lower case to vim, so the title-case `ǅ` is raised by
+    /// `U` and `~` and left by `u`. Every string here is what vim 9.1 made of it.
+    #[test]
+    fn a_case_change_raises_a_letter_to_the_capital_vim_gives_it() {
+        assert_eq!(Case::Upper.applied_to("ᾳᾀᾐᾧῃῳᾲᾶᾼᾈǅǆǈǋǲ"), "ᾼᾈᾘᾯῌῼᾲᾶᾼᾈǄǄǇǊǱ");
+        assert_eq!(Case::Lower.applied_to("ᾼᾈῌῼǅǄǇǊǲǈǋᾳ"), "ᾳᾀῃῳǅǆǉǌǲǈǋᾳ");
+        assert_eq!(Case::Swapped.applied_to("ᾳᾀᾼᾈǅǄǆǲǈǋ"), "ᾼᾈᾳᾀǄǆǄǱǇǊ");
+    }
+
+    /// `1` to `9` begin a count and every digit continues one, which is the whole of the grammar and
+    /// the reason `0` is still the key for the first column. A `0` read as the start of a count
+    /// would leave that key doing nothing at all, and one refused as the second digit would make
+    /// `10` the digit `1` and then a jump to column zero.
+    #[test]
+    fn a_digit_begins_a_count_only_where_it_is_not_zero() {
+        assert_eq!(counted(None, '3'), Some(3));
+        assert_eq!(counted(None, '0'), None);
+        assert_eq!(counted(Some(1), '0'), Some(10));
+        assert_eq!(counted(Some(10), '0'), Some(100));
+        assert_eq!(counted(Some(2), '5'), Some(25));
+        assert_eq!(counted(None, 'w'), None);
+        // Not a digit here, whatever `char::to_digit` would make of it in another radix.
+        assert_eq!(counted(Some(1), 'a'), None);
+    }
+
+    /// The cap is what stops a held-down digit leaving a ten-digit number for the box to walk out one
+    /// step at a time, and it holds however many digits arrive after it.
+    #[test]
+    fn a_count_stops_growing_at_the_cap() {
+        assert_eq!(counted(Some(COUNT_CAP), '9'), Some(COUNT_CAP));
+        let mut count = None;
+        for _ in 0..12 {
+            count = counted(count, '9');
+        }
+        assert_eq!(count, Some(COUNT_CAP));
+    }
+
+    /// A digit is a count with nothing waiting and with an operator waiting for its stretch, and is
+    /// the key itself everywhere else: the wait in `f3` is for the character to jump to, and the one
+    /// in `"3` is for a register whose key is taken and thrown away.
+    #[test]
+    fn a_digit_is_a_count_only_where_nothing_is_waiting_for_that_key() {
+        assert!(takes_a_count(None));
+        assert!(takes_a_count(Some(Pending::Operate(Operator::Delete))));
+        assert!(takes_a_count(Some(Pending::UnclaimedStretch)));
+        assert!(!takes_a_count(Some(Pending::Find {
+            forwards: true,
+            short: false
+        })));
+        assert!(!takes_a_count(Some(Pending::Unclaimed)));
+        assert!(!takes_a_count(Some(Pending::G)));
+        assert!(!takes_a_count(Some(Pending::ReplaceWith)));
+        assert!(!takes_a_count(Some(Pending::OperateObject {
+            operator: Operator::Delete,
+            around: false
+        })));
+    }
+
+    /// The two counts multiply, which is vi's rule: `2d3w` is six words. Either one alone is itself,
+    /// and neither is a count of one, since a count of one would make `G` the first row.
+    #[test]
+    fn the_two_counts_of_an_instruction_multiply() {
+        assert_eq!(multiplied(None, None), None);
+        assert_eq!(multiplied(Some(2), None), Some(2));
+        assert_eq!(multiplied(None, Some(3)), Some(3));
+        assert_eq!(multiplied(Some(2), Some(3)), Some(6));
+        assert_eq!(
+            multiplied(Some(COUNT_CAP), Some(COUNT_CAP)),
+            Some(COUNT_CAP)
+        );
+    }
+}

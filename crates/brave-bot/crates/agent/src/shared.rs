@@ -1,0 +1,1232 @@
+//! Lending one confirmer, one reporter, one audit trail and one premium key to several runs at once.
+//!
+//! A turn and the delegates it spawned run at the same time and each of the four is single: one
+//! person answers the questions, one screen shows the lines, one trail records the decisions, one
+//! subscription pays for the requests. What they need is not a copy each but a turn each, which is
+//! what this is.
+//!
+//! # Why a lock and not a copy
+//!
+//! Copying is wrong for all four. Two trails leave a hole in the record exactly over the part of
+//! the turn nobody watched. Two reporters interleave half-written lines. Two confirmers put two
+//! questions on one screen, and a person cannot answer either without reading both. Two wallets
+//! over one batch hand out the same credential twice, which is the one thing a credential may
+//! never be.
+//!
+//! Holding the lock for the whole of one question is deliberate rather than a cost. A person is
+//! asked one thing at a time, and a delegate that wants an answer while somebody is reading
+//! another delegate's diff waits for them to finish reading it.
+//!
+//! # What this does not do
+//!
+//! It carries no content and reads none. Every method here takes what it was handed, takes the
+//! lock, and passes it through. Usage is the one thing it combines: a report of the turn's total
+//! is the turn's own figure plus what each delegate running under it has reported so far
+//! (TURN-5). Labelled content keeps the label it arrived with.
+
+use crate::confirm::{
+    Confirmer, Decision, OutputRequest, RunDecision, RunRequest, VetRequest, VouchRequest,
+    WriteDecision, WriteRequest,
+};
+use crate::report::{
+    Activity, DelegateId, Delegation, HeardMessage, Landing, Phase, Printed, Reported, Reporter,
+    Returned, SentMessage, Shown,
+};
+use bravebot_aichat::{Subscription, SubscriptionCredential};
+use bravebot_core::ask::{Answer, Asking};
+use bravebot_core::event::{Event, Sink};
+use bravebot_core::todo::Row;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard};
+
+/// One thing several runs take turns with.
+///
+/// Holds the borrow for as long as the turn does, and hands out [`Borrowed`] handles that take
+/// the lock for one call each.
+pub struct Lent<'a, T: ?Sized> {
+    inner: Mutex<&'a mut T>,
+    totals: Mutex<Totals>,
+}
+
+/// What the turn and the delegates under it have each reported spending, so that a report of the
+/// turn's total can be made whichever of them last spent (TURN-5).
+#[derive(Default)]
+struct Totals {
+    /// The turn's own last report, which already holds every delegate collected before it.
+    turn: crate::outcome::Spent,
+    /// Each delegate's last report, from its first request until the turn reports again.
+    delegates: BTreeMap<DelegateId, Delegated>,
+}
+
+#[derive(Default)]
+struct Delegated {
+    spent: crate::outcome::Spent,
+    /// Set when the turn has taken this delegate's usage into its own count. The turn's next
+    /// report holds it, and until then it is still added here, so the total neither drops nor
+    /// counts it twice in between.
+    collected: bool,
+}
+
+impl Totals {
+    /// The turn's figures with what every delegate it has not yet reported has spent added. The
+    /// context reading and the timing are the turn's alone: a delegate's context is another
+    /// conversation, and its requests overlap the turn's own clock.
+    fn reported(&self) -> crate::outcome::Spent {
+        let mut total = self.turn;
+        for delegate in self.delegates.values() {
+            total.add_spent(&delegate.spent);
+        }
+        total
+    }
+}
+
+impl<'a, T: ?Sized> Lent<'a, T> {
+    pub fn new(inner: &'a mut T) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+            totals: Mutex::new(Totals::default()),
+        }
+    }
+
+    /// Take the usage lock. Always taken before [`Lent::hold`] where a call needs both, so the two
+    /// cannot be waited on in opposite orders.
+    fn totals(&self) -> MutexGuard<'_, Totals> {
+        self.totals.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// A handle for the turn's own work.
+    pub fn turn(&self) -> Borrowed<'_, 'a, T> {
+        Borrowed {
+            lent: self,
+            from: None,
+            relayed: None,
+            stop: None,
+            spent: Default::default(),
+            inference: Vec::new(),
+        }
+    }
+
+    /// A handle for one delegate's work, which says whose every report through it is.
+    pub fn delegate(&self, id: DelegateId) -> Borrowed<'_, 'a, T> {
+        Borrowed {
+            lent: self,
+            from: Some(id),
+            relayed: None,
+            stop: None,
+            spent: Default::default(),
+            inference: Vec::new(),
+        }
+    }
+
+    /// A handle for one delegate whose prompts a person can decline in advance by stopping it
+    /// (DELEGATE-25). A question it has queued for the person is refused instead of asked once the
+    /// stop is set, including one that was waiting on another delegate's question.
+    pub fn delegate_stoppable(
+        &self,
+        id: DelegateId,
+        stop: bravebot_core::cancel::DelegateStop,
+    ) -> Borrowed<'_, 'a, T> {
+        Borrowed {
+            stop: Some(stop),
+            ..self.delegate(id)
+        }
+    }
+
+    /// Take the lock.
+    ///
+    /// A delegate that panicked leaves it poisoned, and the turn is still running and still owns
+    /// the screen. What is behind the lock is a confirmer, a reporter, a trail or a source, and a
+    /// panic leaves none of the four half written: each method here is one call that either
+    /// happened or did not, and a spend is recorded before the credential it produced is handed
+    /// back. So the turn carries on with what it was lent rather than dying of somebody else's
+    /// failure.
+    fn hold(&self) -> MutexGuard<'_, &'a mut T> {
+        self.inner.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// Take the lock if nothing else holds it.
+    ///
+    /// For the one question nobody is waiting on the answer to. See [`Borrowed::interjection`].
+    fn try_hold(&self) -> Option<MutexGuard<'_, &'a mut T>> {
+        match self.inner.try_lock() {
+            Ok(held) => Some(held),
+            Err(std::sync::TryLockError::Poisoned(held)) => Some(held.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+}
+
+/// The one source of the premium key a run presents.
+///
+/// A trait rather than [`Lent`] itself, because `Lent` is invariant in the lifetime of the borrow
+/// it holds: a run that has to carry either the source it opened or the one it was handed cannot
+/// name both in a single type, and every signature between the turn and its delegates would
+/// otherwise state the turn's own borrow.
+///
+/// Presenting, and nothing else. A run is told what the key is and never where it came from: that
+/// belongs to the run that took it from the configuration.
+pub trait Spends: Sync {
+    /// Take the lock and spend the next credential.
+    fn spend_one(&self) -> Result<SubscriptionCredential, String>;
+}
+
+impl<T: Subscription + Send + ?Sized> Spends for Lent<'_, T> {
+    fn spend_one(&self) -> Result<SubscriptionCredential, String> {
+        self.hold().next_credential()
+    }
+}
+
+/// A source that counts each request it is asked for against a session's spend limit (TURN-8).
+///
+/// Wrapped round the source a turn takes, which is the one its delegates are lent, so a delegate's
+/// requests reach the same count as the turn's own.
+pub struct Counted<'a> {
+    source: &'a dyn Spends,
+    limit: crate::spend_limit::SpendLimit,
+}
+
+impl<'a> Counted<'a> {
+    pub fn new(source: &'a dyn Spends, limit: crate::spend_limit::SpendLimit) -> Self {
+        Self { source, limit }
+    }
+}
+
+impl Spends for Counted<'_> {
+    fn spend_one(&self) -> Result<SubscriptionCredential, String> {
+        let credential = self.source.spend_one()?;
+        self.limit.add_credit();
+        Ok(credential)
+    }
+}
+
+/// One run's handle on the source.
+///
+/// A handle rather than a copy, so that every handle reaches the one source and a request made
+/// through any of them is counted with the rest (TURN-8).
+pub struct Spending<'a>(&'a dyn Spends);
+
+impl<'a> Spending<'a> {
+    pub fn new(source: &'a dyn Spends) -> Self {
+        Self(source)
+    }
+}
+
+impl Subscription for Spending<'_> {
+    fn next_credential(&mut self) -> Result<SubscriptionCredential, String> {
+        self.0.spend_one()
+    }
+}
+
+/// One run's handle on something lent.
+///
+/// Each handle retains its own progress until the parent collects it.
+pub struct Borrowed<'m, 'a, T: ?Sized> {
+    lent: &'m Lent<'a, T>,
+    /// Whose work goes through this handle, where it is a delegate's.
+    from: Option<DelegateId>,
+    /// A delegate beneath `from` whose work the next call forwards, as the handle that call came
+    /// through said. Only ever one of `from`'s own descendants, and spent by the call it names.
+    relayed: Option<DelegateId>,
+    /// Set where the person asked this one delegate to stop.
+    stop: Option<bravebot_core::cancel::DelegateStop>,
+    spent: crate::outcome::Spent,
+    inference: Vec<crate::timing::Interval>,
+}
+
+impl<T: Sink + ?Sized> Sink for Borrowed<'_, '_, T> {
+    /// Both under one lock, so a record and the run it belongs to cannot be separated by another
+    /// run recording in between. The same reason the reports below announce whose they are.
+    fn emit(&mut self, event: Event) {
+        let whose = self.whose();
+        let mut held = self.lent.hold();
+        held.recording_for(whose);
+        held.emit(event);
+    }
+
+    /// Kept for one call only where it names a delegate beneath this handle's own, so a handle
+    /// for a delegate cannot be talked into recording as the turn or as a sibling. A delegate's
+    /// own turn lends this handle onward and hands its own work a handle for the turn, which says
+    /// `None` here and so records as this delegate; a delegate that turn spawned says its own
+    /// number, and the trail names it rather than the delegate above it.
+    fn recording_for(&mut self, delegate: Option<DelegateId>) {
+        self.relay(delegate);
+    }
+}
+
+/// Forward one report, saying whose it is first.
+///
+/// Both under one lock, so a line and the run it belongs to cannot be separated by another run
+/// reporting in between.
+macro_rules! reports {
+    ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?); )*) => {
+        $(
+            fn $name(&mut self $(, $arg: $ty)*) {
+                let whose = self.whose();
+                let mut held = self.lent.hold();
+                held.reporting_for(whose);
+                held.$name($($arg),*);
+            }
+        )*
+    };
+}
+
+impl<T: Reporter + ?Sized> Reporter for Borrowed<'_, '_, T> {
+    fn inference_interval(&mut self, interval: crate::timing::Interval) {
+        if self.from.is_some() {
+            self.inference.push(interval);
+        }
+        let whose = self.whose();
+        let mut held = self.lent.hold();
+        held.reporting_for(whose);
+        held.inference_interval(interval);
+    }
+
+    fn wants_request_view(&self) -> bool {
+        self.from.is_none() && self.lent.hold().wants_request_view()
+    }
+
+    /// Only the turn's own request: a delegate's is a different conversation with a different
+    /// prompt.
+    fn request_built(&mut self, view: crate::request_view::RequestView) {
+        if self.from.is_none() {
+            self.lent.hold().request_built(view);
+        }
+    }
+
+    fn wants_fork(&self) -> bool {
+        self.from.is_none() && self.lent.hold().wants_fork()
+    }
+
+    /// Only the turn's own exchange: a delegate's is a different conversation.
+    fn exchange_forked(&mut self, fork: crate::aside::Fork) {
+        if self.from.is_none() {
+            self.lent.hold().exchange_forked(fork);
+        }
+    }
+
+    fn prompt_recorded(&mut self, at: usize) {
+        // A delegate has its own conversation; its offsets do not describe the parent turn.
+        if self.from.is_none() {
+            self.lent.hold().prompt_recorded(at);
+        }
+    }
+
+    reports! {
+        fn todos(&mut self, rows: Vec<Row>);
+        fn output_tokens(&mut self, written: u64);
+        fn phase(&mut self, phase: Phase);
+        fn narration(&mut self, text: String);
+        fn summary_failed(&mut self, why: crate::report::Why);
+        fn fell_back(&mut self, from: &str, to: &str, why: crate::report::Why);
+        fn streaming(&mut self, text: String);
+        fn thinking(&mut self, text: String);
+        fn composing(&mut self, call: Option<&'static str>);
+        fn notice(&mut self, text: String);
+        fn quarantined(&mut self, shown: Shown);
+        fn printed(&mut self, output: Printed);
+        fn returned(&mut self, returned: Returned);
+        fn landed(&mut self, call: Option<crate::report::CallId>, landing: Landing);
+        fn tool_started(&mut self, activity: Activity);
+        fn tool_finished(&mut self, activity: Activity);
+        fn movable(&mut self, handoff: bravebot_core::cancel::Handoff);
+        fn job(&mut self, event: crate::report::JobEvent);
+        fn check_started(&mut self, checking: bravebot_core::vetting::Checking);
+        fn check_finished(&mut self);
+        fn hook_started(&mut self, moment: &'static str, program: String);
+        fn hook_finished(&mut self);
+        fn interjected(&mut self, said: String);
+        fn session_message(&mut self, heard: HeardMessage);
+        fn message_sent(&mut self, sent: SentMessage);
+        fn delegate_started(&mut self, delegation: Delegation);
+        fn delegate_waiting(&mut self, delegate: DelegateId);
+    }
+
+    /// Report the turn's total as the turn's own figure plus what its delegates have spent so far.
+    ///
+    /// A delegate's report is kept beside the turn's and added to it, because forwarding it as it
+    /// stands would replace the turn's cumulative total with one delegate's smaller one. The sum
+    /// is made and forwarded under one lock so reports reach the interface in the order they
+    /// were summed.
+    fn spent(&mut self, spent: crate::outcome::Spent) {
+        self.spent = spent;
+        let mut totals = self.lent.totals();
+        match self.from {
+            Some(delegate) => totals.delegates.entry(delegate).or_default().spent = spent,
+            None => {
+                totals.turn = spent;
+                totals.delegates.retain(|_, delegate| !delegate.collected);
+            }
+        }
+        let combined = totals.reported();
+        let mut held = self.lent.hold();
+        held.reporting_for(None);
+        held.spent(combined);
+    }
+
+    /// Not through the macro: whose report this is was settled when the handle was made, and a
+    /// delegate finishing is the turn's news rather than the delegate's own.
+    fn delegate_finished(
+        &mut self,
+        delegate: DelegateId,
+        note: String,
+        failed: bool,
+        reported: Option<Reported>,
+    ) {
+        // The turn added this delegate's usage to its own count before saying it finished, and
+        // reports that count next. Until it does, the delegate stays in the sum.
+        if let Some(delegated) = self.lent.totals().delegates.get_mut(&delegate) {
+            delegated.collected = true;
+        }
+        let mut held = self.lent.hold();
+        held.reporting_for(None);
+        held.delegate_finished(delegate, note, failed, reported);
+    }
+
+    /// Kept for one call only where it names a delegate beneath this handle's own, so a handle
+    /// for a delegate cannot be talked into reporting as the turn or as a sibling. See
+    /// [`Borrowed::recording_for`](Sink::recording_for).
+    fn reporting_for(&mut self, delegate: Option<DelegateId>) {
+        self.relay(delegate);
+    }
+}
+
+impl<T: Confirmer + ?Sized> Confirmer for Borrowed<'_, '_, T> {
+    fn confirm_write(&mut self, request: &WriteRequest) -> WriteDecision {
+        self.asked(
+            |held| held.confirm_write(request),
+            |refuse| refuse.confirm_write(request),
+        )
+    }
+
+    fn confirm_run(&mut self, request: &RunRequest) -> RunDecision {
+        self.asked(
+            |held| held.confirm_run(request),
+            |refuse| refuse.confirm_run(request),
+        )
+    }
+
+    fn confirm_read_output(&mut self, request: &OutputRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_read_output(request),
+            |refuse| refuse.confirm_read_output(request),
+        )
+    }
+
+    fn confirm_vetted_read(&mut self, request: &VetRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_vetted_read(request),
+            |refuse| refuse.confirm_vetted_read(request),
+        )
+    }
+
+    fn confirm_fetch(&mut self, request: &crate::confirm::FetchRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_fetch(request),
+            |refuse| refuse.confirm_fetch(request),
+        )
+    }
+
+    fn confirm_vouch(&mut self, request: &VouchRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_vouch(request),
+            |refuse| refuse.confirm_vouch(request),
+        )
+    }
+
+    fn confirm_exposing_read(&mut self, request: &crate::confirm::ExposureRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_exposing_read(request),
+            |refuse| refuse.confirm_exposing_read(request),
+        )
+    }
+
+    fn confirm_exposing_read_noting_the_mode(
+        &mut self,
+        request: &crate::confirm::ExposureRequest,
+    ) -> (Decision, Option<&'static str>) {
+        self.asked(
+            |held| held.confirm_exposing_read_noting_the_mode(request),
+            |refuse| refuse.confirm_exposing_read_noting_the_mode(request),
+        )
+    }
+
+    fn confirm_tool_list(
+        &mut self,
+        request: &crate::confirm::ToolListRequest,
+    ) -> crate::confirm::Decision {
+        self.asked(
+            |held| held.confirm_tool_list(request),
+            |refuse| refuse.confirm_tool_list(request),
+        )
+    }
+
+    fn confirm_mcp_call(
+        &mut self,
+        request: &crate::confirm::McpCallRequest,
+    ) -> crate::confirm::CallDecision {
+        self.asked(
+            |held| held.confirm_mcp_call(request),
+            |refuse| refuse.confirm_mcp_call(request),
+        )
+    }
+
+    fn confirm_path(&mut self, request: &crate::confirm::PathRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_path(request),
+            |refuse| refuse.confirm_path(request),
+        )
+    }
+
+    fn confirm_host(&mut self, request: &crate::confirm::HostRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_host(request),
+            |refuse| refuse.confirm_host(request),
+        )
+    }
+
+    fn confirm_message(
+        &mut self,
+        request: &crate::confirm::MessageRequest,
+    ) -> crate::confirm::MessageDecision {
+        self.asked(
+            |held| held.confirm_message(request),
+            |refuse| refuse.confirm_message(request),
+        )
+    }
+
+    fn confirm_move(&mut self, request: &crate::confirm::MoveRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_move(request),
+            |refuse| refuse.confirm_move(request),
+        )
+    }
+
+    fn confirm_server(&mut self, request: &crate::confirm::ServerRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_server(request),
+            |refuse| refuse.confirm_server(request),
+        )
+    }
+
+    fn confirm_server_noting_the_mode(
+        &mut self,
+        request: &crate::confirm::ServerRequest,
+    ) -> (Decision, Option<&'static str>) {
+        self.asked(
+            |held| held.confirm_server_noting_the_mode(request),
+            |refuse| refuse.confirm_server_noting_the_mode(request),
+        )
+    }
+
+    fn confirm_manifest(&mut self, request: &crate::confirm::ManifestRequest) -> Decision {
+        self.asked(
+            |held| held.confirm_manifest(request),
+            |refuse| refuse.confirm_manifest(request),
+        )
+    }
+
+    fn ask_user(&mut self, asking: &Asking) -> Vec<Answer> {
+        self.asked(
+            |held| held.ask_user(asking),
+            |refuse| refuse.ask_user(asking),
+        )
+    }
+
+    /// The one method here nobody is waiting on, so it never waits.
+    ///
+    /// Everything else is a question, and a question is asked because a run has stopped until it
+    /// is answered. This is a poll: the turn asks between rounds whether anything was typed. With
+    /// somebody part way through answering a delegate's question the lock is held for as long as
+    /// they take to read it, and a turn that blocked here would stop for that long over a
+    /// question it did not ask. What was typed keeps until the next poll.
+    fn interjection(&mut self) -> Option<String> {
+        self.lent.try_hold()?.interjection()
+    }
+
+    /// The handle of the confirmer behind the lock, which a turn asks for once, when it begins and
+    /// nothing else holds the lock. Where the lock is held, a delegate's question being answered,
+    /// the handle is one that never reports a line, so no request is cut short for that wait.
+    fn arrival(&self) -> crate::interjections::Arrival {
+        self.lent
+            .try_hold()
+            .map_or_else(crate::interjections::Arrival::never, |held| held.arrival())
+    }
+}
+
+impl<T: Confirmer + ?Sized> Borrowed<'_, '_, T> {
+    /// Put a question to the person, or refuse it where this delegate has been stopped.
+    ///
+    /// Checked again once the lock is held: a delegate waiting its turn behind another's question
+    /// can be stopped while it waits, and the person should not be shown the question of a run
+    /// they just ended.
+    fn asked<R>(
+        &mut self,
+        ask: impl FnOnce(&mut T) -> R,
+        refuse: impl FnOnce(&mut crate::confirm::Unattended) -> R,
+    ) -> R {
+        let stopped = |stop: &Option<bravebot_core::cancel::DelegateStop>| {
+            stop.as_ref().is_some_and(|stop| stop.is_requested())
+        };
+        if stopped(&self.stop) {
+            return refuse(&mut crate::confirm::Unattended);
+        }
+        let mut held = self.lent.hold();
+        if stopped(&self.stop) {
+            return refuse(&mut crate::confirm::Unattended);
+        }
+        ask(&mut **held)
+    }
+}
+
+impl<T: ?Sized> Borrowed<'_, '_, T> {
+    /// Remember whose the next call is, where the handle it came through named one of this
+    /// handle's descendants, and forget any earlier one either way.
+    ///
+    /// The numbers are the kernel's, so a descendant's is this handle's own with more after it
+    /// and nothing a model wrote reaches the comparison.
+    fn relay(&mut self, delegate: Option<DelegateId>) {
+        self.relayed = delegate.filter(|id| self.from.is_some_and(|from| id.is_beneath(from)));
+    }
+
+    /// Whose the call being forwarded is: the descendant it was relayed for, or this handle's own.
+    fn whose(&mut self) -> Option<DelegateId> {
+        self.relayed.take().or(self.from)
+    }
+
+    /// Keep request intervals available on successful, failed and cancelled returns alike.
+    pub fn take_inference(&mut self) -> Vec<crate::timing::Interval> {
+        std::mem::take(&mut self.inference)
+    }
+
+    /// Keep completed usage available when a delegate returns an error without an outcome.
+    pub fn last_spent(&self) -> crate::outcome::Spent {
+        self.spent
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outcome::Spent;
+    use crate::report::RecordingReporter;
+
+    fn a_total(tokens: u64) -> Spent {
+        Spent {
+            tokens,
+            ..Default::default()
+        }
+    }
+
+    /// One question with one row, which a double that answers questions picks.
+    fn a_question() -> Asking {
+        Asking {
+            prompts: vec![bravebot_core::ask::Prompt {
+                rows: vec![bravebot_core::ask::Row {
+                    index: 0,
+                    label: "yes".to_string(),
+                    detail: None,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A delegate the person stopped is not asked about anything further, and one beside it still
+    /// is. Reaching the person with a stopped delegate's question would show them the prompt of a
+    /// run they had just ended.
+    #[test]
+    fn a_stopped_delegates_question_is_declined_and_a_siblings_is_asked() {
+        let mut person = crate::confirm::ChoosesFirst;
+        let lent = Lent::new(&mut person);
+        let stop = bravebot_core::cancel::DelegateStop::new();
+        let mut stopped = lent.delegate_stoppable(DelegateId::nth(1), stop.clone());
+        let mut sibling = lent.delegate_stoppable(
+            DelegateId::nth(2),
+            bravebot_core::cancel::DelegateStop::new(),
+        );
+
+        assert_eq!(
+            stopped.ask_user(&a_question()),
+            vec![Answer::Chosen(vec![0])]
+        );
+        stop.request();
+
+        assert!(
+            stopped.ask_user(&a_question()).is_empty(),
+            "a stopped delegate's question reached the person"
+        );
+        assert_eq!(
+            sibling.ask_user(&a_question()),
+            vec![Answer::Chosen(vec![0])],
+            "stopping one delegate declined another's question"
+        );
+    }
+
+    /// The press can arrive while the delegate is queued behind somebody else's question, which
+    /// is the one case a check before taking the lock cannot see.
+    #[test]
+    fn a_question_waiting_for_the_person_is_declined_when_its_delegate_is_stopped_meanwhile() {
+        use std::sync::mpsc;
+
+        struct Slow(mpsc::Sender<()>, mpsc::Receiver<()>);
+        impl crate::confirm::Confirmer for Slow {
+            fn ask_user(&mut self, asking: &Asking) -> Vec<Answer> {
+                self.0.send(()).expect("announce the question");
+                self.1
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("be let go");
+                crate::confirm::ChoosesFirst.ask_user(asking)
+            }
+            fn confirm_write(
+                &mut self,
+                r: &crate::confirm::WriteRequest,
+            ) -> crate::confirm::WriteDecision {
+                crate::confirm::Unattended.confirm_write(r)
+            }
+            fn confirm_run(
+                &mut self,
+                r: &crate::confirm::RunRequest,
+            ) -> crate::confirm::RunDecision {
+                crate::confirm::Unattended.confirm_run(r)
+            }
+            fn confirm_read_output(
+                &mut self,
+                r: &crate::confirm::OutputRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_read_output(r)
+            }
+            fn confirm_vetted_read(
+                &mut self,
+                r: &crate::confirm::VetRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_vetted_read(r)
+            }
+            fn confirm_fetch(
+                &mut self,
+                r: &crate::confirm::FetchRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_fetch(r)
+            }
+            fn confirm_vouch(
+                &mut self,
+                r: &crate::confirm::VouchRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_vouch(r)
+            }
+            fn confirm_exposing_read(
+                &mut self,
+                r: &crate::confirm::ExposureRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_exposing_read(r)
+            }
+            fn confirm_tool_list(
+                &mut self,
+                r: &crate::confirm::ToolListRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_tool_list(r)
+            }
+            fn confirm_mcp_call(
+                &mut self,
+                r: &crate::confirm::McpCallRequest,
+            ) -> crate::confirm::CallDecision {
+                crate::confirm::Unattended.confirm_mcp_call(r)
+            }
+            /// Refuses. This double answers no question about reach.
+            fn confirm_path(&mut self, _request: &crate::confirm::PathRequest) -> Decision {
+                Decision::Reject
+            }
+
+            fn confirm_host(&mut self, _request: &crate::confirm::HostRequest) -> Decision {
+                Decision::Reject
+            }
+
+            fn confirm_message(
+                &mut self,
+                _request: &crate::confirm::MessageRequest,
+            ) -> crate::confirm::MessageDecision {
+                crate::confirm::MessageDecision::Decline
+            }
+
+            fn confirm_move(
+                &mut self,
+                r: &crate::confirm::MoveRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_move(r)
+            }
+            fn confirm_server(
+                &mut self,
+                r: &crate::confirm::ServerRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_server(r)
+            }
+            fn confirm_manifest(
+                &mut self,
+                r: &crate::confirm::ManifestRequest,
+            ) -> crate::confirm::Decision {
+                crate::confirm::Unattended.confirm_manifest(r)
+            }
+            fn interjection(&mut self) -> Option<String> {
+                None
+            }
+        }
+
+        let (asked_tx, asked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut person = Slow(asked_tx, release_rx);
+        let lent = Lent::new(&mut person);
+        let stop = bravebot_core::cancel::DelegateStop::new();
+        let mut first = lent.delegate(DelegateId::nth(1));
+        let mut queued = lent.delegate_stoppable(DelegateId::nth(2), stop.clone());
+
+        std::thread::scope(|scope| {
+            let holding = scope.spawn(|| first.ask_user(&a_question()));
+            asked_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the first question reached the person");
+            let waiting = scope.spawn(|| queued.ask_user(&a_question()));
+            // Nothing observable says the thread is blocked on the lock. The pause only makes it
+            // likely that the stop lands after the check that precedes the lock, which is the
+            // case this test is for; a thread that has not got that far is declined all the same.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            stop.request();
+            release_tx.send(()).expect("let the first question go");
+            assert_eq!(
+                holding.join().expect("first"),
+                vec![Answer::Chosen(vec![0])]
+            );
+            assert!(
+                waiting.join().expect("queued").is_empty(),
+                "a question queued behind another was put to the person after its delegate was stopped"
+            );
+        });
+        assert!(
+            asked_rx.try_recv().is_err(),
+            "the stopped delegate's question reached the person"
+        );
+    }
+
+    /// A turn waiting on a delegate completes no round of its own, so the total a person watches
+    /// moves only if the delegate's requests are added to it as they complete (PANEL-9). The
+    /// turn's own count is the base and stays the base: reporting a delegate's smaller total in
+    /// its place would make the figure fall.
+    #[test]
+    fn what_a_running_delegate_has_spent_is_added_to_the_turns_total_as_it_goes() {
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            let mut turn = lent.turn();
+            let mut delegate = lent.delegate(DelegateId::nth(1));
+            turn.spent(a_total(1_000));
+            delegate.spent(a_total(5));
+            delegate.spent(a_total(10));
+            turn.spent(a_total(1_200));
+        }
+        assert_eq!(
+            recording.spent,
+            vec![
+                a_total(1_000),
+                a_total(1_005),
+                a_total(1_010),
+                a_total(1_210)
+            ],
+            "a delegate's spend was left out of the total, or reported in place of the turn's"
+        );
+    }
+
+    /// Delegates run side by side, and each one's spend counts while the others work.
+    #[test]
+    fn every_running_delegates_spend_is_in_the_total() {
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            let mut turn = lent.turn();
+            let mut first = lent.delegate(DelegateId::nth(1));
+            let mut second = lent.delegate(DelegateId::nth(2));
+            turn.spent(a_total(1_000));
+            first.spent(a_total(500));
+            second.spent(a_total(200));
+            first.spent(a_total(700));
+        }
+        assert_eq!(
+            recording.spent,
+            vec![
+                a_total(1_000),
+                a_total(1_500),
+                a_total(1_700),
+                a_total(1_900)
+            ],
+            "a delegate's spend replaced a sibling's instead of adding to it"
+        );
+    }
+
+    /// The turn adds a delegate's usage to its own count when it collects it, and the total must
+    /// hold that usage once: not dropping it while another delegate reports in the moment between
+    /// the collection and the turn's next report, and not adding it a second time after.
+    #[test]
+    fn a_collected_delegates_spend_is_in_the_total_once() {
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            let mut turn = lent.turn();
+            let mut first = lent.delegate(DelegateId::nth(1));
+            let mut second = lent.delegate(DelegateId::nth(2));
+            turn.spent(a_total(1_000));
+            first.spent(a_total(500));
+            second.spent(a_total(200));
+            turn.delegate_finished(DelegateId::nth(1), String::new(), false, None);
+            second.spent(a_total(300));
+            turn.spent(a_total(1_500));
+            second.spent(a_total(400));
+        }
+        assert_eq!(
+            recording.spent,
+            vec![
+                a_total(1_000),
+                a_total(1_500),
+                a_total(1_700),
+                a_total(1_800),
+                a_total(1_800),
+                a_total(1_900)
+            ],
+            "a collected delegate's spend dropped out of the total, or was counted twice"
+        );
+    }
+
+    /// Only the tokens add up. The context reading describes the turn's own conversation, and a
+    /// delegate's is another one.
+    #[test]
+    fn a_delegates_context_reading_is_not_the_turns() {
+        use bravebot_aichat::protocol::Cached;
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            let mut turn = lent.turn();
+            let mut delegate = lent.delegate(DelegateId::nth(1));
+            turn.spent(Spent {
+                tokens: 1_000,
+                output_tokens: 100,
+                context_tokens: 900,
+                cached: Cached {
+                    read_tokens: 50,
+                    written_tokens: 5,
+                },
+                ..Default::default()
+            });
+            delegate.spent(Spent {
+                tokens: 40,
+                output_tokens: 7,
+                context_tokens: 30_000,
+                cached: Cached {
+                    read_tokens: 20,
+                    written_tokens: 2,
+                },
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            recording.spent.last().copied(),
+            Some(Spent {
+                tokens: 1_040,
+                output_tokens: 107,
+                context_tokens: 900,
+                cached: Cached {
+                    read_tokens: 70,
+                    written_tokens: 7,
+                },
+                ..Default::default()
+            }),
+            "the delegate's context reading replaced the turn's, or its cache figures were left out"
+        );
+    }
+
+    /// A delegate's own delegates spend inside its total, which is what reaches the turn.
+    #[test]
+    fn a_nested_delegates_spend_reaches_the_turns_total() {
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            let mut turn = lent.turn();
+            turn.spent(a_total(1_000));
+            let mut delegate = lent.delegate(d(&[1]));
+            let within = Lent::new(&mut delegate);
+            let mut own = within.turn();
+            let mut nested = within.delegate(d(&[1, 2]));
+            own.spent(a_total(100));
+            nested.spent(a_total(40));
+        }
+        assert_eq!(
+            recording.spent,
+            vec![a_total(1_000), a_total(1_100), a_total(1_140)],
+            "what a delegate's own delegate spent never reached the turn's total"
+        );
+    }
+
+    /// TURN-8: two runs holding handles on one source reach that source, so a premium request made
+    /// by either is the one thing counted against a session's limit in credits.
+    ///
+    /// The turn and its delegates are the two runs. A handle that asked the configuration for the
+    /// key instead of the source it was lent would present the same key and count nothing.
+    #[test]
+    fn two_runs_holding_one_source_both_ask_it() {
+        use bravebot_aichat::{Subscription, SubscriptionCredential};
+
+        struct Counting {
+            asked: usize,
+        }
+        impl Subscription for Counting {
+            fn next_credential(&mut self) -> Result<SubscriptionCredential, String> {
+                self.asked += 1;
+                Ok(SubscriptionCredential {
+                    key: bravebot_config::Secret::new("a-key"),
+                })
+            }
+        }
+
+        let mut source = Counting { asked: 0 };
+        {
+            let lent = Lent::new(&mut source);
+            Spending::new(&lent)
+                .next_credential()
+                .expect("the turn presents the key");
+            Spending::new(&lent)
+                .next_credential()
+                .expect("the delegate presents the key");
+        }
+
+        assert_eq!(
+            source.asked, 2,
+            "a request was made that the source the run was lent did not hear of"
+        );
+    }
+
+    /// Nested delegates cannot replace the parent prompt's position with their own offset.
+    #[test]
+    fn only_the_parent_reports_its_prompt_position() {
+        let mut recording = RecordingReporter::default();
+        {
+            let lent = Lent::new(&mut recording);
+            lent.turn().prompt_recorded(7);
+            let mut delegate = lent.delegate(DelegateId::nth(1));
+            let nested = Lent::new(&mut delegate);
+            nested.turn().prompt_recorded(2);
+        }
+        assert_eq!(recording.prompts, [7]);
+    }
+
+    fn a_gate(gate: &'static str) -> Event {
+        Event::GatePassed {
+            gate,
+            detail: String::new(),
+        }
+    }
+
+    fn named(sink: &bravebot_core::event::RecordingSink) -> Vec<Option<String>> {
+        sink.recorded()
+            .map(|(from, _)| from.map(|id| id.to_string()))
+            .collect()
+    }
+
+    fn d(path: &[u32]) -> DelegateId {
+        path[1..].iter().fold(DelegateId::nth(path[0]), |at, &n| {
+            at.child(n).expect("within the depth")
+        })
+    }
+
+    /// A delegate's own turn lends the handle it was given onward, so every record its delegates
+    /// make passes through two handles, and the trail has to name the run that took the decision
+    /// rather than the delegate above it. Otherwise a grandchild's approvals read as its parent's,
+    /// and two grandchildren of one delegate read as one run.
+    #[test]
+    fn a_nested_delegates_records_name_it_rather_than_the_delegate_above_it() {
+        let mut sink = bravebot_core::event::RecordingSink::new();
+        {
+            let lent = Lent::new(&mut sink);
+            lent.turn().emit(a_gate("the turn's"));
+            let mut first = lent.delegate(d(&[1]));
+            {
+                let within = Lent::new(&mut first);
+                within.turn().emit(a_gate("the first delegate's"));
+                let mut nested = within.delegate(d(&[1, 2]));
+                nested.emit(a_gate("its second delegate's"));
+                {
+                    let deeper = Lent::new(&mut nested);
+                    deeper
+                        .delegate(d(&[1, 2, 1]))
+                        .emit(a_gate("that one's first"));
+                    deeper.turn().emit(a_gate("its second delegate's again"));
+                }
+                within.turn().emit(a_gate("the first delegate's again"));
+            }
+        }
+        let expected = ["", "d1", "d1.2", "d1.2.1", "d1.2", "d1"];
+        assert_eq!(
+            named(&sink),
+            expected
+                .iter()
+                .map(|name| (!name.is_empty()).then(|| name.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The relay takes only a number beneath the handle's own, and only for the next call. A
+    /// handle that could be told it was the turn, itself, or a sibling would let one run's records
+    /// be written down as another's, which is the whole of what attribution is for.
+    #[test]
+    fn a_handle_relays_only_its_own_descendants_and_only_once() {
+        let mut sink = bravebot_core::event::RecordingSink::new();
+        {
+            let lent = Lent::new(&mut sink);
+            let mut turn = lent.turn();
+            turn.recording_for(Some(d(&[1])));
+            turn.emit(a_gate("the turn claimed by a delegate"));
+
+            let mut first = lent.delegate(d(&[1]));
+            for claimed in [None, Some(d(&[1])), Some(d(&[2])), Some(d(&[2, 1]))] {
+                first.recording_for(claimed);
+                first.emit(a_gate("a claim that is not a descendant"));
+            }
+            first.recording_for(Some(d(&[1, 3])));
+            first.emit(a_gate("a descendant's"));
+            first.emit(a_gate("the delegate's own after it"));
+        }
+        let expected = [
+            None,
+            Some("d1"),
+            Some("d1"),
+            Some("d1"),
+            Some("d1"),
+            Some("d1.3"),
+            Some("d1"),
+        ];
+        assert_eq!(
+            named(&sink),
+            expected
+                .iter()
+                .map(|name| name.map(str::to_string))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Lines, and what each was attributed to when it arrived.
+    #[derive(Default)]
+    struct Lines {
+        attributed_to: Option<DelegateId>,
+        lines: Vec<(Option<String>, String)>,
+        requests: usize,
+    }
+
+    impl Reporter for Lines {
+        fn reporting_for(&mut self, delegate: Option<DelegateId>) {
+            self.attributed_to = delegate;
+        }
+
+        fn narration(&mut self, text: String) {
+            self.lines
+                .push((self.attributed_to.map(|id| id.to_string()), text));
+        }
+
+        fn inference_interval(&mut self, _interval: crate::timing::Interval) {
+            self.requests += 1;
+        }
+
+        fn job(&mut self, event: crate::report::JobEvent) {
+            let crate::report::JobEvent::Started { name, .. } = event else {
+                return;
+            };
+            self.lines
+                .push((self.attributed_to.map(|id| id.to_string()), name));
+        }
+
+        fn todos(&mut self, _rows: Vec<bravebot_core::todo::Row>) {}
+    }
+
+    /// A delegate numbers its jobs from one as the turn does, so the screen tells its `job:1` from
+    /// the turn's only by the number it is told the event comes from.
+    #[test]
+    fn a_delegates_job_is_reported_as_its_own() {
+        let started = || crate::report::JobEvent::Started {
+            name: "job:1".to_string(),
+            line: "sleep 600".to_string(),
+            moved_after: None,
+            stop: bravebot_core::cancel::JobStop::new(),
+        };
+        let mut screen = Lines::default();
+        {
+            let lent = Lent::new(&mut screen);
+            lent.turn().job(started());
+            lent.delegate(d(&[1])).job(started());
+        }
+        assert_eq!(
+            screen.lines,
+            [
+                (None, "job:1".to_string()),
+                (Some("d1".to_string()), "job:1".to_string()),
+            ]
+        );
+    }
+
+    /// A screen puts a line under the block of the run whose it is, by the number it was told,
+    /// so a grandchild's lines have to arrive under the grandchild's number or they land in its
+    /// parent's block.
+    #[test]
+    fn a_nested_delegates_lines_are_reported_as_its_own() {
+        let mut screen = Lines::default();
+        {
+            let lent = Lent::new(&mut screen);
+            let mut first = lent.delegate(d(&[1]));
+            let within = Lent::new(&mut first);
+            within.turn().narration("the first delegate's".to_string());
+            within
+                .delegate(d(&[1, 1]))
+                .narration("its first delegate's".to_string());
+            within
+                .turn()
+                .narration("the first delegate's again".to_string());
+        }
+        assert_eq!(
+            screen.lines,
+            [
+                (Some("d1".to_string()), "the first delegate's".to_string()),
+                (Some("d1.1".to_string()), "its first delegate's".to_string()),
+                (
+                    Some("d1".to_string()),
+                    "the first delegate's again".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// The turn above a delegate counts the requests made inside its wait on that delegate, and a
+    /// request a grandchild made is one of them: the time went on the person's model whichever run
+    /// asked. Kept by every handle on the way up, not only the one it was made through.
+    #[test]
+    fn a_nested_delegates_requests_reach_every_delegate_above_it() {
+        let interval = crate::timing::Interval::since(std::time::Instant::now());
+        let mut screen = Lines::default();
+        let (kept_by_first, kept_by_nested) = {
+            let lent = Lent::new(&mut screen);
+            let mut first = lent.delegate(d(&[1]));
+            let kept_by_nested = {
+                let within = Lent::new(&mut first);
+                let mut nested = within.delegate(d(&[1, 1]));
+                nested.inference_interval(interval);
+                within.turn().inference_interval(interval);
+                nested.take_inference().len()
+            };
+            (first.take_inference().len(), kept_by_nested)
+        };
+        assert_eq!(
+            kept_by_nested, 1,
+            "the nested delegate lost its own request"
+        );
+        assert_eq!(
+            kept_by_first, 2,
+            "the delegate above lost its own request or its delegate's"
+        );
+        assert_eq!(
+            screen.requests, 2,
+            "the screen was not told of both requests"
+        );
+    }
+}

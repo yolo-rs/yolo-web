@@ -1,0 +1,108 @@
+---
+sidebar_position: 3
+title: Shell mode
+description: Type `!` on an empty prompt to run a line in your own shell, and have its output reach the model in full.
+---
+
+# Shell mode
+
+Type `!` on an empty prompt and the line becomes a command for your own shell.
+
+```
+! cargo test
+! git log --oneline -20 | head
+! ls build/*.o
+```
+
+The line goes to `$SHELL -c`, so globs, `$VAR`, redirection, `&&` and `$(...)` all work exactly as
+they do in your terminal. `$SHELL` falls back to a POSIX shell when it is unset. An empty line is not
+run.
+
+The `!` is a mode rather than a character: the prompt changes colour, the hint names the shell the line
+is about to go to, Backspace or Escape leaves it, and the mode lasts one command. The hint line
+in this mode also names the key that opens what a turn started, once there is something to open,
+and how many rows there are.
+
+**A file dragged onto an armed line is written as its path** and attaches nothing, which is what a
+terminal does for a file dropped into a shell. There is no `[Image #1]` marker in the line, so the
+shell is handed exactly what you see. See [dropping a file](context.md#dropping-a-file).
+
+## While a turn is running
+
+A turn can begin with nobody pressing anything, from a [`/loop`](../reference/commands.md#loop-interval-prompt) tick
+or a watch firing, so it can begin while `!` is armed and a command line is in the box. Enter there
+does what Enter does to any line typed mid-turn: the line waits, drawn under the box behind its `!`
+and marked as waiting, and it is run when the turn ends. It is never sent to the model as a prompt,
+because the mode is how you said the line was for a shell. Taking the queue back gives it to the box
+as words, so running it then takes arming the mode again.
+
+## Nothing asks
+
+`! rm -rf build` runs, with no approval prompt. The approval prompt exists so that a person endorses
+argv the *planner* proposed. Here you are the person it would have asked.
+
+## The output reaches the model in full
+
+The planner reads the whole output, trusted and private, not as a reference. After `! cargo test` you
+can say "fix the first failure" and it has already read the errors. Output from a *failing* command
+reaches it too, since that is where the explanation is. A cancelled command records nothing.
+
+The label is a first label from provenance, exactly like the label on a program's output or on your
+own configuration. It is admissible for the reason a vouched-for command's output is: a person took
+responsibility, and nothing inspected anything.
+
+A command that colours its output is drawn without its colour codes, with a row under the output
+saying how many were left out ([the transcript](transcript.md)). That changes what the screen draws
+and not what the model is sent.
+
+## Output while it runs
+
+What a command prints is drawn under it as it prints, from standard output and standard error in the
+order they were read. A build or a server start that prints for minutes shows what it has printed so
+far, so you can tell a slow command from a hung one and stop it with Esc. While it runs only the
+last 200 lines are drawn, with a row saying how many came before them. Colour codes and other
+escapes are drawn the way they are for a command that has ended.
+
+When the command ends, what was drawn is replaced by the output the model reads, so nothing is drawn
+twice. Standard error is listed after standard output there, which is the order the model reads it
+in. A command you stop, or that runs past ten minutes, leaves on the screen what it had printed,
+above the note saying why it ended and a note that it was not sent to the model.
+
+## Keeping the output to yourself
+
+Type `!!` to run one command whose output is shown and never sent to the model: `!!cat .env`. The
+prompt shows `!!`, the hint says the output stays on the screen, and a line under the output says it
+was not sent. The next request carries neither the command nor what it printed. Nothing else changes:
+the line runs through `$SHELL -c`, nothing asks, and the mode lasts one command. Backspace on the
+empty line removes the second `!` first. A line queued behind a turn keeps its form, so it is still
+private when it runs. A paste cannot make a line private.
+
+## Only a line a human typed
+
+Shell mode is reachable from one place, a key press in the input box, and nowhere else. Never argv
+the planner proposed, never text read from a file, never anything a processor produced, never a line
+reconstructed from a transcript.
+
+**The planner gets no shell tool, ever.** Not behind a capability, not behind an approval prompt, not
+via MCP. If it could ask for one, everything above is void.
+
+What it gets instead is [`run`](../reference/tools.md#run), which takes a command line and
+**compiles** it: bravebot's own grammar reads the line into the programs, arguments and destinations
+it names, refuses anything it cannot fully work out, and runs the result. That is shell syntax
+without a shell. No line the planner writes is ever handed to an interpreter. Here, by contrast,
+`$SHELL` really does read the line, because you typed it.
+
+## The cost, stated plainly
+
+`! cat notes-from-a-stranger.md` puts somebody else's words into the planner's context as though they
+were yours. Nothing inspects the bytes to catch that, exactly as nothing inspects a directory that
+was vouched for.
+
+It is the same assertion you make by vouching for a command at a run prompt, made once for one
+command. **If you would not press `a` for it, ask the agent to `run` it instead** and have the output
+quarantined.
+
+A paste into an armed command line is the same cost in miniature: the text lands in the line verbatim,
+and a line you put away comes back into an armed mode as the command being written. What Enter asserts
+is the line in the box, which you armed the mode for and are looking at, and that is the same assertion
+you make for a command typed one character at a time. What the mode never does is arm *itself*.

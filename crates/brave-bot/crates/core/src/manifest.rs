@@ -1,0 +1,2243 @@
+//! The frozen program a manifest run executes.
+//!
+//! A turn decides what to do next after each thing it reads. A manifest run decides everything
+//! before it reads anything: the planner emits a step list, this module refuses it or freezes
+//! it, and the driver then walks it with no model in the control path. Untrusted content can
+//! still change the bytes a step carries. It cannot add a step, remove one, or change which
+//! slot feeds which, because by the time any content exists the program is already fixed.
+//!
+//! This follows the plan-then-execute architecture in the SafeHouse specification, including
+//! its tool schema: a static contract per tool, checked by a pure function, with any violation
+//! failing the run rather than being repaired.
+//!
+//! # What validation is for
+//!
+//! Not defence against a hostile planner. [`validate`] is crate-private: the only
+//! caller is [`crate::policy::Policy::adopt_manifest`], which has already established
+//! that the draft came from a context holding nothing untrusted. Validation is what
+//! makes the frozen program *well formed*: every slot read was written by an earlier
+//! step, no slot is written twice, no path leaves the workspace, and nothing reads
+//! anything after the first action. Those are the properties the driver relies on to
+//! run without asking questions, and a manifest that fails one of them is refused whole.
+//!
+//! # Tiers
+//!
+//! The specification's three tiers survive intact, because they are what makes a plan
+//! reviewable before it runs:
+//!
+//! - [`Tier::Fetch`] reads. No model is involved at all: the driver calls the same workspace
+//!   code an ordinary turn calls, and the result goes straight into a slot.
+//! - [`Tier::Process`] transforms. An isolated model with no tools reads the slots its step
+//!   names and writes one more.
+//! - [`Tier::Act`] changes something or shows something. These are the only steps with a
+//!   consequence outside the slot store, and they are the ones a person endorses.
+
+use crate::slot::SlotId;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+/// Which of the three tiers a step belongs to.
+///
+/// Ordered so the validator can say "no read after an action" without naming the tiers
+/// individually: an action is the highest tier, and the sequence may not go back down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Reads something into a slot. Deterministic, no model.
+    Fetch,
+    /// Transforms slots into another slot, through an isolated model.
+    Process,
+    /// Writes a file or shows an answer. The only tier with an effect.
+    Act,
+}
+
+impl fmt::Display for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fetch => f.write_str("fetch"),
+            Self::Process => f.write_str("process"),
+            Self::Act => f.write_str("act"),
+        }
+    }
+}
+
+/// A value one of a step's arguments holds.
+///
+/// Three shapes, which is every shape a step in this tool set needs. Kept deliberately small:
+/// a manifest is a program the driver executes, and an argument grammar wide enough to express
+/// arbitrary structure would be an interpreter nobody asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arg {
+    Text(String),
+    Count(u64),
+    List(Vec<String>),
+}
+
+impl Arg {
+    /// The text, where this is text. `None` rather than a rendering, so a contract asking for a
+    /// path cannot be satisfied by a number that happens to print like one.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn count(&self) -> Option<u64> {
+        match self {
+            Self::Count(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn list(&self) -> Option<&[String]> {
+        match self {
+            Self::List(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Whether this holds nothing.
+    ///
+    /// The specification's `required` check catches absent, `""`, `[]` and `{}` alike, on the
+    /// grounds that a field present and empty is a field the planner did not fill in. A count
+    /// is never empty: zero is a value someone may have meant.
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(value) => value.trim().is_empty(),
+            Self::List(values) => values.is_empty(),
+            Self::Count(_) => false,
+        }
+    }
+}
+
+/// One step as the planner proposed it, before any of it has been checked.
+///
+/// Named a draft rather than a step because it is not one yet. Nothing constructs a [`Step`]
+/// except [`validate`], so a value of that type has been through the schema by the only route
+/// there is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftStep {
+    pub tool: String,
+    pub args: BTreeMap<String, Arg>,
+}
+
+impl DraftStep {
+    pub fn new(tool: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            args: BTreeMap::new(),
+        }
+    }
+
+    pub fn with(mut self, key: impl Into<String>, value: Arg) -> Self {
+        self.args.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_text(self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.with(key, Arg::Text(value.into()))
+    }
+}
+
+/// A whole plan as proposed, before validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub steps: Vec<DraftStep>,
+}
+
+impl Draft {
+    pub fn new(steps: Vec<DraftStep>) -> Self {
+        Self { steps }
+    }
+}
+
+/// A step that passed the schema.
+///
+/// The fields the driver routes on are lifted out of the argument map during validation, so the
+/// driver never has to go looking for them and cannot mistake one tool's convention for
+/// another's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    tool: &'static str,
+    tier: Tier,
+    args: BTreeMap<String, Arg>,
+    out_slot: Option<SlotId>,
+    reads: Vec<SlotId>,
+}
+
+impl Step {
+    /// The tool's name, from the static schema rather than from the plan. A validated step
+    /// names a tool that exists, because a name that did not match one never got this far.
+    pub fn tool(&self) -> &'static str {
+        self.tool
+    }
+
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
+
+    /// The slot this step fills, where it fills one. An action fills none.
+    pub fn out_slot(&self) -> Option<&SlotId> {
+        self.out_slot.as_ref()
+    }
+
+    /// The slots this step reads, in the order the plan named them.
+    pub fn reads(&self) -> &[SlotId] {
+        &self.reads
+    }
+
+    pub fn arg(&self, key: &str) -> Option<&Arg> {
+        self.args.get(key)
+    }
+
+    /// A text argument, or the empty string.
+    ///
+    /// Total because the schema already decided what must be present: a required text field is
+    /// there by the time anything asks, and an optional one absent means the default the caller
+    /// would have chosen anyway.
+    pub fn text(&self, key: &str) -> &str {
+        self.args.get(key).and_then(Arg::text).unwrap_or_default()
+    }
+
+    pub fn count(&self, key: &str) -> Option<u64> {
+        self.args.get(key).and_then(Arg::count)
+    }
+
+    /// How this step reads to a person, for the summary shown before the run starts.
+    ///
+    /// Every routing field the contract names, and not only the headline one. This line is the
+    /// whole of what somebody is shown before they answer for the plan, and a routing field they
+    /// were not shown is one they did not endorse: a search names where it runs as much as it names
+    /// what it looks for, and both are locked before the question is put.
+    pub fn describe(&self) -> String {
+        let contract = contract_for(self.tool).expect("a validated step names a known tool");
+        let headline = contract
+            .headline
+            .iter()
+            .copied()
+            .find(|field| self.args.get(*field).and_then(Arg::text).is_some());
+        let subject = headline
+            .and_then(|field| self.args.get(field).and_then(Arg::text))
+            .unwrap_or("");
+
+        // The item an act lands on reads as such, apart from what it reads its text from.
+        let on = contract
+            .slot_refs
+            .contains(&"on")
+            .then(|| self.args.get("on").and_then(Arg::text))
+            .flatten()
+            .filter(|slot| !slot.is_empty());
+        let read: Vec<&str> = self
+            .reads
+            .iter()
+            .map(SlotId::as_str)
+            .filter(|slot| Some(*slot) != on)
+            .collect();
+        let reads = match read.as_slice() {
+            [] => String::new(),
+            slots => format!(" from {}", slots.join(", ")),
+        };
+        let on = on.map(|slot| format!(" on {slot}")).unwrap_or_default();
+        let writes = match &self.out_slot {
+            Some(slot) => format!(" into {slot}"),
+            None => String::new(),
+        };
+
+        // An empty one is left out rather than printed blank. An omitted listing pattern or search
+        // include is locked as the empty string, which is the absence of a filter rather than a
+        // destination anybody has to read.
+        let elsewhere = contract
+            .routing
+            .iter()
+            .copied()
+            .filter(|field| Some(*field) != headline)
+            .filter_map(|field| {
+                self.args
+                    .get(field)
+                    .and_then(Arg::text)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!("{field} {value}"))
+            })
+            .collect::<Vec<_>>();
+        let routing = match elsewhere.is_empty() {
+            true => String::new(),
+            false => format!(" ({})", elsewhere.join(", ")),
+        };
+
+        // A call reads as a call is put to a person, `alias:tool` (SERVERS-7).
+        let (subject, routing) = match self.tool {
+            MCP_CALL => (format!("{subject}:{}", self.text("tool")), String::new()),
+            _ => (subject.to_string(), routing),
+        };
+
+        format!("{} {subject}{reads}{on}{writes}{routing}", contract.verb)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// A validated plan, frozen.
+///
+/// There is no way to add a step, and no way to change one. Construction is [`validate`] and
+/// nothing else, which is what "fixed before any execution begins" means in a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    steps: Vec<Step>,
+    /// Words a person reads after a step, set once by whoever knows what the step's definition
+    /// fills in for itself. They decide nothing: no check reads them.
+    notes: BTreeMap<usize, String>,
+}
+
+impl Manifest {
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// The plan with a note after some steps, as the line a person approves then reads it.
+    #[must_use]
+    pub fn with_notes(mut self, notes: BTreeMap<usize, String>) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// Every value the driver must lock into routing before the first step runs.
+    ///
+    /// The specification calls this the pre-execution routing lock, and it is the reason a
+    /// manifest run can write a file without asking the model where: the destination was fixed
+    /// while the only input in existence was the user's own task string. Returned as key/value
+    /// pairs so the caller inserts them through [`crate::policy::Routing::insert`], which
+    /// refuses anything not `(T,pub)` and is the check that actually holds.
+    pub fn routing(&self) -> Vec<(String, String)> {
+        let mut fields = Vec::new();
+        for (index, step) in self.steps.iter().enumerate() {
+            let contract = contract_for(step.tool).expect("a validated step names a known tool");
+            for field in contract.routing {
+                // Validation established that every routing field is text, filling an omitted
+                // optional one with its default, so the driver never invents a destination that
+                // did not go through Routing::insert.
+                let value = step
+                    .args
+                    .get(*field)
+                    .and_then(Arg::text)
+                    .expect("a routing field is text on every validated step");
+                fields.push((format!("step_{index}_{field}"), value.to_string()));
+            }
+        }
+        fields
+    }
+
+    /// The slots this plan will release to the user's screen.
+    ///
+    /// Named here so they can go into the release plan before the policy exists, which is what
+    /// makes [`crate::policy::Policy::declassify`] able to refuse everything else: a slot
+    /// nominated after content was read is a slot content nominated.
+    pub fn released(&self) -> Vec<SlotId> {
+        self.steps
+            .iter()
+            .filter(|step| step.tool == ANSWER)
+            .flat_map(|step| step.reads.iter().cloned())
+            .collect()
+    }
+}
+
+/// Why a plan was refused.
+///
+/// Every variant names the step it failed on, because a plan is a program and "step 3 reads a
+/// slot nothing wrote" is the only form of this message that helps anyone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestError {
+    Empty,
+    UnknownTool {
+        step: usize,
+        tool: String,
+    },
+    Missing {
+        step: usize,
+        tool: &'static str,
+        field: &'static str,
+    },
+    WrongType {
+        step: usize,
+        tool: &'static str,
+        field: &'static str,
+        wanted: &'static str,
+    },
+    Unknown {
+        step: usize,
+        tool: &'static str,
+        field: String,
+    },
+    /// Exactly one of a set of alternatives was required and that is not what arrived.
+    Alternatives {
+        step: usize,
+        tool: &'static str,
+        fields: &'static [&'static str],
+    },
+    /// Two steps write the same slot. A slot is written once, so one of them would lose.
+    SlotWrittenTwice {
+        step: usize,
+        slot: String,
+    },
+    /// A step reads a slot no earlier step wrote. This is the forward-validity check.
+    SlotNotYetWritten {
+        step: usize,
+        slot: String,
+    },
+    EscapingPath {
+        step: usize,
+        field: &'static str,
+        path: String,
+    },
+    /// An action wrote a slot, which would let a later step consume what an effect produced.
+    ActionFillsSlot {
+        step: usize,
+        tool: &'static str,
+    },
+    /// Something read the workspace after an action had already changed it.
+    ReadAfterAction {
+        step: usize,
+        tool: &'static str,
+    },
+    /// More than one step answers the user.
+    AnswerRepeated {
+        step: usize,
+    },
+    /// A processor named the same slot twice. Once is a read; twice is a plan that
+    /// has not decided what it is asking for.
+    DuplicateRead {
+        step: usize,
+        slot: String,
+    },
+}
+
+impl fmt::Display for ManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "the plan has no steps"),
+            Self::UnknownTool { step, tool } => {
+                write!(f, "step {step}: '{tool}' is not a capability in this plan")
+            }
+            Self::Missing { step, tool, field } => {
+                write!(f, "step {step} ({tool}): '{field}' is required and empty")
+            }
+            Self::WrongType {
+                step,
+                tool,
+                field,
+                wanted,
+            } => write!(f, "step {step} ({tool}): '{field}' must be {wanted}"),
+            Self::Unknown { step, tool, field } => {
+                write!(
+                    f,
+                    "step {step} ({tool}): '{field}' is not an argument it takes"
+                )
+            }
+            Self::Alternatives { step, tool, fields } => write!(
+                f,
+                "step {step} ({tool}): give exactly one of {}",
+                fields.join(" or ")
+            ),
+            Self::SlotWrittenTwice { step, slot } => write!(
+                f,
+                "step {step}: '{slot}' is already written by an earlier step; \
+                 every slot is written once"
+            ),
+            Self::SlotNotYetWritten { step, slot } => {
+                write!(f, "step {step}: '{slot}' is read before anything writes it")
+            }
+            Self::EscapingPath { step, field, path } => write!(
+                f,
+                "step {step}: '{field}' is '{path}', which is not inside the workspace"
+            ),
+            Self::ActionFillsSlot { step, tool } => write!(
+                f,
+                "step {step} ({tool}): an action writes no slot, so nothing can depend on \
+                 what it did"
+            ),
+            Self::ReadAfterAction { step, tool } => write!(
+                f,
+                "step {step} ({tool}): every read and every processor comes before the first \
+                 action"
+            ),
+            Self::AnswerRepeated { step } => {
+                write!(f, "step {step}: the plan already answers the user")
+            }
+            Self::DuplicateRead { step, slot } => {
+                write!(f, "step {step}: '{slot}' is read more than once")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManifestError {}
+
+/// The tool a plan uses to show the user something.
+///
+/// Named as a constant because two things depend on it and a string typed twice is a string
+/// that will disagree with itself: the release plan, and the driver's choice of what to print.
+pub const ANSWER: &str = "answer";
+
+/// The step that fetches from an account through a connector.
+///
+/// Named as constants for the reason [`ANSWER`] is: the releases, the driver's dispatch and the
+/// check on what an act targets all depend on the names.
+pub const CONNECTOR_FETCH: &str = "connector_fetch";
+
+/// The step that acts on an account through a connector.
+pub const CONNECTOR_ACT: &str = "connector_act";
+
+/// Whether a step reaches an account through a connector rather than the workspace.
+pub fn is_connector(tool: &str) -> bool {
+    tool == CONNECTOR_FETCH || tool == CONNECTOR_ACT
+}
+
+/// The step that calls one tool of an MCP server a person vouched for.
+///
+/// Named for the reason [`ANSWER`] is. Its server and tool are routing, and its arguments are a
+/// body the plan wrote, as a file write's `contents` are.
+pub const MCP_CALL: &str = "mcp_call";
+
+/// The static contract for one tool.
+///
+/// This is the specification's `TOOL_SCHEMA`, and it plays the same role: the single place that
+/// says what a step of this kind must look like, consulted by a pure function, with no
+/// heuristics and nothing learned at runtime.
+struct Contract {
+    tool: &'static str,
+    tier: Tier,
+    /// Must be present and must not be empty.
+    required: &'static [&'static str],
+    /// Every argument this tool accepts. Anything else is a typo or an invention.
+    accepted: &'static [&'static str],
+    /// The one argument naming the slot this step fills.
+    slot_output: Option<&'static str>,
+    /// Arguments holding a list of slot names, each of which must already be written.
+    slot_inputs: &'static [&'static str],
+    /// Arguments holding a single slot name, likewise.
+    slot_refs: &'static [&'static str],
+    /// Arguments that must be a workspace-relative path.
+    paths: &'static [&'static str],
+    /// Arguments that must be a whole number where present.
+    counts: &'static [&'static str],
+    /// Fields whose value is a body the driver hands on as it is, so a number or a list is a
+    /// wrong shape and not an empty string.
+    texts: &'static [&'static str],
+    /// Exactly one of these must be present. Empty where the tool has no such choice.
+    alternatives: &'static [&'static str],
+    /// Arguments that decide where an effect lands, to be locked before execution.
+    routing: &'static [&'static str],
+    /// Which argument to name first when describing the step to a person.
+    headline: &'static [&'static str],
+    /// The driver's word for what this step does.
+    verb: &'static str,
+}
+
+/// Every tool a manifest may name.
+///
+/// Shorter than the turn loop's set, and deliberately. `edit_file` is absent because locating a
+/// passage means having read the file, and in this mode nothing has: the planner works from the
+/// task string alone. `todo_write` is absent because the manifest already is the task list, and
+/// a better one, since it was fixed in advance rather than narrated as work went.
+const CONTRACTS: &[Contract] = &[
+    Contract {
+        tool: "read_file",
+        tier: Tier::Fetch,
+        required: &["path", "out_slot"],
+        accepted: &["path", "out_slot", "offset", "limit"],
+        slot_output: Some("out_slot"),
+        slot_inputs: &[],
+        slot_refs: &[],
+        paths: &["path"],
+        counts: &["offset", "limit"],
+        texts: &[],
+        alternatives: &[],
+        routing: &["path"],
+        headline: &["path"],
+        verb: "read",
+    },
+    Contract {
+        tool: "list_files",
+        tier: Tier::Fetch,
+        required: &["directory", "out_slot"],
+        accepted: &["directory", "pattern", "out_slot"],
+        slot_output: Some("out_slot"),
+        slot_inputs: &[],
+        slot_refs: &[],
+        paths: &["directory"],
+        counts: &[],
+        texts: &[],
+        alternatives: &[],
+        routing: &["directory", "pattern"],
+        headline: &["directory"],
+        verb: "list",
+    },
+    Contract {
+        tool: "search",
+        tier: Tier::Fetch,
+        required: &["pattern", "out_slot"],
+        accepted: &["pattern", "directory", "include", "out_slot"],
+        slot_output: Some("out_slot"),
+        slot_inputs: &[],
+        slot_refs: &[],
+        paths: &["directory"],
+        counts: &[],
+        texts: &[],
+        alternatives: &[],
+        routing: &["pattern", "directory", "include"],
+        headline: &["pattern"],
+        verb: "search for",
+    },
+    Contract {
+        tool: "process",
+        tier: Tier::Process,
+        required: &["reads", "instruction", "out_slot"],
+        accepted: &["reads", "instruction", "out_slot"],
+        slot_output: Some("out_slot"),
+        slot_inputs: &["reads"],
+        slot_refs: &[],
+        paths: &[],
+        counts: &[],
+        texts: &["instruction"],
+        alternatives: &[],
+        routing: &[],
+        headline: &[],
+        verb: "process",
+    },
+    Contract {
+        tool: "write_file",
+        tier: Tier::Act,
+        required: &["path"],
+        accepted: &["path", "contents", "from_slot"],
+        slot_output: None,
+        slot_inputs: &[],
+        slot_refs: &["from_slot"],
+        paths: &["path"],
+        counts: &[],
+        texts: &["contents"],
+        alternatives: &["contents", "from_slot"],
+        routing: &["path"],
+        headline: &["path"],
+        verb: "write",
+    },
+    // A connector's provider and resource are argument values, so a second service adds no row
+    // here. Which fields a resource takes, and in what form, is the connector definition's to
+    // say, and the driver checks a plan against it before the plan is put to anybody.
+    //
+    // `place` is always routing and never a slot: it is the repository, mailbox or channel
+    // the step reads from or lands in. A fetch may have none, as a search across places does;
+    // the definition says which resources need one. `select` is a selector in the definition's
+    // vocabulary, and `with` the named values the definition asks for, such as an event's start,
+    // each held to its form.
+    Contract {
+        tool: CONNECTOR_FETCH,
+        tier: Tier::Fetch,
+        required: &["connector", "resource", "out_slot"],
+        accepted: &[
+            "connector",
+            "resource",
+            "place",
+            "item",
+            "select",
+            "with",
+            "out_slot",
+        ],
+        slot_output: Some("out_slot"),
+        slot_inputs: &[],
+        slot_refs: &[],
+        paths: &[],
+        counts: &[],
+        texts: &[],
+        alternatives: &[],
+        routing: &["connector", "resource", "place", "item", "select", "with"],
+        headline: &["resource"],
+        verb: "fetch",
+    },
+    // `on` is a slot reference and not routing: it names the fetch whose chosen item the act
+    // lands on, and the item itself is known only to the authority, which puts it to a person.
+    // It cannot be optional routing, since routing defaults are filled before slot references
+    // are read and an empty default would name a slot called "".
+    //
+    // `path` is a place in the service, such as a file in a branch, not a workspace path.
+    // `title` is carried content the plan wrote, like `contents`. `take` is routing: which field of
+    // which earlier fetch fills which `with` value is fixed before the run, and the value itself
+    // is known only to the authority, which takes it from that fetch's receipt.
+    Contract {
+        tool: CONNECTOR_ACT,
+        tier: Tier::Act,
+        required: &["connector", "resource", "place"],
+        accepted: &[
+            "connector",
+            "resource",
+            "place",
+            "item",
+            "select",
+            "with",
+            "path",
+            "option",
+            "take",
+            "on",
+            "title",
+            "contents",
+            "from_slot",
+        ],
+        slot_output: None,
+        slot_inputs: &[],
+        slot_refs: &["on", "from_slot"],
+        paths: &[],
+        counts: &[],
+        texts: &["title", "contents"],
+        alternatives: &["contents", "from_slot"],
+        routing: &[
+            "connector",
+            "resource",
+            "place",
+            "item",
+            "select",
+            "with",
+            "path",
+            "option",
+            "take",
+        ],
+        headline: &["resource"],
+        verb: "act",
+    },
+    // The server is an alias a person typed and the tool a word on a list a person vouched for;
+    // together they are what a person approves a call by (SERVERS-7), so both are routing. The
+    // arguments are the plan's own text, a JSON object whose shape the server's tool decides, and
+    // are carried as `contents` is. The step has no slot field of either kind: a call fills no
+    // slot, and nothing a step produced can be named in its arguments.
+    Contract {
+        tool: MCP_CALL,
+        tier: Tier::Act,
+        required: &["server", "tool"],
+        accepted: &["server", "tool", "arguments"],
+        slot_output: None,
+        slot_inputs: &[],
+        slot_refs: &[],
+        paths: &[],
+        counts: &[],
+        texts: &["arguments"],
+        alternatives: &[],
+        routing: &["server", "tool"],
+        headline: &["server"],
+        verb: "call",
+    },
+    Contract {
+        tool: ANSWER,
+        tier: Tier::Act,
+        required: &["from_slot"],
+        accepted: &["from_slot"],
+        slot_output: None,
+        slot_inputs: &[],
+        slot_refs: &["from_slot"],
+        paths: &[],
+        counts: &[],
+        texts: &[],
+        alternatives: &[],
+        routing: &[],
+        headline: &[],
+        verb: "answer",
+    },
+];
+
+fn contract_for(tool: &str) -> Option<&'static Contract> {
+    CONTRACTS.iter().find(|contract| contract.tool == tool)
+}
+
+/// The fields a tool's step locks into routing before the run, in the contract's order. None for
+/// a tool the schema does not know.
+pub fn routing_fields(tool: &str) -> &'static [&'static str] {
+    contract_for(tool).map_or(&[], |contract| contract.routing)
+}
+
+/// The value locked when the plan left a routing field out.
+///
+/// Optional routing still has to go through `Routing::insert`. Inventing the default in the
+/// driver would mean a destination that never passed that check. An omitted listing pattern or
+/// search include is locked as the empty string, which the driver then treats as no filter: an
+/// empty glob matches nothing, so handing the string through would list or search an empty set.
+fn routing_default(tool: &str, field: &str) -> Option<&'static str> {
+    match (tool, field) {
+        ("search", "directory") => Some("."),
+        ("list_files", "pattern") | ("search", "include") => Some(""),
+        // A connector step's optional routing is locked as the absence of a value, and the
+        // definition decides whether the resource needs it.
+        (CONNECTOR_FETCH, "place" | "item" | "select" | "with")
+        | (CONNECTOR_ACT, "item" | "select" | "with" | "path" | "option" | "take") => Some(""),
+        _ => None,
+    }
+}
+
+/// Whether a step may carry no text at all. A connector act's definition says whether its
+/// resource takes text, so the connector check holds it to exactly one or none.
+fn text_optional(tool: &str) -> bool {
+    tool == CONNECTOR_ACT
+}
+
+/// Fill every routing field the contract names, so [`Manifest::routing`] cannot skip one.
+///
+/// Only a field the plan left out, which by the same reading as [`Arg::is_empty`] includes one it
+/// left empty. A default standing in for a value the plan gave would repair the step to make the
+/// plan usable, and repairing a pattern into the no-filter default widens the read past what the
+/// plan named.
+fn with_routing_defaults(
+    tool: &'static str,
+    mut args: BTreeMap<String, Arg>,
+) -> BTreeMap<String, Arg> {
+    for field in contract_for(tool)
+        .expect("called only for a known tool")
+        .routing
+    {
+        if args.get(*field).is_none_or(Arg::is_empty)
+            && let Some(default) = routing_default(tool, field)
+        {
+            args.insert((*field).to_string(), Arg::Text(default.to_string()));
+        }
+    }
+    args
+}
+
+/// Every tool the schema knows, with its tier.
+///
+/// Exists so the layer that advertises capabilities to a planner can be checked against the
+/// layer that validates what comes back. Two tables that must agree and have no way to say so
+/// are two tables that will disagree.
+pub fn tools() -> Vec<(&'static str, Tier)> {
+    CONTRACTS.iter().map(|c| (c.tool, c.tier)).collect()
+}
+
+/// Turn a proposal into a frozen program, or refuse it.
+///
+/// Pure: no model, no network, no filesystem, and no state carried between calls. The same
+/// draft validates the same way every time, which is what lets a rejected plan be reported to
+/// a person as a fact about the plan rather than as something that went wrong.
+///
+/// The order of the checks is not arbitrary. Slot bookkeeping happens as the walk proceeds, so
+/// "read before written" is decided by position rather than by a second pass: a plan whose
+/// steps are in the wrong order fails for that reason, not for a missing slot.
+pub(crate) fn validate(draft: &Draft) -> Result<Manifest, ManifestError> {
+    if draft.steps.is_empty() {
+        return Err(ManifestError::Empty);
+    }
+
+    let mut steps = Vec::with_capacity(draft.steps.len());
+    let mut written: Vec<SlotId> = Vec::new();
+    let mut acted = false;
+    let mut answered = false;
+
+    for (index, draft_step) in draft.steps.iter().enumerate() {
+        let Some(contract) = contract_for(&draft_step.tool) else {
+            return Err(ManifestError::UnknownTool {
+                step: index,
+                tool: draft_step.tool.clone(),
+            });
+        };
+
+        for key in draft_step.args.keys() {
+            if !contract.accepted.contains(&key.as_str()) {
+                return Err(ManifestError::Unknown {
+                    step: index,
+                    tool: contract.tool,
+                    field: key.clone(),
+                });
+            }
+        }
+
+        for field in contract.required {
+            match draft_step.args.get(*field) {
+                Some(value) if !value.is_empty() => {}
+                _ => {
+                    return Err(ManifestError::Missing {
+                        step: index,
+                        tool: contract.tool,
+                        field,
+                    });
+                }
+            }
+        }
+
+        if !contract.alternatives.is_empty() {
+            let given = contract
+                .alternatives
+                .iter()
+                .filter(|field| {
+                    draft_step
+                        .args
+                        .get(**field)
+                        .is_some_and(|value| !value.is_empty())
+                })
+                .count();
+            if given > 1 || (given == 0 && !text_optional(contract.tool)) {
+                return Err(ManifestError::Alternatives {
+                    step: index,
+                    tool: contract.tool,
+                    fields: contract.alternatives,
+                });
+            }
+        }
+
+        for field in contract.counts {
+            if let Some(value) = draft_step.args.get(*field)
+                && value.count().is_none()
+            {
+                return Err(ManifestError::WrongType {
+                    step: index,
+                    tool: contract.tool,
+                    field,
+                    wanted: "a whole number",
+                });
+            }
+        }
+
+        for field in contract.texts {
+            if let Some(value) = draft_step.args.get(*field)
+                && value.text().is_none()
+            {
+                return Err(ManifestError::WrongType {
+                    step: index,
+                    tool: contract.tool,
+                    field,
+                    wanted: "text",
+                });
+            }
+        }
+
+        let args = with_routing_defaults(contract.tool, draft_step.args.clone());
+
+        for field in contract.paths {
+            if let Some(value) = args.get(*field) {
+                let Some(path) = value.text() else {
+                    return Err(ManifestError::WrongType {
+                        step: index,
+                        tool: contract.tool,
+                        field,
+                        wanted: "a path",
+                    });
+                };
+                if !is_inside_workspace(path) {
+                    return Err(ManifestError::EscapingPath {
+                        step: index,
+                        field,
+                        path: path.to_string(),
+                    });
+                }
+            }
+        }
+
+        // A routing field is a destination, and a destination is text. The required check passes
+        // a count and a non-empty list, so nothing before this establishes the shape
+        // `Manifest::routing` reads these fields under, and a wrong-shaped one would reach that
+        // lock instead of failing the plan.
+        for field in contract.routing {
+            if args.get(*field).and_then(Arg::text).is_none() {
+                return Err(ManifestError::WrongType {
+                    step: index,
+                    tool: contract.tool,
+                    field,
+                    wanted: "text",
+                });
+            }
+        }
+
+        let mut reads = Vec::new();
+        for field in contract.slot_inputs {
+            if let Some(value) = args.get(*field) {
+                let Some(names) = value.list() else {
+                    return Err(ManifestError::WrongType {
+                        step: index,
+                        tool: contract.tool,
+                        field,
+                        wanted: "a list of slot names",
+                    });
+                };
+                for name in names {
+                    reads.push(SlotId::new(name.clone()));
+                }
+            }
+        }
+        for field in contract.slot_refs {
+            if let Some(value) = args.get(*field) {
+                let Some(name) = value.text() else {
+                    return Err(ManifestError::WrongType {
+                        step: index,
+                        tool: contract.tool,
+                        field,
+                        wanted: "a slot name",
+                    });
+                };
+                reads.push(SlotId::new(name));
+            }
+        }
+
+        let mut unique_reads = Vec::with_capacity(reads.len());
+        for slot in reads {
+            if unique_reads.contains(&slot) {
+                return Err(ManifestError::DuplicateRead {
+                    step: index,
+                    slot: slot.as_str().to_string(),
+                });
+            }
+            unique_reads.push(slot);
+        }
+        let reads = unique_reads;
+
+        // Forward validity. A slot must already be written by the time a step names it, which
+        // is what stops a plan describing a cycle or depending on a step that never runs.
+        for slot in &reads {
+            if !written.contains(slot) {
+                return Err(ManifestError::SlotNotYetWritten {
+                    step: index,
+                    slot: slot.as_str().to_string(),
+                });
+            }
+        }
+
+        let out_slot = match contract.slot_output {
+            Some(field) => {
+                let Some(name) = args.get(field).and_then(Arg::text) else {
+                    return Err(ManifestError::WrongType {
+                        step: index,
+                        tool: contract.tool,
+                        field,
+                        wanted: "a slot name",
+                    });
+                };
+                let slot = SlotId::new(name);
+                if written.contains(&slot) {
+                    return Err(ManifestError::SlotWrittenTwice {
+                        step: index,
+                        slot: name.to_string(),
+                    });
+                }
+                written.push(slot.clone());
+                Some(slot)
+            }
+            None => None,
+        };
+
+        // An action producing a slot would mean a later step consuming what an effect returned,
+        // and the plan would then be reasoning about the world it had just changed. Nothing in
+        // this tool set does that, and the schema says so rather than leaving it to be true by
+        // accident.
+        if contract.tier == Tier::Act && out_slot.is_some() {
+            return Err(ManifestError::ActionFillsSlot {
+                step: index,
+                tool: contract.tool,
+            });
+        }
+
+        if acted && contract.tier < Tier::Act {
+            return Err(ManifestError::ReadAfterAction {
+                step: index,
+                tool: contract.tool,
+            });
+        }
+        if contract.tier == Tier::Act {
+            acted = true;
+        }
+
+        if contract.tool == ANSWER {
+            if answered {
+                return Err(ManifestError::AnswerRepeated { step: index });
+            }
+            answered = true;
+        }
+
+        steps.push(Step {
+            tool: contract.tool,
+            tier: contract.tier,
+            args,
+            out_slot,
+            reads,
+        });
+    }
+
+    Ok(Manifest {
+        steps,
+        notes: BTreeMap::new(),
+    })
+}
+
+/// Where the content in a slot came from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Origin {
+    /// Read out of the workspace.
+    Workspace,
+    /// Fetched through a connector, from one place.
+    Place { connector: String, place: String },
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Workspace => f.write_str("workspace"),
+            Self::Place { connector, place } if place.is_empty() => f.write_str(connector),
+            Self::Place { connector, place } => f.write_str(&destination(connector, place)),
+        }
+    }
+}
+
+/// One connector act's release: the slot it carries, where it carries one, where its content and
+/// any it takes came from, and the one connector and place it goes to.
+///
+/// Fixed at validation, from the frozen plan alone, which is what makes it a precommitted
+/// release: the plan was written from the task string and nothing had been read when this was
+/// decided, so fetched content can change what the slot says and never where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub step: usize,
+    /// The slot whose content leaves, where the act carries one. An act that only takes values
+    /// sends none: the authority reads them from the receipts it issued.
+    pub slot: Option<SlotId>,
+    pub origins: BTreeSet<Origin>,
+    pub connector: String,
+    pub place: String,
+}
+
+impl Release {
+    /// The destination this release is precommitted to, as the policy's release plan names it.
+    pub fn destination(&self) -> String {
+        destination(&self.connector, &self.place)
+    }
+
+    /// The release as the line a person approves names it.
+    pub fn describe(&self) -> String {
+        format!(
+            "content from {} to {}",
+            named(&self.origins),
+            self.destination()
+        )
+    }
+}
+
+/// Where a slot's content came from, as a plan line names it.
+fn named(origins: &BTreeSet<Origin>) -> String {
+    if origins.is_empty() {
+        "nowhere".to_string()
+    } else {
+        let from: Vec<String> = origins.iter().map(Origin::to_string).collect();
+        from.join(", ")
+    }
+}
+
+/// One connector place, as a release names it.
+pub fn destination(connector: &str, place: &str) -> String {
+    format!("{connector} {place}")
+}
+
+impl Manifest {
+    /// One step as the line a person approves reads: its own description, and for a connector
+    /// act that carries a slot, where that content came from and where it goes. A file write
+    /// that carries a slot names where its content came from too, where that is anywhere but the
+    /// workspace.
+    ///
+    /// Here rather than on [`Step`] because a release is a fact about the whole plan: which
+    /// places a slot's content came from depends on every step before it.
+    pub fn describe_step(&self, index: usize) -> String {
+        let step = &self.steps[index];
+        let mut described = step.describe();
+        let carried = step.args.get("from_slot").and_then(Arg::text);
+        let origins = self.origins();
+        if let Some(release) = self.release_at(index, &origins) {
+            described = format!("{described}; {}", release.describe());
+        }
+        if step.tool == "write_file"
+            && let Some(name) = carried
+        {
+            let from = origins.get(&SlotId::new(name)).cloned().unwrap_or_default();
+            if from != BTreeSet::from([Origin::Workspace]) {
+                described = format!("{described}; content from {}", named(&from));
+            }
+        }
+        match self.notes.get(&index) {
+            Some(note) => format!("{described}; {note}"),
+            None => described,
+        }
+    }
+
+    /// Every connector act that carries a slot or takes a value from one, with where that content
+    /// came from, as [`Manifest::origins`] finds it. An act that carries text the plan wrote
+    /// releases nothing, since that text was written before anything was read.
+    pub fn releases(&self) -> Vec<Release> {
+        let origins = self.origins();
+        (0..self.steps.len())
+            .filter_map(|index| self.release_at(index, &origins))
+            .collect()
+    }
+
+    /// The release the step at `index` makes, where it is a connector act carrying a slot or taking
+    /// values from fetches, with the origins of each looked up in `origins`.
+    fn release_at(
+        &self,
+        index: usize,
+        origins: &BTreeMap<SlotId, BTreeSet<Origin>>,
+    ) -> Option<Release> {
+        let step = &self.steps[index];
+        if step.tool != CONNECTOR_ACT {
+            return None;
+        }
+        let carried = step
+            .args
+            .get("from_slot")
+            .and_then(Arg::text)
+            .map(SlotId::new);
+        let taken = taken_slots(step.text("take"));
+        if carried.is_none() && taken.is_empty() {
+            return None;
+        }
+        Some(Release {
+            step: index,
+            origins: carried
+                .iter()
+                .chain(&taken)
+                .flat_map(|slot| origins.get(slot).cloned().unwrap_or_default())
+                .collect(),
+            slot: carried,
+            connector: step.text("connector").to_string(),
+            place: step.text("place").to_string(),
+        })
+    }
+
+    /// Where the content in each slot came from. A workspace read gives the workspace, a
+    /// connector fetch gives its connector and place, and a processor's slot gets the union of
+    /// the slots it reads. A slot is written once and before anything reads it, so the map for
+    /// the whole plan holds what each slot held when it was read.
+    fn origins(&self) -> BTreeMap<SlotId, BTreeSet<Origin>> {
+        let mut origins: BTreeMap<SlotId, BTreeSet<Origin>> = BTreeMap::new();
+        for step in &self.steps {
+            if let Some(out) = &step.out_slot {
+                let from = if step.tool == CONNECTOR_FETCH {
+                    BTreeSet::from([Origin::Place {
+                        connector: step.text("connector").to_string(),
+                        place: step.text("place").to_string(),
+                    }])
+                } else if step.tier == Tier::Fetch {
+                    BTreeSet::from([Origin::Workspace])
+                } else {
+                    step.reads
+                        .iter()
+                        .flat_map(|slot| origins.get(slot).cloned().unwrap_or_default())
+                        .collect()
+                };
+                origins.insert(out.clone(), from);
+            }
+        }
+        origins
+    }
+}
+
+/// The slots an act's `take` names. A malformed `take` names none here; the connector check
+/// refuses it.
+fn taken_slots(take: &str) -> Vec<SlotId> {
+    crate::selector::take_terms(take)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, slot, _)| slot)
+        .collect()
+}
+
+/// Whether a path stays inside the workspace.
+///
+/// The workspace refuses an escaping path anyway, so this decides nothing the filesystem layer
+/// would not. It is here because a plan is shown to a person before it runs, and `../../.ssh`
+/// in a step someone is being asked to approve is a thing they should never have had to spot.
+/// Refusing it at validation means the plan is rejected whole rather than half executed.
+fn is_inside_workspace(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with('~') {
+        return false;
+    }
+    // Windows-style roots and drive letters are not paths this workspace takes, and a backslash
+    // is a legal filename byte on the platforms it does, so neither is special-cased: what is
+    // checked is the component grammar the workspace itself resolves.
+    !path.split('/').any(|component| component == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(path: &str, slot: &str) -> DraftStep {
+        DraftStep::new("read_file")
+            .with_text("path", path)
+            .with_text("out_slot", slot)
+    }
+
+    fn process(reads: &[&str], out: &str) -> DraftStep {
+        DraftStep::new("process")
+            .with(
+                "reads",
+                Arg::List(reads.iter().map(|s| s.to_string()).collect()),
+            )
+            .with_text("instruction", "summarise")
+            .with_text("out_slot", out)
+    }
+
+    fn answer(slot: &str) -> DraftStep {
+        DraftStep::new(ANSWER).with_text("from_slot", slot)
+    }
+
+    #[test]
+    fn a_gather_process_answer_plan_validates() {
+        let plan = validate(&Draft::new(vec![
+            read("README.md", "readme"),
+            process(&["readme"], "summary"),
+            answer("summary"),
+        ]))
+        .expect("this is the shape the mode exists for");
+
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan.steps()[0].tier(), Tier::Fetch);
+        assert_eq!(plan.steps()[1].tier(), Tier::Process);
+        assert_eq!(plan.steps()[2].tier(), Tier::Act);
+    }
+
+    /// The whole mode rests on the program being fixed in advance, and a program with no steps
+    /// is a run that did nothing while reporting that it had followed a plan.
+    #[test]
+    fn an_empty_plan_is_refused() {
+        assert_eq!(validate(&Draft::default()), Err(ManifestError::Empty));
+    }
+
+    /// A tool the schema does not know is not a tool the driver has a handler for. Accepting it
+    /// would mean discovering that at execution time, with earlier steps already run.
+    #[test]
+    fn a_tool_outside_the_schema_is_refused() {
+        let err = validate(&Draft::new(vec![
+            DraftStep::new("edit_file")
+                .with_text("path", "a.rs")
+                .with_text("old_text", "x")
+                .with_text("new_text", "y"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::UnknownTool { step: 0, .. }));
+    }
+
+    /// Forward validity is the property that makes the driver able to run without checking
+    /// anything: every slot a step reads was filled by a step that already ran.
+    #[test]
+    fn reading_a_slot_before_anything_writes_it_is_refused() {
+        let err = validate(&Draft::new(vec![
+            process(&["readme"], "summary"),
+            read("README.md", "readme"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::SlotNotYetWritten {
+                step: 0,
+                slot: "readme".to_string()
+            }
+        );
+    }
+
+    /// A slot is written once. Two steps writing one would leave the second failing at run time
+    /// against a store that refuses a second write, halfway through a plan a person approved.
+    #[test]
+    fn two_steps_writing_one_slot_are_refused() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            read("b.md", "doc"),
+            answer("doc"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::SlotWrittenTwice {
+                step: 1,
+                slot: "doc".to_string()
+            }
+        );
+    }
+
+    /// A required field that is present but blank is a field the planner did not fill in, and
+    /// reading a file called "" is not what anyone meant by it.
+    #[test]
+    fn a_blank_required_field_counts_as_missing() {
+        for blank in ["", "   "] {
+            let err = validate(&Draft::new(vec![read(blank, "doc"), answer("doc")])).unwrap_err();
+            assert_eq!(
+                err,
+                ManifestError::Missing {
+                    step: 0,
+                    tool: "read_file",
+                    field: "path"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_list_of_reads_counts_as_missing() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            process(&[], "summary"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::Missing {
+                step: 1,
+                tool: "process",
+                field: "reads"
+            }
+        );
+    }
+
+    /// A path leaving the workspace is refused here rather than at the filesystem, so a plan
+    /// nobody should approve is never put in front of anybody to approve.
+    #[test]
+    fn a_path_outside_the_workspace_is_refused() {
+        for path in [
+            "/etc/passwd",
+            "../secrets",
+            "~/.ssh/id_rsa",
+            "a/../../b",
+            // Refused even though it resolves back inside. Deciding otherwise would mean the
+            // kernel modelling a filesystem it has no access to, and a plan nobody can read at
+            // a glance is a plan nobody should be asked to approve.
+            "a/b/../c.txt",
+        ] {
+            let err = validate(&Draft::new(vec![read(path, "doc"), answer("doc")])).unwrap_err();
+            assert!(
+                matches!(err, ManifestError::EscapingPath { step: 0, .. }),
+                "{path} was allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_relative_paths_are_accepted() {
+        for path in ["README.md", "src/main.rs", "..hidden", "a..b/c"] {
+            let plan = validate(&Draft::new(vec![read(path, "doc"), answer("doc")]));
+            assert!(plan.is_ok(), "{path} was refused");
+        }
+    }
+
+    /// Nothing reads the workspace after the plan has changed it. A read placed after a write
+    /// would be a plan reasoning about consequences it caused, which is the shape a turn has
+    /// and a manifest deliberately does not.
+    #[test]
+    fn a_read_after_an_action_is_refused() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            DraftStep::new("write_file")
+                .with_text("path", "b.md")
+                .with_text("from_slot", "doc"),
+            read("b.md", "again"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::ReadAfterAction {
+                step: 2,
+                tool: "read_file"
+            }
+        );
+    }
+
+    /// Several actions in a row are fine: each one's destination was locked before the run, so
+    /// position buys nothing extra. It is only going back to reading that is refused.
+    #[test]
+    fn several_actions_may_follow_one_another() {
+        let plan = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            process(&["doc"], "out"),
+            DraftStep::new("write_file")
+                .with_text("path", "b.md")
+                .with_text("from_slot", "out"),
+            answer("out"),
+        ]));
+        assert!(plan.is_ok(), "{plan:?}");
+    }
+
+    #[test]
+    fn a_write_must_give_exactly_one_source() {
+        let both = DraftStep::new("write_file")
+            .with_text("path", "b.md")
+            .with_text("contents", "hello")
+            .with_text("from_slot", "doc");
+        let err = validate(&Draft::new(vec![read("a.md", "doc"), both])).unwrap_err();
+        assert!(matches!(err, ManifestError::Alternatives { step: 1, .. }));
+
+        let neither = DraftStep::new("write_file").with_text("path", "b.md");
+        let err = validate(&Draft::new(vec![neither])).unwrap_err();
+        assert!(matches!(err, ManifestError::Alternatives { step: 0, .. }));
+    }
+
+    /// A body the plan wrote is fixed before anything is read, so it is as trustworthy as
+    /// the task string it came from. This is the one way a manifest run creates a file from
+    /// nothing, and refusing it would leave the mode unable to write a file that is not a
+    /// transformation of one it read.
+    #[test]
+    fn a_write_may_carry_a_body_the_plan_fixed_in_advance() {
+        let plan = validate(&Draft::new(vec![
+            DraftStep::new("write_file")
+                .with_text("path", "notes.md")
+                .with_text("contents", "# Notes\n"),
+        ]));
+        assert!(plan.is_ok(), "{plan:?}");
+    }
+
+    /// An argument the tool does not take is a plan that meant something the driver will not
+    /// do. Silently dropping it would run a step nobody described.
+    #[test]
+    fn an_argument_outside_the_contract_is_refused() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc").with_text("encoding", "utf-16"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Unknown { step: 0, .. }));
+    }
+
+    #[test]
+    fn a_count_field_must_hold_a_number() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc").with_text("limit", "lots"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::WrongType {
+                step: 0,
+                tool: "read_file",
+                field: "limit",
+                wanted: "a whole number"
+            }
+        );
+    }
+
+    /// Rejects: a validator that leaves `contents`, `title` and `instruction` to the driver, which
+    /// reads a number or a list as an empty body and writes or sends it.
+    #[test]
+    fn a_body_field_must_hold_text() {
+        let wrong = [Arg::Count(42), Arg::List(vec!["a".to_string()])];
+        for value in wrong {
+            let write = DraftStep::new("write_file")
+                .with_text("path", "notes.md")
+                .with("contents", value.clone());
+            assert_eq!(
+                validate(&Draft::new(vec![write])).unwrap_err(),
+                ManifestError::WrongType {
+                    step: 0,
+                    tool: "write_file",
+                    field: "contents",
+                    wanted: "text"
+                }
+            );
+
+            for field in ["title", "contents"] {
+                let send = act("send", "brave/bravebot").with(field, value.clone());
+                assert_eq!(
+                    validate(&Draft::new(vec![send])).unwrap_err(),
+                    ManifestError::WrongType {
+                        step: 0,
+                        tool: CONNECTOR_ACT,
+                        field,
+                        wanted: "text"
+                    }
+                );
+            }
+
+            let mut step = process(&["doc"], "out");
+            step.args.insert("instruction".to_string(), value);
+            assert_eq!(
+                validate(&Draft::new(vec![read("a.md", "doc"), step])).unwrap_err(),
+                ManifestError::WrongType {
+                    step: 1,
+                    tool: "process",
+                    field: "instruction",
+                    wanted: "text"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn only_one_step_may_answer() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            answer("doc"),
+            answer("doc"),
+        ]))
+        .unwrap_err();
+        assert_eq!(err, ManifestError::AnswerRepeated { step: 2 });
+    }
+
+    /// The release plan is built from the manifest before the policy exists. If a slot could
+    /// reach it any other way, content would be nominating itself for release.
+    #[test]
+    fn only_the_answered_slot_is_named_for_release() {
+        let plan = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            process(&["doc"], "summary"),
+            answer("summary"),
+        ]))
+        .unwrap();
+        assert_eq!(plan.released(), vec![SlotId::new("summary")]);
+    }
+
+    #[test]
+    fn a_plan_that_answers_nothing_releases_nothing() {
+        let plan = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            DraftStep::new("write_file")
+                .with_text("path", "b.md")
+                .with_text("from_slot", "doc"),
+        ]))
+        .unwrap();
+        assert!(plan.released().is_empty());
+    }
+
+    /// Every destination an effect could land on is lockable before the first step runs. A
+    /// routing field the manifest did not surface would be one the driver took from somewhere
+    /// else, and by then something has been read.
+    #[test]
+    fn every_effect_destination_is_named_for_the_routing_lock() {
+        let plan = validate(&Draft::new(vec![
+            read("src/a.rs", "doc"),
+            DraftStep::new("write_file")
+                .with_text("path", "src/b.rs")
+                .with_text("from_slot", "doc"),
+        ]))
+        .unwrap();
+        let routing = plan.routing();
+        assert!(routing.contains(&("step_0_path".to_string(), "src/a.rs".to_string())));
+        assert!(routing.contains(&("step_1_path".to_string(), "src/b.rs".to_string())));
+    }
+
+    /// An omitted directory used to be missing from the lock, so the driver invented "."
+    /// after the plan was frozen. The default belongs in the frozen program.
+    #[test]
+    fn an_omitted_search_directory_is_locked_as_the_workspace() {
+        let plan = validate(&Draft::new(vec![
+            DraftStep::new("search")
+                .with_text("pattern", "TODO")
+                .with_text("out_slot", "hits"),
+            answer("hits"),
+        ]))
+        .unwrap();
+        assert!(
+            plan.routing()
+                .contains(&("step_0_directory".to_string(), ".".to_string()))
+        );
+        assert!(
+            plan.routing()
+                .contains(&("step_0_include".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn an_omitted_list_pattern_is_locked_as_no_filter() {
+        let plan = validate(&Draft::new(vec![
+            DraftStep::new("list_files")
+                .with_text("directory", "src")
+                .with_text("out_slot", "files"),
+            answer("files"),
+        ]))
+        .unwrap();
+        assert!(
+            plan.routing()
+                .contains(&("step_0_directory".to_string(), "src".to_string()))
+        );
+        assert!(
+            plan.routing()
+                .contains(&("step_0_pattern".to_string(), String::new()))
+        );
+    }
+
+    /// A wrong-shaped routing field used to reach the driver: the required check accepts a
+    /// non-empty list as present, and nothing else established that the value was text, so
+    /// [`Manifest::routing`] failed its own invariant and the run ended in a panic rather than
+    /// as a refused plan.
+    #[test]
+    fn a_routing_field_that_is_not_text_is_refused() {
+        let err = validate(&Draft::new(vec![
+            DraftStep::new("search")
+                .with("pattern", Arg::List(vec!["TODO".to_string()]))
+                .with_text("out_slot", "hits"),
+            answer("hits"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::WrongType {
+                step: 0,
+                tool: "search",
+                field: "pattern",
+                wanted: "text"
+            }
+        );
+    }
+
+    /// An empty value is a field the planner did not fill in, which is what the required check
+    /// already reads it as, so the default stands in for it. A plan naming no pattern in either
+    /// spelling lists the tree rather than failing the run.
+    #[test]
+    fn a_pattern_the_plan_left_empty_is_locked_as_no_filter() {
+        let plan = validate(&Draft::new(vec![
+            DraftStep::new("list_files")
+                .with_text("directory", "src")
+                .with("pattern", Arg::List(Vec::new()))
+                .with_text("out_slot", "files"),
+            answer("files"),
+        ]))
+        .unwrap();
+        assert!(
+            plan.routing()
+                .contains(&("step_0_pattern".to_string(), String::new()))
+        );
+    }
+
+    /// A default stands in for a field the plan left out, never for one it filled. Overwriting a
+    /// wrong-shaped pattern with the no-filter default repaired the step into one that listed
+    /// the whole directory, a wider read than the plan named.
+    #[test]
+    fn a_routing_default_never_replaces_a_field_the_plan_gave() {
+        let err = validate(&Draft::new(vec![
+            DraftStep::new("list_files")
+                .with_text("directory", "src")
+                .with("pattern", Arg::List(vec!["*.rs".to_string()]))
+                .with_text("out_slot", "files"),
+            answer("files"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::WrongType {
+                step: 0,
+                tool: "list_files",
+                field: "pattern",
+                wanted: "text"
+            }
+        );
+    }
+
+    /// A processor that names a slot twice has not decided what it is reading. Catching it
+    /// here means the run fails as a plan, not halfway through a call.
+    #[test]
+    fn a_processor_that_reads_the_same_slot_twice_is_refused() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            process(&["doc", "doc"], "out"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::DuplicateRead {
+                step: 1,
+                slot: "doc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_processor_after_a_write_is_refused() {
+        let err = validate(&Draft::new(vec![
+            read("a.md", "doc"),
+            DraftStep::new("write_file")
+                .with_text("path", "b.md")
+                .with_text("from_slot", "doc"),
+            process(&["doc"], "out"),
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::ReadAfterAction {
+                step: 2,
+                tool: "process"
+            }
+        );
+    }
+
+    /// The schema is what makes ActionFillsSlot unreachable today. If a contract grows a
+    /// slot on an action, the validator still refuses; this test is what fails first.
+    #[test]
+    fn no_action_in_the_schema_fills_a_slot() {
+        for contract in CONTRACTS {
+            if contract.tier == Tier::Act {
+                assert!(
+                    contract.slot_output.is_none(),
+                    "{} is an action that writes a slot",
+                    contract.tool
+                );
+            }
+        }
+    }
+
+    /// Validation is a function of the draft and nothing else, so the same plan is refused for
+    /// the same reason every time and a person can be told what to change.
+    #[test]
+    fn validation_is_deterministic() {
+        let draft = Draft::new(vec![process(&["missing"], "out")]);
+        assert_eq!(validate(&draft), validate(&draft));
+    }
+
+    #[test]
+    fn a_step_describes_itself_for_the_summary() {
+        let plan = validate(&Draft::new(vec![
+            read("README.md", "readme"),
+            process(&["readme"], "summary"),
+            answer("summary"),
+        ]))
+        .unwrap();
+        let lines: Vec<String> = plan.steps().iter().map(Step::describe).collect();
+        assert_eq!(lines[0], "read README.md into readme");
+        assert_eq!(lines[1], "process from readme into summary");
+        assert_eq!(lines[2], "answer from summary");
+    }
+
+    /// A search decides where it runs and what it matches, not only what it looks for, and a listing
+    /// decides what it filters by. All of it is locked before the plan is put to anybody, so all of
+    /// it has to be on the line they read: a yes given to a pattern is not a yes to whichever
+    /// subtree somebody else chose to run it in.
+    #[test]
+    fn a_described_step_names_every_routing_field_it_fixes() {
+        let searching = validate(&Draft::new(vec![
+            DraftStep::new("search")
+                .with_text("pattern", "TODO")
+                .with_text("directory", "crates")
+                .with_text("include", "*.rs")
+                .with_text("out_slot", "hits"),
+            answer("hits"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            searching.steps()[0].describe(),
+            "search for TODO into hits (directory crates, include *.rs)"
+        );
+
+        let listing = validate(&Draft::new(vec![
+            DraftStep::new("list_files")
+                .with_text("directory", "docs")
+                .with_text("pattern", "*.md")
+                .with_text("out_slot", "names"),
+            answer("names"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            listing.steps()[0].describe(),
+            "list docs into names (pattern *.md)"
+        );
+    }
+
+    fn call(server: &str, tool: &str) -> DraftStep {
+        DraftStep::new(MCP_CALL)
+            .with_text("server", server)
+            .with_text("tool", tool)
+    }
+
+    /// A call is locked by the alias and the tool, which are what a person approves it by
+    /// (SERVERS-7), and never by its arguments, which are the plan's body. It reads as `alias:tool`.
+    #[test]
+    fn a_server_call_locks_its_alias_and_tool_and_not_its_arguments() {
+        let plan = validate(&Draft::new(vec![
+            call("brave", "open_tab").with_text("arguments", r#"{"url":"https://example.com"}"#),
+        ]))
+        .unwrap();
+        let routing = plan.routing();
+        assert!(routing.contains(&("step_0_server".to_string(), "brave".to_string())));
+        assert!(routing.contains(&("step_0_tool".to_string(), "open_tab".to_string())));
+        assert!(
+            routing.iter().all(|(key, _)| !key.ends_with("arguments")),
+            "{routing:?}"
+        );
+        assert_eq!(plan.steps()[0].describe(), "call brave:open_tab");
+    }
+
+    /// The step has no field that names a slot, so no argument of a call can be taken from what an
+    /// earlier step produced and a call fills nothing a later step could use.
+    #[test]
+    fn a_server_call_names_no_slot_so_no_argument_comes_from_a_result() {
+        for field in ["out_slot", "from_slot", "reads", "on", "take", "with"] {
+            let failure = validate(&Draft::new(vec![
+                read("a.md", "doc"),
+                call("brave", "open_tab").with_text(field, "doc"),
+            ]))
+            .expect_err(field);
+            assert!(
+                matches!(&failure, ManifestError::Unknown { step: 1, field: named, .. } if named == field),
+                "{field}: {failure:?}"
+            );
+        }
+    }
+
+    /// The schema takes a call by its alias and tool and by nothing else a plan could add.
+    #[test]
+    fn a_server_call_with_an_extra_field_or_a_missing_name_is_refused() {
+        assert!(matches!(
+            validate(&Draft::new(vec![
+                call("brave", "open_tab").with_text("timeout", "5")
+            ])),
+            Err(ManifestError::Unknown { step: 0, .. })
+        ));
+        for field in ["server", "tool"] {
+            let mut step = call("brave", "open_tab");
+            step.args.remove(field);
+            assert!(matches!(
+                validate(&Draft::new(vec![step])),
+                Err(ManifestError::Missing { step: 0, field: named, .. }) if named == field
+            ));
+        }
+        assert!(matches!(
+            validate(&Draft::new(vec![
+                DraftStep::new(MCP_CALL)
+                    .with("server", Arg::Count(1))
+                    .with_text("tool", "open_tab"),
+            ])),
+            Err(ManifestError::WrongType {
+                field: "server",
+                ..
+            })
+        ));
+    }
+
+    /// Arguments are a body the driver hands on as it is, so a number or a list is a wrong shape
+    /// and not an empty object.
+    #[test]
+    fn a_server_calls_arguments_must_be_text() {
+        for wrong in [Arg::Count(3), Arg::List(vec!["a".to_string()])] {
+            assert!(matches!(
+                validate(&Draft::new(vec![
+                    call("brave", "open_tab").with("arguments", wrong)
+                ])),
+                Err(ManifestError::WrongType {
+                    field: "arguments",
+                    wanted: "text",
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// A call may change anything the server can, so it is an action: nothing reads or processes
+    /// after it, and it fills no slot.
+    #[test]
+    fn a_read_after_a_server_call_is_refused() {
+        let failure = validate(&Draft::new(vec![
+            call("brave", "close_tab"),
+            read("a.md", "doc"),
+        ]))
+        .expect_err("a read after an action");
+        assert_eq!(
+            failure,
+            ManifestError::ReadAfterAction {
+                step: 1,
+                tool: "read_file"
+            }
+        );
+        assert!(
+            validate(&Draft::new(vec![
+                read("a.md", "doc"),
+                call("brave", "open_tab"),
+                call("brave", "close_tab"),
+                answer("doc"),
+            ]))
+            .is_ok()
+        );
+    }
+
+    /// A filter the plan left out is locked as the empty string, and printing that would read as a
+    /// destination rather than as the absence of one. The directory a search runs in has no such
+    /// value, so where the plan omitted it the line shows the root it was locked to instead.
+    #[test]
+    fn a_routing_field_that_filters_nothing_is_left_off_the_line() {
+        let plan = validate(&Draft::new(vec![
+            DraftStep::new("search")
+                .with_text("pattern", "TODO")
+                .with_text("out_slot", "hits"),
+            answer("hits"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            plan.steps()[0].describe(),
+            "search for TODO into hits (directory .)"
+        );
+    }
+
+    #[test]
+    fn every_listed_tool_has_a_contract() {
+        for (tool, _) in tools() {
+            assert!(contract_for(tool).is_some(), "{tool} is listed only");
+        }
+    }
+
+    fn fetch(resource: &str, place: &str, out: &str) -> DraftStep {
+        DraftStep::new(CONNECTOR_FETCH)
+            .with_text("connector", "github")
+            .with_text("resource", resource)
+            .with_text("place", place)
+            .with_text("select", "state:open no:label sort:created-asc")
+            .with_text("out_slot", out)
+    }
+
+    #[test]
+    fn a_connector_fetch_locks_every_routing_field_and_an_omitted_one_as_no_value() {
+        let plan = validate(&Draft::new(vec![
+            fetch("find_issue", "brave/bravebot", "issue"),
+            DraftStep::new(CONNECTOR_FETCH)
+                .with_text("connector", "github")
+                .with_text("resource", "search")
+                .with_text("out_slot", "found"),
+        ]))
+        .expect("two fetches");
+
+        let routing: BTreeMap<String, String> = plan.routing().into_iter().collect();
+        assert_eq!(routing["step_0_connector"], "github");
+        assert_eq!(routing["step_0_resource"], "find_issue");
+        assert_eq!(routing["step_0_place"], "brave/bravebot");
+        assert_eq!(
+            routing["step_0_select"],
+            "state:open no:label sort:created-asc"
+        );
+        assert_eq!(routing["step_0_item"], "");
+        for field in ["place", "item", "select"] {
+            assert_eq!(routing[&format!("step_1_{field}")], "", "{field}");
+        }
+        assert_eq!(plan.steps()[0].out_slot(), Some(&SlotId::new("issue")));
+    }
+
+    #[test]
+    fn a_described_write_names_where_its_content_came_from_unless_that_is_the_workspace() {
+        let write = |path: &str, slot: &str| {
+            DraftStep::new("write_file")
+                .with_text("path", path)
+                .with_text("from_slot", slot)
+        };
+        let plan = validate(&Draft::new(vec![
+            read("docs/x.md", "doc"),
+            fetch("issue", "brave/bravebot", "issue"),
+            process(&["doc", "issue"], "both"),
+            write("a.md", "doc"),
+            write("b.md", "issue"),
+            write("c.md", "both"),
+        ]))
+        .unwrap();
+
+        assert_eq!(plan.describe_step(3), plan.steps()[3].describe());
+        assert_eq!(
+            plan.describe_step(4),
+            format!(
+                "{}; content from github brave/bravebot",
+                plan.steps()[4].describe()
+            )
+        );
+        assert_eq!(
+            plan.describe_step(5),
+            format!(
+                "{}; content from workspace, github brave/bravebot",
+                plan.steps()[5].describe()
+            )
+        );
+    }
+
+    fn act(resource: &str, place: &str) -> DraftStep {
+        DraftStep::new(CONNECTOR_ACT)
+            .with_text("connector", "github")
+            .with_text("resource", resource)
+            .with_text("place", place)
+    }
+
+    /// Whether a connector act carries text is its definition's to say, so here it may carry
+    /// none, and never two.
+    #[test]
+    fn a_connector_act_gives_at_most_one_source() {
+        let act = || {
+            DraftStep::new(CONNECTOR_ACT)
+                .with_text("connector", "mail")
+                .with_text("resource", "modify")
+                .with_text("place", "me")
+                .with_text("option", "archive")
+        };
+        assert!(validate(&Draft::new(vec![act()])).is_ok());
+        let both = act()
+            .with_text("contents", "x")
+            .with_text("from_slot", "doc");
+        let err = validate(&Draft::new(vec![read("a.md", "doc"), both])).unwrap_err();
+        assert!(matches!(err, ManifestError::Alternatives { step: 1, .. }));
+    }
+
+    /// The shape the connector steps exist for: fetch one item, process it, act on that item.
+    /// Every routing field is locked, the ones the plan left out as empty, and `on` is not
+    /// among them because it names a slot, not a destination.
+    #[test]
+    fn a_connector_plan_locks_every_routing_field_and_not_its_target_slot() {
+        let plan = validate(&Draft::new(vec![
+            fetch("find_issue", "brave/bravebot", "issue"),
+            process(&["issue"], "summary"),
+            act("comment", "brave/bravebot")
+                .with_text("on", "issue")
+                .with_text("from_slot", "summary"),
+        ]))
+        .expect("a fetch, a processor and an act on what the fetch chose");
+
+        let routing: BTreeMap<String, String> = plan.routing().into_iter().collect();
+        assert_eq!(routing["step_0_place"], "brave/bravebot");
+        assert_eq!(
+            routing["step_0_select"],
+            "state:open no:label sort:created-asc"
+        );
+        assert_eq!(routing["step_0_item"], "");
+        assert_eq!(routing["step_2_place"], "brave/bravebot");
+        assert_eq!(routing["step_2_item"], "");
+        assert_eq!(routing["step_2_option"], "");
+        assert!(!routing.contains_key("step_2_on"));
+        assert_eq!(
+            plan.steps()[2].reads(),
+            &[SlotId::new("issue"), SlotId::new("summary")]
+        );
+    }
+
+    /// An act that names its item by number needs no fetch at all.
+    #[test]
+    fn a_connector_act_naming_its_item_validates_without_a_fetch() {
+        let plan = validate(&Draft::new(vec![
+            act("comment", "brave/bravebot")
+                .with_text("item", "914")
+                .with_text("contents", "thanks"),
+        ]))
+        .expect("a comment on a named issue");
+        assert!(
+            plan.releases().is_empty(),
+            "text the plan wrote releases nothing"
+        );
+    }
+
+    /// Each act's release is fixed from the frozen plan: the places its slot's content came
+    /// from, through every processor, and the one place it goes to.
+    #[test]
+    fn a_connector_act_release_is_named_before_anything_is_read() {
+        let plan = validate(&Draft::new(vec![
+            read("docs/x.md", "doc"),
+            fetch("issue", "brave/bravebot", "issue"),
+            process(&["doc", "issue"], "fix"),
+            act("put_file", "brave/bravebot")
+                .with_text("item", "bravebot/fix-x")
+                .with_text("path", "docs/x.md")
+                .with_text("title", "Fix x")
+                .with_text("from_slot", "fix"),
+        ]))
+        .unwrap();
+
+        let releases = plan.releases();
+        assert_eq!(releases.len(), 1);
+        let release = &releases[0];
+        assert_eq!(release.step, 3);
+        assert_eq!(release.slot, Some(SlotId::new("fix")));
+        assert_eq!(release.destination(), "github brave/bravebot");
+        assert_eq!(
+            release.origins,
+            BTreeSet::from([
+                Origin::Workspace,
+                Origin::Place {
+                    connector: "github".into(),
+                    place: "brave/bravebot".into()
+                }
+            ])
+        );
+        assert_eq!(
+            release.describe(),
+            "content from workspace, github brave/bravebot to github brave/bravebot"
+        );
+        assert_eq!(
+            plan.describe_step(3),
+            "act put_file from fix (connector github, place brave/bravebot, item bravebot/fix-x, \
+             path docs/x.md); content from workspace, github brave/bravebot to github \
+             brave/bravebot"
+        );
+        assert_eq!(plan.describe_step(0), plan.steps()[0].describe());
+    }
+
+    /// The person approving an act needs to see which item it lands on apart from the text it
+    /// sends, so the line names the fetch in `on` as the target and the processor's slot as the
+    /// source.
+    #[test]
+    fn an_act_reads_on_the_item_it_lands_on_and_from_the_slot_it_sends() {
+        let plan = validate(&Draft::new(vec![
+            fetch("find_issue", "brave/bravebot", "issue"),
+            process(&["issue"], "summary"),
+            act("comment", "brave/bravebot")
+                .with_text("on", "issue")
+                .with_text("from_slot", "summary"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            plan.steps()[2].describe(),
+            "act comment from summary on issue (connector github, place brave/bravebot)"
+        );
+    }
+
+    /// A note is words after a step and decides nothing: the same plan with and without one has
+    /// the same steps, routing and releases, and the note follows the release on the line.
+    #[test]
+    fn a_note_follows_the_step_and_changes_nothing_else() {
+        let draft = Draft::new(vec![
+            fetch("find_issue", "brave/bravebot", "issue"),
+            process(&["issue"], "summary"),
+            act("comment", "brave/bravebot")
+                .with_text("on", "issue")
+                .with_text("from_slot", "summary"),
+        ]);
+        let plain = validate(&draft).unwrap();
+        let noted = plain.clone().with_notes(BTreeMap::from([(
+            2,
+            "the authority fills in the recipient".to_string(),
+        )]));
+        assert_eq!(plain.steps(), noted.steps());
+        assert_eq!(plain.routing(), noted.routing());
+        assert_eq!(plain.releases(), noted.releases());
+        assert_eq!(noted.describe_step(0), plain.describe_step(0));
+        assert_eq!(
+            noted.describe_step(2),
+            format!(
+                "{}; the authority fills in the recipient",
+                plain.describe_step(2)
+            )
+        );
+        assert!(noted.describe_step(2).contains(
+            "content from github brave/bravebot to github brave/bravebot; the authority"
+        ));
+    }
+
+    /// An act that carries one slot and takes values from another names the origins of both, and
+    /// one that only takes values releases no slot of its own.
+    #[test]
+    fn a_release_names_what_an_act_carries_and_what_it_takes() {
+        let plan = validate(&Draft::new(vec![
+            read("docs/x.md", "doc"),
+            fetch("find_pull", "brave/bravebot", "pr"),
+            act("comment", "brave/bravebot")
+                .with_text("item", "1")
+                .with_text("take", "branch:pr.head")
+                .with_text("from_slot", "doc"),
+            act("protect", "brave/bravebot").with_text("take", "branch:pr.head"),
+        ]))
+        .unwrap();
+        let releases = plan.releases();
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].slot, Some(SlotId::new("doc")));
+        assert_eq!(
+            releases[0].origins,
+            BTreeSet::from([
+                Origin::Workspace,
+                Origin::Place {
+                    connector: "github".into(),
+                    place: "brave/bravebot".into()
+                }
+            ])
+        );
+        assert_eq!(releases[1].slot, None);
+        assert_eq!(
+            releases[1].describe(),
+            "content from github brave/bravebot to github brave/bravebot"
+        );
+    }
+}

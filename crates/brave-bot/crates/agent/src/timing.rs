@@ -1,0 +1,395 @@
+//! Where a turn's wall clock went.
+//!
+//! A turn takes a length of time, and until now that was the only thing recorded about it. The
+//! figure is unactionable on its own: a turn that took four minutes because the model was slow, one
+//! that took four minutes because a test suite ran, and one that took four minutes because it put a
+//! diff on the screen and waited for somebody to come back from lunch are the same number and want
+//! three different fixes.
+//!
+//! So the clock is split four ways, and the split is a partition rather than a set of overlapping
+//! measures: every millisecond of a turn is charged to exactly one of inference, tools, stalled, or
+//! the remainder. That is what makes the remainder worth reading. Approval prompts happen inside
+//! tool calls, so what is spent waiting for a person is taken out of the tool figure rather than
+//! counted in both.
+//!
+//! Milliseconds, and `u64` rather than `Duration`, because these are written into a session record
+//! and read back by whatever is to hand. A `Duration` serialises as a struct of seconds and
+//! nanoseconds, which is a poor thing to meet in a JSON file six months later.
+
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+
+/// How a turn's wall clock divided up.
+///
+/// Nothing in here is content, a path, or a label. It is four counts of milliseconds, so it may be
+/// written down and shown without any release: see [`crate::turn::Outcome::timing`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timing {
+    /// The whole turn, end to end, as the turn loop saw it.
+    ///
+    /// The one figure that is not a component: the other three are parts of this, and what they do
+    /// not account for is [`Timing::overhead_ms`].
+    #[serde(default)]
+    pub wall_ms: u64,
+    /// Waiting on the model, across own requests and the union of requests during delegate joins.
+    ///
+    /// A turn is several requests when the model calls tools, and a processor is a request of its
+    /// own, so a figure for one round would understate this by however long the rest took.
+    #[serde(default)]
+    pub inference_ms: u64,
+    /// Running tools, with time spent waiting for a person taken out.
+    ///
+    /// An approval prompt is drawn from inside a tool call, so the naive measure would charge the
+    /// same seconds here and to [`Timing::stalled_ms`]. Subtracted rather than left in both,
+    /// because the four figures are meant to add up.
+    #[serde(default)]
+    pub tools_ms: u64,
+    /// Waiting for a person to answer a prompt.
+    ///
+    /// Every approval and every question, whatever was answered: a refusal took as long to arrive
+    /// as an approval, and this measures the wait rather than the decision.
+    #[serde(default)]
+    pub stalled_ms: u64,
+}
+
+impl Timing {
+    /// What the turn spent on none of the three.
+    ///
+    /// Reading a session back, this is the figure with nobody to blame for it: not the model, not a
+    /// subprocess, not the person. On a turn that ran no delegate, anything large here is time the
+    /// harness spent on itself and there is no other way to see it. On a turn that delegated it is
+    /// also whatever a delegate spent inside a join on something other than a request, which
+    /// `DELEGATE-18` leaves here rather than charging to a figure the parent did not spend it on.
+    ///
+    /// Saturating, because the parts are measured separately and a clock that steps back must not
+    /// produce a wrapped figure in the billions.
+    pub fn overhead_ms(&self) -> u64 {
+        self.wall_ms
+            .saturating_sub(self.inference_ms)
+            .saturating_sub(self.tools_ms)
+            .saturating_sub(self.stalled_ms)
+    }
+
+    /// Add another turn's figures, for a total over a session.
+    pub fn add(&mut self, other: Timing) {
+        self.wall_ms += other.wall_ms;
+        self.inference_ms += other.inference_ms;
+        self.tools_ms += other.tools_ms;
+        self.stalled_ms += other.stalled_ms;
+    }
+
+    /// Add another turn's inference, tool and stalled figures, leaving `wall_ms` alone.
+    ///
+    /// For a caller that keeps its own wall clock, which is better than the worker's.
+    pub fn add_measured(&mut self, other: Timing) {
+        self.inference_ms += other.inference_ms;
+        self.tools_ms += other.tools_ms;
+        self.stalled_ms += other.stalled_ms;
+    }
+}
+
+/// Durations as the turn loop accumulates them, before they become a [`Timing`].
+///
+/// The loop adds up `Duration`s because that is what `Instant::elapsed` gives it, and rounding each
+/// one to milliseconds as it arrived would lose a fraction per round and end up short by the number
+/// of rounds. Rounded once, here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Elapsed {
+    pub wall: Duration,
+    pub inference: Duration,
+    /// Already net of `stalled`: see [`Timing::tools_ms`].
+    pub tools: Duration,
+    pub stalled: Duration,
+}
+
+impl Elapsed {
+    pub fn finish(self) -> Timing {
+        Timing {
+            wall_ms: self.wall.as_millis() as u64,
+            inference_ms: self.inference.as_millis() as u64,
+            tools_ms: self.tools.as_millis() as u64,
+            stalled_ms: self.stalled.as_millis() as u64,
+        }
+    }
+}
+
+/// A request's original timing boundary, on the process-wide monotonic clock.
+#[derive(Debug, Clone, Copy)]
+pub struct Interval {
+    pub start: Instant,
+    pub end: Instant,
+}
+
+impl Interval {
+    pub fn since(start: Instant) -> Self {
+        Self {
+            start,
+            end: Instant::now(),
+        }
+    }
+
+    pub fn duration(self) -> Duration {
+        self.end.duration_since(self.start)
+    }
+}
+
+/// The union of requests, restricted to one actual parent wait.
+fn covered(requests: &[Interval], wait: Interval) -> Duration {
+    let mut clipped: Vec<_> = requests
+        .iter()
+        .filter_map(|request| {
+            let start = request.start.max(wait.start);
+            let end = request.end.min(wait.end);
+            (start < end).then_some(Interval { start, end })
+        })
+        .collect();
+    clipped.sort_unstable_by_key(|interval| interval.start);
+    let mut through = wait.start;
+    let mut total = Duration::ZERO;
+    for interval in clipped {
+        let start = interval.start.max(through);
+        if start < interval.end {
+            total += interval.end.duration_since(start);
+            through = interval.end;
+        }
+    }
+    total
+}
+
+/// Join windows never overlap: the parent joins on one thread. A later join may return a
+/// request that covered an earlier window, so retain both until all delegates are collected.
+#[derive(Default)]
+pub(crate) struct DelegateWait {
+    requests: Vec<Interval>,
+    waits: Vec<Interval>,
+    charged: Duration,
+    /// When the turn began waiting for a delegate to end, until the first join after it takes it.
+    window_from: Option<Instant>,
+    /// How many typed lines the buffer had counted when the last wait ended, so a wait wakes for a
+    /// line added after it and not again for one it already woke for.
+    typed_seen: u64,
+}
+
+impl DelegateWait {
+    pub fn typed_seen(&self) -> u64 {
+        self.typed_seen
+    }
+
+    pub fn note_typed(&mut self, typed: u64) {
+        self.typed_seen = typed;
+    }
+
+    /// Whether a wake has announced the delegate it waits on and no join has taken its window yet.
+    pub fn wake_announced(&self) -> bool {
+        self.window_from.is_some()
+    }
+
+    /// Note that the turn begins waiting now, so the next join's window starts here and covers the
+    /// whole wait rather than only the instant of the join.
+    pub fn begin_wait(&mut self) {
+        self.window_from = Some(Instant::now());
+    }
+
+    /// Where the window of a join starting now begins: the start of the wait noted by
+    /// [`DelegateWait::begin_wait`] for the first join after it, and now for any other.
+    pub fn join_window_start(&mut self) -> Instant {
+        self.window_from.take().unwrap_or_else(Instant::now)
+    }
+
+    /// Close a wait that ended with nothing joined, so requests a later collection returns are
+    /// still charged for the part of it they covered.
+    pub fn end_wait(&mut self) {
+        if let Some(from) = self.window_from.take() {
+            self.waits.push(Interval::since(from));
+        }
+    }
+
+    pub fn collected(&mut self, wait: Interval, requests: Vec<Interval>) -> Duration {
+        self.waits.push(wait);
+        self.requests.extend(requests);
+        let total: Duration = self
+            .waits
+            .iter()
+            .map(|wait| covered(&self.requests, *wait))
+            .sum();
+        let added = total - self.charged;
+        self.charged = total;
+        added
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interval(base: Instant, start: u64, end: u64) -> Interval {
+        Interval {
+            start: base + Duration::from_millis(start),
+            end: base + Duration::from_millis(end),
+        }
+    }
+
+    /// Elapsed inference is a union clipped to the wait, including neither gaps nor background work.
+    #[test]
+    fn delegate_requests_cover_only_their_union_inside_a_wait() {
+        let base = Instant::now();
+        for (name, requests, expected) in [
+            ("disjoint", vec![(110, 120), (140, 160)], 30),
+            ("overlap", vec![(80, 150), (120, 180)], 80),
+            ("nested", vec![(110, 190), (120, 130)], 80),
+            ("identical", vec![(110, 190), (110, 190)], 80),
+            ("spanning", vec![(80, 220)], 100),
+            ("left clip", vec![(80, 130)], 30),
+            ("right clip", vec![(170, 230)], 30),
+            ("outside", vec![(20, 90), (210, 230)], 0),
+            ("adjacent", vec![(100, 150), (150, 200)], 100),
+            ("empty", vec![(120, 120), (200, 220), (80, 100)], 0),
+            ("unordered", vec![(160, 190), (110, 130), (120, 170)], 80),
+        ] {
+            let requests: Vec<_> = requests
+                .into_iter()
+                .map(|(start, end)| interval(base, start, end))
+                .collect();
+            assert_eq!(
+                covered(&requests, interval(base, 100, 200)),
+                Duration::from_millis(expected),
+                "{name}"
+            );
+            assert_eq!(
+                covered(&requests, interval(base, 150, 150)),
+                Duration::ZERO,
+                "empty wait: {name}"
+            );
+        }
+    }
+
+    /// A later-collected delegate can cover an earlier wait, but cannot charge it twice.
+    #[test]
+    fn successive_collections_charge_each_covered_instant_once() {
+        let base = Instant::now();
+        let mut waits = DelegateWait::default();
+        assert_eq!(
+            waits.collected(interval(base, 100, 150), vec![interval(base, 120, 140)]),
+            Duration::from_millis(20)
+        );
+        // The second delegate was already working during the first join. Its request also
+        // spans a gap between joins; that gap is the parent's own work, not delegate wait.
+        assert_eq!(
+            waits.collected(interval(base, 170, 200), vec![interval(base, 80, 190)]),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            waits.collected(interval(base, 220, 230), vec![interval(base, 100, 190)]),
+            Duration::ZERO
+        );
+        assert_eq!(waits.charged, Duration::from_millis(70));
+    }
+
+    /// The point of the whole type: what is left when the three known costs are taken out.
+    #[test]
+    fn the_remainder_is_what_nothing_else_accounts_for() {
+        let timing = Timing {
+            wall_ms: 10_000,
+            inference_ms: 6_000,
+            tools_ms: 1_500,
+            stalled_ms: 2_000,
+        };
+        assert_eq!(timing.overhead_ms(), 500);
+    }
+
+    /// A clock that steps backwards, or three parts measured slightly over the whole, must not turn
+    /// a small discrepancy into a figure in the billions.
+    #[test]
+    fn parts_exceeding_the_whole_do_not_wrap() {
+        let timing = Timing {
+            wall_ms: 100,
+            inference_ms: 200,
+            tools_ms: 200,
+            stalled_ms: 200,
+        };
+        assert_eq!(timing.overhead_ms(), 0);
+    }
+
+    #[test]
+    fn a_session_total_adds_every_turn() {
+        let mut total = Timing::default();
+        total.add(Timing {
+            wall_ms: 100,
+            inference_ms: 60,
+            tools_ms: 10,
+            stalled_ms: 20,
+        });
+        total.add(Timing {
+            wall_ms: 50,
+            inference_ms: 30,
+            tools_ms: 5,
+            stalled_ms: 5,
+        });
+        assert_eq!(total.wall_ms, 150);
+        assert_eq!(total.inference_ms, 90);
+        assert_eq!(total.tools_ms, 15);
+        assert_eq!(total.stalled_ms, 25);
+        assert_eq!(total.overhead_ms(), 20);
+    }
+
+    /// A caller with a better wall clock of its own adds the three measured parts and keeps its figure.
+    #[test]
+    fn add_measured_leaves_the_wall_clock_alone() {
+        let mut total = Timing {
+            wall_ms: 7,
+            inference_ms: 1,
+            tools_ms: 2,
+            stalled_ms: 3,
+        };
+        total.add_measured(Timing {
+            wall_ms: 999_999,
+            inference_ms: 10,
+            tools_ms: 20,
+            stalled_ms: 30,
+        });
+        assert_eq!(
+            total,
+            Timing {
+                wall_ms: 7,
+                inference_ms: 11,
+                tools_ms: 22,
+                stalled_ms: 33,
+            }
+        );
+    }
+
+    /// Rounded once at the end rather than per round, or a turn of many short rounds comes back
+    /// short by a fraction of a millisecond per round.
+    #[test]
+    fn durations_are_rounded_once_rather_than_per_round() {
+        let mut elapsed = Elapsed::default();
+        for _ in 0..10 {
+            elapsed.inference += Duration::from_micros(1_900);
+        }
+        assert_eq!(elapsed.finish().inference_ms, 19);
+    }
+
+    /// The figures are written into a session record, so they have to survive being one.
+    #[test]
+    fn timing_survives_a_round_trip_as_json() {
+        let timing = Timing {
+            wall_ms: 1,
+            inference_ms: 2,
+            tools_ms: 3,
+            stalled_ms: 4,
+        };
+        let body = serde_json::to_string(&timing).expect("serialises");
+        assert_eq!(
+            serde_json::from_str::<Timing>(&body).expect("parses"),
+            timing
+        );
+    }
+
+    /// A record written before this was kept reads as a turn that took no time, which is the same
+    /// way an absent token breakdown reads: nothing recorded rather than an error.
+    #[test]
+    fn a_record_without_timing_reads_as_zero() {
+        let timing: Timing = serde_json::from_str("{}").expect("parses");
+        assert_eq!(timing, Timing::default());
+    }
+}

@@ -1,0 +1,6092 @@
+//! Command-line entry point.
+
+#![forbid(unsafe_code)]
+
+mod acp;
+mod auth;
+mod background;
+mod brave;
+mod bug_report;
+mod chatgpt;
+mod completion;
+mod continued;
+mod deep_link;
+mod doctor;
+mod exit;
+mod finish;
+mod flags;
+mod goal_run;
+mod host;
+mod import;
+mod invocation;
+mod json;
+mod lines;
+mod mcp;
+mod model;
+mod one_shot;
+mod permissions_check;
+mod plain;
+mod progress;
+mod push_identity;
+mod reopen;
+mod sandbox_check;
+mod schedule;
+mod session_delete;
+mod session_import;
+mod session_search;
+mod sessions_list;
+mod shell_init;
+mod skill_eval;
+mod stats;
+#[cfg(unix)]
+mod supervisor;
+#[cfg(test)]
+mod test_support;
+mod trigger;
+mod update;
+mod usage;
+mod workspace;
+mod xai;
+use bravebot_agent::servers;
+
+use crate::exit::{Ending, fail};
+use crate::finish::{
+    Finished, ending_of_a_turn, ending_with_the_goal, failure_of_a_turn, failure_with_the_goal,
+    refusals, refused_with_the_usage, report, say_notices, say_the_goal_unmet, say_the_result,
+    say_what_a_stopped_manifest_produced, say_what_a_stored_manifest_produced,
+    stopped_before_the_turn, what_ran, with_declined,
+};
+use crate::flags::{
+    ACCEPT_EDITS, AUTO, BYPASS_APPROVALS_AND_SANDBOX, INCOGNITO, SAFE, SKIP_PERMISSIONS,
+    TASK_FLAGS, VET, bypass_made_unreachable, continues_with_a_task, flag_named,
+    interactive_out_of_place, is_a_one_shot, opens_a_session, sandbox_refusal, starts_no_program,
+    take_agent, take_flag, take_links, take_log_level, take_run_network, take_sandbox,
+    take_sandbox_filesystem, take_settings, take_system_prompts, take_tool_limit, wants_json,
+    without_a_definition, without_a_prompt_to_give, without_a_tool_set_to_limit,
+};
+use crate::invocation::{
+    Given, Invocation, approve_input_lines_conflict, input_lines_conflict, limit_not_with_a_goal,
+    limit_not_with_a_manifest, manifest_conflict, parse_invocation, prompt_to_open_on,
+};
+use crate::model::{
+    model_asked_for, model_for_this_run, model_not_served, nothing_serves,
+    put_processor_model_in_force, resolve_advisor,
+};
+use crate::one_shot::OneShot;
+use crate::usage::print_help;
+use crate::workspace::{
+    confinement_name, current_workspace, definition_for_a_run, open_directories,
+    rules_for_a_one_shot_run, scratch_for_this_run, unattended_trust,
+};
+use bravebot_agent::Mode;
+use bravebot_agent::turn::{self, SystemPrompts, Task};
+use bravebot_config::{Config, Managed};
+use bravebot_core::cancel::Cancel;
+use bravebot_i18n::t;
+use bravebot_sandbox::SandboxMode;
+use bravebot_session::sessions::Resumable;
+use std::io::{IsTerminal, Read};
+use std::path::Path;
+use std::process::ExitCode;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the command line settled, for the dispatch that follows.
+struct Settled {
+    as_json: bool,
+    skip_permissions: bool,
+    /// The spelling of the bypass flag that was typed, for a refusal that names it. Meaningful only
+    /// where `skip_permissions` is true.
+    bypass_flag: &'static str,
+    /// The mode a flag other than the bypass flag opened a one-shot run in (`--accept-edits` or
+    /// `--auto`), or `None` where neither was given and the run asks.
+    starts_in: Option<bravebot_agent::PermissionMode>,
+    carried: Option<String>,
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    prompts: SystemPrompts,
+}
+
+/// Takes every flag that belongs to the process rather than to a command out of `args`, and engages
+/// what each one switches on, in the order the comments below give. A line that is refused stops
+/// here, ahead of any dispatch, with the status `stopped_before_the_turn` chose.
+fn settle_flags(args: &mut Vec<String>) -> Result<Settled, ExitCode> {
+    // A bare `--` ends bravebot's own flags: what follows is another program's argv, as after
+    // `mcp add <alias> --`, where a server's own `--settings` must stay the server's.
+    let foreign = match args.iter().position(|arg| arg == "--") {
+        Some(at) => args.split_off(at),
+        None => Vec::new(),
+    };
+
+    // Noted before the flags below are taken out, because they are what it looks for: a session
+    // that starts in another process reads none of them, and one that ran without a flag it was
+    // given would be running under rules its author did not choose.
+    let carried: Option<String> = args
+        .iter()
+        .find(|arg| {
+            matches!(
+                arg.as_str(),
+                "--incognito"
+                    | "--safe"
+                    | "--locked"
+                    | "--tools"
+                    | "--no-shell"
+                    | "--vet"
+                    | "--processor-model"
+                    | "--settings"
+                    | "--run-network"
+                    | "--sandbox"
+                    | "--dangerously-bypass-approvals-and-sandbox"
+                    | "--sandbox-allow-read"
+                    | "--sandbox-deny-read"
+                    | "--sandbox-allow-write"
+                    | "--sandbox-deny-write"
+                    | "--log-level"
+            )
+        })
+        .cloned();
+    if let Some(flag) = &carried {
+        bravebot_tui::app::background_cannot_carry(flag);
+    }
+
+    // Engaged here rather than deeper in because it must be true before the first thing that could
+    // write is reached, and this is the last moment that is certain to be before all of them.
+    //
+    // Removed before anything dispatches on what leads the list, so the mode composes with every
+    // other way of starting rather than being a fourth flag that may lead: `--incognito -p "task"`,
+    // `--incognito --resume` and `--incognito` on its own all mean what they look like. Repeats are
+    // one flag rather than an error: `--incognito --incognito` asks for a mode that is already on,
+    // and refusing it would be a rule about privacy's typing rather than about privacy.
+    if take_flag(args, INCOGNITO) {
+        bravebot_core::incognito::engage();
+    }
+
+    // Beside the mode above and for the same reason: every loader it turns off is reached while a
+    // session is assembled, and this is before the first of them.
+    //
+    // It composes with every way of starting: a session, a resumed session, a session in lines and
+    // a one-shot run all load the same five things, so reading it per subcommand would be a chance
+    // to forget it in each.
+    if take_flag(args, SAFE) {
+        bravebot_core::safe::engage();
+    }
+
+    // Beside the mode above, which it includes, and before the first setting is read: a settings
+    // layer read once from a checkout cannot be unread. The bypass flag is refused here and not
+    // after the arguments are parsed, so that nothing else the line says is acted on first.
+    let locked = take_flag(args, "--locked");
+    if locked {
+        bravebot_core::safe::engage();
+        bravebot_config::lock();
+    }
+
+    // Beside the mode above and for the same reason: the switch has to be settled before a session
+    // is assembled, and this is the last moment certain to be before every way of assembling one.
+    // What it turns on is read once per session, where the three routes into it are resolved.
+    //
+    // Turns auto-vetting on for this run, and outranks both standing answers because it is the
+    // narrowest in time: somebody typing it has said what they want of the run in front of them.
+    // That includes a recorded `off`, on the footing `--dangerously-skip-permissions` sits on,
+    // which is a strictly larger thing anything able to pass this flag could pass instead. There is
+    // no flag the other way. It would matter only to somebody who had turned the mode on standing
+    // and wanted one run without it, and for them the answer is the file the standing answer is
+    // kept in. A second flag whose absence and presence both mean something is worth adding when
+    // there is a case for it, not before.
+    if take_flag(args, VET) {
+        bravebot_core::vetting::ask_for_it();
+    }
+
+    // Taken out before anything dispatches on the first argument, because this one belongs to every
+    // way of starting: a session, a resumed session, and a one-shot run all put the same four
+    // questions to the same trait. Reading it per subcommand would be four chances to read it in
+    // three of them, and the flag would then be silently ignored wherever it was forgotten.
+    //
+    // See [`bravebot_agent::PermissionMode`] for what giving it up costs. Deny rules from the
+    // settings file are not part of it: they refuse before there is anything to prompt about, so
+    // the flag means "stop asking me" rather than "forget what I wrote down".
+    //
+    // `--dangerously-bypass-approvals-and-sandbox` is that flag and `--sandbox off` given together,
+    // so everything below that refuses or reads the first reads this one too. Which of the two was
+    // typed is kept only to name it in a refusal.
+    let bypass_and_unconfine = take_flag(args, BYPASS_APPROVALS_AND_SANDBOX);
+    let skip_permissions = take_flag(args, SKIP_PERMISSIONS) || bypass_and_unconfine;
+    let bypass_flag = if bypass_and_unconfine {
+        BYPASS_APPROVALS_AND_SANDBOX
+    } else {
+        SKIP_PERMISSIONS
+    };
+    if locked && skip_permissions {
+        return Err(stopped_before_the_turn(
+            wants_json(args),
+            Ending::Argument,
+            t!(cli_locked_refuses_bypass, flag = bypass_flag),
+        ));
+    }
+
+    // Taken out beside the flag above, for the reason that one is, and refused with it: the flag
+    // above answers every question this one answers and more, so both given is a line that does
+    // not say which of the two its author meant.
+    let accept_edits = take_flag(args, ACCEPT_EDITS);
+    if accept_edits && skip_permissions {
+        return Err(stopped_before_the_turn(
+            wants_json(args),
+            Ending::Argument,
+            t!(cli_accept_edits_not_with_bypass, flag = bypass_flag),
+        ));
+    }
+    // The auto mode is refused beside either of the others for the same reason: each answers a
+    // different set of questions, and a line that gave two does not say which its author meant.
+    let auto = take_flag(args, AUTO);
+    if auto && skip_permissions {
+        return Err(stopped_before_the_turn(
+            wants_json(args),
+            Ending::Argument,
+            t!(cli_auto_not_with_bypass, flag = bypass_flag),
+        ));
+    }
+    if auto && accept_edits {
+        return Err(stopped_before_the_turn(
+            wants_json(args),
+            Ending::Argument,
+            t!(cli_auto_not_with_accept_edits).to_string(),
+        ));
+    }
+    let starts_in = match (accept_edits, auto) {
+        (_, true) => Some(bravebot_agent::PermissionMode::Auto),
+        (true, false) => Some(bravebot_agent::PermissionMode::AcceptEdits),
+        (false, false) => None,
+    };
+
+    // Read off the arguments as typed, before the flag below takes anything out of them: a result
+    // object was asked for by the command line that failed, whichever token the failure consumed.
+    let as_json = wants_json(args);
+
+    // Taken out before dispatch for the reason the two above are, and acted on here because this is
+    // before the first read of a setting: a layer registered after the interface had loaded the
+    // others would configure half of one process.
+    match take_settings(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?
+    {
+        None => {}
+        Some(path) if path.is_file() => bravebot_config::name_a_settings_file(path),
+        // Refused rather than ignored, and for the audience CLI-11 refuses a directory for: a run
+        // told to configure itself from a file is a run whose configuration is the file, so falling
+        // back to whatever was found would be the wrong configuration used in silence. A mistyped
+        // path and a variable that expanded to nothing look the same here, and both are common.
+        Some(path) => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Argument,
+                t!(cli_settings_not_a_file, path = path.display().to_string()),
+            ));
+        }
+    }
+
+    // After the settings file is registered, which the settings it reads include, and before a
+    // session is assembled: a stage started under one answer and the next under another would
+    // make the network a property of the line rather than of the session.
+    bravebot_config::settle_run_network(
+        take_run_network(args)
+            .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?,
+    );
+
+    // Settled with the network and for the same reason: the lists a stage is held to are a property
+    // of the session, and a line started under one answer and the next under another would make
+    // them a property of the line. The flags are the person's own act for this run, so they add to
+    // what their settings say.
+    bravebot_config::settle_sandbox_filesystem(
+        &take_sandbox_filesystem(args)
+            .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?,
+    );
+
+    // The host list a stage is held to and the key each owner's repositories are pushed with,
+    // settled with the lists above for the same reason.
+    let layers = bravebot_config::Settings::load();
+    bravebot_config::sandbox_network::settle(&layers);
+    bravebot_config::git_identities::settle(&layers);
+    // And the proxy and certificate authorities the person's own file states, before the first
+    // request any command below goes on to make resolves them from the environment alone.
+    bravebot_agent::transport::settle(&layers);
+
+    // After the mode above is engaged, because an incognito session is given no directory to log
+    // into, and before the first thing that could fail in a way worth recording.
+    let level = take_log_level(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+    bravebot_diag::configure(
+        level.unwrap_or(bravebot_diag::Level::Error),
+        bravebot_agent::home::writable(),
+    );
+
+    // Beside the log, for the same reason: an incognito session is given no directory, so it leaves
+    // no report and sends none (CRASH-5), and this is before the first thing that could panic in a
+    // way worth reporting. A build with nowhere to send reports, or a person who switched them off,
+    // gets nothing from this call (CRASH-3, CRASH-4).
+    bravebot_backtrace::start(bravebot_backtrace::Process::Cli);
+
+    // Taken out before the refusals below read the first argument: a leading `--sandbox <mode>`
+    // would otherwise hide the command from them, and `completion` would go unrefused the flags it
+    // refuses (CLI-20). The mode is resolved further down, once the settings it reads are in place.
+    let sandbox_flag = take_sandbox(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+
+    // Taken out here, like the settings file, because a session, a session in lines and a one-shot
+    // run all use the name the same way. It is matched later, by whichever of them starts, because
+    // the set it is matched against depends on the directory's trust (CLI-17).
+    let agent = take_agent(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+    if let Some(refused) = agent
+        .as_ref()
+        .and_then(|_| without_a_definition(args.first().map(String::as_str)))
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, refused));
+    }
+
+    // Taken out beside `--agent`, for its reason: it names what the session it opens is about.
+    let links = take_links(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+    if links != bravebot_tui::app::Links::default() && !opens_a_session(args) {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Argument,
+            t!(cli_links_need_a_session).to_string(),
+        ));
+    }
+
+    // Taken out here for the same reason: a session, a session in lines, a resumed session and a
+    // one-shot run all carry the words the same way (CLI-19).
+    let prompts = take_system_prompts(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+    if let Some(flag) = flag_named(&prompts)
+        && let Some(refused) = without_a_prompt_to_give(flag, args.first().map(String::as_str))
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, refused));
+    }
+
+    // After the flag above and after the layer named beside it, because a file `--settings` names is
+    // one of the layers that may say this. MODE-5: the flag opens the bypass mode unless a layer in
+    // force made it unreachable, and then the flag is refused with the file named rather than
+    // ignored. Refused rather than downgraded to asking: a run that was told to stop asking and
+    // carried on with a notice is a run whose author believes it is unattended.
+    if skip_permissions
+        && let Some(path) =
+            bypass_made_unreachable(&bravebot_config::Settings::load(), &Managed::load())
+    {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Argument,
+            t!(
+                cli_bypass_unreachable,
+                flag = bypass_flag,
+                path = path.display().to_string()
+            ),
+        ));
+    }
+
+    // After the settings file is named and before anything dispatches, for the reason the settings
+    // are: a turn started by any of the ways below holds its programs to the one answer settled
+    // here, and a managed floor that the flag or a file goes under stops the session before it
+    // starts rather than being met on the first `run`.
+    // Refused rather than resolved in favour of one of the two: a line that names a confining mode
+    // beside a flag that says nothing is confined has two authors' worth of intent in it.
+    let sandbox_flag = match sandbox_flag {
+        Some(mode) if bypass_and_unconfine && mode != SandboxMode::Off => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Argument,
+                t!(cli_bypass_and_sandbox_disagree, mode = mode.name()),
+            ));
+        }
+        _ if bypass_and_unconfine => Some(SandboxMode::Off),
+        flag => flag,
+    };
+    if let Some(mode) = sandbox_flag {
+        bravebot_config::sandbox::note_flag(mode);
+    }
+    match bravebot_config::sandbox::resolve(
+        sandbox_flag,
+        &bravebot_config::Settings::load(),
+        &Managed::load(),
+    ) {
+        Ok(choice) => bravebot_config::sandbox::engage(choice),
+        // The commands that start no program are let through, `doctor` among them: the person
+        // holding a setting the managed file refuses is the one who needs the report that names it,
+        // and a diagnosis that is itself refused cannot be read.
+        Err(refused) if starts_no_program(args.first().map(String::as_str)) => {
+            bravebot_config::sandbox::engage(bravebot_config::sandbox::Choice {
+                mode: refused.pinned,
+                source: bravebot_config::sandbox::Source::Managed(refused.pinned_in),
+            });
+        }
+        Err(refused) => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Argument,
+                sandbox_refusal(&refused),
+            ));
+        }
+    }
+
+    // Taken out after every flag that takes a value, so the first argument left is the command, and
+    // settled before a session is assembled so that the list a turn is offered is written once under
+    // one answer. A refused list stops here, ahead of any turn.
+    let tool_limit = take_tool_limit(args)
+        .map_err(|complaint| stopped_before_the_turn(as_json, Ending::Argument, complaint))?;
+    if !tool_limit.is_none() {
+        if let Some(refused) = args
+            .first()
+            .and_then(|first| without_a_tool_set_to_limit(first))
+        {
+            return Err(stopped_before_the_turn(as_json, Ending::Argument, refused));
+        }
+        bravebot_core::tool_set::settle(tool_limit);
+    }
+
+    // Before the words after a bare `--` rejoin the line, since those are another program's.
+    if let Some(refused) = interactive_out_of_place(args) {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, refused));
+    }
+
+    args.extend(foreign);
+    // Refused rather than ignored where there is no one-shot run to open in the mode: a session
+    // has the mode key, and a line that asked for a run to write unasked and was started as
+    // something that asks would leave its author believing the flag had been honoured.
+    // `schedule add` is the one command that takes the mode of a run it starts later.
+    if starts_in.is_some()
+        && args.first().map(String::as_str) != Some("schedule")
+        && !is_a_one_shot(args, continues_with_a_task(args))
+    {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Argument,
+            match starts_in {
+                Some(bravebot_agent::PermissionMode::Auto) => t!(cli_auto_needs_a_run),
+                _ => t!(cli_accept_edits_needs_a_run),
+            }
+            .to_string(),
+        ));
+    }
+    Ok(Settled {
+        as_json,
+        skip_permissions,
+        bypass_flag,
+        starts_in,
+        carried,
+        agent,
+        links,
+        prompts,
+    })
+}
+
+fn main() -> ExitCode {
+    // First of all, before the command line is read: what this process was started with, its
+    // environment included, is readable from `/proc/<pid>/environ` by any process of the same
+    // user until the kernel is told otherwise, and a program a stage starts is one. The mark is
+    // cleared by `execve`, so the programs this process starts are not affected. A refusal is
+    // said and the run goes on, since the remedy is outside the program. See SANDBOX-8.
+    if let Some(notice) = bravebot_sandbox::inspection::refuse_same_user_inspection().notice() {
+        eprintln!("bravebot: {notice}");
+    }
+
+    // Next, because it has to be true before the first credential is in memory and the
+    // signing key is unmasked while the command line is still being read. A crash after this
+    // writes no image of this process, which is where a key and a live session credential would
+    // otherwise be recovered from. Nothing is done about a platform that refuses: the remedy is
+    // outside the program, and quitting over it would protect the credential by making the tool
+    // unusable. See CRED-23.
+    let _ = bravebot_sandbox::crash::disable_core_dumps();
+
+    // Before anything is printed, and exactly once: every later lookup reads what this settled
+    // on. Nothing else in the tree consults the environment about a language. What the person
+    // said is read here with it, ahead of the command line, since the first sentence the program
+    // says can be the refusal of a flag.
+    let picked = bravebot_session::store::load_language();
+    let written = bravebot_config::Settings::written_language();
+    bravebot_i18n::init_from_environment(bravebot_i18n::Said {
+        picked: picked.as_deref(),
+        written: written.as_deref(),
+    });
+
+    // The process's own argv, parsed below into the documented flags. There is no other
+    // way for a command line tool to learn what it was asked to do.
+    // nosemgrep: rust.lang.security.args.args
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    let Settled {
+        as_json,
+        skip_permissions,
+        bypass_flag,
+        starts_in,
+        carried,
+        agent,
+        links,
+        prompts,
+    } = match settle_flags(&mut args) {
+        Ok(settled) => settled,
+        Err(code) => return code,
+    };
+
+    match args.first().map(String::as_str) {
+        Some("--version" | "-V") => {
+            // The same words a session record writes down, so the two can be compared without
+            // anyone having to work out what "the current build" means.
+            println!("bravebot {}", bravebot_stamp::BUILD);
+            ExitCode::SUCCESS
+        }
+        Some("--help" | "-h") => {
+            print_help();
+            ExitCode::SUCCESS
+        }
+        // With no arguments the interactive session is the natural default.
+        None => interactive(
+            bravebot_tui::app::Start::Fresh,
+            agent,
+            links,
+            skip_permissions,
+            prompts,
+        ),
+        // The same session, with a prompt from the command line sent as its first turn (CLI-31). A
+        // flag of its own because `bravebot "<task>"` is the one-shot run scripts already call.
+        Some("-i" | "--interactive") => {
+            open_on(&args[1..], as_json, agent, links, skip_permissions, prompts)
+        }
+        // What a `bravebot://open` link starts (LINK-1). Takes the link and nothing else, and none of
+        // the flags that compose with other ways of starting: the line is written by the operating
+        // system's registration, and a flag on it would be a way for a link to ask for more.
+        Some("--handle-uri") => open_link(&args[1..], as_json, agent, skip_permissions, prompts),
+        // Picking up where a session left off, chosen from a list or named outright.
+        Some("--resume" | "-r" | "--continue" | "-c") if continues_with_a_task(&args) => {
+            run_task(&args, skip_permissions, starts_in, agent, prompts)
+        }
+        Some("--resume" | "-r") => match args.get(1) {
+            Some(id) => resume_named(id, agent, links, skip_permissions, prompts),
+            None => interactive(
+                bravebot_tui::app::Start::Choose,
+                agent,
+                links,
+                skip_permissions,
+                prompts,
+            ),
+        },
+        // The same list, opened for the sessions linked to one pull request. A missing value is
+        // refused rather than read as a plain `--resume`, since a script whose variable expanded to
+        // nothing asked about one pull request and would be shown every session.
+        Some("--from-pr") => match args.get(1).map(|wanted| wanted.trim()) {
+            Some(wanted) if !wanted.is_empty() && !wanted.starts_with('-') => interactive(
+                bravebot_tui::app::Start::ChooseFromPr(wanted.to_string()),
+                agent,
+                links,
+                skip_permissions,
+                prompts,
+            ),
+            _ => fail(Ending::Argument, t!(cli_from_pr_needs_a_value)),
+        },
+        // The same, for the session somebody was in a moment ago, which is the one they mean
+        // often enough that asking them to find its id is asking for nothing.
+        Some("--continue" | "-c") if !continues_with_a_task(&args) => {
+            continue_here(agent, links, skip_permissions, prompts)
+        }
+        // Fork a session, creating a new session record that starts with the same transcript.
+        Some("--fork" | "-f") => match args.get(1) {
+            Some(id) => fork_named(id, agent, links, skip_permissions, prompts),
+            // No result object here, and none is owed: reaching this arm means the arguments held
+            // `--fork` and nothing after it, so the command line cannot also have carried `--json`.
+            // `bravebot --fork --json` reads the flag as the session id and is refused by name in
+            // `fork_named` instead.
+            None => fail(Ending::Argument, t!(cli_fork_needs_a_name)),
+        },
+        // A session in lines, which takes nothing from the terminal (CLI-14). On its own, because
+        // it starts a session rather than describing one: the flags that compose with every way of
+        // starting are the ones taken out above, and everything else on this list is another way of
+        // starting.
+        Some("--plain") => match args.len() {
+            1 => plain::session(skip_permissions, agent, prompts),
+            _ => refused_with_the_usage(as_json, t!(cli_plain_takes_nothing_else)),
+        },
+        // The task flags may lead: `bravebot -p "task"` and `bravebot --mode manifest "task"`
+        // would otherwise be caught below as unknown options.
+        Some(flag) if TASK_FLAGS.contains(&flag) => {
+            run_task(&args, skip_permissions, starts_in, agent, prompts)
+        }
+        Some("doctor") if args.get(1).map(String::as_str) == Some("--sandbox-check") => {
+            match args.len() {
+                2 => sandbox_check::run(),
+                _ => refused_with_the_usage(as_json, t!(cli_doctor_sandbox_takes_nothing_else)),
+            }
+        }
+        Some("doctor") if args.get(1).map(String::as_str) == Some("--push-identity") => {
+            match args.len() {
+                2 | 3 => push_identity::run_command(args.get(2).map(String::as_str)),
+                _ => refused_with_the_usage(as_json, t!(cli_doctor_push_identity_argument)),
+            }
+        }
+        Some("doctor") => doctor::doctor(),
+        Some("update") => update::command(&args[1..]),
+        Some("bug-report") => bug_report::command(&args[1..]),
+        Some("auth") => auth::command(&args[1..]),
+        Some("sessions") => background::sessions(&args[1..]),
+        Some("stats") => stats::command(&args[1..]),
+        Some("schedule") => schedule::command(
+            &args[1..],
+            &schedule::Typed {
+                bypass: skip_permissions.then_some(bypass_flag),
+                starts_in,
+            },
+        ),
+        Some("skill") => skill_eval::command(&args[1..], skip_permissions.then_some(bypass_flag)),
+        Some("trigger") => trigger::command(&args[1..], skip_permissions),
+        Some("--bg") => match carried {
+            Some(flag) => stopped_before_the_turn(
+                as_json,
+                Ending::Argument,
+                t!(bg_takes_nothing_else, flag = flag.as_str()),
+            ),
+            None => background_start(&args[1..], skip_permissions, agent, &prompts),
+        },
+        Some("attach") => background::attach(&args[1..]),
+        Some("reply") => background::reply(&args[1..]),
+        Some("__bg-host") => {
+            use bravebot_session::jobs::Mode as HostMode;
+            match (args.get(1), args.get(2).map(|word| HostMode::named(word))) {
+                (Some(id), Some(Some(mode))) => background::host(id, mode),
+                (Some(id), None) => background::host(id, HostMode::Ask),
+                _ => ExitCode::FAILURE,
+            }
+        }
+        Some("__bg-supervisor") => background::supervise(),
+        Some("mcp") => mcp::command(&args[1..]),
+        Some("permissions") => permissions_check::command(&args[1..]),
+        Some("completion") => match completion::command(&args[1..]) {
+            Some(()) => ExitCode::SUCCESS,
+            None => {
+                stopped_before_the_turn(as_json, Ending::Argument, t!(cli_completion_needs_a_shell))
+            }
+        },
+        Some("acp") if skip_permissions => {
+            stopped_before_the_turn(as_json, Ending::Argument, t!(cli_acp_refuses_bypass))
+        }
+        Some("acp") => match acp::command(&args[1..]) {
+            Some(()) => ExitCode::SUCCESS,
+            None => {
+                stopped_before_the_turn(as_json, Ending::Argument, t!(cli_acp_takes_nothing_else))
+            }
+        },
+        Some("shell-init") => match shell_init::command(&args[1..]) {
+            Some(()) => ExitCode::SUCCESS,
+            None => {
+                stopped_before_the_turn(as_json, Ending::Argument, t!(cli_shell_init_needs_a_shell))
+            }
+        },
+        Some("import-leo-creds") => fail(Ending::Argument, t!(cli_import_leo_creds_retired)),
+        Some("import-providers") => import::providers(&args[1..]),
+        Some(flag) if flag.starts_with('-') => {
+            refused_with_the_usage(as_json, t!(cli_unknown_option, flag = flag))
+        }
+        // Anything else is treated as the task prompt.
+        Some(_) => run_task(&args, skip_permissions, starts_in, agent, prompts),
+    }
+}
+
+/// `-i <prompt>`: the interface that draws, sending the prompt as its first turn (CLI-31).
+///
+/// Refused where stdin or stdout is not a terminal rather than run as a one-shot. Whoever wrote the
+/// line asked for a person to watch the task and be able to stop it, and a run with nobody watching
+/// is a different thing to do in their name, with `--dangerously-skip-permissions` most of all.
+fn open_on(
+    words: &[String],
+    as_json: bool,
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    let (prompt, named) = match prompt_to_open_on(words) {
+        Ok(opening) => opening,
+        Err(refused) => return stopped_before_the_turn(as_json, Ending::Argument, refused),
+    };
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return fail(Ending::Argument, t!(cli_interactive_needs_a_terminal));
+    }
+    interactive(
+        bravebot_tui::app::Start::Sending(prompt, named),
+        agent,
+        links,
+        skip_permissions,
+        prompts,
+    )
+}
+
+/// `--handle-uri <link>`: open a session on what a `bravebot://open` link asks, with its prompt put
+/// in the box and not sent (LINK-1 to LINK-5).
+fn open_link(
+    words: &[String],
+    as_json: bool,
+    agent: Option<String>,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    let [text] = words else {
+        return stopped_before_the_turn(as_json, Ending::Argument, t!(deep_link_takes_one_link));
+    };
+    // A link that is switched off, or that cannot be read, starts nothing, before the terminal is
+    // taken, so what is said is where the person will see it.
+    if bravebot_config::Settings::load().deep_links() == Some(false) {
+        return fail(Ending::Configuration, t!(deep_link_switched_off));
+    }
+    let link = match deep_link::parse(text) {
+        Ok(link) => link,
+        Err(refused) => return stopped_before_the_turn(as_json, Ending::Argument, refused.said()),
+    };
+    // A link carries a directory and words, and nothing that decides how the session runs: the
+    // flags that would, taken from the line before this ran, are refused rather than honoured.
+    if skip_permissions || agent.is_some() || flag_named(&prompts).is_some() {
+        return stopped_before_the_turn(as_json, Ending::Argument, t!(deep_link_takes_one_link));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return fail(Ending::Argument, t!(deep_link_needs_a_terminal));
+    }
+    let profile = bravebot_agent::home::profile();
+    let placement = deep_link::place(link.dir.as_deref(), profile.as_deref(), |directory| {
+        bravebot_agent::trusted::honoured(
+            bravebot_agent::home::directory().as_deref(),
+            profile.as_deref(),
+            directory,
+        )
+        .is_some()
+    });
+    if let Some(directory) = &placement.start_in
+        && let Err(problem) = std::env::set_current_dir(directory)
+    {
+        // Printed as it stands, without `progress::printable_lines` (LAYER-3): `set_current_dir`
+        // fails only with an `io::Error` the operating system made, whose text is the system's own
+        // words and an error number. It holds no path, so the directory the link named is not in
+        // it and there is no control character to draw.
+        return fail(Ending::Failed, t!(cli_workspace_problem, problem = problem));
+    }
+    interactive(
+        bravebot_tui::app::Start::Prefilling(link.prompt.unwrap_or_default(), placement.note),
+        None,
+        bravebot_tui::app::Links::default(),
+        false,
+        prompts,
+    )
+}
+
+/// `--bg <prompt>`, which starts a session in another process and so cannot carry what the other
+/// flags carry into this one.
+fn background_start(
+    words: &[String],
+    skip_permissions: bool,
+    agent: Option<String>,
+    prompts: &SystemPrompts,
+) -> ExitCode {
+    // Every one-shot option `parse_invocation` reads, less `--processor-model` (already refused
+    // below, with `carried`): a condition is judged by the run that took it (CLI-35), a limit is
+    // counted by the run that was given it (CLI-38), and the rest name a model, a file, a session or
+    // a result shape for the one-shot run that reads them. The words after `--bg` are all one
+    // prompt, so none of this is read, and each is refused by the name of the first that appears
+    // rather than sent to the session as text.
+    const ONE_SHOT_OPTIONS: &[&str] = &[
+        "--goal",
+        "--mode",
+        "--model",
+        "--effort",
+        "--advisor",
+        "--file",
+        "--session-ref",
+        "--add-dir",
+        "--trust-workspace",
+        "--trace",
+        "--json",
+        "--json-stream",
+        "--output-schema",
+        "--max-rounds",
+        "--max-tokens",
+    ];
+    if skip_permissions {
+        return fail(Ending::Argument, t!(bg_bypass_refused));
+    }
+    if agent.is_some() {
+        return fail(
+            Ending::Argument,
+            t!(bg_takes_nothing_else, flag = "--agent"),
+        );
+    }
+    if let Some(flag) = flag_named(prompts) {
+        return fail(Ending::Argument, t!(bg_takes_nothing_else, flag = flag));
+    }
+    if let Some(flag) = words
+        .iter()
+        .find(|word| ONE_SHOT_OPTIONS.contains(&word.as_str()))
+    {
+        return fail(
+            Ending::Argument,
+            t!(bg_takes_nothing_else, flag = flag.as_str()),
+        );
+    }
+    background::start(words)
+}
+
+/// Whether a one-shot puts its plan to somebody: only where both ends of the conversation are a
+/// terminal, since either one piped or redirected is nobody (CLI-8).
+fn a_plan_is_put(stdin_is_terminal: bool, stderr_is_terminal: bool) -> bool {
+    stdin_is_terminal && stderr_is_terminal
+}
+
+fn run_task(
+    args: &[String],
+    skip_permissions: bool,
+    starts_in: Option<bravebot_agent::PermissionMode>,
+    agent: Option<String>,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    match prepare_the_run(args, skip_permissions, starts_in, agent, prompts) {
+        Ok(prepared) if prepared.input_lines => run_the_lines(prepared),
+        Ok(mut prepared) => {
+            let continued = prepared.continued.take();
+            let (code, ..) = run_and_report(
+                &prepared,
+                &prepared.task,
+                continued,
+                None,
+                &Cancel::new(),
+                None,
+            );
+            prepared.dismantle();
+            code
+        }
+        Err(stopped) => stopped,
+    }
+}
+
+/// What the second half of a one-shot run reads, and the two guards that only have to live as long
+/// as the run does. The fields are declared in the order the run used to declare the locals they
+/// replace, and [`Prepared::dismantle`] drops them in the reverse of that order, as those locals
+/// were dropped.
+struct Prepared {
+    workspace: bravebot_agent::Workspace,
+    continued: Option<continued::Continuing>,
+    agent: Option<String>,
+    /// Held because dropping it removes the run's scratch directory.
+    _scratch: Option<bravebot_agent::SessionScratch>,
+    egress: bravebot_net::Egress,
+    task: Task,
+    /// Held because dropping it stops the servers the task reaches.
+    _reached: servers::Reached,
+    config: Config,
+    under: Option<String>,
+    model: String,
+    mode: Mode,
+    trace: bool,
+    as_json: bool,
+    as_stream: bool,
+    trust_workspace: bool,
+    named_on_the_command_line: bool,
+    permission_mode: bravebot_agent::PermissionMode,
+    goal: Option<String>,
+    /// Whether stdin carries the lines of CLI-36 and not a task.
+    input_lines: bool,
+    /// Whether the person vouched for those lines.
+    trust_input_lines: bool,
+    /// Whether the person let the program sending those lines answer the write, run and fetch
+    /// questions of the run.
+    approve_input_lines: bool,
+}
+
+impl Prepared {
+    /// Drop what the run holds in the order it has always been dropped in: the servers the task
+    /// reaches stop first, and the scratch directory goes before the workspace it was made in.
+    /// Fields of a struct drop in the order they are declared, which is the other way about, so a
+    /// run that ended by dropping this one would stop its servers last.
+    fn dismantle(self) {
+        let Self {
+            workspace,
+            continued,
+            agent,
+            _scratch,
+            egress,
+            task,
+            _reached,
+            config,
+            ..
+        } = self;
+        drop(config);
+        drop(_reached);
+        drop(task);
+        drop(egress);
+        drop(_scratch);
+        drop(agent);
+        drop(continued);
+        drop(workspace);
+    }
+}
+
+/// Everything a one-shot run settles before the turn: the arguments, the configuration, the
+/// workspace and the session it continues, the definition and the model, and the task. Each refusal
+/// is printed here, so the code it returns is the one the run exits with.
+fn prepare_the_run(
+    args: &[String],
+    skip_permissions: bool,
+    starts_in: Option<bravebot_agent::PermissionMode>,
+    agent: Option<String>,
+    prompts: SystemPrompts,
+) -> Result<Prepared, ExitCode> {
+    let invocation = match parse_invocation(args) {
+        Ok(invocation) => invocation,
+        // Whether a result object was asked for is read off the raw arguments here, because the
+        // parse that would otherwise have said is the thing that just failed, and a caller that
+        // asked for one asked for this one too.
+        Err(err) => {
+            return Err(stopped_before_the_turn(
+                wants_json(args),
+                Ending::Argument,
+                err,
+            ));
+        }
+    };
+    let Invocation {
+        prompt,
+        files,
+        session_refs,
+        mode,
+        model,
+        advisor,
+        processor_model,
+        effort,
+        directories,
+        trust_workspace,
+        trace,
+        print,
+        json: as_json,
+        stream: as_stream,
+        resume,
+        output_schema,
+        goal,
+        input_lines,
+        trust_input_lines,
+        approve_input_lines,
+        limits,
+    } = invocation;
+
+    // Refused before stdin is read, since a run that reads lines owns the rest of the stream.
+    if let Some(conflict) =
+        input_lines_conflict(input_lines, trust_input_lines, approve_input_lines, mode)
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, conflict));
+    }
+    if let Some(conflict) = approve_input_lines_conflict(
+        approve_input_lines,
+        skip_permissions,
+        "--dangerously-skip-permissions",
+        starts_in,
+    ) {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, conflict));
+    }
+
+    // Read before the emptiness check below, since `cat notes.md | bravebot -p` is a complete
+    // invocation: the pipe is the input and the prompt may be left off.
+    let piped = if print && !input_lines {
+        let stdin = std::io::stdin();
+        let is_tty = stdin.is_terminal();
+        match piped_input(stdin.lock(), is_tty) {
+            Ok(text) => text,
+            Err(err) => return Err(stopped_before_the_turn(as_json, Ending::Argument, err)),
+        }
+    } else {
+        None
+    };
+
+    // A run reading lines may be given its first prompt on stdin, so none here is not yet none.
+    if prompt.is_empty() && piped.is_none() && !input_lines {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Argument,
+            t!(cli_task_required),
+        ));
+    }
+
+    if let Some(conflict) = manifest_conflict(
+        mode,
+        Given {
+            agent: agent.is_some(),
+            advisor: advisor.is_some(),
+            output_schema: output_schema.is_some(),
+            goal: goal.is_some(),
+        },
+        &prompts,
+        resume.as_ref(),
+    ) {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, conflict));
+    }
+    if let Some(conflict) = limit_not_with_a_manifest(mode, limits)
+        .or_else(|| limit_not_with_a_goal(goal.is_some(), limits))
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Argument, conflict));
+    }
+    // Read and vetted before anything is sent, so a schema outside what is checked is a refused
+    // argument and not a constraint the run quietly did not hold the reply to.
+    let output_schema = match output_schema.as_deref().map(load_output_schema).transpose() {
+        Ok(schema) => schema,
+        Err(complaint) => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Argument,
+                complaint,
+            ));
+        }
+    };
+
+    let mut config = match Config::from_env() {
+        Ok(c) => c,
+        Err(err) => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Configuration,
+                t!(cli_configuration_problem, problem = err),
+            ));
+        }
+    };
+
+    // Before anything runs, because nothing here is configured to serve a turn yet: what a person
+    // would conclude from whatever came back is that the agent is poor rather than that nothing has
+    // been set up.
+    //
+    // Asked of the model this run will actually request, which is what decides where the request
+    // goes. The flag it may have been named by is resolved below; what is read here is the same
+    // answer without it, since a `--model` naming a configured service's model is exactly the case
+    // this must not refuse.
+    //
+    // A run under a definition and no `--model` is asked below instead, once the definition is
+    // matched, because the model it asks for is the definition's where the definition names one.
+    // A continued session may be recorded as having worked under one, which is not known until its
+    // record is read.
+    let settings = bravebot_config::Settings::load();
+    // The `agent` setting stands in for `--agent` where there is none, except in a manifest run,
+    // which no definition addresses (ADDRESS-13).
+    let configured = settings.agent().filter(|_| mode != Mode::Manifest);
+    let asked_below =
+        (agent.is_some() || configured.is_some() || resume.is_some()) && model.is_none();
+    if !asked_below
+        && let Some(how) = nothing_serves(&config, &model_for_this_run(model.as_deref(), &config))
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Configuration, how));
+    }
+
+    // Resolved like `--model`, and refused like it where the machine-level layer refuses the
+    // name, so a run never starts with an advisor its first question could not reach (BACKEND-48).
+    let advisor = match advisor.map(|name| resolve_advisor(&config, &name)) {
+        Some(Ok(advisor)) => Some(advisor),
+        Some(Err(how)) => return Err(stopped_before_the_turn(as_json, Ending::Configuration, how)),
+        None => None,
+    };
+
+    // The person's own command line, so it names the model as their settings file does and outranks
+    // the file for this run (PROC-13). Made where the advisor's check is, which it follows.
+    if let Err(how) = put_processor_model_in_force(&mut config, processor_model.as_deref()) {
+        return Err(stopped_before_the_turn(as_json, Ending::Configuration, how));
+    }
+
+    let mut workspace = match current_workspace(&settings, &Managed::load()) {
+        Ok(w) => w,
+        Err(err) => {
+            return Err(stopped_before_the_turn(
+                as_json,
+                Ending::Failed,
+                t!(cli_workspace_problem, problem = err),
+            ));
+        }
+    };
+
+    // Fatal rather than said and carried on with. A session leaves the person to retype it; a
+    // script that asked to reach a directory and did not gets a turn that fails somewhere further
+    // in, over a file it was told it could open.
+    match open_directories(&mut workspace, &directories) {
+        Ok(notices) => say_notices(&mut std::io::stderr().lock(), &notices),
+        Err(problem) => return Err(stopped_before_the_turn(as_json, Ending::Argument, problem)),
+    }
+
+    // Found before anything is sent, so a session that is not there exits with the status for an
+    // argument and costs nothing (CLI-25).
+    let continued = match resume
+        .as_ref()
+        .map(|asked| continued::find(workspace.root(), asked))
+        .transpose()
+    {
+        Ok(record) => record,
+        Err(why) => return Err(stopped_before_the_turn(as_json, Ending::Argument, why)),
+    };
+
+    // The rules the settings file carried, read before the definition is matched so the match
+    // leaves out a definition they deny reading, as the turn does. Anything unreadable is named on
+    // stderr below, beside the rest of what this run has to say about itself.
+    let (permissions, rejected) = rules_for_a_one_shot_run(
+        &settings,
+        bravebot_agent::home::profile().as_deref(),
+        workspace.root(),
+        skip_permissions,
+    );
+
+    // Matched here, before any server is reached, so a name matching nothing sends nothing and the
+    // refusal lists the names that exist (ADDRESS-5). The turn's kernel matches it again and makes
+    // the decision. This match is what makes a miss exit with the argument status.
+    //
+    // A continued session works under the definition its record names unless this command line
+    // named one. The recorded name is the person's own earlier `--agent`, so a name that matches
+    // nothing now is said on stderr and the run goes on without it, where a name typed here would
+    // end the run (ADDRESS-3).
+    let recorded = continued
+        .as_ref()
+        .and_then(|record| record.agent.as_deref());
+    let (agent, under) = settle_the_definition(
+        agent.as_deref(),
+        recorded,
+        configured,
+        &config,
+        &workspace,
+        &permissions,
+        model.is_some(),
+        asked_below,
+        as_json,
+    )?;
+
+    // A run is a session for this: it is given somewhere of its own to write what is not part of
+    // the project, and the directory goes when the run does. Held in a binding for exactly that
+    // reason, since dropping it is what removes it.
+    let _scratch = scratch_for_this_run(&mut workspace);
+
+    // The record this run continues, and the index of its workspace, are what the sweep of what has
+    // outlived the retention period must leave whatever their age (STATE-4): a person who named a
+    // record is resuming it.
+    bravebot_session::retention::at_startup(
+        settings.retention(),
+        bravebot_session::retention::InUse {
+            session: continued.as_ref().map(|record| record.id.as_str()),
+            workspace: Some(workspace.root()),
+        },
+    );
+
+    let egress = bravebot_net::Egress::new();
+
+    for problem in &rejected {
+        eprintln!(
+            "{}",
+            t!(
+                session_permission_rule_ignored,
+                problem = progress::described(problem)
+            )
+        );
+    }
+
+    // Bypassing where the flag was given, accepting edits where the narrower one was, and asking
+    // otherwise. There is no mode key here: a one-shot run has no session to hold a mode and
+    // nobody to press anything, so the command line is the whole of what can say.
+    let permission_mode = match (skip_permissions, starts_in) {
+        (true, _) => bravebot_agent::PermissionMode::Bypass,
+        (false, Some(mode)) => mode,
+        (false, None) => bravebot_agent::PermissionMode::Ask,
+    };
+    // Resolved against the configuration rather than at parse, since a tier word names a model
+    // only the configuration knows: the AWS account's ARN for that tier where it named one, and
+    // Brave's name for it otherwise. The settings key this flag outranks accepts those words, so a
+    // flag that did not would refuse a spelling the file it overrides takes.
+    let named = model.map(|name| config.model_named(&name));
+    // Held onto because it is what separates a substitution worth reporting from one worth failing
+    // the run over: below the flag the model is whatever was recorded or configured, and a script
+    // that never named one did not ask for what it did not get.
+    let named_on_the_command_line = named.is_some();
+    let pick = match named_on_the_command_line {
+        true => bravebot_agent::backend::Pick::Absent,
+        false => bravebot_agent::backend::pick(
+            &config,
+            bravebot_session::store::model(bravebot_session::store::load_model(), &settings),
+        ),
+    };
+    if let Some(said) = the_model_pick_said(&pick) {
+        eprintln!("{said}");
+    }
+    // Read before anything is sent, so an id that names nothing quotable is a refused argument and
+    // not a run that quietly went without the session it was told to carry (NAME-10).
+    let mut excerpts = Vec::new();
+    for id in &session_refs {
+        match bravebot_session::excerpt::of(workspace.root(), id) {
+            Ok(excerpt) => excerpts.push(excerpt),
+            Err(refused) => {
+                return Err(stopped_before_the_turn(
+                    as_json,
+                    Ending::Argument,
+                    refused.said(id),
+                ));
+            }
+        }
+    }
+    let mut task = Task::new(prompt)
+        .with_home(bravebot_agent::home::directory())
+        .with_profile(bravebot_agent::home::profile())
+        .with_cache(bravebot_agent::home::cache())
+        .with_model(model_asked_for(named, pick.into_model()))
+        .with_advisor(advisor)
+        .with_output_schema(output_schema)
+        .with_run_limits(limits)
+        .with_permissions(permissions)
+        .with_permission_mode(bravebot_agent::LiveMode::unattended(permission_mode))
+        // The words the command line put in the planner's system prompt (CLI-19). A manifest run
+        // was refused above, so this task is a turn's.
+        .with_system_prompts(prompts)
+        .addressing(agent.clone())
+        .addressing_standing(true)
+        .model_outranks_a_definition(named_on_the_command_line)
+        // Every round is told the condition it is judged against, the first one included (GOAL-14).
+        .working_towards(goal.clone());
+    task = task_from_the_settings(task, &settings, effort);
+    // A one-shot run puts no question to anybody (ASK-7), so the planner is told to say in its
+    // reply what it could not read. A run reading lines sends its questions to the program feeding
+    // it, which answers them.
+    if !input_lines {
+        task = task.with_nobody_answering();
+    }
+    // The kept facts a continued session has already had put in front of its planner (RECALL-9).
+    if let Some(record) = &continued {
+        task = task.with_injected_facts(record.injected_facts.clone());
+    }
+    for file in files {
+        task = task.with_file(file);
+    }
+    for excerpt in excerpts {
+        task = task.with_session_excerpt(excerpt.id, excerpt.text);
+    }
+    if let Some(text) = piped {
+        task = task.with_piped_input(text);
+    }
+    if input_lines && trust_input_lines {
+        task = task.with_vouched_channel();
+    }
+
+    // Nobody is asked here, so a server no answer of the person's covers is absent and the reason
+    // goes to stderr beside the rest of what this run says about itself (SERVERS-4). Held until the
+    // run ends, since dropping one stops its server.
+    let reached = reach_the_servers(&settings, workspace.root(), skip_permissions);
+    task = task.with_mcp(reached.session());
+
+    // Before the turn, so the sign-in's own output is not interleaved with progress lines and a
+    // browser opening is accounted for. Nothing happens where no sign-in is wanted, which includes
+    // every run whose model is served by Brave.
+    //
+    // Not fatal: the turn goes ahead and fails with the backend's own account of what is wrong,
+    // which says more than this could guess.
+    //
+    let model =
+        check_the_model_can_serve_the_run(&mut config, &mut task, under.as_deref(), as_json)?;
+
+    // The judge runs on the model `summaryModel` names (GOAL-19), so a name nothing can serve is
+    // found here, ahead of a round that would spend tokens before its first check could say so.
+    if goal.is_some()
+        && let Err(refusal) =
+            bravebot_agent::goal::judge_model(&config, &egress, Some(model.as_str()))
+    {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Configuration,
+            bravebot_agent::report::summary_model_refusal(&refusal),
+        ));
+    }
+
+    Ok(Prepared {
+        workspace,
+        continued,
+        agent,
+        _scratch,
+        egress,
+        task,
+        _reached: reached,
+        config,
+        under,
+        model,
+        mode,
+        trace,
+        as_json,
+        as_stream,
+        trust_workspace,
+        named_on_the_command_line,
+        permission_mode,
+        goal,
+        input_lines,
+        trust_input_lines,
+        approve_input_lines,
+    })
+}
+
+/// The definition the run works under and the model it names, settled before any server is
+/// reached, with what is said on stderr about a recorded or configured name that no longer
+/// matches. A name typed on this command line that matches nothing, and a model nothing serves
+/// where the run asked below the flag, end the run.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the match reads what the caller already holds, and a struct would only rename the arguments"
+)]
+fn settle_the_definition(
+    agent: Option<&str>,
+    recorded: Option<&str>,
+    configured: Option<&str>,
+    config: &Config,
+    workspace: &bravebot_agent::Workspace,
+    permissions: &bravebot_core::permissions::Permissions,
+    model_named: bool,
+    asked_below: bool,
+    as_json: bool,
+) -> Result<(Option<String>, Option<String>), ExitCode> {
+    let (agent, under) =
+        match bravebot_tui::app::settle_definition(agent, recorded, configured, |name| {
+            definition_for_a_run(config, workspace, permissions, name, model_named)
+        }) {
+            Ok(bravebot_tui::app::Settled::Under {
+                name,
+                found,
+                by_setting,
+            }) => {
+                if by_setting {
+                    eprintln!("{}", t!(session_working_under_by_setting));
+                }
+                (Some(name), found)
+            }
+            Ok(bravebot_tui::app::Settled::SettingGone { name, why }) => {
+                eprintln!(
+                    "{}",
+                    t!(
+                        cli_agent_setting_gone,
+                        definition = progress::printable(&name)
+                    )
+                );
+                eprintln!("{}", progress::printable_lines(&why));
+                (None, None)
+            }
+            Ok(bravebot_tui::app::Settled::Gone { name, why }) => {
+                eprintln!(
+                    "{}",
+                    t!(
+                        session_recorded_definition_gone,
+                        definition = progress::printable(&name)
+                    )
+                );
+                eprintln!("{}", progress::printable_lines(&why));
+                (None, None)
+            }
+            Ok(bravebot_tui::app::Settled::Nothing) => (None, None),
+            Err(refused) => {
+                return Err(stopped_before_the_turn(as_json, Ending::Argument, refused));
+            }
+        };
+    if asked_below
+        && let Some(how) = nothing_serves(
+            config,
+            &under
+                .clone()
+                .unwrap_or_else(|| model_for_this_run(None, config)),
+        )
+    {
+        return Err(stopped_before_the_turn(as_json, Ending::Configuration, how));
+    }
+    Ok((agent, under))
+}
+
+/// The sentence for stderr saying that a recorded model was set aside or refused, or nothing where
+/// it was not. The pick is only borrowed: the caller still turns it into the model.
+///
+/// The recorded name and the reason come from a file, so both are drawn through
+/// [`progress::printable`] (LAYER-3).
+fn the_model_pick_said(pick: &bravebot_agent::backend::Pick) -> Option<String> {
+    match pick {
+        bravebot_agent::backend::Pick::SetAside(model) => Some(t!(
+            session_model_pick_set_aside,
+            model = progress::printable(model)
+        )),
+        bravebot_agent::backend::Pick::Refused { recorded, reason } => Some(t!(
+            session_model_pick_refused,
+            model = progress::printable(recorded),
+            reason = progress::printable_lines(reason)
+        )),
+        bravebot_agent::backend::Pick::Absent | bravebot_agent::backend::Pick::InForce(_) => None,
+    }
+}
+
+/// Reaches the servers a one-shot run may use. Nobody is asked here, so a server no answer of the
+/// person's covers is absent and the reason goes to stderr beside the rest of what this run says
+/// about itself (SERVERS-4). The value is held until the run ends, since dropping one stops its
+/// server.
+fn reach_the_servers(
+    settings: &bravebot_config::Settings,
+    workspace: &Path,
+    skip_permissions: bool,
+) -> servers::Reached {
+    let reached = servers::for_this_session(
+        settings,
+        workspace,
+        match skip_permissions {
+            true => servers::Asking::Bypass,
+            false => servers::Asking::OneShot,
+        },
+        &mut servers::nobody(),
+        bravebot_sandbox::Stream::Inherited,
+    );
+    say_notices(&mut std::io::stderr().lock(), &reached.notes);
+    // On stderr, beside the progress lines, so a pipe of the reply is unaffected. Said even here,
+    // where nobody may be reading: a run that wrote to the tree without asking should leave a record
+    // of having been told not to ask.
+    if skip_permissions {
+        eprintln!(
+            "{}",
+            t!(cli_notice, notice = t!(session_permissions_skipped))
+        );
+    }
+    reached
+}
+
+/// Which model the run asks for, and whether the endpoint can serve it as asked: its window, the
+/// output-schema check (CLI-28), the effort level (BACKEND-22) and the sign-in. Returns the model
+/// in force, and the refusal's status where there is one.
+fn check_the_model_can_serve_the_run(
+    config: &mut Config,
+    task: &mut Task,
+    under: Option<&str>,
+    as_json: bool,
+) -> Result<String, ExitCode> {
+    // The definition's model where it names one the command line did not outrank, since that is
+    // the one the turn will ask for, and every question below is about what is asked for.
+    let model = under
+        .map(str::to_string)
+        .or_else(|| task.model.clone())
+        .unwrap_or_else(|| config.default_model.clone());
+
+    // The window the endpoint advertises for that model, which is what compaction measures a
+    // conversation against. A run opens no picker and holds no session, so this is the only place
+    // it can be looked up, and the model is in force here however it got there: named on the
+    // command line, read back off disk, or pinned in the settings file. Without it a run compacts
+    // against a default that a narrow window never reaches, so compaction never fires, while a wide
+    // one reaches it with three quarters of the conversation still to spare.
+    //
+    // The same listing says whether that model reads an effort level, which is the other thing a
+    // run cannot learn anywhere else.
+    let reads_effort = bravebot_tui::app::adopt_listing_for_model(config, &model);
+
+    // A model that cannot be asked for a reply of a given shape refuses the flag before anything
+    // is sent, rather than answering in prose that the check afterwards fails (CLI-28). Bedrock has
+    // no field for it here, and a roster row that states its parameters without one says the
+    // service would ignore it.
+    if task.output_schema.is_some()
+        && (config.bedrock_for(&model).is_some()
+            || !bravebot_tui::app::reads_structured_output(config, &model))
+    {
+        return Err(stopped_before_the_turn(
+            as_json,
+            Ending::Argument,
+            t!(cli_output_schema_not_served, model = model.as_str()),
+        ));
+    }
+
+    // A level goes out only where the listing describing the model in force says it is read
+    // (BACKEND-22). What is recorded stays recorded: the choice applies again the moment a model
+    // that reads one is in force, so what a request carries does not depend on the order two
+    // commands were typed in.
+    //
+    // Said, because a level that is charged for and discarded at the far end is indistinguishable
+    // from one that was honoured, so silence here would leave somebody believing every turn of the
+    // run thought harder than it did. Said only where one was chosen: a run that asked for no level
+    // has had nothing withheld from it.
+    if !reads_effort && task.effort.is_some() {
+        eprintln!("{}", t!(cli_notice, notice = t!(session_effort_not_read)));
+        task.effort = None;
+    }
+
+    // The sign-in's own lines go to stderr as they arrive, beside every other progress line, which
+    // keeps stdout the reply and nothing else. A URL and a code are no use after the fact, so they
+    // are printed while the command that wrote them is still waiting.
+    let signed_in = bravebot_agent::backend::Backend::sign_in_if_needed(config, &model, |line| {
+        eprintln!("{}", progress::printable_lines(&line));
+    });
+    if let Err(failure) = signed_in {
+        eprintln!(
+            "{}",
+            t!(
+                cli_notice,
+                notice = progress::printable_lines(&failure.to_string())
+            )
+        );
+    }
+
+    Ok(model)
+}
+
+/// The turn or the manifest, and what is reported of how it ended, with the id of the session
+/// record the turn wrote where it wrote one, and whether the turn ended with an answer, which is
+/// what a turn that wrote no record has to be told apart from a turn that failed by.
+///
+/// `task` is the prompt to run, which is the one in `prepared` for a run of one turn and the
+/// words of a line for each turn of a run reading lines. `continued` is the record to carry on,
+/// and `lines` is where such a run's questions go and its steers come from (CLI-36). `carry` is
+/// where an incognito run reading lines keeps its conversation between turns, in the place of a
+/// record.
+fn run_and_report(
+    prepared: &Prepared,
+    task: &Task,
+    continued: Option<continued::Continuing>,
+    lines: Option<&lines::Channel>,
+    cancel: &Cancel,
+    carry: Option<&mut Option<continued::Carried>>,
+) -> (ExitCode, Option<String>, bool) {
+    let Prepared {
+        workspace,
+        agent,
+        egress,
+        config,
+        under,
+        model,
+        mode,
+        trace,
+        as_json,
+        as_stream,
+        trust_workspace,
+        named_on_the_command_line,
+        permission_mode,
+        goal,
+        ..
+    } = prepared;
+    let (mode, trace, as_json, as_stream, trust_workspace, named_on_the_command_line) = (
+        *mode,
+        *trace,
+        *as_json,
+        *as_stream,
+        *trust_workspace,
+        *named_on_the_command_line,
+    );
+    let permission_mode = *permission_mode;
+    let mut sink = json::Streaming::new(as_stream.then(|| json::Stream::new(std::io::stdout())));
+    // The trail goes to stderr as each gate decides, so a run that never finishes still shows
+    // what it decided (TRACE-5).
+    if trace {
+        sink = sink.with_live_trace(json::Stream::new(std::io::stderr()));
+    }
+
+    // A one-shot run has nobody to ask about a write, so writes are refused rather than silently
+    // applied. The one exception is a plan, which is put before the first step rather than in the
+    // middle of a run, and only where both ends of the conversation are a terminal: a plan written
+    // into a redirected stderr is a plan nobody read, and a pipe means the answer would be read
+    // from whatever fed it.
+    //
+    // Unless the flag was given, which is the one way a run nobody is watching may write: the
+    // person accepted that when they typed it, and this is the only path where the refusal above
+    // is what stands between the flag and an effect.
+    //
+    // Not where lines are being read: stdin then belongs to the thread reading them, and the plan is
+    // refused as it is for any pipe.
+    let attended = lines.is_none()
+        && a_plan_is_put(
+            std::io::stdin().is_terminal(),
+            std::io::stderr().is_terminal(),
+        );
+    let mut one_shot = OneShot::new(std::io::stdin(), std::io::stderr(), attended);
+    if let Some(lines) = lines {
+        one_shot = one_shot.with_lines(lines.clone());
+        if prepared.approve_input_lines {
+            one_shot = one_shot.approving_over_lines();
+        }
+    }
+    // A run `schedule run-now` or `trigger serve` started for a stored entry has nobody to ask, and
+    // stops at the first question (SCHEDULE-2).
+    let scheduled = schedule::firing();
+    let triggered = trigger::firing();
+    if scheduled.is_some() || triggered.is_some() {
+        one_shot = one_shot.stopping_at_a_question(cancel.clone());
+    }
+    // Screening off the task, so the answer the tools fill a verdict in under and the answer that
+    // decides whether a verdict which objects can refuse are the one value resolved above.
+    // The sandbox mode off the task as well, since bypassing answers the start of a language server
+    // only where nothing is confined (LSP-5).
+    let mut confirmer =
+        bravebot_agent::Confining::new(&mut one_shot, permission_mode, task.auto_vetting)
+            .with_sandbox_mode(task.sandbox.clone());
+
+    // Progress goes to stderr so stdout stays the reply and nothing else, which is what makes
+    // the command pipeable. Without it a long turn prints nothing until it is over.
+    let mut reporter = progress::Progress::new(std::io::stderr())
+        .streaming(as_stream.then(|| json::Stream::new(std::io::stdout())));
+
+    // The id of the record this run wrote, which the result object carries (CLI-25).
+    let mut session: Option<String> = None;
+
+    // The run is a session of one turn, so it opens before the turn is sent and ends once the
+    // record is written (HOOK-10). A run refused before this point opened nothing.
+    let mut moments = bravebot_agent::hooks::SessionMoments::read(
+        bravebot_agent::home::directory().as_deref(),
+        workspace.root(),
+    );
+    let opened = moments.started();
+    for sentence in &opened {
+        bravebot_agent::report::Reporter::notice(&mut reporter, sentence.clone());
+    }
+
+    // Both modes take the same arguments and return the same outcome. The whole of the
+    // difference is inside: one asks the model what to do next after every result, the other
+    // asked once, before there were any.
+    let mut unmet: Option<goal_run::Unmet> = None;
+    let mut outcome = match mode {
+        Mode::Turn => {
+            let (outcome, kept, why) = run_turn(
+                TurnRun {
+                    config,
+                    egress,
+                    workspace,
+                    task,
+                    trust_workspace,
+                    agent: agent.as_deref(),
+                    goal: goal.as_deref(),
+                    model,
+                    cancel,
+                    carry,
+                },
+                continued,
+                &mut confirmer,
+                &mut reporter,
+                &mut sink,
+            );
+            session = kept;
+            // Kept out of `outcome`: it decides the ending only where the turns ended well, but is
+            // said wherever it is set, even under a refusal that outranks it (CLI-35).
+            unmet = why;
+            outcome
+        }
+        Mode::Manifest => bravebot_agent::manifest::run(
+            config,
+            egress,
+            workspace,
+            task,
+            &mut confirmer,
+            &mut reporter,
+            &mut sink,
+            unattended_trust(workspace.root(), trust_workspace),
+            &Cancel::new(),
+        ),
+    };
+
+    // A manifest run is written down like any other session. It cannot be resumed, and the
+    // picker says so, but "cannot be continued" is a different thing from "leaves no trace":
+    // the run somebody needs to read is the one that stopped, and until now it left nothing.
+    if mode == Mode::Manifest {
+        bravebot_session::sessions::record_manifest_run(
+            workspace.root(),
+            &task.prompt,
+            &outcome,
+            Some(reporter.spent()),
+            // The same surface the full-screen interface records: one binary, one terminal, and a
+            // run started from a session written down the same way as one started from here.
+            bravebot_session::sessions::Front::Terminal,
+            bravebot_stamp::BUILD,
+        );
+    }
+
+    // Before the reply is written, so a hook that could not run is said beside it and in the result
+    // object. A run that failed carries what the reporter was told, and one that answered carries
+    // the outcome's own list, so both are given the sentences.
+    let closed = moments.ended();
+    for sentence in &closed {
+        bravebot_agent::report::Reporter::notice(&mut reporter, sentence.clone());
+    }
+    if let Ok(outcome) = &mut outcome {
+        outcome.notices.splice(0..0, opened);
+        outcome.notices.extend(closed);
+    }
+
+    // Read once the turn is over, which is when the confirmer's borrow ends.
+    let declined = one_shot.declined().to_vec();
+    // What the schedule or the trigger keeps beside its entry: the question this run stopped at, if
+    // it did.
+    if let Some(id) = &scheduled {
+        schedule::record_firing(id, one_shot.asked());
+    }
+    if let Some(name) = &triggered {
+        trigger::record_firing(name, one_shot.asked());
+    }
+
+    let answered = outcome.is_ok();
+    let code = match outcome {
+        Ok(outcome) => {
+            // The reply is untrusted model output. Printing it is safe, since the
+            // terminal is not a decision, so it is released explicitly for display.
+            // A traced manifest run puts the plan on stderr with the trail, never on
+            // stdout: stdout stays the reply so a pipe is still a pipe.
+            let attempt = if trace {
+                outcome
+                    .attempt
+                    .as_ref()
+                    .map(bravebot_agent::manifest::Attempt::describe)
+            } else {
+                None
+            };
+            // What was asked for against what answered. A model this run cannot be served is
+            // substituted rather than refused: one that needs a subscription comes back answered
+            // by a weaker model, with a 200 and an ordinary reply, so the name the server reports
+            // is the only trace of it. Which name the service was actually asked for, and whether
+            // it reports that name at all, are the backend's questions and are put to it here,
+            // where the configuration is in hand.
+            //
+            // Against the model in force rather than the flag alone. A model pinned in the
+            // settings file is the one a repository commits beside its scripts, so a substitution
+            // of that is the case the reporting is for, and a session is told about it whatever
+            // named the model.
+            let asked = bravebot_agent::backend::Backend::name_as_asked(config, model);
+            let comparable =
+                bravebot_agent::backend::Backend::reports_the_model_it_was_asked_for(config, model);
+            // Skipped where the definition's model was asked for, because the turn compared that
+            // model itself and reported the substitution in the definition's words. The same for a
+            // turn a skill moved onto its own model (SKILL-15): the command line did not name that
+            // model, so it does not fail the run.
+            let not_served = (under.is_none() && outcome.ran_on_the_sessions_model())
+                .then(|| model_not_served(&asked, comparable, &outcome.model))
+                .flatten();
+
+            // An effect nobody could approve was refused as surely as one a rule refused. The
+            // policy records some of them, and a delegate's stay in its own policy, so the status
+            // reads what the confirmer kept (CLI-6).
+            let ending = ending_of_a_turn(
+                outcome.clean && declined.is_empty(),
+                named_on_the_command_line,
+                not_served.is_some(),
+            );
+            let ending = ending_with_the_goal(ending, unmet.as_ref());
+
+            // Held to the schema only once the turn is otherwise a success: a run that failed for
+            // another reason keeps that reason, and a reply that was not asked for in this shape
+            // has nothing to be held to (CLI-28).
+            let (ending, structured, off_schema) = match (&task.output_schema, ending) {
+                (Some(schema), Ending::Done) => match schema.check(outcome.reply_for_display()) {
+                    Ok(value) => (ending, Some(value), None),
+                    Err(broke) => (Ending::Schema, None, Some(off_schema_message(&broke))),
+                },
+                _ => (ending, None, None),
+            };
+
+            // Built before the reply is chosen, because with `--json` the result object is what
+            // goes on stdout in the reply's place and it has to hold the reply itself.
+            let rendered = as_json.then(|| {
+                json::render(&json::Report {
+                    ending,
+                    message: failure_with_the_goal(
+                        off_schema
+                            .as_deref()
+                            .or_else(|| failure_of_a_turn(ending, not_served.as_deref())),
+                        unmet.as_ref(),
+                    )
+                    .as_deref(),
+                    reply: outcome.reply_for_display(),
+                    model: &outcome.model,
+                    agent: outcome.addressed.as_ref().map(|addressed| addressed.name()),
+                    session: session.as_deref(),
+                    steps: outcome.steps,
+                    tokens: json::Tokens {
+                        total: outcome.tokens,
+                        output: outcome.output_tokens,
+                        context: outcome.context_tokens,
+                        cache_read: outcome.cached.read_tokens,
+                        cache_written: outcome.cached.written_tokens,
+                    },
+                    calls: reporter.calls(),
+                    refusals: &with_declined(refusals(sink.recorded()), &declined),
+                    notices: &outcome.notices,
+                    structured: structured.as_deref(),
+                })
+            });
+
+            let finished = Finished {
+                reply: rendered.as_deref().unwrap_or(outcome.reply_for_display()),
+                notices: &outcome.notices,
+                attempt: attempt.as_deref(),
+                model: trace.then_some(outcome.model.as_str()),
+                clean: outcome.clean && declined.is_empty(),
+                ending,
+                not_served: not_served.as_deref(),
+            };
+            // Nothing of a reply that is off its schema goes where a pipe would take it for the
+            // shape it asked for. With `--json` the object holds it, beside the status that says so.
+            match (&off_schema, as_json) {
+                (Some(_), false) => report(
+                    &mut std::io::sink(),
+                    &mut std::io::stderr().lock(),
+                    &finished,
+                ),
+                _ => report(
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::stderr().lock(),
+                    &finished,
+                ),
+            }
+            if let Some(complaint) = &off_schema {
+                eprintln!("{}", ending.told(progress::printable_lines(complaint)));
+            }
+            if let Some(why) = &unmet {
+                say_the_goal_unmet(&mut std::io::stderr().lock(), ending, why);
+            }
+            ending.code()
+        }
+        // A run that stopped is the one worth looking at, so what it produced is printed
+        // whether or not --trace was asked for. Without it a failed plan is a one-line
+        // complaint about a document nobody can see.
+        Err(bravebot_agent::TurnError::Manifest { attempt, cause }) => {
+            report_a_failed_turn(&cause, Some(&attempt), as_json, &reporter, &sink, &declined)
+        }
+        Err(err) => report_a_failed_turn(&err, None, as_json, &reporter, &sink, &declined),
+    };
+    (code, session, answered)
+}
+
+/// A run reading lines from stdin: one turn for each `prompt`, each carried on from the record the
+/// turn before wrote, or from memory where the run is incognito, until the input has ended and
+/// nothing is left waiting (CLI-36).
+///
+/// The words on the command line, where there are any, are the first turn and are the person's own.
+/// A line's words are the person's only where they vouched for the channel; otherwise they are
+/// piped input to a turn with no prompt of its own, and the planner is given a reference to them.
+/// The process exits with the status of the last turn it ran, and each turn wrote its own result
+/// object.
+fn run_the_lines(mut prepared: Prepared) -> ExitCode {
+    // The cap piped input is held to, for a line and for what waits, so a file piped in whole fills
+    // no more memory than one piped to `-p` does (CLI-4).
+    let channel = lines::Channel::new(
+        prepared.trust_input_lines,
+        json::Stream::new(std::io::stdout()),
+        PIPE_CAP,
+    );
+    // Buffered here for the reason `OneShot` buffers its input: the reader runs on a thread of its
+    // own, and a held lock on stdin cannot go there.
+    channel.read(std::io::BufReader::new(std::io::stdin()));
+
+    let mut command_line =
+        Some(std::mem::take(&mut prepared.task.prompt)).filter(|words| !words.is_empty());
+    let mut continued = prepared.continued.take();
+    // The record the next turn carries on: the one a resumed run started from, then the one each
+    // turn that wrote one left behind. A turn that failed wrote none and leaves the last one
+    // standing. A turn that answered and wrote none leaves nothing to carry on from.
+    let mut kept = continued.as_ref().map(|record| record.id.clone());
+    let mut unsaved = false;
+    // An incognito run writes no record to carry on from, so each turn leaves what the next needs
+    // in memory, for as long as the process lives (CLI-36, INCOG-3).
+    let incognito = bravebot_core::incognito::engaged();
+    let mut carry: Option<continued::Carried> = None;
+    let mut turns = 0usize;
+    let mut exit = None;
+    loop {
+        let mut task = prepared.task.clone();
+        let cancel = match command_line.take() {
+            Some(words) => {
+                task.prompt = words;
+                channel.start()
+            }
+            None => {
+                let Some((words, cancel)) = channel.next_prompt() else {
+                    break;
+                };
+                match channel.vouched() {
+                    true => task.prompt = words,
+                    false => task.piped = Some(words),
+                }
+                cancel
+            }
+        };
+        // What the command line attached belongs to the first turn: the next one is carried on
+        // from a conversation that already holds it.
+        if turns > 0 {
+            task.files.clear();
+            task.session_excerpts.clear();
+        }
+        if let Some(held) = &carry {
+            task = task.with_injected_facts(held.injected_facts.clone());
+        }
+        let record = match (turns, kept.as_deref()) {
+            (0, _) => Ok(continued.take()),
+            (_, _) if incognito => Ok(None),
+            (_, _) if unsaved => Err(t!(cli_input_lines_session_unsaved).to_string()),
+            (_, None) => Ok(None),
+            (_, Some(id)) => continued::find(
+                prepared.workspace.root(),
+                &continued::Resume::Id(id.to_string()),
+            )
+            .map(Some)
+            .map_err(|problem| t!(cli_input_lines_session_lost, problem = problem)),
+        };
+        turns += 1;
+        let record = match record {
+            Ok(record) => record,
+            Err(message) => {
+                channel.idle();
+                exit = Some(stopped_before_the_turn(true, Ending::Failed, message));
+                continue;
+            }
+        };
+        let (code, wrote, answered) = run_and_report(
+            &prepared,
+            &task,
+            record,
+            Some(&channel),
+            &cancel,
+            incognito.then_some(&mut carry),
+        );
+        channel.idle();
+        exit = Some(code);
+        match wrote {
+            Some(id) => kept = Some(id),
+            None => unsaved |= answered && !incognito,
+        }
+    }
+    let code = exit.unwrap_or_else(|| {
+        stopped_before_the_turn(true, Ending::Argument, t!(cli_input_lines_no_prompt))
+    });
+    prepared.dismantle();
+    code
+}
+
+/// What `run_turn` reads of the run around it, and none of what it changes.
+struct TurnRun<'a> {
+    config: &'a Config,
+    egress: &'a bravebot_net::Egress,
+    workspace: &'a bravebot_agent::Workspace,
+    task: &'a Task,
+    trust_workspace: bool,
+    agent: Option<&'a str>,
+    /// The condition the run works towards (CLI-35), and the model its rounds are asked of, which
+    /// the judge is asked too unless `summaryModel` names another.
+    goal: Option<&'a str>,
+    model: &'a str,
+    /// The token a stop reaches this turn by.
+    cancel: &'a Cancel,
+    /// Where an incognito run reading lines holds what the next turn carries on from, and where it
+    /// finds what the turn before left (CLI-36).
+    carry: Option<&'a mut Option<continued::Carried>>,
+}
+
+/// The `Mode::Turn` arm of a one-shot run: the turn, continued from `continued` where there is one,
+/// and the id of the record it wrote (CLI-25). `continued` is taken by value so the record can be
+/// `take()`n and handed to `continued::keep`.
+fn run_turn<C: bravebot_agent::Confirmer + Send>(
+    run: TurnRun<'_>,
+    mut continued: Option<continued::Continuing>,
+    confirmer: &mut C,
+    reporter: &mut progress::Progress<std::io::Stderr>,
+    sink: &mut json::Streaming,
+) -> (
+    Result<turn::Outcome, bravebot_agent::TurnError>,
+    Option<String>,
+    Option<goal_run::Unmet>,
+) {
+    let TurnRun {
+        config,
+        egress,
+        workspace,
+        task,
+        trust_workspace,
+        agent,
+        goal,
+        model,
+        cancel,
+        carry,
+    } = run;
+    let mut session: Option<String> = None;
+    // Taken before the task is given to the turn, which is where a mode that was bypass ends up
+    // readable only through the handle it holds.
+    let permission_mode = task.permission_mode.clone();
+    // What a continued session vouched for comes back with it, as it does in a session
+    // (SESSION-1). The programs it vouched for do not (CLI-1): the run is handed none, and
+    // the record keeps the ones it holds.
+    let trust = match continued
+        .as_ref()
+        .and_then(|record| record.trust_map(workspace.root()))
+    {
+        Some(mut carried) => {
+            if trust_workspace {
+                carried.trust(".");
+            }
+            carried
+        }
+        None => match carry.as_deref().and_then(Option::as_ref) {
+            Some(held) => held.trust.clone(),
+            None => unattended_trust(workspace.root(), trust_workspace),
+        },
+    };
+    let mut conversation = match (
+        continued.as_ref(),
+        carry.as_deref().and_then(Option::as_ref),
+    ) {
+        (Some(record), _) => bravebot_agent::Conversation::restored(record.conversation.clone()),
+        (None, Some(held)) => bravebot_agent::Conversation::restored(held.conversation.clone()),
+        (None, None) => bravebot_agent::Conversation::default(),
+    };
+    // The names the earlier run's file tools had reached, so the nested instructions and
+    // path-scoped rules they loaded are in force from this run's first request (INSTR-14,
+    // INSTR-16).
+    if let Some(record) = continued.as_ref() {
+        workspace.restore_touched(&record.touched);
+    }
+    let begins = conversation.recounted().len();
+    let started = bravebot_session::sessions::now();
+    let mut rewind = continued.as_ref().map(|record| {
+        continued::rewind_points(record, workspace, &conversation, &trust, &task.prompt)
+    });
+    let completed = turn::resume(
+        config,
+        egress,
+        workspace,
+        task,
+        &mut conversation,
+        confirmer,
+        reporter,
+        sink,
+        trust,
+        bravebot_core::programs::TrustedPrograms::new(),
+        None,
+        cancel,
+    );
+    // Where the person's prompt entered the conversation, read before a later round moves it: a
+    // run that works towards a goal is one turn of the record, and the prompt is the first one.
+    let prompt_at = reporter.prompt_at();
+    let (mut completed, unmet, earlier) = match goal {
+        Some(condition) => {
+            let ended = goal_run::work_towards(
+                &goal_run::Towards {
+                    condition,
+                    config,
+                    egress,
+                    workspace,
+                    task,
+                    model,
+                    cancel,
+                },
+                completed,
+                &mut conversation,
+                confirmer,
+                reporter,
+                sink,
+            );
+            (ended.completed, ended.unmet, Some(ended.earlier))
+        }
+        None => (completed, None, None),
+    };
+    if let (Some(earlier), Ok(last)) = (earlier, &mut completed.outcome) {
+        earlier.fold_into(last, reporter.earlier());
+    }
+    // Taken whether or not the turn has points to keep them on, so the next turn of a run that has
+    // several starts with none of this one's: a backup is kept for the first write to a path, and a
+    // later turn writing the same path would otherwise be put back to where this one found it.
+    let backups = workspace.take_backups();
+    if let Some(points) = rewind.as_mut() {
+        points.keep_backups(backups);
+    }
+    let turn::Decisions {
+        trust,
+        programs: _,
+        asked_about: _,
+        exposed: _,
+        injected_facts,
+        // A run from the command line opens no panel and keeps no link.
+        links: _,
+    } = completed.decisions;
+    if let Ok(finished) = &completed.outcome {
+        // Only a turn that answered leaves anything for the next, as one that wrote a record does:
+        // a failed turn leaves the conversation as the turn before left it.
+        if let Some(slot) = carry {
+            *slot = Some(continued::Carried {
+                conversation: conversation.snapshot(),
+                trust: trust.clone(),
+                injected_facts: injected_facts.clone(),
+            });
+        }
+        session = continued::keep(
+            workspace.root(),
+            continued.take().zip(rewind),
+            continued::Finished {
+                prompt: &task.prompt,
+                conversation: &conversation,
+                outcome: finished,
+                trust: &trust,
+                injected_facts: &injected_facts,
+                begins,
+                prompt_at,
+                agent,
+                started,
+                events: sink.stamped(),
+                touched: workspace.touched_record(),
+                answered_by_mode: permission_mode.has_bypassed(),
+            },
+        );
+    }
+    (completed.outcome, session, unmet)
+}
+
+/// What a turn that stopped says: the notices, then what it produced and the trail, then the result
+/// object where one was asked for. A manifest run passes the cause and the attempt, and prints the
+/// attempt whether or not `--trace` was given, after the notices and before the trail (MANIFEST-3).
+fn report_a_failed_turn(
+    error: &bravebot_agent::TurnError,
+    attempt: Option<&bravebot_agent::manifest::Attempt>,
+    as_json: bool,
+    reporter: &progress::Progress<std::io::Stderr>,
+    sink: &json::Streaming,
+    declined: &[one_shot::Declined],
+) -> ExitCode {
+    // A plan nobody approved stopped the run before anything happened, which is a gate refusing it
+    // and not a failure to run (CLI-6).
+    let ending = match declined
+        .iter()
+        .any(|d| d.gate == "manifest_plan" || d.gate == "scheduled_question")
+    {
+        true => Ending::Refused,
+        false => exit::ending_of(error),
+    };
+    // A failure can name a path, a model or a definition a checkout chose, so the copy on stderr
+    // is drawn (LAYER-3). The result object below keeps the text as it is.
+    let stopped = fail(ending, progress::printable_lines(&error.to_string()));
+    say_notices(&mut std::io::stderr().lock(), reporter.notices());
+    // The trail, where `--trace` asked for one, was written as the gates ran.
+    if let Some(attempt) = attempt {
+        say_what_a_stopped_manifest_produced(&mut std::io::stderr().lock(), attempt);
+    }
+    if as_json {
+        say_the_result(&what_ran(
+            ending,
+            &error.to_string(),
+            error
+                .limit_reached()
+                .map_or(0, bravebot_agent::turn::LimitReached::rounds),
+            reporter.spent(),
+            reporter.calls(),
+            &with_declined(refusals(sink.recorded()), declined),
+            reporter.notices(),
+        ));
+    }
+    stopped
+}
+
+/// The calls that build a one-shot run's task off the settings, and the sandbox and vetting state
+/// beside them, apart from the ones that name the run itself.
+fn task_from_the_settings(
+    task: Task,
+    settings: &bravebot_config::Settings,
+    effort: Option<bravebot_session::store::Effort>,
+) -> Task {
+    task
+        // The flag, then the settings layers and the saved pick ranked as BACKEND-43 ranks them.
+        // The layers are the only route a machine where nobody ever opens the interface has to a
+        // level that outlives one run.
+        .with_effort(effort.or_else(|| {
+            bravebot_session::store::effort(bravebot_session::store::load_effort(), settings)
+        }))
+        // What the settings say this run may add to a commit message or a pull request it writes
+        // (BACKEND-30). Read off the same resolved settings the permission rules came from.
+        .with_attribution(settings.attribution().clone())
+        // And what they say a command's output may spend of this run's context (RUN-21), off the
+        // same resolved settings.
+        .with_output_cap(settings.run_output_cap())
+        // And what they say one download may write to a file (DOWNLOAD-4).
+        .with_download_cap(settings.download_max_bytes())
+        // And how long one may take, resolved here because this is where the settings were read
+        // (RUN-23).
+        .with_deadlines(bravebot_agent::exec::Deadlines::resolve(
+            settings.run_deadlines(),
+        ))
+        .with_confined_runs(true)
+        .with_sandbox_mode(bravebot_config::sandbox::in_force().mode)
+        // Whether a check that finds nothing answers in a person's place. Resolved here, once, out
+        // of the three routes: `bravebot_core::vetting::auto` is the rule and nothing below reads
+        // any of the three again. A run nobody is watching has no prompt to fall back to, so
+        // without this every check on this path ends in a refusal.
+        .with_auto_vetting(bravebot_core::vetting::auto(
+            bravebot_core::vetting::asked_for(),
+            bravebot_session::store::load_vetting(),
+            settings.auto_vetting(),
+        ))
+}
+
+/// The schema a path names, read and vetted, or the sentence that says why it cannot be used.
+fn load_output_schema(path: &str) -> Result<bravebot_agent::output_schema::OutputSchema, String> {
+    use bravebot_agent::output_schema::{OutputSchema, SchemaError};
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        t!(
+            cli_output_schema_unreadable,
+            path = path,
+            problem = err.to_string()
+        )
+    })?;
+    OutputSchema::parse(&text).map_err(|err| match err {
+        SchemaError::NotJson => t!(cli_output_schema_not_json, path = path),
+        SchemaError::NotAnObject { at } => {
+            t!(cli_output_schema_not_an_object, path = path, at = at)
+        }
+        SchemaError::Unsupported { at, keyword } => t!(
+            cli_output_schema_unsupported,
+            path = path,
+            at = at,
+            keyword = keyword
+        ),
+        SchemaError::Malformed { at, keyword } => t!(
+            cli_output_schema_malformed,
+            path = path,
+            at = at,
+            keyword = keyword
+        ),
+    })
+}
+
+/// Why a finished reply is not the shape it was asked for, naming where in it and which rule.
+///
+/// Built from a position and a rule alone, so nothing the reply spelt reaches the sentence.
+fn off_schema_message(broke: &bravebot_agent::output_schema::Mismatch) -> String {
+    use bravebot_agent::output_schema::Rule;
+    let problem = match broke.rule {
+        Rule::NotJson => t!(cli_output_schema_rule_not_json),
+        Rule::Type => t!(cli_output_schema_rule_type),
+        Rule::Enum => t!(cli_output_schema_rule_enum),
+        Rule::Const => t!(cli_output_schema_rule_const),
+        Rule::Required => t!(cli_output_schema_rule_required),
+        Rule::Extra => t!(cli_output_schema_rule_extra),
+        Rule::Length => t!(cli_output_schema_rule_length),
+        Rule::Count => t!(cli_output_schema_rule_count),
+        Rule::Range => t!(cli_output_schema_rule_range),
+    };
+    t!(
+        cli_output_schema_mismatch,
+        at = broke.at.as_str(),
+        problem = problem
+    )
+}
+
+/// What a pipe may carry before it is refused.
+///
+/// Matches the cap other agents document, and exists because the alternative is a `bravebot -p` that a
+/// stray `cat` of a disk image holds open while it fills memory.
+const PIPE_CAP: usize = 10 * 1024 * 1024;
+
+/// Read input piped into the process, if any.
+///
+/// Generic over the source, as [`progress::Progress`] is over its sink, so a test can pass bytes
+/// and a terminal answer without a real pipe.
+///
+/// A terminal means nothing was piped, and a read error means nobody is feeding us: neither is a
+/// reason to stop, so the run continues on the argument prompt. Exceeding the cap is different,
+/// since silently truncating would hand the model a fragment of what the user piped and say
+/// nothing about it.
+fn piped_input(source: impl Read, is_tty: bool) -> Result<Option<String>, String> {
+    if is_tty {
+        return Ok(None);
+    }
+
+    // One byte past the cap, so the buffer that proves the input was too large is not itself the
+    // problem the cap exists to avoid.
+    let mut buffer = Vec::new();
+    if let Err(err) = source.take(PIPE_CAP as u64 + 1).read_to_end(&mut buffer) {
+        eprintln!("{}", t!(cli_piped_input_unreadable, problem = err));
+        return Ok(None);
+    }
+
+    if buffer.len() > PIPE_CAP {
+        return Err(t!(
+            cli_piped_input_too_large,
+            limit = PIPE_CAP / (1024 * 1024)
+        ));
+    }
+
+    if buffer.is_empty() {
+        return Ok(None);
+    }
+
+    // Lossy because the bytes are never decided from: they go into a slot and the planner is shown
+    // a reference, so a replacement character changes nothing that matters.
+    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
+}
+
+fn resume_named(
+    id: &str,
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    let Ok(directory) = std::env::current_dir() else {
+        return fail(Ending::Failed, t!(cli_directory_unknown));
+    };
+    match bravebot_session::sessions::load(&directory, id) {
+        // Printing what a run produced is what naming one here is for (SESSION-10), and a session
+        // that started a run says to name it. So this answers on stdout and succeeds: the id was
+        // real, the record was read, and the person got the thing they asked for. Reporting it as a
+        // failure would make the line the session printed read as advice that does not work.
+        Some(record) if record.manifest.is_some() => {
+            println!("{}", t!(cli_manifest_run, id = id));
+            if let Some(stored) = &record.manifest {
+                say_what_a_stored_manifest_produced(&mut std::io::stdout().lock(), stored);
+            }
+            ExitCode::SUCCESS
+        }
+        // Not resumed by a second process: the one running it writes the record after every turn,
+        // and two writers would be one conversation (BG-9).
+        Some(record) if background::is_running(&record.id) => {
+            background::refuse_to_resume(&record.id)
+        }
+        // Nor by a second process when another one holds the record: one process writes a record
+        // at a time, and the one that holds it may be a terminal (SESSION-38).
+        Some(record) if bravebot_session::sessions::is_open_elsewhere(&directory, &record.id) => {
+            // Drawn: the id is read from a stored record (LAYER-3).
+            fail(
+                Ending::Failed,
+                progress::printable_lines(
+                    &bravebot_session::sessions::Held::Open { id: record.id }.refusal(),
+                ),
+            )
+        }
+        Some(record) => interactive(
+            bravebot_tui::app::Start::Resuming(Box::new(record)),
+            agent,
+            links,
+            skip_permissions,
+            prompts,
+        ),
+        None => fail(Ending::Argument, t!(cli_no_such_session, id = id)),
+    }
+}
+
+fn fork_named(
+    id: &str,
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    let Ok(directory) = std::env::current_dir() else {
+        return fail(Ending::Failed, t!(cli_directory_unknown));
+    };
+    match bravebot_session::sessions::load(&directory, id) {
+        Some(record) if record.manifest.is_some() => {
+            let refused = fail(Ending::Failed, bravebot_tui::resume::manifest_note());
+            if let Some(stored) = &record.manifest {
+                say_what_a_stored_manifest_produced(&mut std::io::stderr().lock(), stored);
+            }
+            refused
+        }
+        Some(_) => match bravebot_session::sessions::fork(&directory, id) {
+            Some(record) => interactive(
+                bravebot_tui::app::Start::Resuming(Box::new(record)),
+                agent,
+                links,
+                skip_permissions,
+                prompts,
+            ),
+            None => fail(Ending::Argument, t!(cli_no_such_session, id = id)),
+        },
+        None => fail(Ending::Argument, t!(cli_no_such_session, id = id)),
+    }
+}
+
+/// Pick up the most recent session under this directory, without anybody naming one.
+///
+/// Where there is none, this says so and fails. Starting a fresh session instead would answer a
+/// different question than the one asked, and it would answer it by throwing away the request:
+/// somebody who meant to carry on and got an empty transcript has lost the thing they asked for.
+fn continue_here(
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    let Ok(directory) = std::env::current_dir() else {
+        return fail(Ending::Failed, t!(cli_directory_unknown));
+    };
+    match bravebot_session::sessions::most_recent(&directory) {
+        // By the id, so this arrives at the interface the way a named resume does, down to a
+        // record that went away between the list and the read.
+        Some(session) => resume_named(&session.id, agent, links, skip_permissions, prompts),
+        None => fail(Ending::Failed, t!(cli_nothing_to_continue)),
+    }
+}
+
+fn interactive(
+    start: bravebot_tui::app::Start,
+    agent: Option<String>,
+    links: bravebot_tui::app::Links,
+    skip_permissions: bool,
+    prompts: SystemPrompts,
+) -> ExitCode {
+    if agent.is_some() {
+        bravebot_tui::app::background_cannot_carry("--agent");
+    }
+    if let Some(flag) = flag_named(&prompts) {
+        bravebot_tui::app::background_cannot_carry(flag);
+    }
+    let mut config = match Config::from_env() {
+        Ok(c) => c,
+        Err(err) => {
+            // Drawn: the problem can quote an endpoint value an environment variable or a
+            // settings file chose (LAYER-3).
+            return fail(
+                Ending::Configuration,
+                progress::printable_lines(&t!(cli_configuration_problem, problem = err)),
+            );
+        }
+    };
+
+    // Before the session opens, for the reason a one-shot run is stopped before the turn: a
+    // transcript that began with nothing configured would read as the agent rather than as the
+    // configuration, and this is the one moment somebody is looking for what to do next.
+    //
+    // Asked about the model `-i` was given, as a one-shot run's `--model` is, so one nothing serves
+    // or the machine-level layer refuses ends the start here, naming the file, rather than at the
+    // first turn, and one the account serves starts.
+    let named = match &start {
+        bravebot_tui::app::Start::Sending(_, asked) => asked.model.as_deref(),
+        _ => None,
+    };
+    if let Some(ended) = import::before_the_session(&mut config, named) {
+        return ended;
+    }
+
+    let settings = bravebot_config::Settings::load();
+    let workspace = match current_workspace(&settings, &Managed::load()) {
+        Ok(w) => w,
+        Err(err) => return workspace::workspace_problem(&err),
+    };
+
+    // What the platform offers, which is what the session reports: this confines a process running
+    // code we did not write, which is an MCP server this session starts and nothing else it runs.
+    // Read once here because the answer cannot change while the session runs. With no backend no
+    // stage starts, so nothing is said about the sockets one would reach.
+    let (confinement, sockets_with_a_path_reachable) =
+        match bravebot_sandbox::for_current_platform() {
+            Ok(sandbox) => {
+                let capabilities = sandbox.capabilities();
+                (
+                    confinement_name(capabilities.level),
+                    !capabilities.governs_sockets_with_a_path,
+                )
+            }
+            Err(_) => (
+                confinement_name(bravebot_sandbox::policy::ConfinementLevel::None),
+                false,
+            ),
+        };
+
+    // Settled on the plain terminal before the screen takes it, so a question about a server this
+    // checkout requests is a line somebody answers rather than a dialog drawn over a session that
+    // has not begun. Held until the session ends, since dropping one stops its server.
+    let mut reached = servers::for_this_session(
+        &settings,
+        workspace.root(),
+        match skip_permissions {
+            true => servers::Asking::Bypass,
+            false => servers::Asking::Person,
+        },
+        &mut servers::at_the_terminal(),
+        // Nowhere, since the screen would draw over whatever a server writes to its stderr.
+        bravebot_sandbox::Stream::Null,
+    );
+    let started = bravebot_tui::Servers {
+        started: reached.aliases(),
+        confined: reached.confined(),
+        notes: std::mem::take(&mut reached.notes),
+        session: reached.session(),
+        disabled: Vec::new(),
+    };
+
+    let mut moments = bravebot_agent::hooks::SessionMoments::read(
+        bravebot_agent::home::directory().as_deref(),
+        workspace.root(),
+    );
+    let ended = bravebot_tui::app::run(
+        &mut config,
+        &workspace,
+        confinement,
+        sockets_with_a_path_reachable,
+        started,
+        start,
+        agent,
+        links,
+        skip_permissions,
+        prompts,
+        &mut moments,
+    );
+    // After the terminal is handed back, so what a hook that went wrong said survives on the screen
+    // the person is left looking at.
+    let closed = end_the_session(&mut moments, &ended);
+    say_notices(&mut std::io::stderr().lock(), &closed);
+    match ended {
+        // Printed after the terminal is handed back, so it survives on the screen the person is
+        // left looking at rather than going onto the alternate screen with everything else. A
+        // session is worth resuming far more often than anybody thinks to write its name down
+        // beforehand, and the picker is no help to someone who has already closed the window.
+        Ok(bravebot_tui::app::Ended::Left(Some(left))) => {
+            println!("{}", resume_hint(&left, workspace.root()));
+            ExitCode::SUCCESS
+        }
+        Ok(bravebot_tui::app::Ended::Left(None)) => ExitCode::SUCCESS,
+        // After the terminal is handed back, so what it says survives on the screen. The process
+        // that starts the background session is this one, run by the person (BG-2).
+        Ok(bravebot_tui::app::Ended::Background { left, mode }) => {
+            match background::hand_over(&left, mode) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(code) => {
+                    eprintln!("{}", resume_hint(&left, workspace.root()));
+                    code
+                }
+            }
+        }
+        // Printed after the terminal is handed back, like the hint above, with the argument status:
+        // the session never took a turn, and a one-shot run exits with the same status for the
+        // same name (CLI-17).
+        // The sentence can name a definition and the model it writes, which a checkout chose, so
+        // it is drawn here and not where the screen's own notes are (LAYER-3).
+        Ok(bravebot_tui::app::Ended::Refused(refused)) => {
+            fail(Ending::Argument, progress::printable_lines(&refused))
+        }
+        // After the terminal is handed back, like the rest, so the session it opens has the terminal
+        // to itself (SCREEN-8).
+        Ok(bravebot_tui::app::Ended::Open(opening)) => reopen::open(&opening),
+        Err(err) => fail(Ending::Failed, t!(cli_interface_problem, problem = err)),
+    }
+}
+
+/// Fire `session-ended` for the full-screen interface that has just been left, and return the
+/// sentences for a hook that went wrong, for the caller to say (HOOK-10).
+///
+/// However the interface was left, including by a failure, except for a session handed to a
+/// background process, which goes on without the interface and whose process fires neither moment.
+/// Nothing for a session that never began, which `moments` knows.
+fn end_the_session(
+    moments: &mut bravebot_agent::hooks::SessionMoments,
+    ended: &std::io::Result<bravebot_tui::app::Ended>,
+) -> Vec<String> {
+    match ended {
+        Ok(bravebot_tui::app::Ended::Background { .. }) => Vec::new(),
+        _ => moments.ended(),
+    }
+}
+
+/// What to say on the way out about picking this session up again.
+///
+/// `--resume` looks an id up under the working directory it is run in, so the id on its own is a
+/// whole answer only while the session ended where it started. `/cd` moves the record, and the
+/// shell this is printed into did not move with it: a bare id there names a session the shell
+/// cannot find, or worse, finds an earlier state of the same one and resumes that. Naming the
+/// directory is what keeps the line true.
+///
+/// Said only when the two differ. Telling somebody the directory they are already standing in
+/// reads as though something had happened to it.
+fn resume_hint(left: &Resumable, started_in: &Path) -> String {
+    let heading = match left.directory == started_in {
+        true => t!(cli_resume_heading).to_string(),
+        false => t!(
+            cli_resume_moved,
+            directory = progress::printable_path(&left.directory)
+        ),
+    };
+    format!("{heading}\nbravebot --resume {}", left.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finish::trace_line;
+    use crate::invocation::effort_level;
+    use crate::test_support::*;
+    use crate::workspace::unattended_trust_with;
+    use bravebot_agent::Workspace;
+    use bravebot_agent::confirm::{
+        Confirmer, Decision, ManifestRequest, VouchRequest, WriteRequest,
+    };
+    use bravebot_agent::turn::{MAX_TOOL_ROUNDS, RunLimits};
+    use bravebot_core::capability::Capability;
+    use bravebot_core::event::Sink;
+    use bravebot_core::event::{Event, RecordingSink, Role};
+    use bravebot_core::label::Label;
+    use bravebot_core::slot::SlotId;
+    use bravebot_session::store::Effort;
+    use bravebot_tui::app::AskedFor;
+    use std::path::PathBuf;
+
+    /// CHATGPT-10: a one-shot run is one session to the ChatGPT account, which begins with its first
+    /// request at the level the run asks for, and every clone of its task, which is what each round
+    /// of a goal run is made from, is in it whether the clone was made before the session began or
+    /// after. Another run is another. The regressions it rejects are a clone that begins a session
+    /// of its own, a run that carries the previous run's, and a run begun at no level.
+    #[test]
+    fn a_one_shot_run_is_a_session_its_clones_share_and_another_run_is_not() {
+        let settings = bravebot_config::Settings::default();
+        let run = task_from_the_settings(Task::new("a"), &settings, Some(Effort::Low));
+        let another = task_from_the_settings(Task::new("a"), &settings, Some(Effort::Low));
+
+        let before_the_session_began = run.clone();
+
+        assert_eq!(
+            before_the_session_began.account_session().identifier(),
+            run.account_session().identifier()
+        );
+        assert_eq!(
+            run.clone().account_session().identifier(),
+            run.account_session().identifier()
+        );
+        // At the level the run asks for, which the account is sent for all of it.
+        assert_eq!(run.account_session().effort(), Some(Effort::Low));
+        assert_ne!(
+            another.account_session().identifier(),
+            run.account_session().identifier()
+        );
+    }
+
+    /// These commands start no session, so a flag that shapes one has nothing to shape. Taking it
+    /// and ignoring it would read as honoured, which is the reason CLI-13 refuses it by name.
+    #[test]
+    fn the_commands_that_start_no_session_refuse_every_flag_that_shapes_one() {
+        let commands = [
+            "acp",
+            "doctor",
+            "update",
+            "bug-report",
+            "auth",
+            "mcp",
+            "permissions",
+            "sessions",
+            "stats",
+            "schedule",
+            "trigger",
+            "attach",
+            "reply",
+            "import-leo-creds",
+            "import-providers",
+            "completion",
+            "shell-init",
+        ];
+        for command in commands {
+            assert!(without_a_definition(Some(command)).is_some(), "{command}");
+            assert!(
+                without_a_prompt_to_give("--system-prompt", Some(command)).is_some(),
+                "{command}"
+            );
+            // CLI-26 does not name `bug-report`, so the tool limit is not refused beside it.
+            assert_eq!(
+                without_a_tool_set_to_limit(command).is_some(),
+                command != "bug-report",
+                "{command}"
+            );
+        }
+        assert!(without_a_definition(Some("-p")).is_none());
+        assert!(without_a_definition(None).is_none());
+        assert!(without_a_tool_set_to_limit("-p").is_none());
+    }
+
+    /// A session that stayed where it started needs no directory: the shell reading this line is
+    /// already standing in the one the id will be looked up under.
+    #[test]
+    fn a_session_that_stayed_put_is_named_by_its_id_alone() {
+        let left = Resumable {
+            id: "abc".to_string(),
+            directory: PathBuf::from("/work"),
+        };
+        let hint = resume_hint(&left, Path::new("/work"));
+
+        assert!(hint.contains("bravebot --resume abc"), "{hint}");
+        assert!(
+            !hint.contains("/work"),
+            "the directory somebody is already in was named at them: {hint}"
+        );
+    }
+
+    /// A session that moved with `/cd` left its record where it moved to, and `--resume` looks an
+    /// id up under the directory it is run in. Printing the id alone would name a session this
+    /// shell cannot find, or find an earlier state of the same one and resume that.
+    #[test]
+    fn a_session_that_moved_says_where_to_resume_it() {
+        let left = Resumable {
+            id: "abc".to_string(),
+            directory: PathBuf::from("/other"),
+        };
+        let hint = resume_hint(&left, Path::new("/work"));
+
+        assert!(hint.contains("bravebot --resume abc"), "{hint}");
+        assert!(
+            hint.contains("/other"),
+            "the line does not say where the session went: {hint}"
+        );
+    }
+
+    /// HOOK-10: leaving the full-screen interface fires `session-ended`, whether the person left or
+    /// the interface failed, and a session handed to a background process does not end, since it
+    /// goes on in another process, nor does one that was refused before it began. The regressions it
+    /// rejects are an end fired for `/bg`, which stops a service the background session is still
+    /// using, one skipped for a failure, which leaves a service a person opened the session to run,
+    /// and one fired for a refusal, which stops a service nothing started.
+    #[cfg(unix)]
+    #[test]
+    fn leaving_the_interface_ends_the_session_except_for_a_hand_over_to_the_background() {
+        use bravebot_tui::app::Ended;
+
+        let scratch = Scratch::new("cli-main-session-end");
+        let state = scratch.directory("state");
+        let log = scratch.path.join("log");
+        std::fs::write(
+            state.join("hooks.json"),
+            serde_json::json!({"hooks": [{
+                "on": "session-ended",
+                "run": ["/bin/sh", "-c", "echo ended >> \"$1\"", "sh", log.display().to_string()],
+            }]})
+            .to_string(),
+        )
+        .expect("a hooks file");
+        let left = || Resumable {
+            id: "abc".to_string(),
+            directory: PathBuf::from("/work"),
+        };
+        let endings: [(&str, bool, std::io::Result<Ended>, bool); 5] = [
+            ("the person left", true, Ok(Ended::Left(None)), true),
+            (
+                "the person left a session to resume",
+                true,
+                Ok(Ended::Left(Some(left()))),
+                true,
+            ),
+            (
+                "the interface failed",
+                true,
+                Err(std::io::Error::other("the terminal went away")),
+                true,
+            ),
+            (
+                "the session went to the background",
+                true,
+                Ok(Ended::Background {
+                    left: left(),
+                    mode: bravebot_session::jobs::Mode::Ask,
+                }),
+                false,
+            ),
+            (
+                "the session was refused before it began",
+                false,
+                Ok(Ended::Refused("the definition was refused".to_string())),
+                false,
+            ),
+        ];
+
+        for (how, began, ended, fires) in endings {
+            let _ = std::fs::remove_file(&log);
+            let mut moments =
+                bravebot_agent::hooks::SessionMoments::read(Some(&state), &scratch.path);
+            if began {
+                assert!(moments.started().is_empty());
+            }
+
+            let said = end_the_session(&mut moments, &ended);
+
+            assert!(said.is_empty(), "{how}: {said:?}");
+            assert_eq!(
+                log.exists(),
+                fires,
+                "{how}: the end of the session {} fire",
+                if fires { "did not" } else { "did" }
+            );
+        }
+    }
+
+    /// The flag is taken out wherever it was typed, with its word, and a word that is not a level
+    /// is refused rather than read as the default.
+    #[test]
+    fn the_log_level_flag_is_taken_out_with_its_word_and_refuses_any_other() {
+        use bravebot_diag::Level;
+        for typed in [
+            &["--log-level", "debug", "-p", "do a thing"][..],
+            &["-p", "--log-level", "debug", "do a thing"][..],
+            &["-p", "do a thing", "--log-level", "debug"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert_eq!(take_log_level(&mut arguments), Ok(Some(Level::Debug)));
+            assert_eq!(arguments, args(&["-p", "do a thing"]), "{typed:?}");
+        }
+        let mut none = args(&["-p", "do a thing"]);
+        assert_eq!(take_log_level(&mut none), Ok(None));
+        for typed in [
+            &["-p", "x", "--log-level"][..],
+            &["--log-level", "Debug", "-p", "x"][..],
+            &["--log-level", "trace", "-p", "x"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_log_level(&mut arguments).is_err(), "{typed:?}");
+            assert_eq!(arguments, args(typed), "a refusal rewrote the list");
+        }
+    }
+
+    /// An interactive `bravebot -p "task"` must not block waiting for a pipe that is not coming.
+    #[test]
+    fn a_terminal_stdin_is_not_read() {
+        let source: &[u8] = b"this would be read from a pipe";
+        assert_eq!(piped_input(source, true), Ok(None));
+    }
+
+    #[test]
+    fn piped_bytes_are_read_when_stdin_is_not_a_terminal() {
+        let source: &[u8] = b"a build log\n";
+        assert_eq!(piped_input(source, false), Ok(Some("a build log\n".into())));
+    }
+
+    /// Truncating would hand the planner a fragment of what the user piped without saying so, and
+    /// a quarantined fragment is one nobody can notice is short.
+    #[test]
+    fn input_over_the_cap_is_refused() {
+        let oversized = vec![b'x'; PIPE_CAP + 1];
+        assert!(
+            piped_input(oversized.as_slice(), false).is_err(),
+            "an oversized pipe must be refused, not truncated"
+        );
+
+        let at_the_cap = vec![b'x'; PIPE_CAP];
+        assert!(
+            piped_input(at_the_cap.as_slice(), false).is_ok(),
+            "the cap itself is allowed"
+        );
+    }
+
+    /// A pipe is not something a person can shorten: what they have is a program writing bytes at
+    /// a command, and a refusal that only says the bytes were too many leaves them with nothing to
+    /// try. The way to hand over something this large is a different gesture, so the refusal names
+    /// it.
+    #[test]
+    fn a_refused_pipe_says_what_to_do_instead() {
+        let oversized = vec![b'x'; PIPE_CAP + 1];
+
+        let refusal = piped_input(oversized.as_slice(), false)
+            .expect_err("an oversized pipe must be refused, not truncated");
+
+        assert!(
+            refusal.contains("Write it to a file and name that instead"),
+            "the refusal said the input was too large and nothing about what to do about it: \
+             {refusal}"
+        );
+    }
+
+    fn trail_of(events: Vec<Event>) -> RecordingSink {
+        let mut sink = RecordingSink::new();
+        for event in events {
+            sink.emit(event);
+        }
+        sink
+    }
+
+    /// The reply is what gets piped onward, so anything else sharing its stream corrupts the
+    /// file at the other end. This is the whole of what makes a one-shot run pipeable.
+    #[test]
+    fn stdout_carries_the_reply_and_nothing_else() {
+        let (reply, beside) = written(&Finished {
+            reply: "ok",
+            notices: &["a skill was loaded".to_string()],
+            attempt: None,
+            model: Some("qwen-3-235b"),
+            clean: false,
+            ending: Ending::Refused,
+            not_served: None,
+        });
+
+        assert_eq!(reply, "ok\n");
+        assert!(
+            !beside.contains("audit trail"),
+            "the trail was written a second time, after the gates had already written it: {beside}"
+        );
+        assert!(beside.contains("note: a skill was loaded"), "got: {beside}");
+        assert!(beside.contains("model: qwen-3-235b"), "got: {beside}");
+        assert!(beside.contains("a policy gate refused"), "got: {beside}");
+        // Status 4 says BB1004 where it is read off a log (CLI-6).
+        assert!(beside.contains("BB1004: "), "got: {beside}");
+    }
+
+    /// A caller reading the result object rather than stderr is a caller with nowhere to draw, and a
+    /// run that failed is the one whose sentences have no reply to arrive on (HOOK-7). Left out,
+    /// there is no surface at all on which that caller learns a hook of theirs is broken.
+    #[test]
+    fn a_result_object_for_a_failed_run_lists_what_the_turn_said() {
+        let object = what_ran(
+            Ending::Failed,
+            "BB1001: nothing answered",
+            0,
+            Default::default(),
+            &[],
+            &[],
+            &["hook turn-finished: /usr/bin/fmt could not be started".to_string()],
+        );
+
+        assert!(
+            object
+                .contains(r#""notices":["hook turn-finished: /usr/bin/fmt could not be started"]"#),
+            "got: {object}"
+        );
+    }
+
+    /// Without `--trace` the trail is not written at all, rather than written somewhere quieter.
+    #[test]
+    fn an_untraced_run_writes_no_trail() {
+        let (reply, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[],
+            attempt: None,
+            model: None,
+            clean: true,
+            ending: Ending::Done,
+            not_served: None,
+        });
+
+        assert_eq!(reply, "ok\n");
+        assert!(beside.is_empty(), "got: {beside}");
+    }
+
+    /// Every arm of the trail is a line somebody reads to see what the turn was allowed to do,
+    /// so a refusal has to be as legible as a pass.
+    #[test]
+    fn the_trail_renders_a_line_for_every_event() {
+        let sink = trail_of(vec![
+            Event::GatePassed {
+                gate: "capability",
+                detail: "file_read granted".into(),
+            },
+            Event::GateBlocked {
+                gate: "network",
+                detail: "egress".into(),
+                reason: "host not allowed".into(),
+                principle: bravebot_core::event::Principle::Confinement,
+            },
+            Event::Observed {
+                capability: Capability::FileRead,
+                label: Label::untrusted_private(),
+            },
+            Event::SlotWritten {
+                slot: SlotId::new("file:a.rs"),
+                label: Label::untrusted_private(),
+            },
+            Event::SlotDeferred {
+                slot: SlotId::new("file:b.rs"),
+                label: Label::untrusted_private(),
+                origin: "b.rs".into(),
+            },
+            Event::Declassified {
+                slot: SlotId::new("reply"),
+                from: Label::untrusted_public(),
+                to: Label::trusted_public(),
+                reason: "present",
+            },
+            Event::ActionField {
+                tool: "write".into(),
+                field: "path".into(),
+                role: Role::Routing,
+                label: Label::untrusted_public(),
+                allowed: false,
+            },
+        ]);
+
+        let lines: Vec<String> = sink
+            .recorded()
+            .map(|(delegate, event)| trace_line(delegate, event))
+            .collect();
+
+        assert_eq!(lines.len(), 7, "a line each: {lines:?}");
+        assert!(lines[0].contains("ok      capability: file_read granted"));
+        assert!(lines[1].contains("BLOCK   network: host not allowed"));
+        assert!(lines[2].starts_with("  observe "));
+        assert!(lines[3].starts_with("  slot    file:a.rs"));
+        assert!(lines[4].contains("holds b.rs, unread"));
+        assert!(lines[5].starts_with("  release reply "));
+        assert!(lines[6].contains("BLOCK") && lines[6].contains("write.path [routing]"));
+    }
+
+    /// TRACE-11, LAYER-3: a name a checkout chose reaches the terminal as pictures. A listing
+    /// entry's name, a path in a gate's detail and a path in a gate's reason are each drawn with
+    /// their control characters replaced, and none is dropped.
+    #[test]
+    fn a_trail_line_draws_the_control_characters_of_a_checkouts_names_as_pictures() {
+        let name = "x\u{1b}]0;T\u{7}\u{1b}[31mred.txt";
+        let pictured = "x\u{241b}]0;T\u{2407}\u{241b}[31mred.txt";
+        let sink = trail_of(vec![
+            Event::SlotDeferred {
+                slot: SlotId::new("ref:1"),
+                label: Label::untrusted_private(),
+                origin: name.into(),
+            },
+            Event::GatePassed {
+                gate: "defer",
+                detail: format!("read_file: {name} will be (U,priv)"),
+            },
+            Event::GateBlocked {
+                gate: "confine",
+                detail: "read_file.path".into(),
+                reason: format!("'{name}'\nresolves outside the workspace"),
+                principle: bravebot_core::event::Principle::Confinement,
+            },
+        ]);
+
+        let lines: Vec<String> = sink
+            .recorded()
+            .map(|(delegate, event)| trace_line(delegate, event))
+            .collect();
+
+        assert_eq!(lines.len(), 3, "a line each: {lines:?}");
+        for line in &lines {
+            assert_eq!(
+                line.chars().find(|c| c.is_control()),
+                None,
+                "a control character reached the trail: {line:?}"
+            );
+            assert!(line.contains(pictured), "the name was not drawn: {line:?}");
+        }
+        assert!(lines[0].contains(&format!("holds {pictured}, unread")));
+        assert!(lines[2].contains("\u{240a}resolves outside"));
+    }
+
+    /// TRACE-11, LAYER-3: the words `--trace` and a stopped manifest write beside the reply are
+    /// drawn with their control characters pictured. A notice, the plan's account of its steps and
+    /// the model line can each hold a name a checkout chose, and all go to stderr. The line breaks
+    /// the sentences themselves run over are kept.
+    #[test]
+    fn the_words_written_beside_the_reply_draw_a_checkouts_names_as_pictures() {
+        let name = "x\u{1b}]0;T\u{7}\u{1b}[31mred.txt";
+        let pictured = "x\u{241b}]0;T\u{2407}\u{241b}[31mred.txt";
+        let attempt = format!("plan\nsteps that ran\n  1. read {name}: done\n");
+        let (_, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[format!("{name} was skipped:\nnot trusted")],
+            attempt: Some(&attempt),
+            model: Some(name),
+            clean: true,
+            ending: Ending::Done,
+            not_served: None,
+        });
+        let stopped = bravebot_agent::manifest::Attempt {
+            proposed: Some(name.to_string()),
+            steps: vec![format!("1. read {name}: done")],
+            ..Default::default()
+        };
+        let mut said = Vec::new();
+        say_what_a_stopped_manifest_produced(&mut said, &stopped);
+        let mut notified = Vec::new();
+        say_notices(&mut notified, &[format!("{name} was skipped")]);
+
+        for (surface, text) in [
+            ("report", beside),
+            ("stopped manifest", String::from_utf8(said).expect("utf-8")),
+            ("notices", String::from_utf8(notified).expect("utf-8")),
+        ] {
+            assert_eq!(
+                text.chars().find(|c| c.is_control() && *c != '\n'),
+                None,
+                "{surface} let a control character through: {text:?}"
+            );
+            assert!(
+                text.contains(pictured),
+                "{surface} dropped the name: {text:?}"
+            );
+        }
+        let (_, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[format!("{name} was skipped:\nnot trusted")],
+            attempt: None,
+            model: Some(name),
+            clean: true,
+            ending: Ending::Done,
+            not_served: None,
+        });
+        assert!(
+            beside.contains(&format!("{pictured} was skipped:\nnot trusted")),
+            "a notice's own line break is kept: {beside:?}"
+        );
+        assert!(beside.contains(&format!("model: {pictured}")), "{beside:?}");
+    }
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    /// LAYER-3: the stored pick a run sets aside or refuses is named from a file, and the reason it
+    /// was refused comes from the configuration, so both reach stderr as pictures.
+    #[test]
+    fn a_pick_set_aside_or_refused_draws_its_name_and_reason_as_pictures() {
+        let name = "x\u{1b}]0;T\u{7}\u{1b}[31mmodel";
+        let pictured = "x\u{241b}]0;T\u{2407}\u{241b}[31mmodel";
+        let set_aside =
+            the_model_pick_said(&bravebot_agent::backend::Pick::SetAside(name.to_string()))
+                .expect("a set aside pick is said");
+        let refused = the_model_pick_said(&bravebot_agent::backend::Pick::Refused {
+            recorded: name.to_string(),
+            reason: format!("{name} is not served:\nask {name}"),
+        })
+        .expect("a refused pick is said");
+
+        for (surface, text) in [("set aside", set_aside), ("refused", refused)] {
+            assert_eq!(
+                text.chars().find(|c| c.is_control() && *c != '\n'),
+                None,
+                "{surface} let a control character through: {text:?}"
+            );
+            assert!(
+                text.contains(pictured),
+                "{surface} dropped the name: {text:?}"
+            );
+        }
+    }
+
+    /// LAYER-3: `--resume` and `--fork` of a manifest run print what the record holds, which is
+    /// text a model and a checkout chose. The plan, the steps and the reason it stopped are drawn
+    /// as pictures and none is dropped.
+    #[test]
+    fn a_stored_manifest_report_draws_its_text_as_pictures() {
+        let name = "x\u{1b}]0;T\u{7}\u{1b}[31mred.txt";
+        let pictured = "x\u{241b}]0;T\u{2407}\u{241b}[31mred.txt";
+        let stored = bravebot_session::sessions::StoredManifest {
+            proposed: Some(name.to_string()),
+            steps: vec![format!("1. read {name}: done")],
+            failure: Some(format!("{name} could not be read")),
+            ..Default::default()
+        };
+        let mut said = Vec::new();
+        say_what_a_stored_manifest_produced(&mut said, &stored);
+        let said = String::from_utf8(said).expect("utf-8");
+
+        assert_eq!(
+            said.chars().find(|c| c.is_control() && *c != '\n'),
+            None,
+            "a control character reached the report: {said:?}"
+        );
+        assert!(said.contains(&format!("read {pictured}: done")), "{said:?}");
+        assert!(
+            said.contains(&format!("{pictured} could not be read")),
+            "{said:?}"
+        );
+    }
+
+    /// LAYER-3: the hint printed when a session ends elsewhere than it started names that
+    /// directory, which a checkout named.
+    #[test]
+    fn the_resume_hint_draws_the_directory_it_names_as_pictures() {
+        let left = Resumable {
+            id: "an-id".to_string(),
+            directory: PathBuf::from("/tmp/x\u{1b}]0;T\u{7}dir"),
+        };
+
+        let hint = resume_hint(&left, Path::new("/tmp/elsewhere"));
+
+        assert_eq!(
+            hint.chars().find(|c| c.is_control() && *c != '\n'),
+            None,
+            "{hint:?}"
+        );
+        assert!(hint.contains("/tmp/x\u{241b}]0;T\u{2407}dir"), "{hint:?}");
+    }
+
+    /// LAYER-3: the complaint that a model was not served names the model the service reported,
+    /// which the service chose, and reaches stderr as pictures.
+    #[test]
+    fn the_complaint_about_a_model_not_served_draws_the_served_name_as_pictures() {
+        let name = "x\u{1b}]0;T\u{7}\u{1b}[31mserved";
+        let complaint = format!("asked-for was not served, {name} was:\nsee {name}");
+        let (_, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[],
+            attempt: None,
+            model: None,
+            clean: true,
+            ending: Ending::Done,
+            not_served: Some(&complaint),
+        });
+
+        assert_eq!(
+            beside.chars().find(|c| c.is_control() && *c != '\n'),
+            None,
+            "{beside:?}"
+        );
+        assert!(
+            beside.contains("x\u{241b}]0;T\u{2407}\u{241b}[31mserved was:\nsee "),
+            "{beside:?}"
+        );
+    }
+
+    /// TRUST-26. The flag gives the run the map a yes writes: the working directory and what is
+    /// under it. A directory `--add-dir` opened sits beside it and is not covered, and neither is
+    /// anything above it.
+    #[test]
+    fn a_flagged_run_trusts_its_directory_and_nothing_outside_it() {
+        let scratch = Scratch::new("trust-flag-covers");
+        let project = scratch.directory("project");
+        let beside = scratch.directory("beside");
+
+        let (trust, notice) = unattended_trust_with(None, None, &project, true);
+
+        assert!(trust.is_trusted("."), "the working directory");
+        assert!(trust.is_trusted("src/lib.rs"), "a file under it");
+        assert!(
+            !trust.is_trusted(&beside.join("notes.md").display().to_string()),
+            "a directory opened beside the working one"
+        );
+        assert!(!trust.is_trusted("/etc/passwd"), "a path outside it");
+        assert_eq!(
+            notice, None,
+            "the person typed the flag, so nothing is said"
+        );
+    }
+
+    /// TRUST-26. The flag answers for this run alone, and the run without it keeps the empty map.
+    #[test]
+    fn a_flagged_run_writes_no_record_and_says_nothing() {
+        let scratch = Scratch::new("trust-flag-writes-nothing");
+        let project = scratch.directory("project");
+        let state = scratch.directory("state");
+
+        let (_, notice) = unattended_trust_with(Some(&state), None, &project, true);
+        assert_eq!(notice, None);
+        assert!(
+            !state.join("trusted").exists(),
+            "the flag kept an answer for later sessions"
+        );
+
+        let (trust, notice) = unattended_trust_with(Some(&state), None, &project, false);
+        assert!(!trust.is_trusted("."), "nothing was said and nothing kept");
+        assert_eq!(notice, None);
+    }
+
+    /// RUN-5. A one-shot run starts from a kept answer, and what that answer says about confined
+    /// lines is what the entry said: an answer kept before the question said so does not allow
+    /// them, one that says so does, and neither changes what the run trusts.
+    #[test]
+    fn a_kept_answer_allows_confined_lines_only_where_its_entry_says_so() {
+        let scratch = Scratch::new("trust-kept-confined-lines");
+        let project = scratch.directory("project");
+        let state = scratch.directory("state");
+        let Some(identity) = bravebot_agent::trusted::Identity::of(&project) else {
+            return;
+        };
+        let store = bravebot_agent::trusted::Store::new(&state, &project);
+        assert!(store.keep(&identity, "1-2", 7, false), "not kept");
+        let (trust, _) = unattended_trust_with(Some(&state), None, &project, false);
+        assert!(trust.is_trusted("."));
+        assert!(
+            !trust.allows_confined_lines(),
+            "an answer kept before the question said so allowed confined lines"
+        );
+
+        assert!(store.keep(&identity, "3-4", 8, true), "not kept");
+        let (trust, _) = unattended_trust_with(Some(&state), None, &project, false);
+        assert!(trust.allows_confined_lines(), "the entry said so");
+
+        let (flagged, _) = unattended_trust_with(Some(&state), None, &project, true);
+        assert!(
+            !flagged.allows_confined_lines(),
+            "--trust-workspace allowed confined lines"
+        );
+    }
+
+    /// TRUST-23. A kept answer trusts a one-shot run in that directory and the run says where it
+    /// came from, since nobody is watching it open.
+    #[test]
+    fn a_kept_answer_trusts_a_one_shot_run_there_and_says_so() {
+        let scratch = Scratch::new("trust-kept-one-shot");
+        let project = scratch.directory("project");
+        let state = scratch.directory("state");
+        let Some(identity) = bravebot_agent::trusted::Identity::of(&project) else {
+            // A filesystem that cannot say when a directory was made keeps no answer to read.
+            return;
+        };
+        let store = bravebot_agent::trusted::Store::new(&state, &project);
+        assert!(
+            store.keep(&identity, "1-2", 7, false),
+            "the answer was not kept"
+        );
+
+        let (trust, notice) = unattended_trust_with(Some(&state), None, &project, false);
+
+        assert!(trust.is_trusted("."), "the kept answer did not apply");
+        assert!(trust.is_trusted("src/lib.rs"), "it did not cover the tree");
+        assert!(!trust.is_trusted("/etc/passwd"), "it covered too much");
+        let notice = notice.expect("a kept answer was used without saying so");
+        assert!(
+            notice.contains(&project.display().to_string())
+                && notice.contains(&store.path().display().to_string()),
+            "the notice names neither the directory nor the file: {notice}"
+        );
+    }
+
+    /// TRUST-23. A one-shot run started in a package of a repository whose root has a kept answer is
+    /// settled by it, as a session there is, trusts its own directory and says which one answered.
+    #[test]
+    fn a_kept_answer_about_the_repository_root_trusts_a_one_shot_run_in_a_package() {
+        let scratch = Scratch::new("trust-kept-root-one-shot");
+        let repository = scratch.directory("repository");
+        let package = scratch.directory("repository/packages/app");
+        let state = scratch.directory("state");
+        std::fs::create_dir_all(repository.join(".git")).expect("make the repository");
+        let Some(identity) = bravebot_agent::trusted::Identity::of(&repository) else {
+            return;
+        };
+        let store = bravebot_agent::trusted::Store::new(&state, &repository);
+        assert!(
+            store.keep(&identity, "1-2", 7, false),
+            "the answer was not kept"
+        );
+
+        let (trust, notice) = unattended_trust_with(Some(&state), None, &package, false);
+
+        assert!(trust.is_trusted("."), "the root's answer did not apply");
+        assert!(trust.is_trusted("src/lib.rs"), "it did not cover the tree");
+        let notice = notice.expect("a kept answer was used without saying so");
+        assert!(
+            notice.contains(&repository.display().to_string())
+                && !notice.contains(&package.display().to_string()),
+            "the notice does not name the root that answered, and only it: {notice}"
+        );
+    }
+
+    /// TRUST-23. The answer is about one directory: another at a different path, and a new
+    /// directory made at the same path, are not covered, and a run there trusts nothing.
+    #[test]
+    fn a_kept_answer_about_another_directory_trusts_a_one_shot_run_nowhere() {
+        let scratch = Scratch::new("trust-kept-elsewhere");
+        let project = scratch.directory("project");
+        let other = scratch.directory("other");
+        let state = scratch.directory("state");
+        let Some(identity) = bravebot_agent::trusted::Identity::of(&project) else {
+            return;
+        };
+        let store = bravebot_agent::trusted::Store::new(&state, &project);
+        assert!(
+            store.keep(&identity, "1-2", 7, false),
+            "the answer was not kept"
+        );
+
+        let (trust, notice) = unattended_trust_with(Some(&state), None, &other, false);
+        assert!(!trust.is_trusted("."), "another directory was trusted");
+        assert_eq!(notice, None);
+
+        std::fs::remove_dir_all(&project).expect("remove the directory answered about");
+        std::fs::create_dir_all(&project).expect("make another at the same path");
+        let (trust, notice) = unattended_trust_with(Some(&state), None, &project, false);
+        assert!(!trust.is_trusted("."), "a remade directory was trusted");
+        assert_eq!(notice, None);
+    }
+
+    /// TRUST-26. The flag is a switch on the command line that may be repeated, and its absence
+    /// leaves the run without it.
+    #[test]
+    fn the_workspace_flag_is_read_from_the_command_line_and_may_repeat() {
+        let typed = |arguments: &[&str]| {
+            parse_invocation(&args(arguments))
+                .expect("parses")
+                .trust_workspace
+        };
+        assert!(typed(&["--trust-workspace", "-p", "do a thing"]));
+        assert!(typed(&["-p", "do a thing", "--trust-workspace"]));
+        assert!(typed(&[
+            "--trust-workspace",
+            "--trust-workspace",
+            "do a thing"
+        ]));
+        assert!(!typed(&["-p", "do a thing"]));
+    }
+
+    /// The mode composes rather than leads: what is left after taking it out is the invocation the
+    /// person would have typed without it, so every dispatch below sees what it always saw.
+    #[test]
+    fn the_incognito_flag_is_taken_out_wherever_it_appears() {
+        for typed in [
+            &["--incognito", "-p", "do a thing"][..],
+            &["-p", "--incognito", "do a thing"][..],
+            &["-p", "do a thing", "--incognito"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_flag(&mut arguments, INCOGNITO),
+                "{typed:?} did not engage it"
+            );
+            assert_eq!(
+                arguments,
+                args(&["-p", "do a thing"]),
+                "left over: {typed:?}"
+            );
+        }
+    }
+
+    /// Asking twice for a mode that is already on is not an error to report.
+    #[test]
+    fn asking_for_incognito_twice_is_asking_once() {
+        let mut arguments = args(&["--incognito", "--incognito", "do a thing"]);
+        assert!(take_flag(&mut arguments, INCOGNITO));
+        assert_eq!(arguments, args(&["do a thing"]));
+    }
+
+    /// The flag is the whole invocation often enough to be worth pinning: what is left is nothing,
+    /// which the dispatch reads as the interactive session, and that is the intent.
+    #[test]
+    fn incognito_alone_leaves_the_interactive_session() {
+        let mut arguments = args(&["--incognito"]);
+        assert!(take_flag(&mut arguments, INCOGNITO));
+        assert!(arguments.is_empty());
+    }
+
+    /// An ordinary invocation is untouched, and stays not incognito. A mode that turned itself on
+    /// for something that merely mentioned it would be worse than one that never worked.
+    #[test]
+    fn an_invocation_without_the_flag_is_left_alone() {
+        let mut arguments = args(&["-p", "write about incognito mode"]);
+        assert!(!take_flag(&mut arguments, INCOGNITO));
+        assert_eq!(arguments, args(&["-p", "write about incognito mode"]));
+    }
+
+    /// `--safe` belongs to every way of starting, so it is taken out wherever it appears, once or
+    /// twice, and a task that merely mentions safe mode does not turn it on.
+    #[test]
+    fn the_safe_flag_is_taken_out_wherever_it_appears() {
+        for typed in [
+            &["--safe", "-p", "do a thing"][..],
+            &["-p", "--safe", "do a thing"][..],
+            &["-p", "do a thing", "--safe", "--safe"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_flag(&mut arguments, SAFE), "{typed:?}");
+            assert!(!arguments.iter().any(|arg| arg == "--safe"), "{typed:?}");
+        }
+        let mut arguments = args(&["-p", "explain safe mode"]);
+        assert!(!take_flag(&mut arguments, SAFE));
+        assert_eq!(arguments, args(&["-p", "explain safe mode"]));
+    }
+
+    /// `--tools` and `--no-shell` belong to every way of starting, so they are taken out wherever they
+    /// stand. A task that merely mentions them is left alone, and a list naming no tool is refused
+    /// rather than read as no limit.
+    #[test]
+    fn the_tool_limit_is_taken_out_wherever_it_appears() {
+        let mut arguments = args(&[
+            "-p",
+            "--tools",
+            "read_file,search",
+            "do a thing",
+            "--no-shell",
+        ]);
+        let limit = take_tool_limit(&mut arguments).expect("a list of tools");
+        assert_eq!(arguments, args(&["-p", "do a thing"]));
+        assert!(limit.no_shell);
+        assert_eq!(
+            limit.only,
+            Some(vec!["read_file".to_string(), "search".to_string()])
+        );
+
+        let mut arguments = args(&["-p", "explain --no-shell and --tools"]);
+        let limit = take_tool_limit(&mut arguments).expect("no flag");
+        assert!(limit.is_none());
+        assert_eq!(arguments, args(&["-p", "explain --no-shell and --tools"]));
+
+        let mut arguments = args(&["-p", "x", "--tools", "read_file,nothing"]);
+        let err = take_tool_limit(&mut arguments).expect_err("an unknown tool");
+        assert!(
+            err.contains("nothing") && err.contains("read_file"),
+            "{err}"
+        );
+    }
+
+    /// `message_session` is added to a background session's list and not to `available`, so the list
+    /// `--tools` is checked against has to name it as it names `advisor`, or a person who limits the
+    /// tools can never keep it.
+    #[test]
+    fn the_tool_limit_may_name_message_session() {
+        let mut arguments = args(&["-p", "x", "--tools", "read_file,message_session"]);
+        let limit = take_tool_limit(&mut arguments).expect("a list of tools");
+        assert_eq!(
+            limit.only,
+            Some(vec!["read_file".to_string(), "message_session".to_string()])
+        );
+    }
+
+    /// `propose_plan` is added to a plan-mode planner's list and not to `available`, so the list
+    /// `--tools` is checked against has to name it, or a person who limits the tools can never
+    /// keep it.
+    #[test]
+    fn the_tool_limit_may_name_propose_plan() {
+        let mut arguments = args(&["-p", "x", "--tools", "read_file,propose_plan"]);
+        let limit = take_tool_limit(&mut arguments).expect("a list of tools");
+        assert_eq!(
+            limit.only,
+            Some(vec!["read_file".to_string(), "propose_plan".to_string()])
+        );
+    }
+
+    /// A list that is followed by `--no-shell` has taken it as a tool name, so the refusal names it
+    /// and the arguments are left as typed.
+    #[test]
+    fn a_tool_list_that_is_the_no_shell_flag_names_it_as_the_unknown_tool() {
+        let mut arguments = args(&["-p", "x", "--tools", "--no-shell"]);
+        let err = take_tool_limit(&mut arguments).expect_err("a flag is no tool");
+        assert!(err.contains("--no-shell"), "{err}");
+        assert_eq!(arguments, args(&["-p", "x", "--tools", "--no-shell"]));
+    }
+
+    /// `--vet` belongs to every way of starting, so it is taken out wherever it appears and the
+    /// dispatch below goes on matching a list it is no longer in. A flag left in the arguments
+    /// would be refused as an unknown option by whichever subcommand read them next.
+    #[test]
+    fn the_vet_flag_is_taken_out_wherever_it_appears() {
+        for typed in [
+            &["--vet", "-p", "do a thing"][..],
+            &["-p", "--vet", "do a thing"][..],
+            &["-p", "do a thing", "--vet"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_flag(&mut arguments, VET),
+                "{typed:?} did not ask for it"
+            );
+            assert_eq!(
+                arguments,
+                args(&["-p", "do a thing"]),
+                "left over: {typed:?}"
+            );
+        }
+    }
+
+    /// Asking twice for something that is already on is not an error to report.
+    #[test]
+    fn asking_to_vet_twice_is_asking_once() {
+        let mut arguments = args(&["--vet", "--vet", "do a thing"]);
+        assert!(take_flag(&mut arguments, VET));
+        assert_eq!(arguments, args(&["do a thing"]));
+    }
+
+    /// An ordinary invocation is untouched and stays as it was. A run that turned the asking off
+    /// because the prompt mentioned vetting would be worse than a flag that never worked.
+    #[test]
+    fn an_invocation_that_only_mentions_vetting_does_not_ask_for_it() {
+        let mut arguments = args(&["-p", "explain --vetting to me"]);
+        assert!(!take_flag(&mut arguments, VET));
+        assert_eq!(arguments, args(&["-p", "explain --vetting to me"]));
+    }
+
+    /// It composes with the other two flags that belong to every way of starting, which is the
+    /// whole reason all three are taken out before anything dispatches.
+    #[test]
+    fn vetting_composes_with_the_other_flags_that_lead() {
+        for typed in [
+            &["--vet", "--incognito", "-p", "x"][..],
+            &["--incognito", "--vet", "-p", "x"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_flag(&mut arguments, VET), "{typed:?}");
+            assert!(take_flag(&mut arguments, INCOGNITO), "{typed:?}");
+            assert_eq!(arguments, args(&["-p", "x"]), "{typed:?}");
+        }
+    }
+
+    fn a_plan() -> ManifestRequest {
+        ManifestRequest {
+            task: "summarise the notes".to_string(),
+            steps: vec![
+                "1. [fetch] read notes.md into notes".to_string(),
+                "2. [act] write summary to summary.md".to_string(),
+            ],
+        }
+    }
+
+    /// HOOK-2, PROMPT-9: a one-shot run alerts for the plan it puts to a person and for nothing it
+    /// refuses. The regression it rejects is the mode wrapper alerting before every question it
+    /// passes on, which rings a person up about writes and runs the confirmer declines unasked.
+    #[test]
+    fn a_one_shot_run_alerts_for_a_plan_it_puts_and_not_for_a_write_it_refuses() {
+        use bravebot_agent::PermissionMode;
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut shown = Vec::new();
+        let mut one_shot = OneShot::new(&b"y\n"[..], &mut shown, true);
+        let mut confining =
+            bravebot_agent::Confining::new(&mut one_shot, PermissionMode::Ask, false);
+        let counted = std::sync::Arc::clone(&count);
+        confining.alert_when_asking(Some(std::sync::Arc::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+
+        let refused = confining.confirm_host(&bravebot_agent::confirm::HostRequest {
+            hosts: vec!["a.example".to_string()],
+        });
+        assert_eq!(refused, Decision::Reject);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let decision = confining.confirm_manifest(&a_plan());
+        assert_eq!(decision, Decision::Approve);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The question reaches the person and their answer reaches the run. It names the task in their
+    /// own words and how many steps they are answering for, and says what a yes does not cover.
+    #[test]
+    fn a_plan_is_answered_by_whoever_typed_the_command() {
+        let plan = a_plan();
+        let mut shown = Vec::new();
+        let decision = OneShot::new(&b"y\n"[..], &mut shown, true).confirm_manifest(&plan);
+
+        assert_eq!(decision, Decision::Approve);
+        let shown = String::from_utf8(shown).expect("the question is text");
+        assert!(shown.contains(&plan.task), "the task is missing: {shown}");
+        assert!(shown.contains("2 steps"), "the count is missing: {shown}");
+        assert!(
+            shown.contains("not approving its writes"),
+            "what a yes leaves open is missing: {shown}"
+        );
+    }
+
+    /// The steps are the lines the run narrated a moment earlier, from the same renderer, so the
+    /// question does not print them again: the same list twice under two headings reads as two
+    /// plans, and the person would be answering about the second one.
+    #[test]
+    fn the_question_does_not_reprint_the_narrated_plan() {
+        let plan = a_plan();
+        let mut shown = Vec::new();
+        OneShot::new(&b"y\n"[..], &mut shown, true).confirm_manifest(&plan);
+
+        let shown = String::from_utf8(shown).expect("the question is text");
+        for step in &plan.steps {
+            assert!(!shown.contains(step), "step printed twice: {shown}");
+        }
+    }
+
+    /// CLI-6: what a one-shot run could not ask is kept, so the run can end on the status that says
+    /// a gate refused something. A plan a person typed `y` to leaves nothing, so a run that was
+    /// answered does not end on it.
+    #[test]
+    fn what_nobody_could_be_asked_is_kept_and_what_was_answered_is_not() {
+        let mut shown = Vec::new();
+        let mut unattended = OneShot::new(&b"y\n"[..], &mut shown, false);
+        unattended.confirm_manifest(&a_plan());
+        unattended.confirm_fetch(&bravebot_agent::confirm::FetchRequest {
+            url: "https://example.invalid/a".to_string(),
+            host: "example.invalid".to_string(),
+            redirected_from: None,
+            classified: Default::default(),
+        });
+        let gates: Vec<_> = unattended.declined().iter().map(|d| d.gate).collect();
+        assert_eq!(gates, ["manifest_plan", "web_fetch"]);
+
+        let mut shown = Vec::new();
+        let mut answered = OneShot::new(&b"y\n"[..], &mut shown, true);
+        answered.confirm_manifest(&a_plan());
+        assert!(answered.declined().is_empty());
+    }
+
+    /// CLI-6, CLI-12, TRACE-1: a write, a fetch or a run nobody could be asked about ends the run
+    /// on the refused status and is listed once. The policy records each in the trail, so the
+    /// confirmer keeps its own record of it for the status alone: a delegate's policy holds its
+    /// refusals apart from the turn's, and this confirmer is shared with it. Only a plan is never
+    /// told to the policy, so it is listed from here. The regressions it rejects are an entry
+    /// that is dropped, which a delegate's unapproved write needs to end the run on the refused
+    /// status, a write, a fetch or a run listed again beside the trail's, and the plan marked as
+    /// already in the trail, which lists it nowhere.
+    #[test]
+    fn a_write_and_a_fetch_nobody_could_be_asked_about_count_for_the_status_and_are_listed_once() {
+        let write = WriteRequest {
+            written_since_checkout: false,
+            path: "notes.md".to_string(),
+            contents: "text".to_string(),
+            existing: None,
+            diff: bravebot_agent::diff::Diff::compute("", "text"),
+            intent: bravebot_agent::Intent::Create,
+            untrusted: false,
+            remark: None,
+            protected: false,
+            credentials: Vec::new(),
+            may_always: false,
+            record: None,
+            may_edit: false,
+        };
+        let run = bravebot_agent::confirm::RunRequest::from_pipeline(
+            &bravebot_core::Pipeline::new(vec![bravebot_core::Stage::new(
+                "git",
+                vec!["log".into()],
+            )]),
+            &["/usr/bin/git".into()],
+            "/tmp/project",
+        );
+        let mut shown = Vec::new();
+        let mut unattended = OneShot::new(&b"y\n"[..], &mut shown, false);
+        unattended.confirm_write(&write);
+        unattended.confirm_fetch(&bravebot_agent::confirm::FetchRequest {
+            url: "https://example.invalid/a".to_string(),
+            host: "example.invalid".to_string(),
+            redirected_from: None,
+            classified: Default::default(),
+        });
+        unattended.confirm_run(&run);
+        unattended.confirm_manifest(&a_plan());
+
+        let gates: Vec<_> = unattended.declined().iter().map(|d| d.gate).collect();
+        assert_eq!(gates, ["file_write", "web_fetch", "run", "manifest_plan"]);
+        let listed: Vec<_> = with_declined(Vec::new(), unattended.declined())
+            .iter()
+            .map(|refusal| refusal.gate)
+            .collect();
+        assert_eq!(listed, ["manifest_plan"]);
+    }
+
+    /// CLI-6, CLI-12, TRACE-1: a call to a server's tool nobody could be asked about ends the run on
+    /// the refused status and is listed once. The policy records it in the trail, so the confirmer
+    /// keeps its own record for the status alone, for the reason a write's is kept: a delegate's
+    /// policy holds its refusals apart from the turn's, and this confirmer is shared with it. The
+    /// regressions it rejects are a call that is not kept, which a delegate's unapproved call needs
+    /// to end the run on the refused status, and one listed again beside the trail's entry.
+    #[test]
+    fn an_mcp_call_nobody_could_be_asked_about_counts_for_the_status_and_is_listed_once() {
+        let mut shown = Vec::new();
+        let mut unattended = OneShot::new(&b"y\n"[..], &mut shown, false);
+        let answer = unattended.confirm_mcp_call(&bravebot_agent::confirm::McpCallRequest {
+            alias: "weather".to_string(),
+            tool: "get_forecast".to_string(),
+            arguments: vec![("city".to_string(), "\"Paris\"".to_string())],
+            description: None,
+            may_stand: true,
+            asked_every_call: false,
+            asked_for_private_arguments: false,
+            also: Vec::new(),
+        });
+        assert_eq!(answer.decision, Decision::Reject);
+
+        let gates: Vec<_> = unattended.declined().iter().map(|d| d.gate).collect();
+        assert_eq!(gates, ["mcp_call"]);
+        assert!(
+            with_declined(Vec::new(), unattended.declined()).is_empty(),
+            "a call the trail holds was listed again"
+        );
+    }
+
+    /// SCHEDULE-2: a run `schedule run-now` fires ends its turn at the first question the planner
+    /// asks, keeps that question whole for `schedule pending`, and counts for the refused status.
+    /// The regressions it rejects are a question answered and carried on from, one that is not kept,
+    /// a later question kept over the first, a turn that is not cancelled, and a run that is
+    /// stopped by a confirmer that was never told to stop.
+    #[test]
+    fn a_scheduled_run_stops_at_the_first_question_and_keeps_it() {
+        let first = a_question("Which branch?");
+        let second = a_question("Which remote?");
+
+        let cancel = bravebot_core::cancel::Cancel::new();
+        let mut shown = Vec::new();
+        let mut stopping =
+            OneShot::new(&b"1\n"[..], &mut shown, true).stopping_at_a_question(cancel.clone());
+        let answers = stopping.ask_user(&first);
+        stopping.ask_user(&second);
+        assert!(cancel.is_cancelled(), "the turn was not ended");
+        assert!(
+            answers.iter().all(|answer| !matches!(
+                answer,
+                bravebot_core::ask::Answer::Chosen(_) | bravebot_core::ask::Answer::Typed(_)
+            )),
+            "the question was answered"
+        );
+        assert_eq!(stopping.asked(), Some(&first));
+        assert!(
+            stopping
+                .declined()
+                .iter()
+                .all(|d| d.gate == "scheduled_question"),
+        );
+        assert!(!stopping.declined().is_empty());
+
+        let cancel = bravebot_core::cancel::Cancel::new();
+        let mut shown = Vec::new();
+        let mut not_stopping = OneShot::new(&b"1\n"[..], &mut shown, true);
+        not_stopping.ask_user(&first);
+        assert!(!cancel.is_cancelled());
+        assert!(not_stopping.asked().is_none());
+    }
+
+    /// SCHEDULE-2: the turn a scheduled run cancels at its first question ends on the refused
+    /// status, as a plan nobody approved does, and not on the status for a cancelled turn. The fault
+    /// it rejects is a gate name `report_a_failed_turn` does not map, which leaves the status of an
+    /// interrupted run for a run that stopped on purpose.
+    #[test]
+    fn a_run_stopped_at_a_scheduled_question_ends_refused() {
+        let reporter = progress::Progress::new(std::io::stderr());
+        let sink = json::Streaming::new(None);
+        let cancelled = bravebot_agent::TurnError::Cancelled { attempts: None };
+        let stopped_at = [one_shot::Declined {
+            gate: "scheduled_question",
+            reason: "a scheduled run cannot be asked",
+            in_the_trail: false,
+        }];
+        let refused = format!("{:?}", ExitCode::from(Ending::Refused.status()));
+
+        let stopped = report_a_failed_turn(&cancelled, None, false, &reporter, &sink, &stopped_at);
+        assert_eq!(format!("{stopped:?}"), refused);
+
+        let interrupted = report_a_failed_turn(&cancelled, None, false, &reporter, &sink, &[]);
+        assert_ne!(
+            format!("{interrupted:?}"),
+            refused,
+            "a cancelled turn with no question is not a refusal"
+        );
+    }
+
+    fn a_question(text: &str) -> bravebot_core::ask::Asking {
+        bravebot_core::ask::Asking {
+            prompts: vec![bravebot_core::ask::Prompt {
+                header: "Pick".to_string(),
+                question: text.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A pipe or a redirected stderr is nobody, and then a plan is refused like every other
+    /// question. The answer is not read either: bytes arriving on a pipe are whatever fed it rather
+    /// than somebody agreeing, and nothing was written for them to be agreeing to.
+    #[test]
+    fn a_plan_is_refused_where_nobody_can_be_asked() {
+        let mut shown = Vec::new();
+        let decision = OneShot::new(&b"y\n"[..], &mut shown, false).confirm_manifest(&a_plan());
+
+        assert_eq!(decision, Decision::Reject);
+        assert!(shown.is_empty(), "a plan was shown to nobody: {shown:?}");
+    }
+
+    /// Both ends have to be a terminal: a plan put to a redirected stderr is a plan nobody read, and
+    /// a piped stdin would be read for an answer from whatever fed it.
+    #[test]
+    fn a_plan_is_put_only_where_stdin_and_stderr_are_both_a_terminal() {
+        assert!(a_plan_is_put(true, true));
+        assert!(!a_plan_is_put(true, false), "a redirected stderr is nobody");
+        assert!(!a_plan_is_put(false, true), "a piped stdin is nobody");
+        assert!(!a_plan_is_put(false, false));
+    }
+
+    /// The affirmative is the only line that runs a program. End of input is not one, and neither is
+    /// a longer sentence that happens to start with it.
+    #[test]
+    fn anything_but_yes_declines_a_plan() {
+        for typed in ["n\n", "\n", "", "yes please\n", "y or n\n"] {
+            let mut shown = Vec::new();
+            let decision =
+                OneShot::new(typed.as_bytes(), &mut shown, true).confirm_manifest(&a_plan());
+
+            assert_eq!(decision, Decision::Reject, "{typed:?} was taken for a yes");
+        }
+    }
+
+    /// Approving a plan is the whole of what this confirmer can approve. A write, a file nobody
+    /// vouched for and the rest are refused exactly as they were before there was a plan question,
+    /// and nothing is put on screen about them.
+    #[test]
+    fn a_one_shot_answers_the_plan_and_nothing_else() {
+        let mut shown = Vec::new();
+        let mut one_shot = OneShot::new(&b"y\ny\n"[..], &mut shown, true);
+
+        let write = WriteRequest {
+            written_since_checkout: false,
+            path: "notes.md".to_string(),
+            contents: "text".to_string(),
+            existing: None,
+            diff: bravebot_agent::diff::Diff::compute("", "text"),
+            intent: bravebot_agent::Intent::Create,
+            untrusted: false,
+            remark: None,
+            protected: false,
+            credentials: Vec::new(),
+            may_always: false,
+            record: None,
+            may_edit: false,
+        };
+        let vouch = VouchRequest {
+            path: "notes.md".to_string(),
+            rule: "notes.md".to_string(),
+            preview: "text".to_string(),
+            truncated: false,
+            verdict: bravebot_core::vetting::Verdict::Safe,
+            reason: None,
+            label: String::new(),
+            reason_label: None,
+        };
+
+        assert_eq!(
+            one_shot.confirm_write(&write),
+            bravebot_agent::WriteDecision::reject()
+        );
+        assert_eq!(one_shot.confirm_vouch(&vouch), Decision::Reject);
+        assert!(one_shot.interjection().is_none());
+        drop(one_shot);
+
+        assert!(shown.is_empty(), "something was asked about: {shown:?}");
+    }
+
+    /// ASK-7: a question in a one-shot run is declined by the confirmer a one-shot run uses, even
+    /// where there is a terminal and a "y" waiting to be read. The planner is told a reply came from
+    /// a person, so an answer this confirmer invented would be taken for theirs.
+    #[test]
+    fn a_one_shot_declines_every_question_even_where_it_may_ask_about_a_plan() {
+        let series = bravebot_core::ask::asking(&bravebot_core::ask::Series::new(vec![
+            bravebot_core::ask::Question::new(
+                "Cache",
+                "Which cache layer?",
+                vec![bravebot_core::ask::Choice::new("HTTP", None)],
+                false,
+            ),
+            bravebot_core::ask::Question::new("Branch", "Which branch?", Vec::new(), false),
+        ]));
+        let mut shown = Vec::new();
+        let mut one_shot = OneShot::new(&b"y\ny\n"[..], &mut shown, true);
+
+        let answers = one_shot.ask_user(&series);
+        assert!(
+            answers
+                .iter()
+                .all(|answer| *answer == bravebot_core::ask::Answer::Declined),
+            "a question was answered for the person: {answers:?}"
+        );
+        drop(one_shot);
+
+        assert!(shown.is_empty(), "a question was put to nobody: {shown:?}");
+    }
+
+    /// A home directory and a checkout, each with the settings file a test writes into it.
+    ///
+    /// `Settings::layered` takes both rather than reading the process's own, so the layers under test
+    /// are the ones this wrote and not whatever the machine running the tests has configured.
+    fn layers(
+        scratch: &Scratch,
+        home: Option<&str>,
+        project: Option<&str>,
+    ) -> bravebot_config::Settings {
+        let state = scratch.directory("home");
+        let cwd = scratch.directory("cwd");
+        if let Some(text) = home {
+            std::fs::write(state.join("settings.json"), text).expect("a home layer");
+        }
+        if let Some(text) = project {
+            std::fs::create_dir_all(cwd.join(".bravebot")).expect("a project directory");
+            std::fs::write(cwd.join(".bravebot/settings.json"), text).expect("a project layer");
+        }
+        bravebot_config::Settings::layered(Some(state), Some(&cwd), None)
+    }
+
+    /// MODE-5 and PERM-17: the flag opens the bypass mode unless a layer in force made it
+    /// unreachable, and then it is refused with the file that asked for it named. Every layer may
+    /// ask, the managed one among them, and no layer lifts what another asked for (PERM-18).
+    ///
+    /// The failure this rejects is reading the key from the person's own file alone, which is where
+    /// `vetting.auto` is read from: a machine an administrator pinned, and a checkout a team wants
+    /// confined, would both be honoured nowhere.
+    #[test]
+    fn the_bypass_flag_is_refused_where_a_layer_made_the_mode_unreachable() {
+        let asked = r#"{"permissions": {"bypassUnreachable": true}}"#;
+        let lifted = r#"{"permissions": {"bypassUnreachable": false}}"#;
+
+        let home = Scratch::new("cli-bypass-home");
+        let settings = layers(&home, Some(asked), None);
+        assert_eq!(
+            bypass_made_unreachable(&settings, &Managed::default()).as_deref(),
+            Some(home.path.join("home/settings.json").as_path()),
+            "the person's own file could not ask for it"
+        );
+
+        let checkout = Scratch::new("cli-bypass-project");
+        let settings = layers(&checkout, None, Some(asked));
+        assert_eq!(
+            bypass_made_unreachable(&settings, &Managed::default()).as_deref(),
+            Some(checkout.path.join("cwd/.bravebot/settings.json").as_path()),
+            "a checkout could not ask for it"
+        );
+
+        let machine = Scratch::new("cli-bypass-managed");
+        let (managed, file) = pinned(&machine, asked);
+        let settings = layers(&machine, None, None);
+        assert_eq!(
+            bypass_made_unreachable(&settings, &managed).as_deref(),
+            Some(file.as_path()),
+            "an administrator could not pin it"
+        );
+
+        // The strictest value any layer named: a file saying no does not lift a pin, and the refusal
+        // names the file that did ask rather than the one that declined.
+        let contested = Scratch::new("cli-bypass-contested");
+        let (managed, file) = pinned(&contested, asked);
+        let settings = layers(&contested, Some(lifted), None);
+        assert_eq!(
+            bypass_made_unreachable(&settings, &managed).as_deref(),
+            Some(file.as_path()),
+            "a settings file lifted a pin"
+        );
+
+        // And the state every run is in unless somebody wrote the key.
+        let quiet = Scratch::new("cli-bypass-unasked");
+        for settings in [
+            layers(&quiet, None, None),
+            layers(&quiet, Some(lifted), Some(lifted)),
+            layers(
+                &quiet,
+                Some(r#"{"permissions": {"deny": ["Read(./.env)"]}}"#),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                bypass_made_unreachable(&settings, &Managed::default()),
+                None,
+                "the flag was refused where no layer asked for it"
+            );
+        }
+    }
+
+    /// Absent is the state every run is in unless somebody typed the flag, and it is the only state
+    /// in which a write is put to a person first.
+    #[test]
+    fn permissions_are_enforced_unless_the_flag_is_given() {
+        let mut arguments = args(&["do a thing"]);
+        assert!(!take_flag(&mut arguments, SKIP_PERMISSIONS));
+        assert_eq!(arguments, args(&["do a thing"]));
+    }
+
+    /// Taken out wherever it appears, so the parser downstream sees only what it already understood.
+    /// Left in, it would come back as "unexpected argument" from whichever parser met it.
+    #[test]
+    fn the_skip_permissions_flag_is_taken_out_wherever_it_appears() {
+        for typed in [
+            &["--dangerously-skip-permissions", "-p", "do a thing"][..],
+            &["-p", "--dangerously-skip-permissions", "do a thing"][..],
+            &["-p", "do a thing", "--dangerously-skip-permissions"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_flag(&mut arguments, SKIP_PERMISSIONS),
+                "{typed:?} did not engage it"
+            );
+            assert_eq!(
+                arguments,
+                args(&["-p", "do a thing"]),
+                "left over: {typed:?}"
+            );
+        }
+    }
+
+    /// It belongs to every way of starting, not only to a one-shot run, so stripping it must leave a
+    /// resume or a bare interactive invocation still recognisable to the dispatch below.
+    #[test]
+    fn the_flag_leaves_every_other_way_of_starting_intact() {
+        let mut arguments = args(&[
+            "--resume",
+            "1787860306-65099",
+            "--dangerously-skip-permissions",
+        ]);
+        assert!(take_flag(&mut arguments, SKIP_PERMISSIONS));
+        assert_eq!(arguments, args(&["--resume", "1787860306-65099"]));
+
+        // Nothing but the flag is an interactive session, not an unknown option.
+        let mut alone = args(&["--dangerously-skip-permissions"]);
+        assert!(take_flag(&mut alone, SKIP_PERMISSIONS));
+        assert!(alone.is_empty());
+    }
+
+    /// CLI-1: `--accept-edits` is taken out wherever it is typed, and only a line that starts a
+    /// one-shot run has somewhere to put it. A session has the mode key, a background session has
+    /// nobody, and a command that starts no run has no write to answer.
+    #[test]
+    fn the_accept_edits_flag_is_taken_out_and_belongs_to_a_one_shot_run() {
+        for typed in [
+            &["--accept-edits", "-p", "do a thing"][..],
+            &["-p", "--accept-edits", "do a thing"][..],
+            &["-p", "do a thing", "--accept-edits"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_flag(&mut arguments, ACCEPT_EDITS), "{typed:?}");
+            assert_eq!(arguments, args(&["-p", "do a thing"]), "{typed:?}");
+        }
+        let one_shot = |typed: &[&str]| {
+            let typed = args(typed);
+            is_a_one_shot(&typed, continues_with_a_task(&typed))
+        };
+        for typed in [
+            &["-p", "task"][..],
+            &["--json", "task"][..],
+            &["fix the test"][..],
+            &["--resume", "an-id", "-p", "more"][..],
+            &["--continue", "more"][..],
+        ] {
+            assert!(one_shot(typed), "{typed:?} is a one-shot run");
+        }
+        for typed in [
+            &[][..],
+            &["-i", "task"][..],
+            &["--plain"][..],
+            &["--bg", "task"][..],
+            &["--resume"][..],
+            &["--resume", "an-id"][..],
+            &["--continue"][..],
+            &["doctor"][..],
+            &["sessions"][..],
+            &["--version"][..],
+        ] {
+            assert!(!one_shot(typed), "{typed:?} is not a one-shot run");
+        }
+    }
+
+    /// It composes with the other flag that is taken out before dispatch, in either order: both are
+    /// about the whole run rather than about a task, and somebody may well want both.
+    #[test]
+    fn it_composes_with_incognito() {
+        for typed in [
+            &["--incognito", "--dangerously-skip-permissions", "-p", "x"][..],
+            &["--dangerously-skip-permissions", "--incognito", "-p", "x"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_flag(&mut arguments, INCOGNITO), "{typed:?}");
+            assert!(take_flag(&mut arguments, SKIP_PERMISSIONS), "{typed:?}");
+            assert_eq!(arguments, args(&["-p", "x"]), "left over: {typed:?}");
+        }
+    }
+
+    /// The setting is taken out wherever it was typed, with its word, and a word that is neither
+    /// is refused rather than read as `open`.
+    #[test]
+    fn the_run_network_flag_is_taken_out_with_its_word_and_refuses_any_other() {
+        use bravebot_sandbox::network::Network;
+        for typed in [
+            &["--run-network", "closed", "-p", "do a thing"][..],
+            &["-p", "--run-network", "closed", "do a thing"][..],
+            &["-p", "do a thing", "--run-network", "closed"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert_eq!(
+                take_run_network(&mut arguments),
+                Ok(Some(Network::Closed)),
+                "{typed:?}"
+            );
+            assert_eq!(arguments, args(&["-p", "do a thing"]), "{typed:?}");
+        }
+        let mut twice = args(&["--run-network", "closed", "--run-network", "open"]);
+        assert_eq!(take_run_network(&mut twice), Ok(Some(Network::Open)));
+        let mut none = args(&["-p", "do a thing"]);
+        assert_eq!(take_run_network(&mut none), Ok(None));
+        for typed in [
+            &["-p", "x", "--run-network"][..],
+            &["--run-network", "Closed", "-p", "x"][..],
+            &["--run-network", "off", "-p", "x"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_run_network(&mut arguments).is_err(), "{typed:?}");
+            assert_eq!(arguments, args(typed), "a refusal rewrote the list");
+        }
+    }
+
+    /// Each of the four flags is taken out wherever it was typed, with its path, into the list it
+    /// names, any number of times, and what is left is the invocation without them. A flag with no
+    /// path after it, or a blank one, is refused and the arguments are left as they were: read as the
+    /// next flag, it would be an entry nobody wrote.
+    #[test]
+    fn the_sandbox_flags_are_taken_out_with_their_paths_into_their_lists() {
+        let mut arguments = args(&[
+            "--sandbox-deny-read",
+            "~/.config/gh",
+            "-p",
+            "--sandbox-allow-write",
+            "/data/out",
+            "do a thing",
+            "--sandbox-deny-read",
+            "**/*.env",
+            "--sandbox-allow-read",
+            "~/.aws",
+            "--sandbox-deny-write",
+            ".env",
+        ]);
+        let lists = take_sandbox_filesystem(&mut arguments).expect("well formed");
+        let paths = |entries: &[bravebot_sandbox::rules::Entry]| {
+            entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(arguments, args(&["-p", "do a thing"]));
+        assert_eq!(paths(&lists.deny_read), ["~/.config/gh", "**/*.env"]);
+        assert_eq!(paths(&lists.allow_read), ["~/.aws"]);
+        assert_eq!(paths(&lists.allow_write), ["/data/out"]);
+        assert_eq!(paths(&lists.deny_write), [".env"]);
+        assert!(lists.deny_read.iter().all(|entry| entry.by.is_none()));
+
+        for typed in [
+            &["-p", "x", "--sandbox-deny-read"][..],
+            &["--sandbox-allow-write", "  ", "-p", "x"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_sandbox_filesystem(&mut arguments).is_err(),
+                "{typed:?}"
+            );
+            assert_eq!(arguments, args(typed), "a refusal rewrote the list");
+        }
+    }
+
+    /// The file is taken out wherever it was typed, with the argument that belongs to it, and what
+    /// is left is the invocation somebody would have typed without it. Left in, the flag would come
+    /// back as an unknown option from whichever parser met it, and its path as a second prompt.
+    #[test]
+    fn the_settings_flag_is_taken_out_with_the_file_it_named() {
+        for typed in [
+            &["--settings", "/etc/ci.json", "-p", "do a thing"][..],
+            &["-p", "--settings", "/etc/ci.json", "do a thing"][..],
+            &["-p", "do a thing", "--settings", "/etc/ci.json"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert_eq!(
+                take_settings(&mut arguments).expect("names a file"),
+                Some(PathBuf::from("/etc/ci.json")),
+                "{typed:?} named no file"
+            );
+            assert_eq!(
+                arguments,
+                args(&["-p", "do a thing"]),
+                "left over: {typed:?}"
+            );
+        }
+    }
+
+    /// It belongs to every way of starting rather than to a one-shot run, so taking it out has to
+    /// leave a resume and a bare interactive invocation recognisable to the dispatch.
+    #[test]
+    fn a_named_settings_file_leaves_every_other_way_of_starting_intact() {
+        let mut arguments = args(&["--resume", "1787860306-65099", "--settings", "/etc/ci.json"]);
+        assert!(take_settings(&mut arguments).is_ok());
+        assert_eq!(arguments, args(&["--resume", "1787860306-65099"]));
+
+        // Nothing but the flag and its file is an interactive session, not an unknown option.
+        let mut alone = args(&["--settings", "/etc/ci.json"]);
+        assert!(take_settings(&mut alone).is_ok());
+        assert!(alone.is_empty());
+    }
+
+    /// A repeat resolves the way `--mode` and `--model` already resolve one, and both are taken
+    /// out: one left behind would reach a parser that has never heard of it.
+    #[test]
+    fn the_last_settings_file_named_is_the_one_read() {
+        let mut arguments = args(&[
+            "--settings",
+            "/etc/first.json",
+            "--settings",
+            "/etc/second.json",
+            "-p",
+            "do a thing",
+        ]);
+        assert_eq!(
+            take_settings(&mut arguments).expect("names a file"),
+            Some(PathBuf::from("/etc/second.json"))
+        );
+        assert_eq!(arguments, args(&["-p", "do a thing"]));
+    }
+
+    /// The flag with nothing after it, and the flag with a path that expanded to nothing, are both
+    /// refused rather than read as no flag at all, and the arguments are left as they were typed
+    /// rather than half consumed.
+    #[test]
+    fn a_settings_flag_with_no_path_is_refused() {
+        for typed in [
+            &["-p", "do a thing", "--settings"][..],
+            &["--settings", "   ", "-p", "do a thing"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_settings(&mut arguments).is_err(),
+                "{typed:?} was accepted"
+            );
+            assert_eq!(arguments, args(typed), "the arguments changed: {typed:?}");
+        }
+    }
+
+    /// It composes with the other two flags taken out before dispatch, in any order: all three are
+    /// about the whole run rather than about a task, and a job that wants one may well want another.
+    /// What is left is the way of starting, whichever one it is, so a mode that refuses every
+    /// argument beside itself still reaches dispatch alone.
+    #[test]
+    fn a_named_settings_file_composes_with_the_other_flags_before_dispatch() {
+        for (typed, left) in [
+            (
+                &[
+                    "--incognito",
+                    "--settings",
+                    "/etc/ci.json",
+                    "--dangerously-skip-permissions",
+                    "-p",
+                    "x",
+                ][..],
+                &["-p", "x"][..],
+            ),
+            (
+                &[
+                    "--settings",
+                    "/etc/ci.json",
+                    "--dangerously-skip-permissions",
+                    "--incognito",
+                    "-p",
+                    "x",
+                ][..],
+                &["-p", "x"][..],
+            ),
+            (
+                &[
+                    "--settings",
+                    "/etc/ci.json",
+                    "--incognito",
+                    "--dangerously-skip-permissions",
+                    "--plain",
+                ][..],
+                &["--plain"][..],
+            ),
+        ] {
+            let mut arguments = args(typed);
+            assert!(take_flag(&mut arguments, INCOGNITO), "{typed:?}");
+            assert!(take_flag(&mut arguments, SKIP_PERMISSIONS), "{typed:?}");
+            assert_eq!(
+                take_settings(&mut arguments).expect("names a file"),
+                Some(PathBuf::from("/etc/ci.json")),
+                "{typed:?}"
+            );
+            assert_eq!(arguments, args(left), "left over: {typed:?}");
+        }
+    }
+
+    /// The name is taken out wherever it was typed, with the argument that belongs to it, and
+    /// beside every other flag taken out before dispatch. Left in, `--plain` would refuse it as
+    /// another argument and `-p` would read the name as the start of its prompt.
+    #[test]
+    fn the_agent_flag_is_taken_out_with_the_name_it_gave() {
+        for (typed, left) in [
+            (
+                &["--agent", "reviewer", "-p", "do a thing"][..],
+                &["-p", "do a thing"][..],
+            ),
+            (
+                &["-p", "do a thing", "--agent", "reviewer"][..],
+                &["-p", "do a thing"][..],
+            ),
+            (&["--plain", "--agent", "reviewer"][..], &["--plain"][..]),
+            (&["--agent", "reviewer"][..], &[][..]),
+            (
+                &[
+                    "--incognito",
+                    "--agent",
+                    "reviewer",
+                    "--settings",
+                    "/etc/ci.json",
+                    "--plain",
+                ][..],
+                &["--plain"][..],
+            ),
+        ] {
+            let mut arguments = args(typed);
+            take_flag(&mut arguments, INCOGNITO);
+            take_settings(&mut arguments).expect("names a file or none");
+            assert_eq!(
+                take_agent(&mut arguments).expect("names a definition"),
+                Some("reviewer".to_string()),
+                "{typed:?} named no definition"
+            );
+            assert_eq!(arguments, args(left), "left over: {typed:?}");
+        }
+    }
+
+    /// The last name is used, as with `--settings`, because every turn can work under only one
+    /// definition. A second flag left in the arguments would reach a parser that does not know it.
+    #[test]
+    fn the_last_definition_named_is_the_one_worked_under() {
+        let mut arguments = args(&["--agent", "first", "--agent", "second", "-p", "x"]);
+        assert_eq!(
+            take_agent(&mut arguments).expect("names a definition"),
+            Some("second".to_string())
+        );
+        assert_eq!(arguments, args(&["-p", "x"]));
+    }
+
+    /// A missing name and a name that expanded to nothing are refused. Treating either as no flag
+    /// would run the planner without telling anyone. So is a flag where the name should be: taken
+    /// as the name, `--json` would be removed and the run would answer in the other format. The
+    /// arguments are left as typed.
+    #[test]
+    fn an_agent_flag_with_no_name_is_refused() {
+        for typed in [
+            &["-p", "do a thing", "--agent"][..],
+            &["--agent", "  ", "-p", "do a thing"][..],
+            &["--agent", "--json", "-p", "do a thing"][..],
+            &["--agent", "-p", "do a thing"][..],
+        ] {
+            let mut arguments = args(typed);
+            assert!(
+                take_agent(&mut arguments).is_err(),
+                "{typed:?} was accepted"
+            );
+            assert_eq!(arguments, args(typed), "the arguments changed: {typed:?}");
+        }
+    }
+
+    /// A command that starts no session has nothing to address, so the name is refused rather than
+    /// silently dropped. A way of picking up a recorded session has something to address: the
+    /// record names the definition, and a name given with the flag replaces it (CLI-17).
+    #[test]
+    fn a_definition_is_refused_where_nothing_would_work_under_it() {
+        for first in [
+            "acp",
+            "doctor",
+            "update",
+            "bug-report",
+            "auth",
+            "mcp",
+            "permissions",
+            "sessions",
+            "stats",
+            "schedule",
+            "trigger",
+            "attach",
+            "reply",
+            "import-leo-creds",
+            "import-providers",
+            "completion",
+            "shell-init",
+        ] {
+            assert!(
+                without_a_definition(Some(first)).is_some(),
+                "{first} took a definition"
+            );
+        }
+        for first in [
+            None,
+            Some("-p"),
+            Some("--plain"),
+            Some("--model"),
+            Some("a task"),
+            Some("--resume"),
+            Some("-r"),
+            Some("--continue"),
+            Some("-c"),
+            Some("--fork"),
+            Some("-f"),
+            Some("--from-pr"),
+        ] {
+            assert_eq!(without_a_definition(first), None, "{first:?} was refused");
+        }
+    }
+
+    /// Each flag is removed wherever it is typed and the words it gave reach the right field, so
+    /// what remains is the task alone and `--system-prompt` does not become `--append-system-prompt`.
+    #[test]
+    fn the_system_prompt_flags_are_taken_out_with_the_words_they_gave() {
+        let mut arguments = args(&[
+            "--append-system-prompt",
+            "answer in French",
+            "-p",
+            "do a thing",
+            "--system-prompt",
+            "You are a reviewer.",
+        ]);
+        let prompts = take_system_prompts(&mut arguments).expect("both flags parse");
+        assert_eq!(prompts.replacing.as_deref(), Some("You are a reviewer."));
+        assert_eq!(prompts.appending.as_deref(), Some("answer in French"));
+        assert_eq!(arguments, args(&["-p", "do a thing"]));
+
+        let mut arguments = args(&["-p", "do a thing"]);
+        assert_eq!(
+            take_system_prompts(&mut arguments),
+            Ok(SystemPrompts::default())
+        );
+        assert_eq!(arguments, args(&["-p", "do a thing"]));
+    }
+
+    /// Of two of the same flag the last is used, for each flag independently.
+    #[test]
+    fn the_last_system_prompt_named_is_the_one_used() {
+        let mut arguments = args(&[
+            "--system-prompt",
+            "first opening",
+            "--append-system-prompt",
+            "first addition",
+            "--system-prompt",
+            "second opening",
+            "--append-system-prompt",
+            "second addition",
+            "-p",
+            "x",
+        ]);
+        let prompts = take_system_prompts(&mut arguments).expect("parses");
+        assert_eq!(prompts.replacing.as_deref(), Some("second opening"));
+        assert_eq!(prompts.appending.as_deref(), Some("second addition"));
+        assert_eq!(arguments, args(&["-p", "x"]));
+    }
+
+    /// A missing value, a blank one and a flag where the words should be are refused with the
+    /// arguments as typed. Taken as the words, `--json` would be removed and the run would answer
+    /// in the other format.
+    #[test]
+    fn a_system_prompt_flag_with_no_words_is_refused() {
+        for typed in [
+            &["-p", "do a thing", "--system-prompt"][..],
+            &["-p", "do a thing", "--append-system-prompt"][..],
+            &["--system-prompt", "  ", "-p", "do a thing"][..],
+            &["--append-system-prompt", "", "-p", "do a thing"][..],
+            &["--system-prompt", "--json", "-p", "do a thing"][..],
+            &["--append-system-prompt", "-p", "do a thing"][..],
+        ] {
+            let mut arguments = args(typed);
+            let refused =
+                take_system_prompts(&mut arguments).expect_err(&format!("{typed:?} was accepted"));
+            let typed_flag = typed
+                .iter()
+                .find(|part| part.ends_with("system-prompt"))
+                .expect("every case types a flag");
+            assert!(
+                refused.contains(typed_flag),
+                "the refusal does not name {typed_flag}: {refused}"
+            );
+            assert_eq!(arguments, args(typed), "the arguments changed: {typed:?}");
+        }
+    }
+
+    /// A sentence that opens with a dash holds a space and is words, which is what tells it from
+    /// the next flag.
+    #[test]
+    fn words_that_open_with_a_dash_are_taken_when_they_are_a_sentence() {
+        let mut arguments = args(&["--append-system-prompt", "- always use rust", "-p", "x"]);
+        let prompts = take_system_prompts(&mut arguments).expect("a sentence is words");
+        assert_eq!(prompts.appending.as_deref(), Some("- always use rust"));
+        assert_eq!(arguments, args(&["-p", "x"]));
+    }
+
+    /// The commands that start neither a session nor a task are refused, so the words are never
+    /// silently dropped. A session, a resumed one and a one-shot run take them.
+    #[test]
+    fn the_system_prompt_flags_are_refused_where_nothing_would_use_them() {
+        for first in [
+            "acp",
+            "doctor",
+            "update",
+            "bug-report",
+            "auth",
+            "mcp",
+            "permissions",
+            "sessions",
+            "stats",
+            "schedule",
+            "trigger",
+            "attach",
+            "reply",
+            "import-leo-creds",
+            "import-providers",
+            "completion",
+            "shell-init",
+        ] {
+            let refused = without_a_prompt_to_give("--system-prompt", Some(first))
+                .unwrap_or_else(|| panic!("{first} took the words"));
+            assert!(
+                refused.contains("--system-prompt") && refused.contains(first),
+                "the refusal names neither the flag nor the command: {refused}"
+            );
+        }
+        for first in [
+            None,
+            Some("-p"),
+            Some("--plain"),
+            Some("--resume"),
+            Some("--continue"),
+            Some("--fork"),
+            Some("a task"),
+        ] {
+            assert_eq!(
+                without_a_prompt_to_give("--system-prompt", first),
+                None,
+                "{first:?} was refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_flag_names_the_model_a_run_asks_for() {
+        let invocation =
+            parse_invocation(&args(&["--model", "some-model", "do a thing"])).expect("parses");
+        assert_eq!(invocation.model.as_deref(), Some("some-model"));
+        assert_eq!(invocation.prompt, "do a thing");
+    }
+
+    /// A run that named no model leaves the configured one in force, which is the whole of how
+    /// `--model` ranks above configuration without standing in for it.
+    #[test]
+    fn a_run_that_named_no_model_names_nothing() {
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.model, None);
+    }
+
+    /// The name is carried as typed, since what a tier word and an older spelling of the routing
+    /// entry name is a question for the configuration and there is none at parse.
+    #[test]
+    fn a_model_name_is_carried_as_it_was_typed() {
+        let invocation =
+            parse_invocation(&args(&["--model", "automatic", "do a thing"])).expect("parses");
+        assert_eq!(invocation.model.as_deref(), Some("automatic"));
+    }
+
+    /// A tier word in the settings key this flag outranks resolves to a model that exists, so a
+    /// flag that sent the word as written would refuse a spelling the file it overrides takes and
+    /// be answered by whatever the service substitutes for a name it has never heard of.
+    #[test]
+    fn a_tier_word_on_the_command_line_names_the_model_the_settings_key_would() {
+        let config = bravebot_config::Config::from_lookup(|key| match key {
+            "BRAVE_AI_CHAT_ENDPOINT" => Some("https://example.invalid".into()),
+            "BRAVE_SERVICES_KEY_ID" => Some("test-key-id".into()),
+            "SERVICES_KEY_AICHAT" => Some("test-signing-key".into()),
+            _ => None,
+        })
+        .expect("a configuration");
+
+        let named = parse_invocation(&args(&["--model", "opus", "do a thing"]))
+            .expect("parses")
+            .model
+            .map(|name| config.model_named(&name));
+
+        assert_eq!(
+            named.as_deref(),
+            Some(bravebot_config::bedrock::Tier::Opus.brave_model())
+        );
+    }
+
+    #[test]
+    fn a_model_flag_with_no_name_is_refused() {
+        let err = parse_invocation(&args(&["--model"])).expect_err("must refuse");
+        assert!(err.contains("--model"), "{err}");
+    }
+
+    /// A script that computed an empty variable asked for a model. Reading the blank as no choice
+    /// would answer it with whatever was configured and say nothing, which is the substitution
+    /// this flag exists to make impossible.
+    #[test]
+    fn a_blank_model_is_refused_rather_than_read_as_no_choice() {
+        for typed in [
+            args(&["--model", "", "do a thing"]),
+            args(&["--model", "   ", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("must refuse");
+            assert!(err.contains("--model"), "{typed:?}: {err}");
+        }
+    }
+
+    /// `--output-schema` names the file holding the schema, and a run that gave none has none.
+    #[test]
+    fn an_output_schema_flag_names_the_file_holding_the_schema() {
+        let parsed = parse_invocation(&args(&["--output-schema", "verdict.json", "do a thing"]))
+            .expect("parses");
+        assert_eq!(parsed.output_schema.as_deref(), Some("verdict.json"));
+        assert_eq!(parsed.prompt, "do a thing");
+        let none = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(none.output_schema, None);
+    }
+
+    #[test]
+    fn an_output_schema_flag_naming_no_file_is_refused() {
+        for typed in [
+            args(&["--output-schema"]),
+            args(&["--output-schema", "", "do a thing"]),
+            args(&["--output-schema", "   ", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("refused");
+            assert!(err.contains("--output-schema"), "{typed:?}: {err}");
+        }
+    }
+
+    /// `--goal` takes the condition whole, wherever it stands among the other flags, and a run that
+    /// gave none has no goal.
+    #[test]
+    fn a_goal_flag_names_the_condition_the_run_works_towards() {
+        for typed in [
+            args(&["--goal", "cargo test exits 0", "do a thing"]),
+            args(&["do a thing", "--goal", "  cargo test exits 0  "]),
+        ] {
+            let parsed = parse_invocation(&typed).expect("parses");
+            assert_eq!(
+                parsed.goal.as_deref(),
+                Some("cargo test exits 0"),
+                "{typed:?}"
+            );
+            assert_eq!(
+                parsed.prompt, "do a thing",
+                "the condition became the prompt"
+            );
+        }
+        let none = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(none.goal, None);
+    }
+
+    /// A blank condition and the next flag are no condition, and the flag is not lost to it.
+    #[test]
+    fn a_goal_flag_naming_no_condition_is_refused() {
+        for typed in [
+            args(&["--goal"]),
+            args(&["--goal", "", "do a thing"]),
+            args(&["--goal", "   ", "do a thing"]),
+            args(&["--goal", "--trace", "-p", "do a thing"]),
+            args(&["--goal", "-p", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("refused");
+            assert!(err.contains("--goal"), "{typed:?}: {err}");
+        }
+    }
+
+    /// A sentence opening with a dash holds a space, and is a condition.
+    #[test]
+    fn a_condition_opening_with_a_dash_is_still_a_condition() {
+        let typed = args(&["--goal", "-1 failing tests remain", "do a thing"]);
+        let parsed = parse_invocation(&typed).expect("parses");
+        assert_eq!(parsed.goal.as_deref(), Some("-1 failing tests remain"));
+    }
+
+    /// The advisor is named on the command line, separately from the model, and a run that did not
+    /// name one has none.
+    #[test]
+    fn an_advisor_flag_names_the_model_the_planner_may_consult() {
+        let invocation =
+            parse_invocation(&args(&["--advisor", "big-model", "do a thing"])).expect("parses");
+        assert_eq!(invocation.advisor.as_deref(), Some("big-model"));
+        assert_eq!(
+            invocation.model, None,
+            "the advisor replaced the run's model"
+        );
+        assert_eq!(invocation.prompt, "do a thing");
+
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.advisor, None);
+    }
+
+    /// PANEL-12. `--issue` and `--pr` are taken out of the line wherever they stand, give each its
+    /// own link, and let the last of two of a kind win.
+    #[test]
+    fn issue_and_pr_flags_are_taken_out_and_set_their_own_link() {
+        use bravebot_session::sessions::Url;
+        const ISSUE: &str = "https://github.com/brave/bravebot/issues/1267";
+        const OTHER: &str = "https://github.com/brave/bravebot/issues/9";
+        const PULL: &str = "https://github.com/brave/bravebot/pull/1270";
+        let mut line = args(&[
+            "--issue", OTHER, "-i", "fix it", "--pr", PULL, "--issue", ISSUE,
+        ]);
+        let links = take_links(&mut line).expect("links");
+        assert_eq!(links.issue, Url::read(ISSUE));
+        assert_eq!(links.pull_request, Url::read(PULL));
+        assert_eq!(line, args(&["-i", "fix it"]));
+
+        let mut line = args(&["--pr", PULL]);
+        let links = take_links(&mut line).expect("links");
+        assert_eq!(links.issue, None, "--pr set the issue");
+        assert!(line.is_empty());
+    }
+
+    /// PANEL-12. A value that `/issue` and `/pr` would refuse, or none, stops the line, and the
+    /// sentence does not repeat what was typed, which may hold the escape that made it no link.
+    #[test]
+    fn a_value_that_is_not_one_web_address_is_refused_and_not_repeated() {
+        for flag in ["--issue", "--pr"] {
+            for value in [
+                "https://example.com/a\nhttps://example.com/b",
+                "https://example.com/\u{1b}]0;owned\u{7}",
+                "ftp://example.com/pull/1",
+                "not a link",
+                "https:///pull/1",
+                "",
+            ] {
+                let complaint = take_links(&mut args(&[flag, value])).expect_err("refused");
+                assert!(complaint.contains(flag), "{flag} {value:?}: {complaint}");
+                assert!(
+                    value.is_empty() || !complaint.contains(value),
+                    "{flag} {value:?}: {complaint}"
+                );
+            }
+            let complaint = take_links(&mut args(&[flag])).expect_err("refused");
+            assert!(complaint.contains(flag), "{complaint}");
+        }
+    }
+
+    /// The links go to a session that opens, and a line that opens none refuses them rather than
+    /// dropping them.
+    #[test]
+    fn only_a_line_that_opens_a_session_takes_links() {
+        for opens in [
+            &[][..],
+            &["-i", "fix it"],
+            &["--resume", "abc"],
+            &["--resume"],
+            &["-c"],
+            &["--fork", "abc"],
+            &["--from-pr", "12"],
+        ] {
+            assert!(opens_a_session(&args(opens)), "{opens:?}");
+        }
+        for opens_none in [
+            &["fix it"][..],
+            &["-p", "fix it"],
+            &["--resume", "abc", "-p", "go"],
+            &["--bg", "fix it"],
+            &["--plain"],
+            &["doctor"],
+            &["--mode", "manifest", "go"],
+        ] {
+            assert!(!opens_a_session(&args(opens_none)), "{opens_none:?}");
+        }
+    }
+
+    /// A script that computed an empty variable asked for an advisor, and running without one would
+    /// not say so.
+    #[test]
+    fn a_blank_advisor_is_refused_rather_than_read_as_no_choice() {
+        for typed in [
+            args(&["--advisor"]),
+            args(&["--advisor", "", "do a thing"]),
+            args(&["--advisor", "   ", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("must refuse");
+            assert!(err.contains("--advisor"), "{typed:?}: {err}");
+        }
+    }
+
+    /// CLI-34. The model processors run on is named on the command line, separately from the run's
+    /// model and from the advisor, and a run that did not name one leaves the setting to answer.
+    #[test]
+    fn a_processor_model_flag_names_the_model_processors_run_on() {
+        let invocation = parse_invocation(&args(&[
+            "--processor-model",
+            "  cheap-model ",
+            "do a thing",
+        ]))
+        .expect("parses");
+        assert_eq!(invocation.processor_model.as_deref(), Some("cheap-model"));
+        assert_eq!(
+            invocation.model, None,
+            "the processor model replaced the run's model"
+        );
+        assert_eq!(
+            invocation.advisor, None,
+            "the processor model was read as the advisor"
+        );
+        assert_eq!(invocation.prompt, "do a thing");
+
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.processor_model, None);
+    }
+
+    /// CLI-34. A script that computed an empty variable asked for a cheaper model, and running the
+    /// processors on the dear one would not say so.
+    #[test]
+    fn a_blank_processor_model_is_refused_rather_than_read_as_no_choice() {
+        for typed in [
+            args(&["--processor-model"]),
+            args(&["--processor-model", "", "do a thing"]),
+            args(&["--processor-model", "   ", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("must refuse");
+            assert!(err.contains("--processor-model"), "{typed:?}: {err}");
+        }
+    }
+
+    /// CLI-34. A machine whose managed settings refuse a model does not run processors on it either,
+    /// and the run stops before it starts, naming the model, rather than at the first processor. A
+    /// model the file does not name is put in force over the setting, and `inherit` and no flag
+    /// leave the run's own model to answer.
+    ///
+    /// Not a binary run, for the reason the advisor's is not: the managed file is read from a fixed
+    /// system path.
+    #[test]
+    fn a_processor_model_the_managed_settings_refuse_is_refused_before_the_run() {
+        let scratch = Scratch::new("cli-processor-model-managed");
+        let (managed, file) = pinned(&scratch, r#"{"models": {"deny": ["stub/cheap"]}}"#);
+        let settings = layers(
+            &scratch,
+            Some(
+                r#"{"provider": {"stub": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                    "models": {"planner": {}, "cheap": {}, "dear": {}}}}}"#,
+            ),
+            None,
+        );
+        let mut config =
+            Config::from_env_and_settings(&settings, &managed).expect("a configuration");
+
+        let how = put_processor_model_in_force(&mut config, Some("stub/cheap"))
+            .expect_err("must be refused");
+        assert!(
+            how.contains("stub/cheap") && how.contains(&file.display().to_string()),
+            "the refusal named neither the model nor the file that refused it: {how}"
+        );
+        assert_eq!(
+            config.processor_model, None,
+            "a refused model was put in force"
+        );
+
+        assert_eq!(
+            put_processor_model_in_force(&mut config, Some("stub/dear")),
+            Ok(())
+        );
+        assert_eq!(config.processor_model.as_deref(), Some("stub/dear"));
+        assert_eq!(
+            put_processor_model_in_force(&mut config, Some("Inherit")),
+            Ok(())
+        );
+        assert_eq!(config.processor_model, None);
+        assert_eq!(put_processor_model_in_force(&mut config, None), Ok(()));
+    }
+
+    /// CLI-21. A machine whose managed settings refuse a model does not request it for an advisor
+    /// either, and the run stops before the first round naming the file that refused it, rather than
+    /// starting with an advisor whose first question could not be sent.
+    ///
+    /// Not a binary run, because the managed file is read from a fixed system path that a test
+    /// cannot point elsewhere. The configuration is built from a managed file the test writes.
+    #[test]
+    fn an_advisor_the_managed_settings_refuse_is_refused_before_the_run() {
+        let scratch = Scratch::new("cli-advisor-managed");
+        let (managed, file) = pinned(&scratch, r#"{"models": {"deny": ["stub/advisor-model"]}}"#);
+        let settings = layers(
+            &scratch,
+            Some(
+                r#"{"provider": {"stub": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                    "models": {"planner": {}, "advisor-model": {}}}}}"#,
+            ),
+            None,
+        );
+        let config = Config::from_env_and_settings(&settings, &managed).expect("a configuration");
+
+        let how = resolve_advisor(&config, "stub/advisor-model").expect_err("must be refused");
+        assert!(
+            how.contains("stub/advisor-model") && how.contains(&file.display().to_string()),
+            "the refusal named neither the model nor the file that refused it: {how}"
+        );
+        assert_eq!(
+            resolve_advisor(&config, "stub/planner").as_deref(),
+            Ok("stub/planner"),
+            "a model the file does not name was refused"
+        );
+    }
+
+    /// The level a run asks for, in any case, and nothing where the flag was not given, which
+    /// leaves the settings and the saved pick to answer.
+    #[test]
+    fn an_effort_flag_names_the_level_a_run_asks_for() {
+        let invocation =
+            parse_invocation(&args(&["--effort", "XHigh", "do a thing"])).expect("parses");
+        assert_eq!(
+            invocation.effort,
+            Some(bravebot_session::store::Effort::Xhigh)
+        );
+        assert_eq!(invocation.prompt, "do a thing");
+
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.effort, None);
+    }
+
+    /// A word that is no level must not reach a request field, and read as no choice it would
+    /// hand a script that asked for one whatever the settings said without telling it. The refusal
+    /// names the levels, since the word typed is the one thing the person got wrong.
+    #[test]
+    fn an_effort_flag_naming_no_level_is_refused() {
+        for typed in [
+            args(&["--effort"]),
+            args(&["--effort", "", "do a thing"]),
+            args(&["--effort", "  ", "do a thing"]),
+            args(&["--effort", "highest", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("must refuse");
+            assert!(err.contains("--effort"), "{typed:?}: {err}");
+            assert!(err.contains("xhigh"), "{typed:?}: {err}");
+        }
+    }
+
+    /// The two flags name a limit each, and a run that names neither has none, which leaves the
+    /// built-in bound to be the only one (CLI-38).
+    #[test]
+    fn the_limit_flags_name_the_most_rounds_and_tokens_a_run_may_spend() {
+        let invocation = parse_invocation(&args(&[
+            "--max-rounds",
+            "12",
+            "do a thing",
+            "--max-tokens",
+            "250000",
+        ]))
+        .expect("parses");
+        assert_eq!(
+            invocation.limits,
+            RunLimits {
+                rounds: Some(12),
+                tokens: Some(250_000),
+            }
+        );
+        assert_eq!(invocation.prompt, "do a thing");
+
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.limits, RunLimits::default());
+    }
+
+    /// A rounds limit has to be below the built-in bound, since at it the bound takes the tools
+    /// away and has the run answer, which ends on status 0 where the limit is meant to give 8. A
+    /// limit in tokens has no upper end.
+    #[test]
+    fn a_rounds_limit_has_to_be_below_the_built_in_bound() {
+        let below = (MAX_TOOL_ROUNDS - 1).to_string();
+        let invocation = parse_invocation(&args(&["--max-rounds", &below, "go"])).expect("parses");
+        assert_eq!(invocation.limits.rounds, Some(MAX_TOOL_ROUNDS - 1));
+
+        for refused in [MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS + 1] {
+            let typed = refused.to_string();
+            let err =
+                parse_invocation(&args(&["--max-rounds", &typed, "go"])).expect_err("refused");
+            assert!(err.contains("--max-rounds"), "{err}");
+            assert!(err.contains(&below), "{err}");
+        }
+
+        let invocation =
+            parse_invocation(&args(&["--max-tokens", "18446744073709551615", "go"])).expect("ok");
+        assert_eq!(invocation.limits.tokens, Some(u64::MAX));
+    }
+
+    /// A value that is not a whole number of 1 or more is refused by name, because read as no
+    /// limit it would hand a script that computed a bad value a run with no cap, untold. Zero is
+    /// among them, since a limit of nothing stops the run before its first request.
+    #[test]
+    fn a_limit_flag_that_is_not_a_whole_number_of_one_or_more_is_refused() {
+        for flag in ["--max-rounds", "--max-tokens"] {
+            for value in [
+                "",
+                " ",
+                "0",
+                "00",
+                "-1",
+                "+5",
+                "5.0",
+                "1e3",
+                "ten",
+                "5 ",
+                " 5",
+                "0x10",
+                "1_000",
+                "--json",
+                "99999999999999999999999",
+            ] {
+                for typed in [
+                    args(&[flag, value, "do a thing"]),
+                    args(&["do a thing", flag, value]),
+                ] {
+                    let err = parse_invocation(&typed).expect_err("must refuse");
+                    assert!(err.contains(flag), "{typed:?}: {err}");
+                }
+            }
+            let err = parse_invocation(&args(&["do a thing", flag])).expect_err("refused");
+            assert!(err.contains(flag), "{flag} ending the line: {err}");
+        }
+    }
+
+    /// The last value wins, as it does for `--effort`, so a wrapper that appends a flag to a line
+    /// it was given can change it.
+    #[test]
+    fn the_last_value_given_for_a_limit_is_the_one_in_force() {
+        let invocation = parse_invocation(&args(&[
+            "--max-rounds",
+            "9",
+            "--max-rounds",
+            "3",
+            "--max-tokens",
+            "10",
+            "--max-tokens",
+            "20",
+            "go",
+        ]))
+        .expect("parses");
+        assert_eq!(invocation.limits.rounds, Some(3));
+        assert_eq!(invocation.limits.tokens, Some(20));
+    }
+
+    /// A manifest run plans before it makes a round of tool calls, so a limit on rounds has nothing
+    /// to count and a limit it accepted and did not hold would cost what it was given to bound. A
+    /// turn is never refused, and neither is a manifest run given no limit.
+    #[test]
+    fn a_manifest_run_refuses_the_limit_flags_by_name() {
+        let both = RunLimits {
+            rounds: Some(3),
+            tokens: Some(100),
+        };
+        let rounds = RunLimits {
+            rounds: Some(3),
+            tokens: None,
+        };
+        let tokens = RunLimits {
+            rounds: None,
+            tokens: Some(100),
+        };
+
+        let refused = limit_not_with_a_manifest(Mode::Manifest, rounds).expect("refused");
+        assert!(refused.contains("--max-rounds"), "{refused}");
+        let refused = limit_not_with_a_manifest(Mode::Manifest, tokens).expect("refused");
+        assert!(refused.contains("--max-tokens"), "{refused}");
+        let refused = limit_not_with_a_manifest(Mode::Manifest, both).expect("refused");
+        assert!(refused.contains("--max-rounds"), "{refused}");
+
+        assert_eq!(limit_not_with_a_manifest(Mode::Turn, both), None);
+        assert_eq!(
+            limit_not_with_a_manifest(Mode::Manifest, RunLimits::default()),
+            None
+        );
+    }
+
+    /// A goal run sends the work back as further turns, and each counts a limit from nothing, so a
+    /// limit given with `--goal` would bound each round and let the run spend it eleven times over.
+    /// It is refused by name, as it is for a manifest run. A run with no goal is never refused, and
+    /// neither is a goal run given no limit.
+    #[test]
+    fn a_goal_run_refuses_the_limit_flags_by_name() {
+        let both = RunLimits {
+            rounds: Some(3),
+            tokens: Some(100),
+        };
+        let rounds = RunLimits {
+            rounds: Some(3),
+            tokens: None,
+        };
+        let tokens = RunLimits {
+            rounds: None,
+            tokens: Some(100),
+        };
+
+        let refused = limit_not_with_a_goal(true, rounds).expect("refused");
+        assert!(refused.contains("--max-rounds"), "{refused}");
+        assert!(refused.contains("--goal"), "{refused}");
+        let refused = limit_not_with_a_goal(true, tokens).expect("refused");
+        assert!(refused.contains("--max-tokens"), "{refused}");
+        let refused = limit_not_with_a_goal(true, both).expect("refused");
+        assert!(refused.contains("--max-rounds"), "{refused}");
+
+        assert_eq!(limit_not_with_a_goal(false, both), None);
+        assert_eq!(limit_not_with_a_goal(true, RunLimits::default()), None);
+    }
+
+    /// Either flag may lead the line, as the other task flags do: `bravebot --max-rounds 3 "task"`
+    /// is a one-shot run and not an unknown option.
+    #[test]
+    fn a_limit_flag_may_lead_the_line_like_the_other_task_flags() {
+        for flag in ["--max-rounds", "--max-tokens"] {
+            assert!(TASK_FLAGS.contains(&flag), "{flag}");
+            assert!(
+                flags::is_a_one_shot(&args(&[flag, "3", "go"]), false),
+                "{flag}"
+            );
+        }
+    }
+
+    /// The flag names a model for one run, which is the only thing a script can pin a model
+    /// against a choice recorded elsewhere with.
+    #[test]
+    fn the_command_line_outranks_the_record_a_session_would_read() {
+        assert_eq!(
+            model_asked_for(
+                Some("named-on-the-command-line".into()),
+                Some("chosen".into())
+            )
+            .as_deref(),
+            Some("named-on-the-command-line")
+        );
+    }
+
+    /// A run that named no model asks for what a session opening in the same directory would, so
+    /// reaching a model somebody already chose needs no interactive step and no flag.
+    #[test]
+    fn a_run_that_named_no_model_reads_the_record_a_session_would() {
+        assert_eq!(
+            model_asked_for(None, Some("chosen".into())).as_deref(),
+            Some("chosen")
+        );
+    }
+
+    /// Nothing recorded and nothing named leaves the configured model in force, which is what a
+    /// person who has never picked one gets in either surface.
+    #[test]
+    fn a_run_with_nothing_to_go_on_leaves_the_configured_model_in_force() {
+        assert_eq!(model_asked_for(None, None), None);
+    }
+
+    /// A run asked for a model and was answered by another. Nothing on stdout says so, and a
+    /// model is pinned for a reason whichever route pinned it.
+    #[test]
+    fn a_model_asked_for_and_not_served_is_reported() {
+        let complaint = model_not_served("a-premium-model", true, "a-free-one")
+            .expect("a complaint about the substitution");
+        assert!(complaint.contains("a-premium-model"), "{complaint}");
+        assert!(complaint.contains("a-free-one"), "{complaint}");
+    }
+
+    /// The routing entry asks for whichever model the server picks, so a concrete name coming back
+    /// is that name working rather than a model standing in for another.
+    #[test]
+    fn a_routing_entry_answered_by_a_model_is_not_a_substitution() {
+        assert_eq!(
+            model_not_served(bravebot_config::DEFAULT_MODEL, true, "the-model-picked"),
+            None
+        );
+    }
+
+    /// A backend asked by an opaque handle answers with a name that never matched what went in, so
+    /// comparing them would fail every run ever made against one.
+    #[test]
+    fn a_backend_that_does_not_report_what_it_was_asked_is_not_compared() {
+        assert_eq!(
+            model_not_served("an-opaque-handle", false, "some-model"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_model_that_answered_as_asked_is_no_complaint() {
+        assert_eq!(model_not_served("same-model", true, "same-model"), None);
+    }
+
+    /// The complaint is about the run rather than part of what the run produced, so a pipe of
+    /// stdout carries the reply and nothing else whichever way the run went.
+    #[test]
+    fn a_substituted_model_is_reported_beside_the_reply_never_in_it() {
+        let (reply, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[],
+            attempt: None,
+            model: None,
+            clean: true,
+            ending: Ending::Failed,
+            not_served: Some("a-premium-model was not served"),
+        });
+
+        assert_eq!(reply, "ok\n");
+        assert!(
+            beside.contains("BB1001: a-premium-model was not served"),
+            "{beside}"
+        );
+    }
+
+    /// The status is the only part of a finished run a script is certain to read, so a model the
+    /// command line named and did not get has to reach it. A turn nothing refused is not enough on
+    /// its own.
+    #[test]
+    fn a_run_answered_by_a_model_other_than_the_one_it_named_does_not_succeed() {
+        let substituted = ending_of_a_turn(true, true, true);
+        assert!(!substituted.ok());
+        assert_eq!(substituted.status(), 1);
+
+        assert!(ending_of_a_turn(true, true, false).ok());
+    }
+
+    /// A turn that was refused something did not do what it was asked, however much of a reply it
+    /// produced on the way. The refusal is a line on stderr and the reply still goes to stdout, so
+    /// a script piping one command into the next has only the status to tell it that the work it
+    /// asked for did not all happen.
+    ///
+    /// Its own status rather than the catch-all, because a policy refusal is the one failure that
+    /// needs a person rather than another attempt.
+    #[test]
+    fn a_turn_something_was_refused_in_does_not_succeed() {
+        let refused = ending_of_a_turn(false, false, false);
+        assert!(!refused.ok());
+        assert_eq!(refused, Ending::Refused);
+        assert_eq!(refused.status(), 4);
+
+        assert!(ending_of_a_turn(true, false, false).ok());
+    }
+
+    /// An unmet condition is what a status of 0 cannot say, so it decides only where the turns would
+    /// have ended well. A refusal or a substituted model is what a person deals with first.
+    #[test]
+    fn an_unmet_goal_decides_the_ending_only_where_the_turns_ended_well() {
+        let spent = goal_run::Unmet::Spent {
+            rounds: 10,
+            last: "still red".to_string(),
+        };
+        assert_eq!(
+            ending_with_the_goal(Ending::Done, Some(&spent)),
+            Ending::Unmet
+        );
+        assert_eq!(ending_with_the_goal(Ending::Done, None), Ending::Done);
+        assert_eq!(
+            ending_with_the_goal(Ending::Refused, Some(&spent)),
+            Ending::Refused
+        );
+        assert_eq!(
+            ending_with_the_goal(Ending::Failed, Some(&spent)),
+            Ending::Failed
+        );
+        let unreachable = goal_run::Unmet::Unchecked {
+            ending: Ending::Unreachable,
+            problem: "no route".to_string(),
+        };
+        assert_eq!(
+            ending_with_the_goal(Ending::Done, Some(&unreachable)),
+            Ending::Unreachable
+        );
+    }
+
+    /// Where a refusal outranks an unmet condition both are said, in the result object's message and
+    /// beside the reply, and only a run that ended on the unmet status claims its identifier.
+    #[test]
+    fn a_goal_that_went_unmet_is_said_whether_or_not_it_decided_the_ending() {
+        let why = goal_run::Unmet::Stalled {
+            last: "still red".to_string(),
+        };
+
+        let message =
+            failure_with_the_goal(Some("a gate refused something"), Some(&why)).expect("a message");
+        assert!(
+            message.starts_with("a gate refused something\n") && message.contains("still red"),
+            "{message}"
+        );
+        assert_eq!(failure_with_the_goal(None, None), None);
+
+        let mut outranked = Vec::new();
+        say_the_goal_unmet(&mut outranked, Ending::Refused, &why);
+        let outranked = String::from_utf8(outranked).expect("utf-8");
+        assert!(
+            outranked.contains("still red") && !outranked.contains("BB1"),
+            "{outranked}"
+        );
+
+        let mut deciding = Vec::new();
+        say_the_goal_unmet(&mut deciding, Ending::Unmet, &why);
+        let deciding = String::from_utf8(deciding).expect("utf-8");
+        assert!(deciding.starts_with("BB1007: "), "{deciding}");
+    }
+
+    /// Below the flag the model is whatever was recorded or configured, so failing here would have
+    /// a script that names no model exit non-zero over a choice made in a terminal. It is still
+    /// reported, which is the whole of what a person needs to see it.
+    #[test]
+    fn a_substitution_the_command_line_did_not_ask_for_is_reported_and_not_failed() {
+        let substituted = Finished {
+            reply: "ok",
+            notices: &[],
+            attempt: None,
+            model: None,
+            clean: true,
+            ending: Ending::Done,
+            not_served: Some("a-premium-model was not served"),
+        };
+
+        let (reply, beside) = written(&substituted);
+        assert_eq!(reply, "ok\n");
+        assert!(beside.contains("was not served"), "{beside}");
+        // Not a failure here, so nothing claims the identifier of one.
+        assert!(!beside.contains("BB1"), "{beside}");
+        assert!(ending_of_a_turn(true, false, true).ok());
+    }
+
+    /// NAME-10: `--session-ref` takes an id, once however often it is written, and refuses a
+    /// missing or blank one.
+    #[test]
+    fn a_session_ref_flag_names_a_session_once() {
+        let invocation = parse_invocation(&args(&[
+            "--session-ref",
+            "abc-123",
+            "do a thing",
+            "--session-ref",
+            " abc-123 ",
+            "--session-ref",
+            "def-456",
+        ]))
+        .expect("parses");
+        assert_eq!(invocation.session_refs, ["abc-123", "def-456"]);
+        for typed in [
+            args(&["--session-ref"]),
+            args(&["--session-ref", "  ", "x"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("refused");
+            assert!(err.contains("--session-ref"), "{typed:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_directory_flag_names_a_directory_the_run_may_reach() {
+        let invocation = parse_invocation(&args(&["--add-dir", "/somewhere/else", "do a thing"]))
+            .expect("parses");
+        assert_eq!(invocation.directories, vec!["/somewhere/else".to_string()]);
+        assert_eq!(invocation.prompt, "do a thing");
+    }
+
+    /// Reaching one sibling checkout is no more natural than reaching two, and a flag that could
+    /// only be given once would be a rule about typing.
+    #[test]
+    fn the_directory_flag_is_repeatable() {
+        let invocation = parse_invocation(&args(&[
+            "--add-dir",
+            "/one",
+            "--add-dir",
+            "/two",
+            "do a thing",
+        ]))
+        .expect("parses");
+        assert_eq!(
+            invocation.directories,
+            vec!["/one".to_string(), "/two".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_directory_flag_with_no_path_is_refused() {
+        for typed in [
+            args(&["--add-dir"]),
+            args(&["--add-dir", "  ", "do a thing"]),
+        ] {
+            let err = parse_invocation(&typed).expect_err("must refuse");
+            assert!(err.contains("--add-dir"), "{typed:?}: {err}");
+        }
+    }
+
+    /// The point of the flag: a file outside the working directory is unreachable until one is
+    /// opened, and reachable afterwards.
+    #[test]
+    fn a_directory_the_command_line_named_is_reachable() {
+        let scratch = Scratch::new("add-dir-reachable");
+        let project = scratch.directory("project");
+        let beside = scratch.directory("beside");
+        let file = beside.join("notes.md");
+        std::fs::write(&file, "notes").expect("write");
+
+        let mut workspace = Workspace::new(project).expect("a workspace");
+        assert!(
+            workspace.confines(&file).is_err(),
+            "reachable before it was opened"
+        );
+        open_directories(&mut workspace, &[beside.display().to_string()]).expect("opens");
+        assert!(workspace.confines(&file).is_ok(), "not reachable after");
+    }
+
+    /// CHECKOUT-7. `--add-dir` of a directory holding the working directory says so, since a run
+    /// is where nobody is watching to find out from a refused spawn; one beside it says nothing.
+    #[test]
+    fn a_directory_holding_the_working_directory_is_said_to_end_checkouts() {
+        let scratch = Scratch::new("add-dir-ends-checkouts");
+        let project = scratch.directory("project");
+        let beside = scratch.directory("beside");
+        let mut workspace = Workspace::new(project).expect("a workspace");
+
+        let notices =
+            open_directories(&mut workspace, &[beside.display().to_string()]).expect("opens");
+        assert!(notices.is_empty(), "{notices:?}");
+        let notices =
+            open_directories(&mut workspace, &[scratch.path.display().to_string()]).expect("opens");
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("no delegate is given a checkout while it is open"),
+            "{notices:?}"
+        );
+    }
+
+    /// A script that asked to reach a directory and did not would otherwise fail somewhere further
+    /// in, over a file it was told it could open.
+    #[test]
+    fn a_directory_that_cannot_be_opened_stops_the_run() {
+        let scratch = Scratch::new("add-dir-missing");
+        let mut workspace = Workspace::new(scratch.directory("project")).expect("a workspace");
+        let absent = scratch.path.join("not-here");
+
+        let err = open_directories(&mut workspace, &[absent.display().to_string()])
+            .expect_err("must refuse");
+        assert!(err.contains("not-here"), "{err}");
+    }
+
+    /// CLI-31. The prompt reaches the session as written. A prompt a script assembled holds line
+    /// breaks and indentation that are part of it, and joining the words after the flag, as `--bg`
+    /// does, would send a different prompt from the one the script built.
+    #[test]
+    fn the_prompt_a_session_opens_on_is_the_argument_as_written() {
+        let written = "Fix the failing test.\n\n  - run it alone first\n  - then the suite";
+        assert_eq!(
+            prompt_to_open_on(&args(&[written])),
+            Ok((written.to_string(), AskedFor::default()))
+        );
+        // A sentence opening with `-` holds a space, so it is a prompt and not the next flag.
+        assert_eq!(
+            prompt_to_open_on(&args(&["- one item"])),
+            Ok(("- one item".to_string(), AskedFor::default()))
+        );
+    }
+
+    /// CLI-31. A line giving `-i` no prompt is refused rather than opening an empty session. A script
+    /// whose variable expanded to nothing asked for a task, and a session waiting for somebody to
+    /// type one leaves it undone with nothing said. A flag after `-i` is the next flag, and taken as
+    /// the prompt it would send `--json` to the planner as the person's words.
+    #[test]
+    fn a_session_given_no_prompt_is_refused() {
+        let refused = t!(cli_interactive_needs_a_prompt).to_string();
+        for words in [
+            &[][..],
+            &["  \n"][..],
+            &["--json"][..],
+            &["-p"][..],
+            &[" --json "][..],
+        ] {
+            assert_eq!(
+                prompt_to_open_on(&args(words)),
+                Err(refused.clone()),
+                "{words:?} was taken as a prompt"
+            );
+        }
+    }
+
+    /// CLI-31. `--model` and `--effort` after the prompt reach the session, in either order and
+    /// whichever is given. A session that read them and kept neither would open on the model a file
+    /// or an earlier pick chose, and the line that named one would not know.
+    #[test]
+    fn a_model_and_a_level_after_the_prompt_reach_the_session() {
+        let asked = |model: Option<&str>, effort| AskedFor {
+            model: model.map(str::to_string),
+            effort,
+        };
+        for (words, expected) in [
+            (
+                &["fix it", "--model", "opus"][..],
+                asked(Some("opus"), None),
+            ),
+            (
+                &["fix it", "--effort", "high"][..],
+                asked(None, Some(Effort::High)),
+            ),
+            (
+                &["fix it", "--effort", "low", "--model", "brave/x"][..],
+                asked(Some("brave/x"), Some(Effort::Low)),
+            ),
+            (
+                &["fix it", "--model", "a", "--model", "b"][..],
+                asked(Some("b"), None),
+            ),
+        ] {
+            assert_eq!(
+                prompt_to_open_on(&args(words)),
+                Ok(("fix it".to_string(), expected)),
+                "{words:?}"
+            );
+        }
+    }
+
+    /// CLI-31. A `--model` with no name and an `--effort` that is no level are refused, as they are
+    /// for a one-shot run. A name the service does not know is substituted and reported, but a word
+    /// that is no level would be dropped and the session opened at another level without a word.
+    #[test]
+    fn a_blank_model_or_an_unknown_level_after_the_prompt_is_refused() {
+        for (words, refused) in [
+            (
+                &["fix it", "--model"][..],
+                t!(cli_model_needs_a_name).to_string(),
+            ),
+            (
+                &["fix it", "--model", "  "][..],
+                t!(cli_model_needs_a_name).to_string(),
+            ),
+            (
+                &["fix it", "--effort"][..],
+                effort_level(None).expect_err("no level"),
+            ),
+            (
+                &["fix it", "--effort", "turbo"][..],
+                effort_level(Some(&"turbo".to_string())).expect_err("no level"),
+            ),
+        ] {
+            assert_eq!(prompt_to_open_on(&args(words)), Err(refused), "{words:?}");
+        }
+    }
+
+    /// CLI-31. Anything else after the prompt is refused, and named. What the line could add is a
+    /// one-shot run's: a session that let `--file` pass unread would run without a file the line
+    /// asked for, and one that let an unquoted second word pass would send part of the prompt.
+    #[test]
+    fn anything_else_after_the_prompt_is_refused_by_name() {
+        for (words, named) in [
+            (&["fix it", "--file", "a.txt"][..], "--file"),
+            (&["fix it", "--mode", "plan"][..], "--mode"),
+            (&["fix it", "--model", "opus", "--json"][..], "--json"),
+            (&["fix", "the", "tests"][..], "the"),
+        ] {
+            let refused = prompt_to_open_on(&args(words)).expect_err("must refuse");
+            assert!(
+                refused.contains(&format!("'{named}'")),
+                "{words:?}: {refused}"
+            );
+        }
+    }
+
+    /// CLI-31. `-i` after another way of starting a session is refused rather than dropped. `--fork`
+    /// and `--from-pr` read no further than their value, so the session would open and the prompt
+    /// never be sent, and `--bg` joins its words, so the session nobody watches would be given a
+    /// prompt opening `-i`. A command's own words are not read: `permissions check` takes a
+    /// program's arguments, and `grep -i` is one.
+    #[test]
+    fn a_session_flag_beside_another_way_of_starting_is_refused() {
+        for (typed, start) in [
+            (&["--fork", "abc", "-i", "try the other way"][..], "--fork"),
+            (&["-f", "abc", "--interactive", "try it"][..], "-f"),
+            (&["--from-pr", "12", "-i", "pick it up"][..], "--from-pr"),
+            (&["--resume", "abc", "-i"][..], "--resume"),
+            (&["-r", "abc", "-i", "carry on"][..], "-r"),
+            (&["--continue", "-i"][..], "--continue"),
+            (&["-c", "-i", "carry on"][..], "-c"),
+            (&["--bg", "-i", "fix the tests"][..], "--bg"),
+        ] {
+            assert_eq!(
+                interactive_out_of_place(&args(typed)),
+                Some(t!(cli_interactive_not_with_another_start, flag = start)),
+                "{typed:?}"
+            );
+        }
+        for typed in [
+            &["-i", "fix it"][..],
+            &["--resume", "abc"][..],
+            &["permissions", "check", "Bash", "grep", "-i", "needle"][..],
+            &["--bg", "explain what -i does"][..],
+        ] {
+            assert_eq!(interactive_out_of_place(&args(typed)), None, "{typed:?}");
+        }
+    }
+
+    /// CLI-31. `-i` behind a task's options is refused rather than read as the task. A one-shot run
+    /// takes its first word that is no option as the prompt, so `bravebot --model opus -i` would run
+    /// the task `-i` with nobody watching, and `bravebot --model opus -i "fix it"` would be refused
+    /// over `fix it` with nothing said about where `-i` goes.
+    #[test]
+    fn a_session_flag_behind_a_tasks_options_is_refused_rather_than_run_as_the_task() {
+        let refused = t!(cli_interactive_not_with_a_task).to_string();
+        for typed in [
+            &["--model", "opus", "-i"][..],
+            &["--model", "opus", "--interactive", "fix it"][..],
+            &["-p", "fix it", "-i"][..],
+        ] {
+            assert_eq!(
+                parse_invocation(&args(typed)).err(),
+                Some(refused.clone()),
+                "{typed:?}"
+            );
+        }
+    }
+
+    /// Turn is what an unqualified run has always been, so an omitted `--mode` has to stay that.
+    #[test]
+    fn the_default_mode_is_the_turn_loop() {
+        let invocation = parse_invocation(&args(&["do a thing"])).expect("parses");
+        assert_eq!(invocation.mode, Mode::Turn);
+        assert_eq!(invocation.prompt, "do a thing");
+    }
+
+    #[test]
+    fn a_leading_mode_flag_is_a_task_not_an_unknown_option() {
+        let invocation =
+            parse_invocation(&args(&["--mode", "manifest", "do a thing"])).expect("parses");
+        assert_eq!(invocation.mode, Mode::Manifest);
+        assert_eq!(invocation.prompt, "do a thing");
+    }
+
+    #[test]
+    fn an_unknown_mode_is_refused_rather_than_guessed() {
+        let err =
+            parse_invocation(&args(&["--mode", "safe", "do a thing"])).expect_err("must refuse");
+        assert!(err.contains("safe"), "{err}");
+        assert!(err.contains("turn") && err.contains("manifest"), "{err}");
+    }
+
+    /// A failed plan is the document nobody would otherwise see. It belongs beside the reply,
+    /// never in it: a pipe of stdout would otherwise pick up the model's own words mixed into
+    /// whatever the run produced.
+    #[test]
+    fn a_failed_plan_is_printed_beside_the_reply() {
+        let (reply, beside) = written(&Finished {
+            reply: "ok",
+            notices: &[],
+            attempt: Some("manifest proposed, which was not usable\n  not JSON\n"),
+            model: None,
+            clean: true,
+            ending: Ending::Done,
+            not_served: None,
+        });
+        assert_eq!(reply, "ok\n");
+        assert!(beside.contains("not usable"), "got: {beside}");
+        assert!(!reply.contains("not usable"));
+    }
+
+    /// A manifest run that stopped is the one worth looking at, so what it produced is printed
+    /// whether or not `--trace` was asked for. The trail is not the flag's to add here: it was
+    /// written as the gates ran.
+    #[test]
+    fn a_stopped_manifest_prints_what_it_produced_without_the_trace_flag() {
+        let attempt = bravebot_agent::manifest::Attempt {
+            proposed: Some("not JSON at all".to_string()),
+            steps: vec!["1. read notes.md: done".to_string()],
+            ..Default::default()
+        };
+
+        let mut said = Vec::new();
+        say_what_a_stopped_manifest_produced(&mut said, &attempt);
+        let said = String::from_utf8(said).expect("utf-8");
+        assert!(said.contains("not JSON at all"), "got: {said}");
+        assert!(said.contains("read notes.md"), "got: {said}");
+        assert!(!said.contains("audit trail"), "got: {said}");
+    }
+
+    /// Nobody is watching a one-shot run, so the list that answers a prompt in advance answers
+    /// nothing: there is no prompt for it to reach. Without the flag an allow rule decides no
+    /// more than a line nobody wrote, while the two lists that refuse and that force an ask carry
+    /// over, because those say something a run with nobody at it can still act on.
+    #[test]
+    fn an_allow_rule_decides_nothing_for_a_run_nobody_is_watching() {
+        use bravebot_core::permissions::{Decision, Ruling, Subject};
+
+        let settings = bravebot_config::Settings::parse(
+            r#"{
+              "permissions": {
+                "allow": ["Edit(**)"],
+                "ask": ["Bash(git push *)"],
+                "deny": ["Read(./.env)"]
+              }
+            }"#,
+        );
+
+        let (permissions, rejected) =
+            rules_for_a_one_shot_run(&settings, None, Path::new("."), false);
+        assert!(rejected.is_empty());
+        assert_eq!(
+            permissions.for_path(Subject::Edit, "notes.md"),
+            Decision::Unmatched,
+            "an allow rule answered a write prompt in a run with nobody to prompt"
+        );
+        assert_eq!(
+            permissions.for_path(Subject::Read, ".env"),
+            Decision::Ruled(Ruling::Deny)
+        );
+        assert_eq!(
+            permissions.for_command(&["git", "push", "origin", "main"]),
+            Decision::Ruled(Ruling::Ask)
+        );
+    }
+
+    /// With the flag the person answered every prompt themselves, so their file is read whole: the
+    /// list is theirs, and the run may act because they said so on the command line.
+    #[test]
+    fn the_flag_is_what_lets_an_allow_rule_decide_again() {
+        use bravebot_core::permissions::{Decision, Ruling, Subject};
+
+        let settings =
+            bravebot_config::Settings::parse(r#"{"permissions": {"allow": ["Edit(**)"]}}"#);
+
+        let (permissions, _) = rules_for_a_one_shot_run(&settings, None, Path::new("."), true);
+        assert_eq!(
+            permissions.for_path(Subject::Edit, "notes.md"),
+            Decision::Ruled(Ruling::Allow)
+        );
+    }
+
+    /// A leading `--resume` or `--continue` with something after the session it names is a task
+    /// run (CLI-25), and with nothing after it is still the request to open that session. Reading
+    /// every `--resume` as a task would turn the interactive resume into a refusal for the missing
+    /// task, and reading none would drop the task a script sent.
+    #[test]
+    fn a_resume_with_a_task_after_it_runs_the_task_and_one_without_opens_the_session() {
+        for (typed, task) in [
+            (&["--resume", "abc", "-p", "next"][..], true),
+            (&["--resume", "abc", "next"][..], true),
+            (&["-r", "abc", "--json", "-p", "next"][..], true),
+            (&["--resume", "abc"][..], false),
+            (&["--resume"][..], false),
+            (&["--continue", "-p", "next"][..], true),
+            (&["-c", "next"][..], true),
+            (&["--continue"][..], false),
+            (&["--resume", "abc", "--plain"][..], false),
+            (&["--continue", "--json"][..], false),
+            (&["-p", "next", "--resume", "abc"][..], false),
+            (&["doctor"][..], false),
+        ] {
+            assert_eq!(continues_with_a_task(&args(typed)), task, "{typed:?}");
+        }
+        // A flag where the id should be is a task run, which refuses it by name.
+        assert!(continues_with_a_task(&args(&["--resume", "-p", "next"])));
+    }
+
+    /// The task may lead and the session may follow, as Claude Code's `-p "task" --resume id`
+    /// does, so a script written for either order carries on the session it names.
+    #[test]
+    fn a_task_may_name_the_session_it_carries_on_before_or_after_it() {
+        use crate::continued::Resume;
+
+        for typed in [
+            &["-p", "next", "--resume", "abc"][..],
+            &["--resume", "abc", "-p", "next"][..],
+            &["-r", "abc", "next"][..],
+        ] {
+            let invocation = parse_invocation(&args(typed)).expect("parses");
+            assert_eq!(invocation.resume, Some(Resume::Id("abc".to_string())));
+            assert_eq!(invocation.prompt, "next");
+        }
+        let latest = parse_invocation(&args(&["-p", "next", "-c"])).expect("parses");
+        assert_eq!(latest.resume, Some(Resume::Latest));
+        let fresh = parse_invocation(&args(&["-p", "next"])).expect("parses");
+        assert_eq!(fresh.resume, None);
+    }
+
+    /// A flag or nothing where the id should be is refused rather than read as a session called
+    /// `-p`, or as no session at all, which would run the follow-up with nothing before it.
+    #[test]
+    fn a_resume_naming_no_session_is_refused() {
+        for typed in [
+            &["next", "--resume"][..],
+            &["--resume", "-p", "next"][..],
+            &["next", "--resume", " "][..],
+        ] {
+            parse_invocation(&args(typed)).expect_err("a missing id must be refused");
+        }
+    }
+
+    /// SANDBOX-22, COMPAT-001: `--sandbox` takes one of four exact words, `standard` still naming
+    /// `workspace-write`, the last of a repeat winning, and is taken out of the arguments wherever
+    /// it stood. The regression it rejects is a flag that reads a near miss as a mode, a script
+    /// written for `standard` that stops working, or a flag that leaves its word behind to be read
+    /// as the task.
+    #[test]
+    fn the_sandbox_flag_takes_one_of_four_words_and_the_last_wins() {
+        for (typed, expected) in [
+            (
+                &["--sandbox", "strict", "-p", "do a thing"][..],
+                SandboxMode::Strict,
+            ),
+            (
+                &["-p", "--sandbox", "off", "do a thing"][..],
+                SandboxMode::Off,
+            ),
+            (
+                &["-p", "do a thing", "--sandbox", "workspace-write"][..],
+                SandboxMode::WorkspaceWrite,
+            ),
+            (
+                &["--sandbox", "read-only", "-p", "do a thing"][..],
+                SandboxMode::ReadOnly,
+            ),
+            (
+                &["-p", "--sandbox", "standard", "do a thing"][..],
+                SandboxMode::WorkspaceWrite,
+            ),
+            (
+                &["--sandbox", "off", "--sandbox", "strict"][..],
+                SandboxMode::Strict,
+            ),
+        ] {
+            let mut arguments = args(typed);
+            assert_eq!(
+                take_sandbox(&mut arguments),
+                Ok(Some(expected)),
+                "{typed:?}"
+            );
+            assert!(
+                !arguments.iter().any(|argument| argument == "--sandbox"),
+                "{typed:?} left the flag behind: {arguments:?}"
+            );
+            assert!(
+                !arguments
+                    .iter()
+                    .any(|argument| SandboxMode::parse(argument).is_some()),
+                "{typed:?} left its word behind: {arguments:?}"
+            );
+        }
+        let mut none = args(&["-p", "do a thing"]);
+        assert_eq!(take_sandbox(&mut none), Ok(None));
+        assert_eq!(none, args(&["-p", "do a thing"]));
+    }
+
+    /// SANDBOX-22: a missing, blank or unknown word is refused naming the four, and the arguments
+    /// are left as typed. The regression it rejects is a script whose variable expanded to nothing
+    /// being run under the default.
+    #[test]
+    fn the_sandbox_flag_refuses_a_word_that_is_not_a_mode() {
+        for typed in [
+            &["-p", "do a thing", "--sandbox"][..],
+            &["--sandbox", "", "-p", "do a thing"][..],
+            &["--sandbox", "Strict", "-p", "do a thing"][..],
+            &["--sandbox", "none", "-p", "do a thing"][..],
+            &["--sandbox", "-p", "do a thing"][..],
+        ] {
+            let mut arguments = args(typed);
+            let refused = take_sandbox(&mut arguments).expect_err(&format!("{typed:?}"));
+            assert!(
+                refused.contains("strict, read-only, workspace-write, off"),
+                "{refused}"
+            );
+            assert_eq!(arguments, args(typed), "a refusal rewrote the arguments");
+        }
+    }
+
+    /// SANDBOX-22: a refused mode stops what runs programs and lets through what only reads or
+    /// writes the person's own files. The regression it rejects is `bravebot completion` or
+    /// `bravebot auth` failing on a machine whose settings went under the managed floor, or a
+    /// session or a task starting past one.
+    #[test]
+    fn a_refused_mode_stops_what_runs_programs_and_not_what_does_not() {
+        for first in [
+            "doctor",
+            "update",
+            "--help",
+            "--version",
+            "auth",
+            "permissions",
+            "sessions",
+            "stats",
+            "attach",
+            "completion",
+            "import-providers",
+        ] {
+            assert!(starts_no_program(Some(first)), "{first}");
+        }
+        for first in [
+            None,
+            Some("-p"),
+            Some("--bg"),
+            Some("--resume"),
+            Some("reply"),
+            Some("__bg-host"),
+            Some("__bg-supervisor"),
+        ] {
+            assert!(!starts_no_program(first), "{first:?}");
+        }
+    }
+
+    /// SANDBOX-22: a refusal under a pin says which of reading and writing the asked mode does more
+    /// of, and suggests the pin, which the pin always keeps. The fault it rejects is a sentence that
+    /// tells a person under a `read-only` pin to choose a stricter mode, of which there is none, or
+    /// tells one under a `strict` pin that `read-only` is looser without saying how.
+    #[test]
+    fn a_refused_mode_says_what_it_does_more_of_and_suggests_a_mode_the_pin_keeps() {
+        let settings = bravebot_config::Settings::default();
+        for (pin, asked, said) in [
+            (
+                "read-only",
+                SandboxMode::Strict,
+                "strict writes more than read-only.",
+            ),
+            (
+                "strict",
+                SandboxMode::ReadOnly,
+                "read-only reads more of the machine than strict.",
+            ),
+            (
+                "strict",
+                SandboxMode::WorkspaceWrite,
+                "workspace-write reads more of the machine and writes more than strict.",
+            ),
+        ] {
+            let managed = pin_file(
+                &format!("looser-{pin}-{asked}"),
+                &format!(r#"{{"sandbox": {{"mode": "{pin}"}}}}"#),
+            );
+            let refused = bravebot_config::sandbox::resolve(Some(asked), &settings, &managed)
+                .expect_err("looser than the pin");
+            let sentence = sandbox_refusal(&refused);
+            assert!(sentence.contains(said), "{sentence}");
+            assert!(
+                sentence.contains(&format!("Run with --sandbox {pin}, or without the flag.")),
+                "{sentence}"
+            );
+            assert!(!sentence.contains("stricter"), "{sentence}");
+            let suggested = SandboxMode::parse(pin).expect("a mode");
+            assert!(
+                bravebot_config::sandbox::resolve(Some(suggested), &settings, &managed).is_ok(),
+                "{pin} keeps {pin}"
+            );
+        }
+
+        let home = scratch("looser-file");
+        let file = home.join("settings.json");
+        std::fs::write(&file, r#"{"sandbox": {"mode": "strict"}}"#).expect("home layer");
+        let settings = bravebot_config::Settings::layered(Some(home), None, None);
+        let managed = pin_file("looser-file-pin", r#"{"sandbox": {"mode": "read-only"}}"#);
+        let refused = bravebot_config::sandbox::resolve(None, &settings, &managed)
+            .expect_err("looser than the pin");
+        let sentence = sandbox_refusal(&refused);
+        assert!(
+            sentence.contains("strict writes more than read-only. Change it to read-only there"),
+            "{sentence}"
+        );
+    }
+
+    /// The refusals a manifest run gives for flags it cannot take: none outside a manifest run,
+    /// and the first in the order the checks run where several are given.
+    #[test]
+    fn a_manifest_run_is_refused_the_flags_it_cannot_take_in_order() {
+        let words = SystemPrompts {
+            replacing: Some("words".to_string()),
+            ..SystemPrompts::default()
+        };
+        let none = SystemPrompts::default();
+        let latest = continued::Resume::Latest;
+
+        assert_eq!(
+            manifest_conflict(
+                Mode::Turn,
+                Given {
+                    agent: true,
+                    advisor: true,
+                    output_schema: true,
+                    goal: true,
+                },
+                &words,
+                Some(&latest)
+            ),
+            None,
+            "a turn is refused nothing here"
+        );
+        assert_eq!(
+            manifest_conflict(Mode::Manifest, Given::default(), &none, None),
+            None
+        );
+        let first = manifest_conflict(
+            Mode::Manifest,
+            Given {
+                agent: true,
+                advisor: true,
+                output_schema: true,
+                ..Given::default()
+            },
+            &words,
+            Some(&latest),
+        );
+        assert_eq!(first.as_deref(), Some(t!(cli_agent_not_with_a_manifest)));
+        let first = manifest_conflict(
+            Mode::Manifest,
+            Given {
+                advisor: true,
+                output_schema: true,
+                ..Given::default()
+            },
+            &words,
+            Some(&latest),
+        );
+        assert_eq!(first.as_deref(), Some(t!(cli_advisor_not_with_a_manifest)));
+        let first = manifest_conflict(
+            Mode::Manifest,
+            Given {
+                output_schema: true,
+                ..Given::default()
+            },
+            &words,
+            Some(&latest),
+        );
+        assert_eq!(
+            first.as_deref(),
+            Some(t!(cli_output_schema_not_with_a_manifest))
+        );
+        let first = manifest_conflict(
+            Mode::Manifest,
+            Given {
+                goal: true,
+                ..Given::default()
+            },
+            &words,
+            Some(&latest),
+        );
+        assert_eq!(first.as_deref(), Some(t!(cli_goal_not_with_a_manifest)));
+        let first = manifest_conflict(Mode::Manifest, Given::default(), &words, Some(&latest));
+        assert_eq!(
+            first,
+            Some(t!(
+                cli_system_prompt_not_with_a_manifest,
+                flag = "--system-prompt"
+            ))
+        );
+        let first = manifest_conflict(Mode::Manifest, Given::default(), &none, Some(&latest));
+        assert_eq!(
+            first,
+            Some(t!(cli_resume_not_with_a_manifest, flag = "--continue"))
+        );
+        let id = continued::Resume::Id("abc".to_string());
+        let named = manifest_conflict(Mode::Manifest, Given::default(), &none, Some(&id));
+        assert_eq!(
+            named,
+            Some(t!(cli_resume_not_with_a_manifest, flag = "--resume"))
+        );
+    }
+}

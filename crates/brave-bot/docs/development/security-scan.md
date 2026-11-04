@@ -1,0 +1,62 @@
+# The security scan
+
+Pull requests here are scanned by an organization-level workflow that runs
+[brave/security-action](https://github.com/brave/security-action) and comments through reviewdog.
+Nothing in this repository configures it, so the runners and the rule set live over there.
+
+```sh
+make check-reviewdog       # what this branch changed, against its merge base
+make check-reviewdog-full  # the whole tree, however old the finding is
+```
+
+`contrib/check-reviewdog.sh` clones that repository, pins the tool versions its `action.yml` pins,
+and drives the same reviewdog runners against this checkout: **opengrep** (the semgrep fork, on
+Brave's rule set), **npm-audit**, **pip-audit**, **safesvg**, and **sveltegrep**. Only the runners
+with something to look at are enabled, which here means opengrep and npm-audit. A finding is one
+the bot would post, so run `check-reviewdog` before pushing; the full scan reports plenty that
+predates any given branch.
+
+The branch is measured against `upstream/main` where a checkout has one, and `origin/main`
+otherwise. In a fork checkout `origin` is the fork, whose `main` moves only when somebody
+updates it, so a base taken from there is a commit the branch is not based on: the scan then
+covers every commit the fork is behind and reports whatever it finds in them against the
+branch. `--base` takes any ref, a sha or a tag included, and `make check-reviewdog BASE=<ref>`
+passes it.
+
+The first run downloads opengrep, reviewdog and the rules into `~/.cache`; later runs re-use them
+and take about half a minute. No model is involved, so both are deterministic.
+
+The two tools are release assets, so the script compares each with a sha256 written in it before
+anything is made executable or extracted, and compares a cached binary again before running it. A
+mismatch, or a platform with no pin, stops the scan. Moving a version means moving its digests in
+`pinned_sha256`, taken from the release and, for opengrep, from `installOpengrep.js` in
+brave/security-action. The rules are cloned at `main` on purpose, because the required `security`
+check runs that same ref.
+
+A runner failure makes the check fail, including a scanner failure hidden by a later
+formatter in its pipeline or by reviewdog filtering out all of its findings. Runner stderr
+also fails the check so a partial scan cannot report a clean result. The one line it may
+carry is security-action's `with-sandbox: ...; running unsandboxed (local mode).`: outside CI
+there is no Landlock sandbox (never on macOS), so the wrapper says so and runs the scanner
+anyway. In CI the same wrapper fails closed instead. Both scan targets first
+run `make check-reviewdog-selftest` to test empty scans, findings, and scanner failures.
+`make check-scripts` also tests check orchestration. A full scan clears any inherited branch baseline.
+Failure to list the files or set the baseline also fails the scan.
+
+Opengrep's baseline mode considers committed changes only. When tracked files have
+uncommitted changes, the local check scans without that baseline and lets reviewdog
+filter findings to the branch and working-tree diff. Stage new files before scanning.
+
+Branch scans select `sveltegrep` only when the diff includes an HTML or Svelte file
+that still exists. Without those inputs, its search for extracted scripts would walk
+ignored build output and nested worktrees for no benefit. Full scans and explicit
+`--runners` selections retain it. Branch scans print each runner's start and finish.
+
+## Socket
+
+The "Socket Security" checks read the dependency manifests in the tree. `socket.yml` at the
+repository root excludes `ui/scripts/demo/project/`, whose `package.json` files belong to fictional
+demo fixtures that nothing installs and that have no lockfile. Without the exclusion Socket
+resolves their version ranges on every scan and reports whatever release is newest, so a pull
+request fails the "Recently published" rule each time one of those packages publishes. A manifest
+added elsewhere is scanned, so give it a lockfile.

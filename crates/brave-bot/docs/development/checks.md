@@ -1,0 +1,516 @@
+# Checks
+
+## Choosing checks
+
+Before changing behaviour or test assertions, use the repository's
+[testing-preflight skill](../../agents/skills/testing-preflight/SKILL.md). Identify which plausible
+mistake each changed test must catch, then choose checks from this page and the affected CI jobs.
+Passing a large test suite does not show that a test can detect the regression it claims to cover.
+
+Run `make check-spec` before committing changes to spec clauses, their referenced tests, guarded
+symbols or call sites, or `agents/unverified-clauses.txt`. This catches stale verification metadata while
+the change is still local. The broader before-push requirements below still apply.
+
+## Before a commit
+
+**fmt and clippy.** Both take seconds and have no exemption for a change that only touched a
+comment or a name: they fail on those as readily as on anything else, and `make init` installs a
+pre-commit hook that refuses a commit failing either. The hook skips a commit that stages nothing
+but files under `docs/` or `agents/`, Markdown, `LICENSE` or `CODEOWNERS`, which nothing compiled
+reads; a commit that stages anything else, or nothing, runs both.
+
+The workspace manifest holds a `[workspace.lints.clippy]` table of lints that code in this tree has no
+violation of: `unwrap_used`, `todo`, `unimplemented`, `dbg_macro`, `unused_async`, `large_futures`,
+`future_not_send`, `let_underscore_future`, `rc_mutex`, `mutex_atomic` and
+`allow_attributes_without_reason`. Each crate opts in with
+`[lints]` and `workspace = true`, and `crates/cli/tests/workspace_lints.rs` fails a member that does
+not. A lint is added to the table once the tree has none of it. A test target that unwraps starts with
+`#![allow(clippy::unwrap_used, reason = "...")]` (`#![cfg_attr(test, allow(...))]` in a crate root whose
+unit tests unwrap), because `allow-unwrap-in-tests` in `clippy.toml` exempts a `#[test]` function and
+a `#[cfg(test)]` module and not a helper in `tests/` or under `cfg(all(test, unix))`.
+
+`bravebot-sandbox` also denies `clippy::undocumented_unsafe_blocks` with an inner attribute in
+`crates/sandbox/src/lib.rs` and in `crates/sandbox/tests/windows.rs`, a root of its own that the
+library attribute does not reach, so every `unsafe` block there has a `// SAFETY:` comment stating
+why it is sound. The lint is not in the workspace table because other crates and targets have
+`unsafe` blocks without one, for example `bravebot-skus`, `bravebot-ui-files`, `fuzz/`,
+`crates/agent/src/preamble.rs` and the tests of `bravebot-agent`, `bravebot-tui`,
+`bravebot-ui-bridge`, `bravebot-cli` and `bravebot-session`. It is checked on the Linux, macOS and
+Windows clippy runs, which each compile different blocks. Place the comment directly above the
+`// nosemgrep:` line, and for an `unsafe impl` between the attributes and the item.
+
+Lints the tree has hundreds of sites of are held to the base instead: `make check-lint-increase`
+runs clippy over the libraries and binaries at the merge base and at the branch, and fails when a lint
+reports more sites in a crate than it did. Mark a site that is right with
+`#[expect(clippy::lint, reason = "...")]`. `make check` runs it after clippy, CI runs it on pull
+requests, and [contrib/README.md](../../contrib/README.md#check-lint-increasepy) lists the lints.
+
+Every `#[allow]` and `#[expect]` ends its list with `reason = "..."`. clippy reads only the code the
+host compiles, so an `#[allow(unsafe_code)]` with no reason in a `#[cfg(windows)]` function passes
+on macOS and fails the Windows lint after the push. `crates/cli/tests/allow_reasons.rs` reads every
+source file under `crates/` as text, so a missing reason fails `make check` on any host. The code
+the i18n build script writes is not source, and a test in `crates/i18n/src/generate.rs` holds it to
+the same rule.
+
+Clippy is run for one target per operating system the project ships for: the Linux job, the macOS job
+and `cargo clippy --target x86_64-pc-windows-gnu`. Those cover the other shipped architectures
+(`aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-pc-windows-gnullvm`) as long as no
+condition in `crates/` selects code by anything but the operating system, because the arms for an
+operating system are the same on both of its architectures. `crates/cli/tests/cfg_targets.rs` fails
+any condition listed in its `BEYOND_THE_OPERATING_SYSTEM` constant (`target_arch`, `target_env`,
+`target_family` and `target_pointer_width` among them), and a `target_os` other than `macos`,
+`linux` or `windows`, in a source file or manifest under `crates/`.
+Adding one means adding a clippy target for it to CI and to this page, then listing it in that test.
+`fuzz/` is a package of its own and is linted by `make check-fuzz`.
+
+Clippy also refuses every call the tree starts a program with (`clippy.toml`,
+[SANDBOX-30](../specs/sandboxing.md#SANDBOX-30)), whatever names the program. A program is started
+with `bravebot_sandbox::programs::start`, which takes a `Resolved`, the variables the program
+inherits (`Inherits`) and the `PATH` it is given (`SearchPath`). The lookup or one of the named
+constructors of `Resolved` (`own_executable`, `written_in_source`, `named_by_person`,
+`found_earlier`, `to_confine`) builds the first, and the other two have no default, so the diff that
+starts a program shows who chose it, what it inherits and where the names it starts are looked up.
+`#[allow(clippy::disallowed_methods, reason = "...")]` is for the few files that cannot call `start`:
+`start` itself, `CreateProcessW` and a build script. `make check-security` fails a mark with no
+reason, a mark that covers more than one start, and a mark in a production file, or a second one in
+a file, that `START_MARKS_ALLOWED` in `agents/skills/security-audit/security-audit.py` does not
+list.
+
+Then run the tests the diff is under, scoped as tightly as the diff is: `cargo test -p bravebot-tui
+--lib` for the interface, `cargo test -p bravebot-agent --test workspace` for one test binary. A
+commit still has to be a state that stands up, and a change nothing covers is a change to be
+suspicious of.
+
+A test that builds a path under `std::env::temp_dir()` puts `std::process::id()` in the name, or a
+counter or timestamp, or takes its directory from `tempfile`. Every process on a machine shares that
+directory, so a fixed name is deleted by another run of the same test, which is a second session or the
+same binary started again, and each fails for a reason that is not in the code under test.
+`crates/cli/tests/temp_names.rs` fails a name that has none of these. A name that has to be fixed is
+marked `// shared-temp-name: <why>` on its line or the line above.
+
+## Before pushing
+
+Choose how much to run:
+
+| Command | Coverage |
+|---|---|
+| `make check-all-local` | Script selftests, host formatting, Clippy and Rust tests, specs, security rules, locales, versions, narration, pull request body, toolchain age, docs, pnpm lockfiles, dependency policy, desktop UI, the TypeScript session client, the mobile app's types and tests, and reviewdog. No Docker. |
+| `make check-all` | Everything in `check-all-local`, plus Docker checks for minimum Rust, Windows Clippy and Linux. |
+| `make check-affected` | Script selftests, specs, security rules, locales, versions, narration, pull request body and reviewdog, plus each host check this branch's changes need, chosen the way CI chooses its jobs. No Docker. |
+| `make check-affected-containers` | The Docker checks this branch's changes need: minimum Rust, Windows Clippy and Linux for a change to Rust, and none otherwise. |
+
+Before a PR, run the checks relevant to your change and state which command passed.
+`make check-affected` and `make check-affected-containers` are those checks as CI decides them.
+If you use `check-all-local`, leave the platform checks to CI and say they were not run
+locally. You can also run an individual target, such as `make check-reviewdog`, or check
+formatting with `cargo fmt --all -- --check`.
+
+`make check-affected` selects every job a changed path could reach, so it can run far more than a
+narrow change needs. Where a page here names narrower checks for a kind of change, run those and say
+in the pull request that the rest was left to CI.
+[localization.md](localization.md#checking-a-translation) does this for a change to the catalogs.
+
+If the checkout has no backend credentials, use
+`BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=1 make check-all-local` (or `check-all`) to allow
+the Rust build.
+
+CI runs its heavier jobs only where a change could fail them.
+[contrib/affected-checks.py](../../contrib/affected-checks.py) reads the paths a pull request
+touches and says which of Rust, the desktop app, the cross-builds, the Windows installers, the
+website, the published pages the agent crate carries in the binary, the pnpm lockfiles, the
+dependency policy and the fuzz targets they could affect. On a pull request the
+Windows installers are built and installed only for a change to the scripts that make them; main
+and every tag build and install them whatever changed. The specs, security, locales, versions and narration
+jobs take seconds and run on every change. A change to a crate needs the desktop jobs when the desktop app
+builds that crate, which is any crate the two bridge crates name, however far down, and needs the fuzz job when
+the fuzz package builds it, which is any crate its manifest names, however far down. A job skipped
+by its condition reports success, and branch protection counts that as passing, so every doubt runs
+the job: a path no rule names runs everything, and so do a change to the workflows, the Makefile or
+the classifier, any run that is not a pull request, and a run where the classifier itself failed.
+Main and every tag are checked whole, and a push to a pull request cancels the run still going
+for its previous head. A file outside `crates/` that a Rust test reads belongs in
+the classifier's `READ_BY_RUST`; its selftest scans the crates for strings naming such a file and
+stops on one that is in neither that list nor `NAMED_NOT_READ`. A file outside `extension/` and
+`extension-trusted/` that a test of either extension reads by a path above its directory belongs in
+`READ_BY_EXTENSION_TESTS`, and its selftest scans those tests for such paths.
+
+The changes job runs the classifier from the pull request's base commit, not from the pull request,
+so a change to the classifier is judged by the copy it replaces. The classifier and the Makefile are
+in `.github/CODEOWNERS`, and `make check-security` fails when a file a workflow step runs by path
+(`python3 <path>`, or the Makefile behind `make`) matches no entry there.
+
+`make check-affected` makes that choice locally, against the merge base with `upstream/main`, or
+`origin/main` where there is no upstream remote, or `BASE=<ref>`, which `check-reviewdog` is
+measured from as well. The branch is its commits, its uncommitted edits and its untracked files. It prints each area and the path that needs it before
+running the checks it names, keeps going past a failed check, and stops without running any when
+the classifier cannot answer. It is for iterating on a branch; `make check-all` is still the whole. For a change the fuzz job
+needs it prints that and runs nothing, since `make check-fuzz` needs a nightly toolchain and cargo-fuzz.
+
+`make check-all` requires Docker for the platform checks. A missing prerequisite fails
+the target; it does not count as a pass. Add `-k`, for example `make -k check-all-local`,
+to continue independent checks when one fails.
+
+For the full run on macOS, start Docker Desktop and run `make check-all` from the checkout
+you plan to submit. The Linux checks run inside Docker, and Windows Clippy cross-compiles there;
+neither needs a separate Linux or Windows machine. Host Rust tests use four threads by
+default; override this with `RUST_TEST_THREADS=8 make check-all` if needed.
+The test binaries that start a mock server per test (`browser_group_servers` and `mcp` in
+`crates/agent/tests`, and `running` in `crates/cli/tests`) raise their own soft open-file limit to
+8192, or to the hard limit where that is lower, through `crates/agent/test-support/open_files.rs`,
+so the 256 a macOS shell starts with does not fail them with `TooManyOpenFiles`. Each binary binds
+its mock servers with `open_files::bind_mock_server()`, which raises the limit once per process
+before the first bind. A new test binary that starts a server per test includes the file with
+`#[path]` and binds through that function rather than `TcpListener::bind`.
+The containers receive current source, including local edits and untracked files,
+but exclude ignored files, build output and nested checkouts. They use Docker's native
+architecture so Apple Silicon does not need to emulate an x86 Linux CPU.
+
+`make check-ui` installs the desktop dependencies, typechecks and builds the app,
+runs its Node tests, and drives the Electron walkthrough. Those Node tests are the only thing
+pinning what the desktop renderer owes the layering spec: that released content is marked by a
+container it cannot forge, reaches no raw markup and makes the app fetch nothing, and that a
+replayed message is drawn from the record rather than from its own words. Both are properties of a
+surface this workspace does not compile, so no Rust test can observe them and `make check` never
+did. Run this for a change under `ui/`. On macOS it needs a logged-in
+desktop session. On Linux it needs `xvfb-run` and Electron's runtime libraries; CI
+installs `xvfb`, `libgtk-3-0`, `libnss3` and `libasound2t64`. CI uses the same build
+and walkthrough targets, with a separate timeout for the walkthrough.
+The check build leaves out backend credentials, even when your development build has
+them, so the walkthrough can test the unconfigured app without using your account.
+Run `pnpm --dir ui run build` afterwards to restore a configured development build.
+
+`make check-agent-client` builds `bravebot-rpc`, then installs, type-checks, builds and tests
+`packages/agent-client`. Its tests start that binary against a model service of their own, an empty
+home and a scratch project, so they need no credentials and no desktop session. The Front end CI
+job runs it, and the classifier gives it to any change under `packages/agent-client/` or to the bridge crates. Only a change to the wire contract file there also runs the Rust jobs, since a Rust test reads it.
+Run it for a change to the session view or the client.
+
+`make check-mobile` builds `packages/agent-client`, then installs, type-checks and tests the React
+Native app in `mobile/` against it. It needs no device, simulator or desktop session, and it does
+not build the Android or iOS projects. The Mobile app CI job runs it. The classifier gives it to any
+change under `mobile/` or `packages/agent-client/`, and a change under `mobile/` alone does not run
+the Front end job.
+
+`make check-scripts` checks that every required gate runs, that UI, installer and lockfile
+failures reach the caller, and that scanner failures cannot pass as empty scans. The installer
+half also holds `check-npm` to reaching the npm tests and the lockfile lint's own cases before
+any lockfile is read, and to failing rather than passing when those tests are no longer there. It runs
+`check-all-selftest`, `check-reviewdog-selftest`, `check-rebase-selftest`, `check-affected-selftest`,
+`check-peer-advisories-selftest`, `check-peer-features-selftest`, `check-pr-fix-selftest`, `check-pr-worktree-selftest`, `check-maintenance-selftest`, `check-session-review-selftest` and `check-review-ready-selftest`, which can also run separately. `check-affected-selftest` holds
+each rule of the classifier, and holds every workflow condition reading it to running its job on
+anything but an explicit `false`.
+To also exercise the installed reviewdog binary, set `REVIEWDOG_TEST_BINARY` to its
+absolute path when running the target. Without it, that integration test is reported as skipped.
+
+The sandbox usability suite (`crates/agent/tests/usability.rs`, spec SANDBOX-21) runs everyday
+workflows under the sandbox default, so a default change cannot break `git`, `gh`, `cargo`, `npm` or
+`make` unnoticed. It runs with `cargo test --all` on Linux and macOS, skips what is not installed, and
+`bravebot doctor --sandbox-check` runs it on any machine.
+
+These are local checks, not a promise that every CI environment passes. Windows Clippy
+cross-compiles without running Windows tests. Docker Desktop cannot exercise Landlock;
+CI's native Linux tests cover that gap. Release cross-builds remain separate.
+
+Most tests that touch the state directory point `HOME` at a scratch directory, and `BRAVEBOT_HOME`
+answers before `HOME`, so each of them clears it as well, and `crates/cli/tests/test_home.rs` fails a
+test that sets `HOME` and does not. A new test clears it beside the `HOME` (`.env_remove`,
+`std::env::remove_var`, or `("BRAVEBOT_HOME", None)` in a list of variables), or marks the line
+`// state-home-kept: <why>`.
+
+`make check` runs the whole suite and takes minutes. It is what to run before pushing a branch and
+what CI runs, not what to run between two edits to the same file, and never twice to confirm the
+same thing. Reaching for it out of caution is not free: it is the difference between a review that
+takes a minute and one that takes twenty, and the reviewer is the person waiting.
+
+`make check-spec` checks the mechanical half of the specs: clause numbering, the tests each clause
+names, the paths it governs, the call sites a guarded symbol pins, and the table in
+[../specs/README.md](../specs/README.md). It also runs
+[../../contrib/check-issue-posters.py](../../contrib/check-issue-posters.py), which fails when
+[the issue-poster definition](../../agents/agents/issue-poster.md) would not load, writes a label
+[labelling-issues.md](labelling-issues.md) does not describe, or when a file under `agents/skills`
+runs `gh issue create` instead of handing the draft to the definition. Its helper's selftest,
+[../../agents/issue_helper_selftest.py](../../agents/issue_helper_selftest.py), runs beside it: the
+label and assignee checks the definition's post command makes are in
+[../../agents/issue_helper.py](../../agents/issue_helper.py). The selftest of the manifest reader and
+writer the skill scripts share,
+[../../agents/work_dir_selftest.py](../../agents/work_dir_selftest.py), runs there too. CI runs it
+too, so a new use of a guarded symbol fails a
+pull request rather than waiting for somebody to notice it. It also holds
+[../../agents/unverified-clauses.txt](../../agents/unverified-clauses.txt) to the clauses that are
+`verified-by: none`, so giving a clause a test, or setting one to `none`, is a line in a diff
+rather than a warning nobody has to read. `make write-unverified` writes the file; commit what it
+writes.
+
+It also compares each spec against main, because clause numbering read within one file cannot see
+the thing it is for. A file renumbered to close a gap still reads `1..N`, so nothing in it is wrong
+and every citation of a moved id, in a cross-spec link, a `verified-by` line or an issue title, goes
+on resolving and points at another clause. What fails is a clause whose heading has moved to another
+id, which is the renumber; rewording a heading under the id it belongs to is expected and fails
+nothing. On a branch, main is where the branch left `upstream/main`, or `origin/main` without one; in
+CI's checkout of a pull request it is the merge commit's first parent, which is why the Specs job
+fetches two commits deep. With neither, the check falls back to `HEAD` and sees only an edit not yet
+committed. The tree compared against is the one the spec files are in rather than whichever
+directory the command was run from. A spec withdrawn and rewritten wholesale renumbers on purpose
+and says so in [../../agents/renumbered-clauses.txt](../../agents/renumbered-clauses.txt), one
+hand-written line per clause that moved, naming the id and heading it carries now: nothing
+generates that file, and the check fails on a line that has stopped being true of the tree.
+
+The review of the governed code is the [check-spec skill](../../agents/skills/check-spec/SKILL.md),
+which needs a model and is not part of `make check-spec`. A full run starts one reviewer for every six
+clauses, and each reads the governed source again, so the skill keeps `docs/check-spec-reviewed`: one
+line per clause with its verdict, the main commit the verdict was reached at, and a hash of what the
+reviewer was given besides the code (the clause, the paths its spec governs, the symbols it guards and
+their uses in files nobody watches, the spec's text outside its clauses, and the reviewer's
+instructions). A repeat run reviews a clause only as far as that has changed. It starts no reviewer
+for a clause when none of the code its spec watches changed since the recorded commit, gives a
+reviewer the earlier verdict and the diff when under half of those lines changed, and reviews the
+clause in full from half, when the hash changed, or when it has no line. `/check-spec full`, or
+`check-spec.py --full`, ignores the file and reviews every clause in full. That is the run to make on
+a schedule, since a review of a diff sees only the lines that changed. `record-reviewed.py` writes
+the file, for a tree that is main and no other, and does not commit it. `make check-spec` fails a
+line of it that is not a well formed record, since a run that cannot read the file reviews every
+clause in full.
+
+`make check-security` decides the things `check-spec` structurally cannot: whether two documents
+agree about how many exceptions to the rule are admitted, whether every crate keeping a network
+client of its own is one the egress register admits and no comment claims a dependency a manifest
+beside it declares, whether the register admitting them leaves as many prompts out of a verdict's
+reach as the clause deciding that does, whether a field documented as read in one place is read in
+one place, whether a trait reaches into a `Labelled`, whether a spec pins the constructors of one as
+well as the releases, whether every gate handing released content to a closure the driver wrote is
+counted rather than merely named and so is every function forwarding its caller's closure to one,
+whether `clippy.toml` still refuses the calls that start a program and no second clippy
+configuration hides them from a crate, and whether every allow of that refusal covers one start and
+carries a reason, since `make check` fails the start and cannot read the reason, whether every
+workflow step is on a commit
+rather than a tag its owner can move, whether every container image this tree runs
+names a digest rather than a tag its publisher can move, and whether a job holding `id-token: write`
+or a secret installs or runs an npm or pnpm dependency, which every step in that job could read the
+credential from, whether a checkout of this tree names a kind of ref rather than a bare name a
+branch and a tag can share, whether the check contexts a merge is held to are written down,
+name jobs that exist, and cover every job whose purpose is running a check, and whether every
+method of the agent's confirmer, every remembered set the front ends hold in `Answers` and every
+question the terminal's trust prompts ask has a row in the register of kept answers in
+`docs/specs/prompting.md`, with each cell filled and each test it names one that exists, and whether
+the functions that build the key a name is filed under, or fold or decompose it (`normalise`,
+`TrustStore::key`, `FileAuthority::key`, the permission rule's `key_of` and the helpers
+`docs/specs/trust-map.md` lists) call a `trim`, a case fold, a Unicode normalisation or a lossy
+conversion, each of which can give two files the volume holds apart one key, unless that spec lists
+the construct with the files it joins and why. CI runs it too, so a pull request that moves a
+workflow step or a build image onto a movable tag, that puts an install back beside the publish
+credential, that points a checkout at a name instead of a ref, that gives a crate a network client
+the egress register does not admit, that drops the entry pinning a constructor, that adds a check
+nothing holds a merge to, or that adds a confirmer method, a remembered set or a trust question the
+register does not account for, or that puts a `trim` in the step that keys a name, fails rather than
+holding only for whoever remembers to run this. The register also has a table beneath it saying, for
+each answer, what a second checkout, a new session, a replaced file, another directory, a changed
+invocation, a changed declaration and an answer wider than its prompt do to it: this check fails a
+row, a cell or a cited test that is missing, and a case in `crates/agent/src/kept_answers.rs` that
+no cell cites. It is the deterministic half of the
+[security-audit skill](../../agents/skills/security-audit/SKILL.md); the lanes that read code are the
+other half, and a person runs those. Run it before a commit that touches a label,
+`.github/workflows`, a Dockerfile, the Makefile's containers, a crate's manifest, the required
+check contexts, the trust specs, a function that keys a name, the confirmer, the remembered answers
+(`crates/agent/src/answers.rs`), the cases that change the world under them
+(`crates/agent/src/kept_answers.rs`), or `docs/specs/prompting.md`. Claude Code runs the mechanical
+half itself when a task ends on a branch that changes a file where an answer is kept
+([agent-configuration.md](agent-configuration.md#checking-the-register-when-a-task-ends)).
+
+`make check-maintenance` lists candidates for cleanup: `pub` items, module-level Python definitions
+and TypeScript exports named nowhere but where they are defined or only from tests, allowances
+silencing a lint about dead code or about a function that is too large, blocks of lines and string
+literals repeated across files, files and functions past a length, functions nested deeply or taking
+several booleans, files that use many other modules, public functions no test names, files holding
+a lot of shared mutable state, commented-out code, and functions returning string errors. rustc
+warns about none of the first kind in a library crate, and no check compares one file with another.
+The scan reads no code and exits zero whatever it lists, so nothing runs it in CI. It is the
+deterministic half of the [maintenance skill](../../agents/skills/maintenance/SKILL.md), whose
+reviewers read each candidate and draft an issue for the ones worth fixing. The skill also runs
+clippy's opinionated lints over the code that ships, which `make check-maintenance` does not, since
+it compiles. `docs/maintenance-reviewed` holds what reviewers decided, so a later run reaches
+candidates it has not read. [smells.md](../../agents/skills/maintenance/smells.md) says which smell
+each lane covers and which a lint already refuses.
+
+Wherever this page says a check fails a pull request, what does the failing is not the job going
+red. A job reports. What holds a merge is branch protection's list of required contexts, which is
+a repository setting no file in a checkout can read, so
+[../../contrib/required-checks.txt](../../contrib/required-checks.txt) is where the tree states
+what that list has to hold. `make check-security` decides the three things about it a checkout
+can: that every name in the file is the display name of a job in `.github/workflows/`, that every
+job running a check target is named in the file, and that a target this page promises will fail a
+pull request is run by some job at all. A required context matches a check run's name exactly, so
+a job renamed on one side and not the other leaves a context nothing reports under, which is the
+shape of the one this repository already has: the required lower-case `security` is the
+organisation's scan, supplied by a workflow that is in no checkout here, and it is a different
+check run from CI's `Security`. What is left is comparing the file against what the protection
+actually requires, which needs the network and a token; the file carries the two `gh` queries
+for it. The review settings of the same protection are recorded in
+[branch-protection.md](branch-protection.md).
+
+`make check-locales` holds every message catalog to
+[../../contrib/untranslated-messages.txt](../../contrib/untranslated-messages.txt), the record of what each
+translation is missing. A translation is allowed to lag the reference, since what it lacks is shown
+in English; what is not allowed is lagging it silently, so the check fails on a gap the file does
+not list and on a line for a gap that is no longer there. `make write-untranslated` writes the file;
+commit what it writes. CI runs this too, so adding a message to `en-US.ftl` and no other catalog
+fails a pull request rather than printing a build warning into a job that passed, which is how
+eleven messages came to ship untranslated. `make locales` is the same count as a report, which no
+gap makes fail, and is the one to read while translating. Run the check before a commit that touches
+`crates/i18n/locales`.
+
+`make check-versions` holds every file that states the version to the workspace manifest: the
+published wrapper and the desktop application, each of which states it in its own
+`package.json`; a pnpm lockfile records no version for the project it locks. `make
+check` runs it and so does CI, because the tagging path's own refusal fires on release day, which
+is long after the pull request that moved one file and not the others. It carries a `--selftest`,
+which `make check-versions` runs first.
+
+`make check-code-selectors` holds each variable in `CODE_SELECTORS` in `crates/agent/src/gcloud.rs`
+to a test that keeps a safe value and a test that removes one a stage may write. `make check` runs
+it and so does CI. It cannot tell that the list is complete, which
+[PATH-008](../best-practices/paths.md#PATH-008) leaves to a reviewer.
+
+`make check-narration` fails a pull request whose commit messages, title, body or added lines
+contain a first-person phrase from a fixed list, which is the rule in [commits.md](commits.md)
+against writing about your own process. The list is in
+[../../contrib/check-narration.py](../../contrib/check-narration.py). CI runs it on every pull
+request and again when the title or body is edited, which is why it is its own workflow,
+`.github/workflows/narration.yml`. The fix for a hit is to reword it, since nothing allows one.
+Locally it reads this branch's commits, uncommitted edits and untracked files against the merge
+base with `upstream/main`, or `origin/main` without one, or `BASE=<ref>`, and reads a title and body
+only where `PR_TITLE` and `PR_BODY` are set. It carries a `--selftest`, which `make check-narration`
+runs first.
+
+`make check-npm` lints the pnpm lockfiles, as CI does, and runs the tests under `npm/tests`. They
+hold the release origin the script that builds the platform packages downloads from to this
+repository whatever the environment says, hold each platform package to its asset and to the
+machine npm installs it on, run the real launcher in a tree laid out the way npm lays one out, and
+hold the wrapper's manifest and the publish workflow to the same six platforms. They are the
+things in the tree that run clauses of [../specs/releases.md](../specs/releases.md) as code, so
+run this target for a change to the published wrapper as well as to a lockfile. `make check-deps` decides
+`.config/deny.toml`: an advisory against anything in the tree, a licence the binary cannot ship, a crate the
+build compiles at two versions without a recorded reason, a dependency from anywhere but
+crates.io, and a regex engine. It reads the graph of the fuzz package as well as the root one,
+since `fuzz/` is a workspace of its own, and that package's lockfile does not follow the root one
+on its own ([fuzzing.md](fuzzing.md#the-lockfile)). It also fails an exception in `.config/deny.toml` that has no
+`reason`, or a licence exception with no comment, since cargo-deny takes no `reason` on one, which
+[../../contrib/check-deny-reasons.py](../../contrib/check-deny-reasons.py) decides before
+cargo-deny is built. CI runs this same target on a pull request that touches a manifest, the
+lockfile or `.config/deny.toml`, on main, and once a day, since an advisory arrives without a commit.
+`make check-reviewdog` is the [security scan](security-scan.md).
+
+`make check-fuzz` lints, builds, replays and briefly runs the fuzz targets in `fuzz/`, which is a package
+of its own with its own lockfile. It needs a nightly toolchain, whose date is `FUZZ_TOOLCHAIN` in the
+`Makefile`, and cargo-fuzz (`make fuzz-install`), so `make check-all` and `make check-affected` leave it out.
+CI's `Fuzz build and replay` job runs it on a pull request where `fuzz/`, the root manifest or a crate
+the targets build changed, and on every push to `main` and every tag. The Fuzz workflow runs each target for an hour every week
+([fuzzing.md](fuzzing.md#the-weekly-run)). Run it for a change to a function a target reads, or to `fuzz/`. `make fuzz TARGET=<name>` runs one
+target. [fuzzing.md](fuzzing.md) lists the targets and says what to do with a crash.
+
+`make check-windows` lints the target that ships to Windows, `x86_64-pc-windows-gnu`, over every
+target including the tests. Nothing else compiles the `#[cfg(windows)]` arms of this tree for a
+check: the cross-build produces the shipped binary and lints nothing, and compiles no test target
+at all, so a Windows arm that does not build or that trips a lint reaches main with CI green. It
+cross-compiles, which clippy allows because it stops before linking, so no Windows host is
+involved and the suite is not run on one. CI's `Desktop on Windows` job runs the file helper's
+suite and the walkthrough on a Windows runner, and CI's `Awkward names on Windows` job runs the
+pair tests over file names there, which no local target does. Worth running for
+anything with a platform branch in it, and for any test that has one: a `#[cfg(unix)]` left off a
+test is invisible from every platform that has `unix`.
+
+`make check-linux` runs fmt, clippy and the tests on Linux under the stable toolchain its container
+is pinned to, which is a digest rather than whatever `rust:slim` resolves to today, so moving it on
+is an edit somebody makes when `make check-toolchain` says the host has fallen behind.
+The container's home starts empty, so it also fails when the tests leave anything in
+`~/.bravebot/sessions`, as CI's test jobs do: a test that saves a session belongs in
+`in_isolated_profile` (`crates/session/test-support/profile.rs`), not in the person's store.
+Worth doing before pushing platform-specific code, since a macOS host never compiles the Linux
+backend. Its one gap is the Landlock tests: the kernel in play is Docker's, and Docker Desktop's
+implements no Landlock at all, so that target sets the switch that skips them instead of failing and
+they say so as they go. On a Linux host `make check` runs them against the host kernel already. `make check-msrv` builds against the declared minimum toolchain, which the pinned
+cross-build container ships.
+
+## Clippy here is not the clippy CI runs
+
+CI installs whatever stable is current on the day it runs, and clippy gains lints with every
+release, so a host a few releases behind passes a warning CI fails on, and the first report of it
+is a red build on code that was checked before it was pushed. `make check-toolchain` measures that
+gap from the release date rustc states, and it runs last in `make check`. When it fires, the answer
+is `make check-linux`. Another local `cargo clippy` is not: it is the same weaker lint set a second
+time.
+
+## Reading a result
+
+Read what a command exits with rather than a filter over it: `make check | grep error` reports
+success on a formatting failure, because a fmt diff says nothing matching that pattern and grep
+exited happily.
+
+**A test that fails on the parent commit is not yours to fix.** Establish that once, cheaply, and
+move on: name the test, say it reproduces without the change, and carry on with the work. Do not
+bisect it, do not run the suite on the parent, and do not re-run the suite hoping. Some tests
+here spawn real processes against a wall clock, so they fail on a loaded machine and pass on the
+next run; that is a flake, not a signal, and chasing one costs more than the failure does.
+
+A test that fails only when the suite runs under bravebot's `run` tool fails because of the
+sandbox, not because of the change. Seatbelt cannot be applied from inside a seatbelt, so a test that
+starts a confined process cannot, and should skip through `bravebot_sandbox::confinement_works_here()`
+instead of failing. To tell the two apart, run the test from a terminal: if it passes there, the
+sandbox is the cause. A test that fails under `run` and has no such skip is a bug in the test.
+
+**Which tests those are is measured rather than assumed.** The weekly
+[Test determinism](../../.github/workflows/test-determinism.yml) workflow runs the suite a hundred
+times against one build, on Linux at four threads and at sixteen and on macOS and Windows at cargo's
+default, and names every test whose outcome changed, with the rate, the platform and the panic it
+produced. Each one gets an issue titled `Flaky test: <name>` and labelled `flaky-test`
+([labelling-issues.md](labelling-issues.md#flaky-tests)), filed by a separate job that holds the
+issue grant and compiles nothing, except from the Windows leg, which files nothing because the
+suite is not expected to pass there yet (#88). A test that already has an issue gets nothing
+further, so the list of open flakes is the search rather than a job summary somebody has to
+remember to read. Search the issues before treating a failure as a
+known flake, and run `contrib/measure-flakes.py --runs 30` to ask this machine over a shorter sweep.
+Neither fails a build over a rate.
+
+A passing test is not evidence that it would fail if the code were wrong. The
+[Mutation testing](../../.github/workflows/mutation-testing.yml) workflow runs cargo-mutants over
+`bravebot-core` every Sunday, in six shards, and its job summary lists the functions with the most
+changes no test noticed. That list is where to find a test to write. It gates nothing, and
+[contrib/README.md](../../contrib/README.md#measure-mutantspy) says how to run it on one file.
+
+**A test missing from that list is not thereby clean.** A hundred runs can only account for a test
+that loses more than about three in a hundred, and the job measures quiet hosted runners, while
+the mock server races that `make check-linux` caps threads for want a machine with something else on
+it. So the workflow reporting nothing means less than the local command reporting nothing on the
+machine that actually failed: every report states the rate it saw, and that bound is what to read
+before concluding a test is deterministic.
+
+To run one failing test on the parent, check the parent out in a detached worktree, run the test
+there, and remove the worktree. The parent is `HEAD` for edits not yet committed, and the merge base
+with `upstream/main`, or `origin/main` without one, for a branch.
+
+```sh
+base=$(mktemp -d)
+git worktree add --lock --detach "$base" <parent>
+(cd "$base" && CARGO_TARGET_DIR="$base/target" cargo test --locked -p <crate> --lib <test>)
+git worktree unlock "$base" && git worktree remove "$base"
+```
+
+`--lib` builds the crate's unit tests alone. For a test in `tests/<file>.rs`, `--test <file>` takes
+its place. The lock keeps a `git worktree prune` or another session's cleanup from removing the
+worktree while the test runs.
+
+The worktree builds into a `target` of its own, so its first build is a cold one. Do not point
+`CARGO_TARGET_DIR` at this checkout's `target` to save that build. The line sets it to the
+worktree's own, so a value already in the environment cannot do so either. Cargo names a workspace
+crate's build by the crate's path inside the workspace, so two trees sharing one `target` write the
+same files, and the next build here takes the parent's binaries as current and runs them in place
+of the change.
+
+Never use `git stash` in a linked worktree, or in any checkout of a repository another session is
+working in. `refs/stash` is one ref in the repository's common directory, so every worktree of the
+repository shares one stack. A `git stash pop` in one applies whatever was stashed last in any of
+them, which can be another worker's changes, and an entry left behind is listed in all of them.
+`git rebase --autostash` and `git pull --autostash` use the same stack, and leave their entry on it
+when putting the changes back conflicts.
+
+If a check cannot pass for a reason outside the change, say so in the commit message rather than
+leaving it to be discovered.

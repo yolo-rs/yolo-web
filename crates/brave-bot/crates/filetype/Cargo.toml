@@ -1,0 +1,9 @@
+[package]
+name = "bravebot-filetype"
+description = "Whether a file is text, and what its name says it is, shared by the agent, the front ends and the file helper"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+

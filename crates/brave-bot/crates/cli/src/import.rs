@@ -1,0 +1,2194 @@
+//! Importing a model service Claude Code or opencode configured, or a running Ollama, LM Studio or
+//! llama-server serves (`docs/specs/import.md`).
+//!
+//! What the two programs' files hold, and what the servers answer, is read and mapped in
+//! [`bravebot_config::import`]. Here is the rest: what is shown, the questions, and the write.
+//! Every question is put in lines, the way a session in lines puts one, because each is asked
+//! before anything is drawn.
+
+use crate::exit::{Ending, fail};
+use crate::plain::Prompting;
+use crate::progress::printable;
+use bravebot_agent::confirm::Decision;
+use bravebot_config::bedrock::{Bedrock, Tier};
+use bravebot_config::import::{self, Destination, Found, Gateway, Key, Left, Reason, Source};
+use bravebot_config::provider::{Credential, Provider};
+use bravebot_config::{Config, Managed};
+use bravebot_i18n::t;
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+/// What the sources hold, for a refusal that asks nothing.
+#[derive(Debug, Default)]
+pub(crate) struct Looked {
+    /// The lines naming what was found and not imported.
+    left: Vec<String>,
+    /// The sources holding something the import command would offer.
+    importable: Vec<Source>,
+}
+
+impl Looked {
+    /// The lines naming what was found and not imported.
+    pub(crate) fn left(&self) -> &[String] {
+        &self.left
+    }
+
+    /// The line naming the command that would ask, where there is anything to ask about.
+    pub(crate) fn command(&self) -> Option<String> {
+        match self.importable.as_slice() {
+            [] => None,
+            [Source::Environment] => Some(t!(onboarding_import_keys).to_string()),
+            [source] if source.is_server() => {
+                Some(t!(onboarding_import_running, source = source.name()))
+            }
+            [source] => Some(t!(onboarding_import_one, source = source.name())),
+            [first, second] => Some(t!(
+                onboarding_import_both,
+                first = named_to_begin(*first).as_str(),
+                second = named(*second).as_str()
+            )),
+            [first, second, third] => Some(t!(
+                onboarding_import_three,
+                first = named_to_begin(*first).as_str(),
+                second = named(*second).as_str(),
+                third = named(*third).as_str()
+            )),
+            sources => Some(t!(
+                onboarding_import_many,
+                sources = sources
+                    .iter()
+                    .enumerate()
+                    .map(|(at, source)| match at {
+                        0 => named_to_begin(*source),
+                        _ => named(*source),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                    .as_str()
+            )),
+        }
+    }
+}
+
+/// What `source` is called inside a sentence. A program goes by its own name, which is not
+/// translated. The environment is no program, so the catalog holds its name.
+fn named(source: Source) -> String {
+    match source {
+        Source::Environment => t!(import_source_environment).to_string(),
+        _ => source.name().to_string(),
+    }
+}
+
+/// What `source` is called where it begins a sentence. Only the environment's name, which the
+/// catalog holds in lowercase, takes a capital: a program's name is written as it always is.
+fn named_to_begin(source: Source) -> String {
+    let name = named(source);
+    if source != Source::Environment {
+        return name;
+    }
+    let mut letters = name.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => name,
+    }
+}
+
+/// Where a start would be refused for naming no model service, offer the import first, and end the
+/// start unless a service answers after it. Both front ends open their session through this.
+///
+/// Asked about the model the session will request: `named`, the `--model` that `-i` was given,
+/// where there is one, and otherwise the recorded pick or the configured default (BACKEND-39).
+///
+/// A model the machine-level layer refuses ends the start here instead, and no import is offered. No
+/// service these sources configure would make the request, so every answer to the question would be
+/// refused, and the file that refused is not this person's to write (BACKEND-48).
+pub(crate) fn before_the_session(config: &mut Config, named: Option<&str>) -> Option<ExitCode> {
+    let model = crate::model::model_for_this_run(named, config);
+    let egress = bravebot_net::Egress::new();
+    let mut serving = bravebot_agent::backend::serving(config, &egress, &model);
+    // Asked before an import is offered, which a stored sign-in leaves out in any case, and only
+    // where no model was named: the flag outranks a recorded pick, so a pick made here would leave
+    // the model this start requests as it is. Where nothing is picked, or the pick is not the model the
+    // start reads back, the start goes on to the refusal.
+    let mut why_no_model_was_offered = None;
+    if let Some(accounts) = crate::model::asks_which_of_the_accounts_models(&serving, named) {
+        match crate::model::ask_which_of_the_accounts_models(config, accounts) {
+            crate::model::Asked::InForce => return None,
+            // Asking for the listing removes a sign-in that has ended, so what the refusal says about
+            // the sign-in is read again, and says why the account offered no model.
+            crate::model::Asked::NothingOffered(why) => {
+                serving = bravebot_agent::backend::serving(config, &egress, &model);
+                why_no_model_was_offered = Some(why);
+            }
+            crate::model::Asked::Nobody | crate::model::Asked::Declined => {}
+        }
+    } else if crate::model::asks_which_of_the_configured_models(&serving, named)
+        && matches!(
+            crate::model::ask_which_of_the_configured_models(config),
+            crate::model::Asked::InForce
+        )
+    {
+        return None;
+    }
+    let (a_service_is_configured, chatgpt, xai) = match serving {
+        bravebot_agent::backend::Serving::Configured => return None,
+        bravebot_agent::backend::Serving::Refused { file, why } => {
+            return Some(fail(
+                Ending::Configuration,
+                crate::model::managed_refusal(&model, &file, why),
+            ));
+        }
+        bravebot_agent::backend::Serving::NothingConfigured {
+            a_service_is_configured,
+            chatgpt,
+            xai,
+        } => (a_service_is_configured, chatgpt, xai),
+    };
+    match at_the_start(a_service_is_configured, named) {
+        Start::Serving(imported) => {
+            *config = *imported;
+            None
+        }
+        Start::Ended(code) => Some(code),
+        Start::Refuse(looked) => Some(fail(
+            Ending::Configuration,
+            crate::model::how_to_configure_a_model(
+                a_service_is_configured,
+                chatgpt,
+                xai,
+                &looked,
+                why_no_model_was_offered.as_deref(),
+            ),
+        )),
+    }
+}
+
+/// How a start with nothing configured goes on, once the import has been offered.
+enum Start {
+    /// Nothing was imported: the start refuses as BACKEND-39 says, with these lines in it.
+    Refuse(Looked),
+    /// Something was imported and a service answers now, on this configuration read back from disk.
+    Serving(Box<Config>),
+    /// The start ends here, having said why.
+    Ended(ExitCode),
+}
+
+/// Offer the import at a start that BACKEND-39 would refuse.
+///
+/// Asked only where there is somebody to answer and somewhere to write: all three streams are
+/// terminals, since the questions go to stderr, the session is not incognito, and no service is
+/// configured, which is the case the routes answer. Anywhere else the refusal gains a line naming the
+/// command that asks, and nothing is read from stdin.
+///
+/// `named` is the model the command line named. The configuration read back after an import is asked
+/// about that model as the first read was.
+fn at_the_start(a_service_is_configured: bool, named: Option<&str>) -> Start {
+    let asks = !a_service_is_configured && a_person_can_be_asked();
+    if !asks {
+        return Start::Refuse(looked(a_service_is_configured));
+    }
+    let Some(file) = destination_file() else {
+        return Start::Refuse(Looked::default());
+    };
+    // Opened before the sources are read, since the refusal for a file that cannot be written
+    // reads them itself, and the servers are asked once per start.
+    let mut destination = match Destination::open(&file) {
+        Ok(destination) => destination,
+        Err(_) => return Start::Refuse(looked(false)),
+    };
+    let found = import::found(&import::Places::from_env(), exported, ask_server);
+    if found.is_empty() {
+        return Start::Refuse(Looked::default());
+    }
+
+    // The process's own stdin, whose buffer is shared with every later reader of it, so an answer
+    // typed ahead here reaches whatever asks next rather than a buffer that is dropped.
+    let mut asking = Prompting::new(std::io::stdin().lock(), std::io::stderr());
+    let offered = offer(
+        &mut asking,
+        found,
+        &mut destination,
+        &Managed::load(),
+        &exported,
+    );
+    if offered.imported.is_empty() {
+        return Start::Refuse(Looked::default());
+    }
+    if let Err(problem) = write(&destination, unwritable) {
+        return Start::Ended(fail(Ending::Failed, problem));
+    }
+    for source in &offered.imported {
+        asking.say(&imported(*source, &file));
+    }
+
+    // Read again as a fresh start reads it, since the file on disk is what every later start will
+    // read and a write that did not make a working configuration is worth finding now.
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            // Drawn: the problem can quote an endpoint value an environment variable or a
+            // settings file chose (LAYER-3).
+            return Start::Ended(fail(
+                Ending::Configuration,
+                crate::progress::printable_lines(&t!(cli_configuration_problem, problem = err)),
+            ));
+        }
+    };
+    // Only the session's own model has to answer before it opens. Another entry's key can be
+    // exported later, and ending here over it would refuse a service that works.
+    let unset = unset_gateways(&config, &offered.gateways);
+    let blocked = config
+        .provider_for(&crate::model::model_for_this_run(named, &config))
+        .is_some_and(|(serving, _)| unset.iter().any(|provider| provider.id == serving.id));
+    if blocked {
+        let lines: Vec<String> = unset
+            .iter()
+            .map(|provider| unset_line(provider, &file, false))
+            .collect();
+        return Start::Ended(fail(Ending::Configuration, lines.join("\n")));
+    }
+    for provider in &unset {
+        asking.say(&unset_line(provider, &file, true));
+    }
+    let model = crate::model::model_for_this_run(named, &config);
+    match bravebot_agent::backend::serving(&config, &bravebot_net::Egress::new(), &model) {
+        bravebot_agent::backend::Serving::NothingConfigured {
+            a_service_is_configured,
+            chatgpt,
+            xai,
+        } => Start::Ended(fail(
+            Ending::Configuration,
+            crate::model::how_to_configure_a_model(
+                a_service_is_configured,
+                chatgpt,
+                xai,
+                &Looked::default(),
+                None,
+            ),
+        )),
+        // An import can put a model in force that the layer refuses, the entry it wrote naming one,
+        // so the answer is read again here rather than taken from the start of this function
+        // (BACKEND-48).
+        bravebot_agent::backend::Serving::Refused { file, why } => Start::Ended(fail(
+            Ending::Configuration,
+            crate::model::managed_refusal(&model, &file, why),
+        )),
+        bravebot_agent::backend::Serving::Configured => Start::Serving(Box::new(config)),
+    }
+}
+
+/// Whether a start may put a question: all three streams are terminals, since a question goes to
+/// stderr, is answered on stdin and leads to a session that draws on stdout, and the session is not
+/// incognito, which leaves nothing to answer a question with.
+pub(crate) fn a_person_can_be_asked() -> bool {
+    !bravebot_core::incognito::engaged()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+}
+
+/// What the sources hold, where nobody is asked.
+///
+/// Nothing where a service is configured, which is the one-line case, and nothing while incognito,
+/// which writes nothing and so has nothing to offer.
+pub(crate) fn looked(a_service_is_configured: bool) -> Looked {
+    let mut looked = Looked::default();
+    if a_service_is_configured {
+        return looked;
+    }
+    let Some(file) = destination_file() else {
+        return looked;
+    };
+    let destination = Destination::open(&file);
+    let managed = Managed::load();
+    // Why the command would refuse to write, where one source's addition would not fit.
+    let mut too_large = None;
+    for found in import::found(&import::Places::from_env(), exported, ask_server) {
+        let plan = plan(found, destination.as_ref().ok(), &managed, &exported);
+        looked.left.extend(left_lines(plan.source, &plan.left));
+        if plan.adds_anything() {
+            match fits(&file, plan) {
+                Ok(source) => looked.importable.push(source),
+                Err(why) => too_large = Some(why),
+            }
+        }
+    }
+    // The command would refuse on this same file, so the file is what is named.
+    let refused = destination.err().or(too_large);
+    if let Some(why) = refused
+        && (!looked.importable.is_empty() || too_large.is_some())
+    {
+        looked.importable.clear();
+        looked.left.push(unwritable(why, &file));
+    }
+    looked
+}
+
+/// Whether the file, with this one source's additions in it, is one the command could write, and
+/// the source where it is.
+///
+/// Applied to a copy read again from disk, so the file the start goes on to read is untouched.
+fn fits(file: &Path, plan: Plan) -> Result<Source, import::Unwritable> {
+    let source = plan.source;
+    let mut scratch = Destination::open(file)?;
+    for (name, value) in &plan.env {
+        scratch.add_env(name, value);
+    }
+    if let Some(model) = &plan.model {
+        scratch.add_model(model);
+    }
+    for gateway in plan.gateways {
+        scratch.add_gateway(gateway);
+    }
+    scratch.text().map(|_| source)
+}
+
+/// `bravebot import-providers`: the same questions, at any time.
+pub(crate) fn providers(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        return fail(Ending::Argument, t!(import_takes_nothing_else));
+    }
+    // Before the terminal: this is a write, and the one thing an incognito session will not do.
+    if bravebot_core::incognito::engaged() {
+        return fail(Ending::Failed, t!(import_not_while_incognito));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return fail(Ending::Argument, t!(import_needs_a_terminal));
+    }
+    let Some(file) = destination_file() else {
+        return fail(Ending::Failed, t!(import_no_home));
+    };
+    let mut destination = match Destination::open(&file) {
+        Ok(destination) => destination,
+        Err(why) => return fail(Ending::Failed, unwritable(why, &file)),
+    };
+
+    let found = import::found(&import::Places::from_env(), exported, ask_server);
+    let mut asking = Prompting::new(std::io::stdin().lock(), std::io::stderr());
+    let offered = offer(
+        &mut asking,
+        found,
+        &mut destination,
+        &Managed::load(),
+        &exported,
+    );
+    if !offered.asked {
+        asking.say(match offered.settled {
+            true => t!(import_nothing_new),
+            false => t!(import_nothing_found),
+        });
+        return ExitCode::SUCCESS;
+    }
+    if offered.imported.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    if let Err(problem) = write(&destination, unwritable) {
+        return fail(Ending::Failed, problem);
+    }
+    for source in &offered.imported {
+        asking.say(&imported(*source, &file));
+    }
+    // Said rather than failed on: a service may already be configured beside this one, and the
+    // import did what it was asked.
+    if let Ok(config) = Config::from_env() {
+        for provider in unset_gateways(&config, &offered.gateways) {
+            asking.say(&unset_line(provider, &file, false));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn exported(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// What the server of `source` at `host` has to offer.
+///
+/// Asked only once there is a settings file to write, so an incognito start opens no socket, and a
+/// trail of its own because no session exists yet whose trail it could join. A source that is
+/// files is never asked.
+fn ask_server(source: Source, host: &str) -> Option<Vec<import::Installed>> {
+    let trail = &mut bravebot_session::audit::Trail::new();
+    match source {
+        Source::Ollama => bravebot_agent::backend::installed_on_ollama(host, trail),
+        Source::LmStudio => bravebot_agent::backend::installed_on_lm_studio(host, trail),
+        Source::LlamaServer => bravebot_agent::backend::installed_on_llama_server(host, trail),
+        Source::ClaudeCode | Source::Opencode | Source::Environment => None,
+    }
+}
+
+/// The user's own settings file, or `None` where nothing may be written.
+fn destination_file() -> Option<PathBuf> {
+    bravebot_agent::home::writable()
+        .map(|directory| bravebot_config::user_settings_file(&directory))
+}
+
+/// What the questions came to.
+#[derive(Debug, Default)]
+struct Offered {
+    /// Whether anything was asked at all.
+    asked: bool,
+    /// Whether a source held something importable that the file already sets or the managed layer
+    /// pins, so that nothing was asked about it.
+    settled: bool,
+    /// The sources somebody said yes to, in the order they were asked about.
+    imported: Vec<Source>,
+    /// The ids of the gateways written.
+    gateways: Vec<String>,
+}
+
+/// Ask about each source in turn, and add what is approved to `destination`.
+///
+/// Planned against the destination as the answers before left it, so a name the first answer wrote
+/// is one the second finds already set.
+fn offer<R: BufRead, W: Write>(
+    asking: &mut Prompting<R, W>,
+    found: Vec<Found>,
+    destination: &mut Destination,
+    managed: &Managed,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Offered {
+    let mut offered = Offered::default();
+    for found in found {
+        let plan = plan(found, Some(destination), managed, environment);
+        if !plan.adds_anything() {
+            offered.settled |=
+                !plan.kept.is_empty() || !plan.pinned.is_empty() || !plan.named.is_empty();
+            let lines = [
+                kept_lines(&plan, destination.path()),
+                named_lines(&plan),
+                pinned_lines(&plan, managed),
+                left_lines(plan.source, &plan.left),
+            ];
+            for line in lines.iter().flatten() {
+                asking.say(line);
+            }
+            continue;
+        }
+        offered.asked = true;
+        let lines = shown(&plan, destination.path(), managed);
+        let question = t!(import_question, source = named(plan.source).as_str());
+        if asking.ask(&lines, &question) != Decision::Approve {
+            continue;
+        }
+        offered.imported.push(plan.source);
+        let Plan {
+            env,
+            model,
+            gateways,
+            ..
+        } = plan;
+        for (name, value) in env {
+            destination.add_env(&name, &value);
+        }
+        if let Some(model) = model {
+            destination.add_model(&model);
+        }
+        for mut gateway in gateways {
+            credential(asking, &mut gateway, destination.path());
+            offered.gateways.push(gateway.id.clone());
+            destination.add_gateway(gateway);
+        }
+    }
+    offered
+}
+
+/// Settle what the written entry says about its credential.
+///
+/// A key the source holds is written only on a question of its own, which names where it goes and
+/// never shows it. Anything else leaves the entry naming the variable to export, or nothing where no
+/// variable is known, which is how a local model server is configured.
+fn credential<R: BufRead, W: Write>(
+    asking: &mut Prompting<R, W>,
+    gateway: &mut Gateway,
+    file: &Path,
+) {
+    let kept = match std::mem::replace(&mut gateway.key, Key::Named) {
+        Key::Named => return,
+        Key::Held(key) => {
+            let question = t!(
+                import_key_question,
+                id = printable(&gateway.id),
+                endpoint = printable(&gateway.endpoint),
+                file = printable(&file.display().to_string())
+            );
+            let approved = asking.ask(&[], &question) == Decision::Approve;
+            if approved {
+                gateway.keep_key(&key);
+            }
+            approved
+        }
+        Key::File(_) => false,
+        // The entry names the variable already, and the line shown with it said so.
+        Key::Command => return,
+    };
+    if kept {
+        return;
+    }
+    if let Some(fallback) = gateway.fallback() {
+        gateway.name_variable(fallback);
+    }
+    let variables = gateway.variables();
+    asking.say(&match variables.is_empty() {
+        true => t!(import_key_none, id = printable(&gateway.id)),
+        false => t!(
+            import_key_export,
+            id = printable(&gateway.id),
+            variables = printable(&variables.join(", "))
+        ),
+    });
+}
+
+/// What one source would add, against what the file and the managed layer already say.
+struct Plan {
+    source: Source,
+    read: Vec<PathBuf>,
+    running_at: Option<String>,
+    /// The window the running server holds the model loaded with.
+    window: Option<u64>,
+    env: Vec<(String, String)>,
+    model: Option<String>,
+    gateways: Vec<Gateway>,
+    /// Names the file already sets, which keep their values.
+    kept: Vec<String>,
+    /// Models left out of an AWS entry because a tier names them, by entry id.
+    named: Vec<(String, String, Tier)>,
+    /// Names the managed layer pins, which it would override.
+    pinned: Vec<String>,
+    left: Vec<Left>,
+}
+
+impl Plan {
+    fn adds_anything(&self) -> bool {
+        !self.env.is_empty() || self.model.is_some() || !self.gateways.is_empty()
+    }
+}
+
+/// `destination` is `None` where the file could not be read as a document, which is said when the
+/// import is asked for rather than here.
+fn plan(
+    found: Found,
+    destination: Option<&Destination>,
+    managed: &Managed,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Plan {
+    let mut plan = Plan {
+        source: found.source,
+        read: found.read,
+        running_at: found.running_at,
+        window: found.window,
+        env: Vec::new(),
+        model: None,
+        gateways: Vec::new(),
+        kept: Vec::new(),
+        named: Vec::new(),
+        pinned: Vec::new(),
+        left: found.left,
+    };
+    let holds = |check: &dyn Fn(&Destination) -> bool| destination.is_some_and(check);
+
+    for (name, value) in found.env {
+        if managed.get(&name).is_some() {
+            plan.pinned.push(format!("env.{name}"));
+        } else if holds(&|file| file.holds_env(&name)) {
+            plan.kept.push(format!("env.{name}"));
+        } else {
+            plan.env.push((name, value));
+        }
+    }
+    // The tiers as a start will read them once this plan is written: pinned, then exported, then
+    // the file.
+    let tiers = Bedrock::from_lookup(|name| {
+        managed
+            .get(name)
+            .map(str::to_string)
+            .or_else(|| environment(name).filter(|value| !value.trim().is_empty()))
+            .or_else(|| {
+                plan.env
+                    .iter()
+                    .find(|(set, _)| set == name)
+                    .map(|(_, value)| value.clone())
+            })
+            .or_else(|| {
+                destination
+                    .and_then(|file| file.env(name))
+                    .map(str::to_string)
+            })
+    });
+    // A managed `provider` block is the whole list of gateways on this machine, so one added here
+    // would never be read.
+    let gateways_pinned = managed.gateways().is_some();
+    for mut gateway in found.gateways {
+        let name = format!("provider.{}", gateway.id);
+        if gateways_pinned {
+            plan.pinned.push(name);
+        } else if holds(&|file| file.holds_gateway(&gateway.id)) {
+            plan.kept.push(name);
+        } else if plan.source.is_server()
+            && let Some(id) = destination.and_then(|file| file.serving_locally(&gateway.endpoint))
+        {
+            // The same server under another id: a second entry would list every model twice.
+            plan.kept.push(format!("provider.{id}"));
+        } else {
+            let taken = tiers
+                .as_ref()
+                .map(|tiers| gateway.take_tier_models(tiers))
+                .unwrap_or_default();
+            // An AWS entry offers only the models it names, so one left with none adds nothing.
+            let emptied = !taken.is_empty() && !gateway.names_models();
+            plan.named.extend(
+                taken
+                    .into_iter()
+                    .map(|(model, tier)| (gateway.id.clone(), model, tier)),
+            );
+            if !emptied {
+                plan.gateways.push(gateway);
+            }
+        }
+    }
+    // An opencode model answers through the entry written beside it, and through no entry this
+    // file or the managed layer already has.
+    let served = found
+        .model_gateway
+        .is_none_or(|id| plan.gateways.iter().any(|gateway| gateway.id == id));
+    if let Some(model) = found.model.filter(|_| served) {
+        match holds(&|file| file.holds_model()) {
+            true => plan.kept.push("model".to_string()),
+            false => plan.model = Some(model),
+        }
+    }
+    plan
+}
+
+/// Everything that is shown before a source's question: the file written, every name added with
+/// its value as written, and the names left out and why.
+///
+/// Every value goes through [`printable`], because a file somebody else's program wrote can hold
+/// an escape sequence, and one here would redraw the lines around the question.
+fn shown(plan: &Plan, destination: &Path, managed: &Managed) -> Vec<String> {
+    let file = printable(&destination.display().to_string());
+    let read = plan
+        .read
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let found = match (&plan.running_at, plan.read.is_empty()) {
+        (Some(url), _) => t!(
+            import_found_running,
+            source = plan.source.name(),
+            url = printable(url)
+        ),
+        (None, true) if plan.source == Source::Environment => t!(import_found_keys).to_string(),
+        (None, true) => t!(import_found_exported, source = plan.source.name()),
+        (None, false) => t!(
+            import_found,
+            source = plan.source.name(),
+            files = printable(&read)
+        ),
+    };
+    let mut lines = vec![found, t!(import_adds, file = file.as_str())];
+    for (name, value) in &plan.env {
+        lines.push(printable(&format!(
+            "  env.{name}: {}",
+            import::quoted(value)
+        )));
+    }
+    if let Some(model) = &plan.model {
+        lines.push(printable(&format!("  model: {}", import::quoted(model))));
+        lines.extend(window_lines(plan.source, plan.window));
+    }
+    for gateway in &plan.gateways {
+        lines.push(format!(
+            "  {}",
+            t!(
+                import_adds_gateway,
+                id = printable(&gateway.id),
+                endpoint = printable(&gateway.endpoint),
+                entry = printable(&gateway.shown())
+            )
+        ));
+        match &gateway.key {
+            Key::Named => {}
+            Key::Held(_) => lines.push(format!(
+                "  {}",
+                t!(import_key_held, id = printable(&gateway.id))
+            )),
+            Key::File(path) => lines.push(format!(
+                "  {}",
+                t!(
+                    import_key_file,
+                    id = printable(&gateway.id),
+                    path = printable(path)
+                )
+            )),
+            Key::Command => lines.push(format!(
+                "  {}",
+                t!(
+                    import_key_command,
+                    id = printable(&gateway.id),
+                    variables = printable(&gateway.variables().join(", "))
+                )
+            )),
+        }
+    }
+    lines.extend(kept_lines(plan, destination));
+    lines.extend(named_lines(plan));
+    lines.extend(pinned_lines(plan, managed));
+    lines.extend(left_lines(plan.source, &plan.left));
+    lines
+}
+
+/// The window the server holds the chosen model loaded with, and where that is below what bravebot
+/// budgets a conversation against, that the server drops what does not fit.
+///
+/// Said only where the server stated a figure: a model that is not loaded has none, and guessing
+/// one would be worse than saying nothing. Where it is below the assumed window the entry listed
+/// under it carries the figure as `options.contextWindow`, so it is the entry that is written.
+fn window_lines(source: Source, window: Option<u64>) -> Vec<String> {
+    let Some(window) = window else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!("  {}", t!(import_window, window = window as i64))];
+    if window < bravebot_config::provider::CONTEXT_WINDOW {
+        let assumed = bravebot_config::provider::CONTEXT_WINDOW as i64;
+        lines.push(format!(
+            "  {}",
+            match source {
+                Source::LmStudio => t!(import_lm_studio_window_small, assumed = assumed),
+                _ => t!(import_ollama_window_small, assumed = assumed),
+            }
+        ));
+    }
+    lines
+}
+
+/// The models a tier already names, which are not added to an entry a second time.
+fn named_lines(plan: &Plan) -> Vec<String> {
+    if plan.named.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![t!(import_named).to_string()];
+    lines.extend(plan.named.iter().map(|(id, model, tier)| {
+        format!(
+            "  {}",
+            t!(
+                import_named_model,
+                id = printable(id),
+                model = printable(&import::quoted(model)),
+                variable = tier.env_var()
+            )
+        )
+    }));
+    lines
+}
+
+/// The names the file already sets, which keep their values.
+fn kept_lines(plan: &Plan, file: &Path) -> Vec<String> {
+    if plan.kept.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![t!(
+        import_kept,
+        file = printable(&file.display().to_string())
+    )];
+    lines.extend(
+        plan.kept
+            .iter()
+            .map(|name| format!("  {}", printable(name))),
+    );
+    lines
+}
+
+/// The names the managed layer pins, under the file that pins them.
+fn pinned_lines(plan: &Plan, managed: &Managed) -> Vec<String> {
+    if plan.pinned.is_empty() {
+        return Vec::new();
+    }
+    let pinning = managed
+        .path()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(bravebot_config::managed_file);
+    let mut lines = vec![t!(
+        import_pinned,
+        file = printable(&pinning.display().to_string())
+    )];
+    lines.extend(
+        plan.pinned
+            .iter()
+            .map(|name| format!("  {}", printable(name))),
+    );
+    lines
+}
+
+/// One line per thing found and left, by name and reason and never by value.
+fn left_lines(source: Source, left: &[Left]) -> Vec<String> {
+    if left.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![t!(import_left_heading, source = named(source).as_str())];
+    for Left { name, reason } in left {
+        let why = match reason {
+            Reason::AnthropicApi => t!(import_left_anthropic_api),
+            Reason::Vertex => t!(import_left_vertex),
+            Reason::BearerToken => t!(import_left_bearer_token),
+            Reason::NoRegion => t!(import_left_no_region),
+            Reason::SignIn => t!(import_left_sign_in),
+            Reason::AnotherSdk => t!(import_left_another_sdk),
+            Reason::NoEndpoint => t!(import_left_no_endpoint),
+            Reason::Substitution => t!(import_left_substitution),
+            Reason::Elsewhere => t!(import_left_elsewhere),
+            Reason::NoToolModel => t!(import_left_no_tool_model),
+            Reason::KeyForAnotherHost => t!(import_left_another_host),
+            Reason::ModelWord => t!(import_left_model_word),
+        };
+        lines.push(format!("  - {}: {why}", printable(name)));
+    }
+    lines
+}
+
+fn imported(source: Source, file: &Path) -> String {
+    let file = printable(&file.display().to_string());
+    match source.is_server() {
+        true => t!(import_imported_running, source = source.name(), file = file),
+        false => t!(
+            import_imported,
+            source = named(source).as_str(),
+            file = file
+        ),
+    }
+}
+
+fn unwritable(why: import::Unwritable, file: &Path) -> String {
+    let file = printable(&file.display().to_string());
+    match why {
+        import::Unwritable::NotADocument => t!(import_not_a_document, file = file),
+        import::Unwritable::TooLarge => t!(import_too_large, file = file),
+        import::Unwritable::Changed => t!(import_changed, file = file),
+    }
+}
+
+/// Every written gateway whose variables are all unset here.
+fn unset_gateways<'a>(config: &'a Config, written: &[String]) -> Vec<&'a Provider> {
+    config
+        .providers
+        .iter()
+        .filter(|provider| written.contains(&provider.id))
+        .filter(|provider| {
+            matches!(
+                provider.credential(|name| std::env::var(name).ok()),
+                Credential::Absent
+            )
+        })
+        .collect()
+}
+
+/// The line naming what `provider` reads its key from, which is unset. `later` where the session
+/// opens anyway, on a model another entry serves.
+fn unset_line(provider: &Provider, file: &Path, later: bool) -> String {
+    let id = printable(&provider.id);
+    let variables = printable(&provider.env.join(", "));
+    let file = printable(&file.display().to_string());
+    match later {
+        false => t!(
+            import_unset_variable,
+            id = id,
+            variables = variables,
+            file = file
+        ),
+        true => t!(
+            import_unset_variable_later,
+            id = id,
+            variables = variables,
+            file = file
+        ),
+    }
+}
+
+/// Put the destination on disk, whole, in place of the file it was read from, as
+/// [`bravebot_agent::accounts::write_settings`] does. `unwritable` words a refusal of the document
+/// for the command writing it.
+pub(crate) fn write(
+    destination: &Destination,
+    unwritable: fn(import::Unwritable, &Path) -> String,
+) -> Result<(), String> {
+    use bravebot_agent::accounts::SettingsNotWritten;
+    let path = destination.path();
+    bravebot_agent::accounts::write_settings(destination).map_err(|failure| match failure {
+        SettingsNotWritten::Unwritable(why) => unwritable(why, path),
+        SettingsNotWritten::Refused(problem) => t!(
+            import_not_written,
+            file = printable(&path.display().to_string()),
+            problem = problem
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bravebot_config::import::Places;
+
+    /// A scratch profile directory that removes itself.
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/test-scratch")
+                .join(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create scratch");
+            Self { path }
+        }
+
+        fn write(&self, relative: &str, text: &str) -> PathBuf {
+            let path = self.path.join(relative);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("create parent");
+            std::fs::write(&path, text).expect("write");
+            path
+        }
+
+        fn settings(&self) -> PathBuf {
+            self.path.join(".bravebot").join("settings.json")
+        }
+
+        /// What the two programs' files under this home hold, with nothing exported.
+        fn found(&self) -> Vec<Found> {
+            self.found_exporting(&[])
+        }
+
+        /// The same, with `set` exported in the process environment.
+        fn found_exporting(&self, set: &[(&str, &str)]) -> Vec<Found> {
+            let home = self.path.display().to_string();
+            let lookup = |name: &str| match name {
+                "HOME" => Some(home.clone()),
+                _ => set
+                    .iter()
+                    .find(|(named, _)| *named == name)
+                    .map(|(_, value)| value.to_string()),
+            };
+            import::found(&Places::from_lookup(lookup), lookup, |_, _| None)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    const BEDROCK: &str = r#"{"env": {
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "AWS_REGION": "us-west-2",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "arn:aws:bedrock:us-west-2:1:application-inference-profile/opus"
+    }, "model": "opus"}"#;
+
+    const OPENROUTER_HELD: &str = r#"{"provider": {"openrouter": {
+        "options": {"apiKey": "sk-or-a-held-key"},
+        "models": {"z-ai/glm-4.6": {}}
+    }}, "model": "openrouter/z-ai/glm-4.6"}"#;
+
+    /// Run the questions over `answers` against this home's settings file, returning what was said
+    /// and what they came to.
+    fn asked(scratch: &Scratch, answers: &str, managed: &Managed) -> (String, Offered) {
+        asked_about(scratch, scratch.found(), answers, managed, &|_| None)
+    }
+
+    /// [`asked`], about what `found` holds, with `environment` exported.
+    fn asked_about(
+        scratch: &Scratch,
+        found: Vec<Found>,
+        answers: &str,
+        managed: &Managed,
+        environment: &dyn Fn(&str) -> Option<String>,
+    ) -> (String, Offered) {
+        let mut said = Vec::new();
+        let offered = {
+            let mut asking = Prompting::new(answers.as_bytes(), &mut said);
+            let mut destination = Destination::open(&scratch.settings()).expect("a document");
+            let offered = offer(&mut asking, found, &mut destination, managed, environment);
+            if !offered.imported.is_empty() {
+                write(&destination, unwritable).expect("written");
+            }
+            offered
+        };
+        (String::from_utf8(said).expect("text"), offered)
+    }
+
+    /// The settings file with its whitespace taken out, which no value these tests write holds.
+    fn written(scratch: &Scratch) -> String {
+        let text = std::fs::read_to_string(scratch.settings()).expect("the file was written");
+        text.split_whitespace().collect()
+    }
+
+    /// IMPORT-5: the host is where a credential will be sent, so it and every other name written
+    /// are on the screen before the question, value for value.
+    #[test]
+    fn every_host_and_name_written_is_shown_before_the_question() {
+        let scratch = Scratch::new("cli-import-shown");
+        scratch.write(".claude/settings.json", BEDROCK);
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"provider": {
+                "gw": {"env": ["GW_TOKEN"], "options": {"baseURL": "https://gw.example.invalid/v1"}},
+                "openrouter": {"env": ["OPENROUTER_API_KEY"]}
+            }}"#,
+        );
+
+        let (said, _) = asked(&scratch, "", &Managed::default());
+
+        let claude = said
+            .find("Import this from Claude Code?")
+            .expect("Claude Code was asked about");
+        let opencode = said
+            .find("Import this from opencode?")
+            .expect("opencode was asked about");
+        let before_claude = &said[..claude];
+        for shown in [
+            r#"env.BRAVEBOT_USE_BEDROCK: "1""#,
+            r#"env.AWS_REGION: "us-west-2""#,
+            r#"env.ANTHROPIC_DEFAULT_OPUS_MODEL: "arn:aws:bedrock:us-west-2:1:application-inference-profile/opus""#,
+            r#"model: "opus""#,
+            &scratch.settings().display().to_string(),
+        ] {
+            assert!(
+                before_claude.contains(shown),
+                "{shown} was not shown before the question: {said}"
+            );
+        }
+        let before_opencode = &said[claude..opencode];
+        // The compiled-in host for a known id is in no field of the entry, so only the line naming
+        // where it is reached shows it.
+        for shown in [
+            "provider.gw",
+            "https://gw.example.invalid/v1",
+            r#""env":["GW_TOKEN"]"#,
+            "provider.openrouter",
+            "https://openrouter.ai/api/v1",
+        ] {
+            assert!(
+                before_opencode.contains(shown),
+                "{shown} was not shown before the question: {said}"
+            );
+        }
+    }
+
+    /// IMPORT-5: a setup exported rather than written down was read from no file, and the line
+    /// above the question says where it was found instead of naming none.
+    #[test]
+    fn a_setup_found_only_in_the_environment_says_so() {
+        let scratch = Scratch::new("cli-import-exported");
+        let home = scratch.path.display().to_string();
+        let lookup = |name: &str| match name {
+            "HOME" => Some(home.clone()),
+            "CLAUDE_CODE_USE_BEDROCK" => Some("1".to_string()),
+            "AWS_REGION" => Some("us-west-2".to_string()),
+            _ => None,
+        };
+        let found = import::found(&Places::from_lookup(lookup), lookup, |_, _| None);
+
+        let (said, _) = asked_about(&scratch, found, "", &Managed::default(), &lookup);
+
+        let question = said
+            .find("Import this from Claude Code?")
+            .expect("Claude Code was asked about");
+        assert!(
+            said[..question]
+                .contains("Claude Code configures a model service bravebot can use, in this process's environment."),
+            "{said}"
+        );
+        assert!(!said.contains(", in ."), "{said}");
+    }
+
+    /// IMPORT-5: only the affirmative approves; another word declines, and so does nobody
+    /// answering at all.
+    #[test]
+    fn only_the_affirmative_writes_and_the_end_of_input_declines() {
+        let scratch = Scratch::new("cli-import-affirmative");
+        scratch.write(".claude/settings.json", BEDROCK);
+
+        for answers in ["", "yes please\n", "n\n", "\n"] {
+            let (said, offered) = asked(&scratch, answers, &Managed::default());
+            assert!(offered.asked, "{answers:?}: nothing was asked: {said}");
+            assert!(
+                offered.imported.is_empty() && !scratch.settings().exists(),
+                "{answers:?} wrote the file"
+            );
+        }
+
+        let (_, offered) = asked(&scratch, "y\n", &Managed::default());
+        assert_eq!(offered.imported, [Source::ClaudeCode]);
+        let file = written(&scratch);
+        assert!(file.contains(r#""BRAVEBOT_USE_BEDROCK":"1""#), "{file}");
+    }
+
+    /// IMPORT-5: two sources that disagree are two questions, and the second finds what the first
+    /// answer wrote already set.
+    #[test]
+    fn a_name_the_first_answer_wrote_is_left_by_the_second() {
+        let scratch = Scratch::new("cli-import-second");
+        scratch.write(".claude/settings.json", BEDROCK);
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"model": "openrouter/z-ai/glm-4.6", "provider": {"openrouter": {"env": ["OPENROUTER_API_KEY"]}}}"#,
+        );
+
+        let (said, offered) = asked(&scratch, "y\ny\n", &Managed::default());
+
+        assert_eq!(offered.imported, [Source::ClaudeCode, Source::Opencode]);
+        let second = &said[said.find("Import this from Claude Code?").expect("asked")..];
+        let kept = second.find("Left as they are").expect("something was left");
+        assert!(
+            second[kept..].contains("  model"),
+            "the model the first answer wrote was offered again: {said}"
+        );
+        let file = written(&scratch);
+        assert!(file.contains(r#""model":"opus""#), "{file}");
+        assert!(file.contains(r#""openrouter":{"#), "{file}");
+    }
+
+    const OPUS: &str = "arn:aws:bedrock:us-west-2:1:application-inference-profile/opus";
+    const SOL: &str = "arn:aws:bedrock:us-west-2:1:application-inference-profile/sol";
+
+    /// An opencode AWS entry in us-west-2 naming `models`.
+    fn aws_entry(models: &[&str]) -> String {
+        let models: Vec<String> = models.iter().map(|id| format!(r#""{id}": {{}}"#)).collect();
+        format!(
+            r#"{{"provider": {{"amazon-bedrock": {{"options": {{"region": "us-west-2"}}, "models": {{{}}}}}}}}}"#,
+            models.join(", ")
+        )
+    }
+
+    /// IMPORT-5: the tiers answer for a model before any entry does, so a model the first answer's
+    /// tier names is not written into the second's AWS entry as well, and an entry left naming
+    /// nothing is not offered.
+    #[test]
+    fn a_model_a_tier_names_is_not_added_to_an_aws_entry_again() {
+        let scratch = Scratch::new("cli-import-tier-named");
+        scratch.write(".claude/settings.json", BEDROCK);
+        scratch.write(".config/opencode/opencode.json", &aws_entry(&[OPUS, SOL]));
+
+        let (said, offered) = asked(&scratch, "y\ny\n", &Managed::default());
+
+        assert_eq!(offered.imported, [Source::ClaudeCode, Source::Opencode]);
+        let second = &said[said.find("Import this from Claude Code?").expect("asked")..];
+        let entry = second
+            .lines()
+            .find(|line| line.contains("provider.amazon-bedrock, reached at"))
+            .expect("the entry was shown");
+        assert!(entry.contains(SOL) && !entry.contains(OPUS), "{said}");
+        assert!(
+            second.contains(&format!(
+                r#""{OPUS}" in provider.amazon-bedrock, named by ANTHROPIC_DEFAULT_OPUS_MODEL"#
+            )),
+            "{said}"
+        );
+        let file = written(&scratch);
+        assert_eq!(file.matches(OPUS).count(), 1, "{file}");
+        assert!(file.contains(SOL), "{file}");
+
+        // Declined, no tier names it, so the entry keeps it.
+        let _ = std::fs::remove_file(scratch.settings());
+        let (said, _) = asked(&scratch, "n\ny\n", &Managed::default());
+        assert!(!said.contains("Not added"), "{said}");
+        let file = written(&scratch);
+        assert!(file.contains(OPUS) && file.contains(SOL), "{file}");
+
+        let _ = std::fs::remove_file(scratch.settings());
+        scratch.write(".config/opencode/opencode.json", &aws_entry(&[OPUS]));
+        let (said, offered) = asked(&scratch, "y\ny\n", &Managed::default());
+        assert_eq!(offered.imported, [Source::ClaudeCode]);
+        assert!(!said.contains("Import this from opencode?"), "{said}");
+        assert!(
+            said.contains("named by ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            "{said}"
+        );
+        assert!(!written(&scratch).contains("provider"), "{said}");
+    }
+
+    /// IMPORT-5: an exported tier is read at run time as a written one is, so it names the model
+    /// just the same.
+    #[test]
+    fn an_exported_tier_names_a_model_as_a_written_one_does() {
+        let scratch = Scratch::new("cli-import-tier-exported");
+        scratch.write(".config/opencode/opencode.json", &aws_entry(&[OPUS, SOL]));
+        let home = scratch.path.display().to_string();
+        let lookup = |name: &str| match name {
+            "HOME" => Some(home.clone()),
+            "BRAVEBOT_USE_BEDROCK" => Some("1".to_string()),
+            "AWS_REGION" => Some("us-west-2".to_string()),
+            "ANTHROPIC_DEFAULT_OPUS_MODEL" => Some(OPUS.to_string()),
+            _ => None,
+        };
+        let found = import::found(&Places::from_lookup(lookup), lookup, |_, _| None);
+
+        let (said, _) = asked_about(&scratch, found, "y\n", &Managed::default(), &lookup);
+
+        assert!(
+            said.contains("named by ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            "{said}"
+        );
+        let file = written(&scratch);
+        assert!(!file.contains(OPUS) && file.contains(SOL), "{file}");
+    }
+
+    /// IMPORT-6: a key the source holds is its own question, which names where it goes and says it
+    /// is kept in plain text, and the key itself is never on the screen.
+    #[test]
+    fn a_held_key_is_asked_about_separately_and_never_drawn() {
+        let scratch = Scratch::new("cli-import-held");
+        scratch.write(".config/opencode/opencode.json", OPENROUTER_HELD);
+
+        let (said, _) = asked(&scratch, "y\ny\n", &Managed::default());
+
+        let source = said.find("Import this from opencode?").expect("asked");
+        let key = said.find("in plain text").expect("the key was asked about");
+        assert!(source < key, "the key was asked about first: {said}");
+        let question = &said[source..];
+        for named in [
+            "provider.openrouter",
+            "https://openrouter.ai/api/v1",
+            &scratch.settings().display().to_string(),
+        ] {
+            assert!(
+                question.contains(named),
+                "{named} is not in the question: {said}"
+            );
+        }
+        assert!(
+            !said.contains("sk-or-a-held-key"),
+            "the key was drawn: {said}"
+        );
+        let file = written(&scratch);
+        assert!(file.contains(r#""apiKey":"sk-or-a-held-key""#), "{file}");
+    }
+
+    /// IMPORT-6: declined, the key is not written, and the entry names the variable opencode reads
+    /// for that id instead, with a line saying to export it.
+    #[test]
+    fn a_declined_key_names_the_variable_to_export() {
+        let scratch = Scratch::new("cli-import-declined");
+        scratch.write(".config/opencode/opencode.json", OPENROUTER_HELD);
+
+        let (said, _) = asked(&scratch, "y\nn\n", &Managed::default());
+
+        let file = written(&scratch);
+        assert!(file.contains(r#""env":["OPENROUTER_API_KEY"]"#), "{file}");
+        assert!(
+            !file.contains("sk-or-a-held-key"),
+            "a declined key was written"
+        );
+        let told = said
+            .find("OPENROUTER_API_KEY: export it")
+            .expect("told to export");
+        assert!(told > said.find("in plain text").expect("asked"), "{said}");
+
+        // With no variable known for the id, the entry is written with no credential, and says so.
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"provider": {"local": {"options": {"baseURL": "http://127.0.0.1:11434/v1", "apiKey": "unused"}}}}"#,
+        );
+        let _ = std::fs::remove_file(scratch.settings());
+        let (said, _) = asked(&scratch, "y\n\n", &Managed::default());
+        assert!(said.contains("no credential"), "{said}");
+        assert_eq!(
+            written(&scratch),
+            r#"{"provider":{"local":{"options":{"baseURL":"http://127.0.0.1:11434/v1"}}}}"#
+        );
+    }
+
+    /// IMPORT-3, IMPORT-6: the key Claude Code holds for Anthropic's API is an `anthropic` entry with
+    /// a question of its own, which writes the key when approved and names the variable to export
+    /// when declined, and says nothing of the key being left.
+    #[test]
+    fn a_claude_code_anthropic_key_is_asked_about_and_written_as_an_entry() {
+        let settings = r#"{"env": {"ANTHROPIC_API_KEY": "sk-ant-a-held-key"}}"#;
+
+        let scratch = Scratch::new("cli-import-claude-anthropic-key");
+        scratch.write(".claude/settings.json", settings);
+        let (said, _) = asked(&scratch, "y\ny\n", &Managed::default());
+        assert!(said.contains("provider.anthropic"), "{said}");
+        assert!(said.contains("https://api.anthropic.com/v1"), "{said}");
+        assert!(said.contains("in plain text"), "{said}");
+        assert!(!said.contains("not carried over"), "{said}");
+        assert!(
+            !said.contains("sk-ant-a-held-key"),
+            "the key was drawn: {said}"
+        );
+        let file = written(&scratch);
+        assert!(file.contains(r#""apiKey":"sk-ant-a-held-key""#), "{file}");
+
+        let scratch = Scratch::new("cli-import-claude-anthropic-declined");
+        scratch.write(".claude/settings.json", settings);
+        let (said, _) = asked(&scratch, "y\nn\n", &Managed::default());
+        let file = written(&scratch);
+        assert!(file.contains(r#""env":["ANTHROPIC_API_KEY"]"#), "{file}");
+        assert!(
+            !file.contains("sk-ant-a-held-key"),
+            "a declined key was written"
+        );
+        assert!(said.contains("ANTHROPIC_API_KEY: export it"), "{said}");
+    }
+
+    /// IMPORT-3, IMPORT-5: a key exported for a service with an endpoint compiled in is shown as the
+    /// entry it would write, naming the variable and the host the key goes to, before the question.
+    /// It writes the variable and not the key, and asks nothing about a key because none is read.
+    #[test]
+    fn an_exported_key_is_asked_about_and_written_as_an_entry_naming_the_variable() {
+        let scratch = Scratch::new("cli-import-exported-key");
+        let found = scratch.found_exporting(&[("OPENAI_API_KEY", "sk-exported-nobody-may-see")]);
+
+        let (said, offered) = asked_about(&scratch, found, "y\n", &Managed::default(), &|_| None);
+
+        assert_eq!(offered.imported, [Source::Environment], "{said}");
+        assert_eq!(offered.gateways, ["openai"]);
+        assert!(
+            said.contains(
+                r#"provider.openai, reached at https://api.openai.com/v1: {"env":["OPENAI_API_KEY"]}"#
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("Import this from your environment?"),
+            "{said}"
+        );
+        assert!(
+            said.contains("exported in this process's environment"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("in plain text"),
+            "a key was asked about: {said}"
+        );
+        assert!(
+            !said.contains("nobody-may-see"),
+            "the key was drawn: {said}"
+        );
+        let file = written(&scratch);
+        assert!(file.contains(r#""env":["OPENAI_API_KEY"]"#), "{file}");
+        assert!(
+            !file.contains("nobody-may-see"),
+            "the key was written: {file}"
+        );
+    }
+
+    /// IMPORT-5: only the affirmative writes, so a decline leaves the file as it was.
+    #[test]
+    fn a_declined_exported_key_writes_nothing() {
+        let scratch = Scratch::new("cli-import-exported-key-declined");
+        let found = scratch.found_exporting(&[("OPENROUTER_API_KEY", "sk-or-exported")]);
+
+        let (said, offered) = asked_about(&scratch, found, "n\n", &Managed::default(), &|_| None);
+
+        assert!(offered.imported.is_empty(), "{said}");
+        assert!(said.contains("provider.openrouter"), "{said}");
+        assert!(!scratch.settings().exists(), "a declined import wrote");
+    }
+
+    /// IMPORT-4: a key exported beside a host of its own is said to be left, by the variable's name
+    /// and never its value, and nothing is asked because nothing can be written.
+    #[test]
+    fn a_key_exported_beside_a_host_is_said_to_be_left_and_not_asked_about() {
+        let scratch = Scratch::new("cli-import-exported-key-host");
+        let found = scratch.found_exporting(&[
+            ("ANTHROPIC_API_KEY", "sk-ant-exported-nobody-may-see"),
+            ("ANTHROPIC_BASE_URL", "https://proxy.invalid"),
+        ]);
+
+        let (said, offered) = asked_about(&scratch, found, "y\n", &Managed::default(), &|_| None);
+
+        assert!(!offered.asked, "{said}");
+        assert!(
+            said.contains("Found in your environment and not imported:"),
+            "{said}"
+        );
+        assert!(
+            said.contains("- ANTHROPIC_API_KEY: a key exported beside a host of its own"),
+            "{said}"
+        );
+        for value in ["nobody-may-see", "proxy.invalid"] {
+            assert!(!said.contains(value), "{value} was drawn: {said}");
+        }
+    }
+
+    /// IMPORT-7: an entry the file already has keeps its name, so an exported key offers no second
+    /// one, and the line naming it is the one said.
+    #[test]
+    fn an_exported_key_for_an_entry_the_file_already_has_is_left_as_it_is() {
+        let scratch = Scratch::new("cli-import-exported-key-kept");
+        scratch.write(
+            ".bravebot/settings.json",
+            r#"{"provider": {"openai": {"env": ["MY_OWN_OPENAI_VARIABLE"]}}}"#,
+        );
+        let found = scratch.found_exporting(&[("OPENAI_API_KEY", "sk-exported")]);
+
+        let (said, offered) = asked_about(&scratch, found, "y\n", &Managed::default(), &|_| None);
+
+        assert!(!offered.asked, "{said}");
+        assert!(said.contains("provider.openai"), "{said}");
+        assert!(written(&scratch).contains("MY_OWN_OPENAI_VARIABLE"));
+        assert!(!written(&scratch).contains(r#""env":["OPENAI_API_KEY"]"#));
+    }
+
+    /// IMPORT-3, IMPORT-4: a key command is offered as an `anthropic` entry naming the variable to
+    /// export, with no question about a key because none is held. The command is named as left and
+    /// never shown, and a word of Claude Code's own is not written as the model.
+    #[test]
+    fn a_claude_code_key_command_is_written_as_an_entry_naming_the_variable() {
+        let scratch = Scratch::new("cli-import-claude-key-command");
+        scratch.write(
+            ".claude/settings.json",
+            r#"{"apiKeyHelper": "echo sk-ant-in-the-command", "model": "sonnet"}"#,
+        );
+
+        let (said, offered) = asked(&scratch, "y\n", &Managed::default());
+
+        assert_eq!(offered.gateways, ["anthropic"]);
+        assert!(
+            said.contains(r#"provider.anthropic, reached at https://api.anthropic.com/v1: {"env":["ANTHROPIC_API_KEY"]}"#),
+            "{said}"
+        );
+        assert!(
+            said.contains("provider.anthropic: its key comes from a command, which is never run: export what it prints as ANTHROPIC_API_KEY"),
+            "{said}"
+        );
+        assert!(
+            said.contains("- model: a word Claude Code turns into a model"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("in plain text"),
+            "a question about a key was asked: {said}"
+        );
+        for command in ["sk-ant-in-the-command", "echo"] {
+            assert!(!said.contains(command), "{command} was drawn: {said}");
+        }
+        let file = written(&scratch);
+        assert!(file.contains(r#""env":["ANTHROPIC_API_KEY"]"#), "{file}");
+        for left in ["apiKey", "sk-ant-in-the-command", "sonnet", r#""model":"#] {
+            assert!(!file.contains(left), "{left} was written: {file}");
+        }
+    }
+
+    /// IMPORT-3: a model Claude Code names the way Anthropic's API does is shown and written beside
+    /// the entry, in the form that names the gateway.
+    #[test]
+    fn a_claude_code_model_for_anthropics_api_is_written_beside_its_entry() {
+        let scratch = Scratch::new("cli-import-claude-anthropic-model");
+        scratch.write(
+            ".claude/settings.json",
+            r#"{"apiKeyHelper": "print-a-key", "model": "claude-sonnet-4-5"}"#,
+        );
+
+        let (said, _) = asked(&scratch, "y\n", &Managed::default());
+
+        assert!(
+            said.contains(r#"model: "anthropic/claude-sonnet-4-5""#),
+            "{said}"
+        );
+        let file = written(&scratch);
+        assert!(
+            file.contains(r#""model":"anthropic/claude-sonnet-4-5""#),
+            "{file}"
+        );
+    }
+
+    /// IMPORT-7: a key command and an exported key both name `provider.anthropic`. Claude Code is
+    /// asked first, and the entry its answer writes is one the environment finds already set, so the
+    /// person is asked once and the file names the variable once. A decline leaves the question to
+    /// the environment.
+    #[test]
+    fn a_key_command_and_an_exported_key_for_anthropic_are_asked_about_once() {
+        let settings = r#"{"apiKeyHelper": "print-a-key"}"#;
+        let exported = [("ANTHROPIC_API_KEY", "sk-ant-exported-nobody-may-see")];
+
+        let scratch = Scratch::new("cli-import-key-command-and-exported-key");
+        scratch.write(".claude/settings.json", settings);
+        let found = scratch.found_exporting(&exported);
+        assert_eq!(found.len(), 2, "{found:?}");
+        let (said, offered) =
+            asked_about(&scratch, found, "y\ny\n", &Managed::default(), &|_| None);
+        assert_eq!(offered.imported, [Source::ClaudeCode], "{said}");
+        assert_eq!(said.matches("Import this from").count(), 1, "{said}");
+        let kept = said.find("Left as they are").expect("the entry was named");
+        assert!(said[kept..].contains("provider.anthropic"), "{said}");
+        assert_eq!(written(&scratch).matches("ANTHROPIC_API_KEY").count(), 1);
+
+        let scratch = Scratch::new("cli-import-key-command-declined-exported-key");
+        scratch.write(".claude/settings.json", settings);
+        let found = scratch.found_exporting(&exported);
+        let (said, offered) =
+            asked_about(&scratch, found, "n\ny\n", &Managed::default(), &|_| None);
+        assert_eq!(offered.imported, [Source::Environment], "{said}");
+        assert_eq!(said.matches("Import this from").count(), 2, "{said}");
+        assert_eq!(written(&scratch).matches("ANTHROPIC_API_KEY").count(), 1);
+    }
+
+    /// IMPORT-6: a `{file:path}` credential is not followed. The shown line names the path, no
+    /// question about a key is asked, and the entry is written as a declined key is: with the
+    /// variable opencode reads for that id, and a line saying to export it.
+    #[test]
+    fn a_file_key_is_shown_by_path_and_treated_as_declined() {
+        let scratch = Scratch::new("cli-import-file-key");
+        let secret = scratch.write("elsewhere/key.txt", "sk-or-in-a-file");
+        scratch.write(
+            ".config/opencode/opencode.json",
+            &format!(
+                r#"{{"provider": {{"openrouter": {{"options": {{"apiKey": "{{file:{}}}"}}, "models": {{"z-ai/glm-4.6": {{}}}}}}}}}}"#,
+                secret.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+
+        let (said, _) = asked(&scratch, "y\n", &Managed::default());
+
+        assert!(said.contains(&secret.display().to_string()), "{said}");
+        assert!(
+            !said.contains("in plain text"),
+            "a question was asked: {said}"
+        );
+        assert!(
+            !said.contains("sk-or-in-a-file"),
+            "the file was read: {said}"
+        );
+        let file = written(&scratch);
+        assert!(file.contains(r#""env":["OPENROUTER_API_KEY"]"#), "{file}");
+        assert!(
+            !file.contains("apiKey") && !file.contains("sk-or-in-a-file"),
+            "{file}"
+        );
+        assert!(said.contains("OPENROUTER_API_KEY: export it"), "{said}");
+    }
+
+    /// IMPORT-7: the import adds and replaces nothing, and a name already set is shown as left.
+    #[test]
+    fn a_name_already_set_keeps_its_value() {
+        let scratch = Scratch::new("cli-import-kept");
+        scratch.write(".claude/settings.json", BEDROCK);
+        scratch.write(
+            ".bravebot/settings.json",
+            r#"{"env": {"AWS_REGION": "eu-central-1"}, "theme": "light"}"#,
+        );
+
+        let (said, _) = asked(&scratch, "y\n", &Managed::default());
+
+        let kept = said
+            .find("Left as they are")
+            .expect("the kept name was shown");
+        assert!(said[kept..].contains("env.AWS_REGION"), "{said}");
+        assert!(!said.contains(r#"env.AWS_REGION: "us-west-2""#), "{said}");
+        let file = written(&scratch);
+        for kept in [
+            r#""AWS_REGION":"eu-central-1""#,
+            r#""theme":"light""#,
+            r#""BRAVEBOT_USE_BEDROCK":"1""#,
+        ] {
+            assert!(file.contains(kept), "{kept} is not in {file}");
+        }
+    }
+
+    /// IMPORT-7: the questions take as long as the person does, and writing the document read
+    /// before them over a file changed since would lose the change.
+    #[test]
+    fn a_file_changed_while_asking_is_not_written_over() {
+        let scratch = Scratch::new("cli-import-changed");
+        scratch.write(".claude/settings.json", BEDROCK);
+        let mut said = Vec::new();
+        let mut asking = Prompting::new("y\n".as_bytes(), &mut said);
+        let mut destination = Destination::open(&scratch.settings()).expect("a document");
+        let offered = offer(
+            &mut asking,
+            scratch.found(),
+            &mut destination,
+            &Managed::default(),
+            &|_| None,
+        );
+        assert_eq!(offered.imported, [Source::ClaudeCode]);
+
+        let meanwhile = r#"{"theme": "light"}"#;
+        scratch.write(".bravebot/settings.json", meanwhile);
+        let problem = write(&destination, unwritable).expect_err("written over");
+
+        assert!(
+            problem.contains("changed while the import was asking"),
+            "{problem}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.settings()).expect("read"),
+            meanwhile
+        );
+    }
+
+    /// IMPORT-3: an opencode model is served by the entry imported beside it. Where that entry is
+    /// not written, the file's own entry or the managed list would be asked for a model neither
+    /// lists.
+    #[test]
+    fn an_opencode_model_is_written_only_beside_its_entry() {
+        let scratch = Scratch::new("cli-import-model-entry");
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"model": "amazon-bedrock/openai.gpt-5.6-sol", "provider": {"amazon-bedrock": {"options": {"region": "us-west-2"}}}}"#,
+        );
+        let own = r#"{"provider": {"amazon-bedrock": {"options": {"region": "eu-west-1"}}}}"#;
+        scratch.write(".bravebot/settings.json", own);
+
+        let (said, offered) = asked(&scratch, "y\n", &Managed::default());
+
+        assert!(!offered.asked, "{said}");
+        assert!(!said.contains("model:"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(scratch.settings()).expect("read"),
+            own
+        );
+
+        let _ = std::fs::remove_file(scratch.settings());
+        let pinning = scratch.write("managed.json", r#"{"provider": {}}"#);
+        let (said, offered) = asked(&scratch, "y\n", &Managed::at(&pinning));
+
+        assert!(!offered.asked, "{said}");
+        assert!(!said.contains("model:"), "{said}");
+        assert!(!scratch.settings().exists(), "{said}");
+    }
+
+    /// IMPORT-7: rewriting a file that does not parse would lose what the person wrote in it.
+    #[test]
+    fn a_settings_file_that_does_not_parse_is_not_rewritten() {
+        let scratch = Scratch::new("cli-import-unparsed");
+        let broken = r#"{"env": {"AWS_REGION": "eu-central-1",}"#;
+        scratch.write(".bravebot/settings.json", broken);
+
+        assert!(Destination::open(&scratch.settings()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(scratch.settings()).expect("read"),
+            broken
+        );
+    }
+
+    /// IMPORT-7: the file can come to hold a key, so it is never readable by anybody else, not even
+    /// for the length of the write.
+    #[cfg(unix)]
+    #[test]
+    fn the_written_file_is_readable_only_by_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("cli-import-mode");
+        scratch.write(".config/opencode/opencode.json", OPENROUTER_HELD);
+        let settings = scratch.write(".bravebot/settings.json", "{}");
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen");
+
+        asked(&scratch, "y\ny\n", &Managed::default());
+
+        let mode = std::fs::metadata(&settings)
+            .expect("written")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let leftovers: Vec<_> = std::fs::read_dir(settings.parent().expect("a parent"))
+            .expect("list")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "settings.json")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// IMPORT-7: a name the managed layer pins would be overridden by it, so offering it would be
+    /// offering a setting that does nothing.
+    #[test]
+    fn a_name_managed_pins_is_not_offered() {
+        let scratch = Scratch::new("cli-import-pinned");
+        scratch.write(".claude/settings.json", BEDROCK);
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"provider": {"gw": {"options": {"baseURL": "https://gw.example.invalid/v1"}}}}"#,
+        );
+        let pinning = scratch.write(
+            "managed.json",
+            r#"{"env": {"AWS_REGION": "us-east-1"}, "provider": {}}"#,
+        );
+        let managed = Managed::at(&pinning);
+
+        let (said, _) = asked(&scratch, "y\ny\n", &managed);
+
+        assert!(!said.contains(r#"env.AWS_REGION: "#), "{said}");
+        assert!(!said.contains("Import this from opencode?"), "{said}");
+        let pinned = said.find("Not offered").expect("the pins were named");
+        assert!(said[pinned..].contains("env.AWS_REGION"), "{said}");
+        assert!(said.contains(&pinning.display().to_string()), "{said}");
+        let pinned_gateway = said
+            .rfind("Not offered")
+            .expect("the gateway pin was named");
+        assert!(said[pinned_gateway..].contains("provider.gw"), "{said}");
+        let file = written(&scratch);
+        assert!(!file.contains("AWS_REGION"), "{file}");
+        assert!(!file.contains("provider"), "{file}");
+    }
+
+    /// BACKEND-48: an interactive start whose model the machine-level layer refuses is ended rather
+    /// than opened, and says which file refused it.
+    ///
+    /// The interface and a session in lines both open through [`before_the_session`], and nothing
+    /// after it asks about the model again. A refusal made only by the one-shot run would leave both
+    /// of them sending the request this clause exists to stop.
+    ///
+    /// The same configuration is asked without the layer first, since a fixture with nothing
+    /// configured ends a start as well, and that is the end a broken implementation would pass on.
+    /// The allow list is empty rather than naming models, so the refusal does not depend on which
+    /// model this machine has recorded; the record is read from the real home directory, which no
+    /// test can move. The sentence is read through [`crate::model::managed_refusal`], the function the start
+    /// ends with, because `fail` writes to the process's own stderr and no test can read that.
+    #[test]
+    fn a_start_on_a_model_the_managed_layer_refuses_is_ended() {
+        let scratch = Scratch::new("cli-import-models-refused");
+        let refusing = scratch.write("managed.json", r#"{"models": {"allow": []}}"#);
+
+        let mut config = Config::from_lookup(|name| match name {
+            bravebot_config::env_var::ENDPOINT => Some("https://example.invalid".into()),
+            bravebot_config::env_var::KEY_ID => Some("a-key-id".into()),
+            bravebot_config::env_var::SIGNING_KEY => Some("a-signing-key".into()),
+            _ => None,
+        })
+        .expect("a configured gateway");
+
+        assert!(
+            before_the_session(&mut config, None).is_none(),
+            "the start was ended with a service configured and no managed layer"
+        );
+
+        config.models = Managed::at(&refusing).models().clone();
+        assert!(
+            before_the_session(&mut config, None).is_some(),
+            "the start opened on a model the managed layer refuses"
+        );
+
+        let model = crate::model::model_for_this_run(None, &config);
+        let (file, why) = config
+            .model_refused(&model)
+            .expect("the layer refuses the model in force");
+        let said = crate::model::managed_refusal(&model, file, why);
+        assert!(
+            said.contains(&refusing.display().to_string()),
+            "the end did not name the file that refused: {said}"
+        );
+        assert!(
+            said.contains(&model),
+            "the end did not name the model that was refused: {said}"
+        );
+    }
+
+    /// What a running Ollama at the default address serves, one model that can call tools.
+    fn ollama_running() -> Found {
+        import::running(
+            Source::Ollama,
+            "http://localhost:11434",
+            vec![import::Installed {
+                name: "qwen3-coder:30b".to_string(),
+                modified_at: "2026-09-18T14:07:58-04:00".to_string(),
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
+                window: None,
+            }],
+        )
+    }
+
+    /// What a running Ollama serves when its one model that can call tools is loaded with `window`.
+    fn ollama_loaded_with(window: Option<u64>) -> Found {
+        import::running(
+            Source::Ollama,
+            "http://localhost:11434",
+            vec![import::Installed {
+                name: "qwen3-coder:30b".to_string(),
+                modified_at: "2026-09-18T14:07:58-04:00".to_string(),
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
+                window,
+            }],
+        )
+    }
+
+    /// IMPORT-5: the question for a server whose model is loaded below the window a conversation is
+    /// budgeted against shows the figure and says the server drops earlier turns; a window at or
+    /// above that, or none stated, shows no warning, and none stated shows no figure either.
+    #[test]
+    fn a_window_below_the_assumed_one_is_shown_with_what_the_server_drops() {
+        let scratch = Scratch::new("cli-import-ollama-window");
+        let asked = |window| {
+            asked_about(
+                &scratch,
+                vec![ollama_loaded_with(window)],
+                "n\n",
+                &Managed::default(),
+                &|_| None,
+            )
+            .0
+        };
+
+        let small = asked(Some(4096));
+        assert!(small.contains("context window of 4096 tokens"), "{small}");
+        assert!(small.contains("drops the earliest turns"), "{small}");
+        assert!(small.contains("OLLAMA_CONTEXT_LENGTH"), "{small}");
+
+        let large = asked(Some(131_072));
+        assert!(large.contains("context window of 131072 tokens"), "{large}");
+        assert!(!large.contains("drops the earliest turns"), "{large}");
+
+        let unstated = asked(None);
+        assert!(!unstated.contains("context window"), "{unstated}");
+        assert!(!unstated.contains("OLLAMA_CONTEXT_LENGTH"), "{unstated}");
+    }
+
+    /// IMPORT-5: the answer that approves writes the window the server holds the model with, and a
+    /// model with no figure writes none. The regression rejected is showing the figure and leaving
+    /// it out of the file, which keeps budgeting compaction against the assumed window.
+    #[test]
+    fn approving_a_small_window_writes_it_into_the_file() {
+        let scratch = Scratch::new("cli-import-ollama-window-written");
+        let (said, offered) = asked_about(
+            &scratch,
+            vec![ollama_loaded_with(Some(4096))],
+            "y\n",
+            &Managed::default(),
+            &|_| None,
+        );
+        assert_eq!(offered.imported, [Source::Ollama], "{said}");
+        assert!(said.contains("contextWindow"), "{said}");
+        let file = written(&scratch);
+        assert!(file.contains(r#""contextWindow":4096"#), "{file}");
+
+        let scratch = Scratch::new("cli-import-ollama-window-unstated");
+        asked_about(
+            &scratch,
+            vec![ollama_loaded_with(None)],
+            "y\n",
+            &Managed::default(),
+            &|_| None,
+        );
+        assert!(!written(&scratch).contains("contextWindow"));
+    }
+
+    /// IMPORT-10: an entry for the same server under an id of its own already lists every model it
+    /// serves, and a second would list each of them twice.
+    #[test]
+    fn an_ollama_already_configured_under_another_id_is_not_offered_again() {
+        let scratch = Scratch::new("cli-import-ollama-kept");
+        let own =
+            r#"{"provider": {"local": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}}}}"#;
+        scratch.write(".bravebot/settings.json", own);
+
+        let (said, offered) = asked_about(
+            &scratch,
+            vec![ollama_running()],
+            "y\n",
+            &Managed::default(),
+            &|_| None,
+        );
+
+        assert!(!offered.asked, "{said}");
+        let kept = said.find("Left as they are").expect("the entry was named");
+        assert!(said[kept..].contains("provider.local"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(scratch.settings()).expect("read"),
+            own
+        );
+
+        // Another port is another server.
+        let other =
+            r#"{"provider": {"local": {"options": {"baseURL": "http://127.0.0.1:8080/v1"}}}}"#;
+        scratch.write(".bravebot/settings.json", other);
+        let (said, offered) = asked_about(
+            &scratch,
+            vec![ollama_running()],
+            "y\n",
+            &Managed::default(),
+            &|_| None,
+        );
+        assert_eq!(offered.imported, [Source::Ollama], "{said}");
+        let file = written(&scratch);
+        assert!(
+            file.contains(r#""ollama":{"name":"Ollama(local)","options":{"baseURL":"http://localhost:11434/v1"}}"#),
+            "{file}"
+        );
+        assert!(
+            file.contains(r#""model":"ollama/qwen3-coder:30b""#),
+            "{file}"
+        );
+    }
+
+    /// IMPORT-10: the opencode entry for a local Ollama is asked about first, and once written the
+    /// running server has nothing left to add.
+    #[test]
+    fn an_opencode_entry_for_the_same_server_leaves_the_ollama_source_with_nothing_to_add() {
+        let scratch = Scratch::new("cli-import-ollama-opencode");
+        scratch.write(
+            ".config/opencode/opencode.json",
+            r#"{"provider": {"mine": {"options": {"baseURL": "http://[::1]:11434/v1"}}}}"#,
+        );
+        let mut found = scratch.found();
+        found.push(ollama_running());
+
+        let (said, offered) = asked_about(&scratch, found, "y\n", &Managed::default(), &|_| None);
+
+        assert_eq!(offered.imported, [Source::Opencode], "{said}");
+        assert!(!said.contains("Import this from Ollama?"), "{said}");
+        let running = said
+            .find("Left as they are")
+            .expect("the entry the first answer wrote was named");
+        assert!(said[running..].contains("provider.mine"), "{said}");
+        assert!(!written(&scratch).contains("ollama"), "{said}");
+    }
+
+    /// What a running LM Studio at the default address serves, one model that can call tools,
+    /// loaded with `window`.
+    fn lm_studio_loaded_with(window: Option<u64>) -> Found {
+        import::running(
+            Source::LmStudio,
+            "http://127.0.0.1:1234",
+            vec![import::Installed {
+                name: "qwen/qwen3-coder-30b".to_string(),
+                modified_at: String::new(),
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
+                window,
+            }],
+        )
+    }
+
+    /// What a running llama-server at its current default address lists.
+    fn llama_server_running() -> Found {
+        import::running(
+            Source::LlamaServer,
+            "http://127.0.0.1:9931",
+            vec![import::Installed {
+                name: "../models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf".to_string(),
+                modified_at: String::new(),
+                capabilities: None,
+                window: None,
+            }],
+        )
+    }
+
+    /// IMPORT-5 and IMPORT-12: the question for an LM Studio model loaded below the assumed window
+    /// says what is true of LM Studio. It does not say Ollama drops turns or name Ollama's variable,
+    /// which would send a person to a setting of a program they are not running.
+    #[test]
+    fn a_small_window_is_shown_for_lm_studio_in_its_own_words() {
+        let scratch = Scratch::new("cli-import-lm-studio-window");
+
+        let (said, _) = asked_about(
+            &scratch,
+            vec![lm_studio_loaded_with(Some(4096))],
+            "n\n",
+            &Managed::default(),
+            &|_| None,
+        );
+
+        assert!(said.contains("context window of 4096 tokens"), "{said}");
+        assert!(said.contains("in LM Studio to keep more"), "{said}");
+        assert!(said.contains("contextWindow"), "{said}");
+        assert!(!said.contains("drops the earliest turns"), "{said}");
+        assert!(!said.contains("OLLAMA_CONTEXT_LENGTH"), "{said}");
+        assert!(said.contains("Import this from LM Studio?"), "{said}");
+    }
+
+    /// IMPORT-5 and IMPORT-12: each server is asked about on its own, in the order Ollama, LM
+    /// Studio, llama-server, and an answer is for the one asked. Declining the first and third and
+    /// approving the second writes the second alone, which an answer applied to the wrong source, or
+    /// one question for every server, does not.
+    #[test]
+    fn each_server_is_asked_about_on_its_own() {
+        let scratch = Scratch::new("cli-import-each-server");
+        let found = vec![
+            ollama_running(),
+            lm_studio_loaded_with(None),
+            llama_server_running(),
+        ];
+
+        let (said, offered) =
+            asked_about(&scratch, found, "n\ny\nn\n", &Managed::default(), &|_| None);
+
+        assert_eq!(offered.imported, [Source::LmStudio], "{said}");
+        let questions: Vec<_> = said
+            .lines()
+            .filter(|line| line.starts_with("Import this from"))
+            .map(str::trim_end)
+            .collect();
+        assert_eq!(
+            questions,
+            [
+                "Import this from Ollama? [y/N]",
+                "Import this from LM Studio? [y/N]",
+                "Import this from llama-server? [y/N]",
+            ],
+            "{said}"
+        );
+        let file = written(&scratch);
+        assert!(
+            file.contains(
+                r#""lmstudio":{"name":"LMStudio(local)","options":{"baseURL":"http://127.0.0.1:1234/v1"}}"#
+            ),
+            "{file}"
+        );
+        assert!(
+            file.contains(r#""model":"lmstudio/qwen/qwen3-coder-30b""#),
+            "{file}"
+        );
+        assert!(
+            !file.contains("ollama") && !file.contains("llama-server"),
+            "{file}"
+        );
+    }
+
+    /// IMPORT-12: llama-server's entry is written with its own id, and a model the server names as
+    /// a path is written as it is named, so the question shows what the file will hold.
+    #[test]
+    fn approving_llama_server_writes_its_entry_and_the_model_it_names() {
+        let scratch = Scratch::new("cli-import-llama-server");
+
+        let (said, offered) = asked_about(
+            &scratch,
+            vec![llama_server_running()],
+            "y\n",
+            &Managed::default(),
+            &|_| None,
+        );
+
+        assert_eq!(offered.imported, [Source::LlamaServer], "{said}");
+        assert!(
+            said.contains("llama-server is running at http://127.0.0.1:9931, serving models"),
+            "{said}"
+        );
+        assert!(
+            said.contains("provider.llama-server, reached at http://127.0.0.1:9931/v1"),
+            "{said}"
+        );
+        let file = written(&scratch);
+        assert!(
+            file.contains(
+                r#""llama-server":{"name":"llama-server(local)","options":{"baseURL":"http://127.0.0.1:9931/v1"}}"#
+            ),
+            "{file}"
+        );
+        assert!(
+            file.contains(
+                r#""model":"llama-server/../models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf""#
+            ),
+            "{file}"
+        );
+        assert!(!file.contains("contextWindow"), "{file}");
+    }
+
+    /// IMPORT-10 and IMPORT-12: two sources that name one port are one server to the file, whichever
+    /// two they are, so the second is not offered once the first is written, and is offered where
+    /// the first was declined. Two entries for one server would list every model twice.
+    #[test]
+    fn a_server_at_a_port_an_earlier_answer_wrote_is_not_offered_again() {
+        let at_the_same_port = || {
+            vec![
+                import::running(
+                    Source::Ollama,
+                    "http://localhost:1234",
+                    vec![import::Installed {
+                        name: "llama3".to_string(),
+                        modified_at: "2026-09-18T14:07:58-04:00".to_string(),
+                        capabilities: Some(vec!["tools".to_string()]),
+                        window: None,
+                    }],
+                ),
+                lm_studio_loaded_with(None),
+            ]
+        };
+
+        let scratch = Scratch::new("cli-import-same-port-written");
+        let (said, offered) = asked_about(
+            &scratch,
+            at_the_same_port(),
+            "y\ny\n",
+            &Managed::default(),
+            &|_| None,
+        );
+        assert_eq!(offered.imported, [Source::Ollama], "{said}");
+        assert!(!said.contains("Import this from LM Studio?"), "{said}");
+        let kept = said.find("Left as they are").expect("the entry was named");
+        assert!(said[kept..].contains("provider.ollama"), "{said}");
+        assert!(!written(&scratch).contains("lmstudio"), "{said}");
+
+        let scratch = Scratch::new("cli-import-same-port-declined");
+        let (said, offered) = asked_about(
+            &scratch,
+            at_the_same_port(),
+            "n\ny\n",
+            &Managed::default(),
+            &|_| None,
+        );
+        assert_eq!(offered.imported, [Source::LmStudio], "{said}");
+    }
+
+    /// IMPORT-8 and IMPORT-12: where nobody can be asked, the refusal names every source that
+    /// holds something, whichever and however many they are. A list that stopped at three would
+    /// leave the fourth unnamed in the one message that says what was found.
+    #[test]
+    fn the_command_line_names_every_source_that_holds_something() {
+        let every = [
+            Source::ClaudeCode,
+            Source::Opencode,
+            Source::Environment,
+            Source::Ollama,
+            Source::LmStudio,
+            Source::LlamaServer,
+        ];
+        for count in 1..=every.len() {
+            let looked = Looked {
+                left: Vec::new(),
+                importable: every[..count].to_vec(),
+            };
+
+            let line = looked.command().expect("a line");
+
+            for source in &every[..count] {
+                assert!(line.contains(&named(*source)), "{count}: {line}");
+            }
+            for source in &every[count..] {
+                assert!(!line.contains(&named(*source)), "{count}: {line}");
+            }
+            assert!(
+                line.contains("bravebot auth login import"),
+                "{count}: {line}"
+            );
+        }
+        // The environment is no program: alone it is said as a key exported here, and ahead of a
+        // server its name begins the sentence.
+        let keys = Looked {
+            left: Vec::new(),
+            importable: vec![Source::Environment],
+        };
+        let line = keys.command().expect("a line");
+        assert!(
+            line.starts_with("An API key") && line.contains("bravebot auth login import"),
+            "{line}"
+        );
+        let with_a_server = Looked {
+            left: Vec::new(),
+            importable: vec![Source::Environment, Source::Ollama],
+        };
+        let line = with_a_server.command().expect("a line");
+        assert!(line.starts_with("Your environment and Ollama"), "{line}");
+        // A program that begins the sentence keeps its own spelling: a literal, not `named()`.
+        let programs = Looked {
+            left: Vec::new(),
+            importable: vec![Source::Opencode, Source::Ollama],
+        };
+        let line = programs.command().expect("a line");
+        assert!(line.starts_with("opencode and Ollama"), "{line}");
+
+        let running = Looked {
+            left: Vec::new(),
+            importable: vec![Source::LmStudio],
+        };
+        assert!(
+            running
+                .command()
+                .expect("a line")
+                .contains("LM Studio is running here with models bravebot can use")
+        );
+    }
+}

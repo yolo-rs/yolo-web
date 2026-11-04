@@ -1,0 +1,290 @@
+---
+id: INCOG
+title: A session that leaves nothing behind
+status: normative
+governs:
+  - crates/core/src/incognito.rs
+  - crates/agent/src/home.rs
+  - crates/agent/src/remembered.rs
+  - crates/agent/src/reach.rs
+  - crates/agent/src/bedrock_refusals.rs
+  - crates/agent/src/trusted.rs
+  - crates/session/src/store.rs
+  - crates/session/src/sessions.rs
+  - crates/cli/src/main.rs
+  - crates/cli/src/invocation.rs
+  - crates/cli/src/flags.rs
+  - crates/cli/src/auth.rs
+  - crates/cli/src/brave.rs
+documented-by:
+  - docs/website/docs/using/sessions.md
+  - docs/website/docs/using/incognito.md
+---
+
+## Scope
+
+`bravebot --incognito`: a session that runs normally and adds nothing to `~/.bravebot`. What is
+ordinarily kept there is [sessions.md](sessions.md): the record of a session and the prompts a
+person typed. This is the mode that declines to keep it. The audit trail's contents are
+[trace.md](trace.md); this governs only whether it is written down.
+
+Three files in that directory are still written, and [INCOG-8](#INCOG-8) states them: the ChatGPT
+sign-in and the xAI sign-in, which a session rewrites when it replaces an access token, and the record
+[MEMORY-5](definition-memory.md#MEMORY-5) keeps of a definition's memory the session left
+untrusted.
+
+Neither does it write the diagnostic log ([diagnostic-log.md](diagnostic-log.md)): there is no
+directory to write one into.
+
+The boundary here is the directory this process owns. It is not confinement:
+[sandboxing.md](sandboxing.md) is the operating-system boundary, it applies to subprocesses running
+code we did not write, and it is a different mechanism answering a different question. A mode that
+claimed to stop everything on the machine from writing would be claiming something it cannot
+deliver.
+
+## Clauses
+
+<a id="INCOG-1"></a>
+### INCOG-1: a prompt typed in an incognito session is not written down
+
+Neither appending one prompt nor rewriting the whole history reaches the file. A history that
+existed before the session is left exactly as it was, rather than trimmed or rewritten in passing.
+
+**Why.** The prompt is the thing most worth not keeping. It is what a person typed, in their own
+words, and it is the part of a session that most often names something private.
+
+`verified-by: bravebot_tui::incognito::no_prompt_is_written_down`
+
+<a id="INCOG-2"></a>
+### INCOG-2: a choice applies to the session and outlives nothing
+
+Choosing a model, a theme or an effort level inside an incognito session takes effect for that
+session and is not recorded. The recorded choice a previous ordinary session made is still read at
+startup and is still there afterwards. A language chosen with `/language` applies from the next
+start, which an incognito session does not record, so the command saves nothing and says so.
+
+**Why.** Both halves are the point. Without the first, the mode would be a session in which nothing
+can be changed; without the second, entering it once would quietly overwrite settings the person
+made deliberately.
+
+`verified-by: bravebot_tui::incognito::a_choice_applies_to_the_session_and_is_not_recorded`
+
+<a id="INCOG-3"></a>
+### INCOG-3: no record of the session, and none that it happened
+
+No session record is written, no title is written, and the directory the records would live in is
+not created. A session that ran incognito does not appear in the resume list and cannot be resumed,
+including by the session itself. A run reading input lines ([CLI-36](cli.md#CLI-36)) holds its
+conversation in memory between turns and writes none of it.
+
+An ordinary session from before may still be resumed and read. It stops being updated for as long
+as the incognito session runs, so what is on disk afterwards is what the last ordinary session left
+there.
+
+[MEMORY-5](definition-memory.md#MEMORY-5) leaves one trace: a definition's memory the session left untrusted is recorded by its path, which says the project was
+worked in.
+
+RECALL ([recall.md](recall.md)) adds nothing to that: an incognito session saves no fact, proposes no rule, and makes no `~/.bravebot/projects/<id>/` directory. It still reads rules and facts, so the session is the one the person configured.
+
+**Why.** An empty directory is a record. It says a session ran, in this project, at this time, which
+is most of what the record was for. The directory is therefore asked about before it is created
+rather than after.
+
+`verified-by: bravebot_tui::incognito::no_session_record_is_written`
+`verified-by: bravebot_tui::incognito::naming_a_session_records_nothing`
+
+<a id="INCOG-4"></a>
+### INCOG-4: the audit trail stays in the session
+
+Gate decisions are shown on screen as always and are not appended to a trail on disk.
+
+**Why.** The trail holds no content ([trace.md](trace.md) is what keeps it that way), but it does
+hold gate names and paths, which is a record of a session having happened and what it touched.
+
+`verified-by: bravebot_tui::incognito::no_audit_trail_is_written`
+
+<a id="INCOG-5"></a>
+### INCOG-5: reading is unchanged, apart from the one answer named here
+
+An incognito session reads the settings, the recorded model and theme, the standing instructions,
+the skills, the stored premium key and the stored ChatGPT and xAI sign-ins, exactly as an ordinary one
+does. What is refused is writing, apart from the three files [INCOG-8](#INCOG-8) names, and one read, named below. The record of
+command lines somebody asked to be remembered past a session, which [tools/run.md](tools/run.md)
+governs, is read here on the same terms: a line already in it stops the asking as it does anywhere,
+and the key that would add one is not offered. The files in that record a write may create a
+credential in ([CRED-13](credential-protection.md#CRED-13)) are read the same way, and the key that
+would add one is not offered either. So is the record of reach a person remembered for a command,
+which [sandboxing.md](sandboxing.md#SANDBOX-23) governs: a grant already in it is attached as it is
+anywhere, and `/reach` adds none and says so. So is the record of answers to the startup question
+somebody asked to be kept, which [trust-map.md](trust-map.md#TRUST-23) governs: a kept answer settles
+the question here as anywhere, the session says so as it opens, a yes is not kept and the question
+says so, and `/forget-trust` writes nothing and names the file. So is the record of Bedrock models that
+refused the ask to show thinking, which [BACKEND-63](backends.md#BACKEND-63) governs: a refusal already
+in it settles the ask here as anywhere, and one this session finds is not written.
+
+**The one read refused is the standing answer about whether a check answers in somebody's place.**
+The word a person's own directory holds about that is not read in this mode, so a session here asks
+as one on a machine with nothing recorded does, unless the command line or the home settings layer
+says otherwise for this run. [vetting.md](vetting.md) owns that answer and decides the refusal; what
+puts it on this side of the line is what it does rather than where it is kept. Reading the model and
+the theme back is what makes this the session somebody configured, because those decide what it
+looks like. That one decides whether they are asked before content nobody vouched for reaches the
+planner, and a private session inheriting it would have stopped asking without having been told to.
+
+**Why.** A session that could not read its own configuration would not be private, it would be
+broken, and one that could not read a credential could not reach a backend at all. This is the same
+division a browser's private window makes: the promise is about what survives, not about what the
+session may know. The exception is the one place that division does not hold. A standing answer
+about what to ask is not something the session knows, it is a decision somebody made in a session
+that recorded decisions, and inheriting it changes what this one does rather than what it knows.
+
+The split is in the source rather than in a convention: `home::directory` is the reading answer and
+`home::writable` is the writing one, so a call site says which it is doing and a new write site that
+reaches for the wrong one is visible in review. The refused read resolves through the writing answer,
+and is the only read that does, which is what makes it one site to review rather than a convention
+to remember.
+
+`verified-by: bravebot_tui::incognito::the_standing_answer_about_vetting_is_not_read`
+`verified-by: bravebot_tui::incognito::no_prompt_is_written_down`
+`verified-by: bravebot_tui::incognito::a_choice_applies_to_the_session_and_is_not_recorded`
+`verified-by: bravebot_agent::incognito::no_remembered_line_is_written_down`
+`verified-by: bravebot_agent::incognito::no_file_a_credential_may_be_created_in_is_written_down`
+`verified-by: bravebot_agent::incognito::a_line_an_earlier_session_recorded_is_still_honoured`
+`verified-by: bravebot_agent::incognito::no_remembered_reach_is_written_down`
+`verified-by: bravebot_agent::incognito::a_reach_an_earlier_session_remembered_is_still_honoured`
+`verified-by: bravebot_agent::incognito::no_bedrock_refusal_is_written_down`
+`verified-by: bravebot_agent::incognito::a_bedrock_refusal_an_earlier_session_kept_is_still_honoured`
+
+<a id="INCOG-6"></a>
+### INCOG-6: asking is one way, and composes with every other way of starting
+
+The mode is engaged once, from the entry point, before anything can have written. There is no way
+to turn it off for the life of the process. `--incognito` is taken out of the arguments before
+anything dispatches on them, so it combines with `-p`, `--resume`, `--mode` and a bare invocation
+alike, and repeating it asks for the same thing once.
+
+**Why.** A flag that could be cleared would oblige every write site to reason about when it was
+cleared and by what, and one missed ordering writes the thing the mode exists not to write.
+
+`verified-by: bravebot_core::incognito::engaging_is_idempotent`
+`verified-by: bravebot_core::incognito::nothing_is_incognito_until_it_is_asked_for`
+`verified-by: bravebot_cli::main::the_incognito_flag_is_taken_out_wherever_it_appears`
+`verified-by: bravebot_cli::main::asking_for_incognito_twice_is_asking_once`
+`verified-by: bravebot_cli::main::incognito_alone_leaves_the_interactive_session`
+`verified-by: bravebot_cli::main::an_invocation_without_the_flag_is_left_alone`
+`verified-by: bravebot_cli::running::the_mode_is_engaged_by_the_flag_wherever_it_stands_and_by_nothing_else`
+
+<a id="INCOG-7"></a>
+### INCOG-7: signing in, storing a key and importing are refused rather than silently skipped
+
+In an incognito session, storing a premium key with `bravebot auth login brave` is refused, before
+the key is asked for, and forgetting one with `bravebot auth logout brave` is allowed
+([PREM-16](premium-credentials.md#PREM-16)). Storing a gateway key with
+`bravebot auth login gateway` is refused the same way, before the key is asked for, and forgetting
+one with `bravebot auth logout gateway` is allowed. Importing
+model services from other tools with `bravebot import-providers` is refused the same way
+([IMPORT-8](import.md#IMPORT-8)). Signing in with a ChatGPT account with
+`bravebot auth login chatgpt` is refused the same way, before the listener binds and before a browser
+opens, and `bravebot auth logout chatgpt` is allowed
+([CHATGPT-12](chatgpt-sign-in.md#CHATGPT-12)). Signing in to xAI with `bravebot auth login xai` is refused
+the same way, before the code is asked for, and `bravebot auth logout xai` is allowed
+([XAI-10](xai-sign-in.md#XAI-10)). Storing a premium key or a gateway key in the desktop window's key
+window is refused the same way, before the key window opens
+([PREM-16](premium-credentials.md#PREM-16), [CLI-18](cli.md#CLI-18)).
+Deleting a stored session with `bravebot sessions delete` or `sessions purge` is allowed for the same
+reason ([CLI-33](cli.md#CLI-33)).
+
+**Why.** Signing in, storing a key and importing are writes by definition: one that did not outlive
+the session would not have happened. Doing one and discarding the result would leave a person who
+was signed in once and never again, so the refusal comes before anything is asked or opened. Forgetting is permitted because
+removing a stored secret leaves less behind rather than more, which is the direction this mode
+points.
+
+`verified-by: bravebot_cli::running::import_providers_is_refused_while_incognito`
+`verified-by: bravebot_cli::running::auth_login_brave_is_refused_where_a_key_cannot_be_typed_or_kept`
+`verified-by: bravebot_cli::running::auth_logout_brave_forgets_the_key_and_only_that_one`
+`verified-by: bravebot_cli::brave::the_sign_in_is_refused_where_a_key_cannot_be_asked_for_or_kept`
+`verified-by: bravebot_cli::running::auth_login_gateway_is_refused_before_a_key_is_asked_for`
+`verified-by: bravebot_cli::running::auth_logout_gateway_forgets_the_key_named_in_an_incognito_session`
+`verified-by: bravebot_cli::running::auth_login_chatgpt_is_refused_before_a_browser_opens_where_it_cannot_be_done`
+`verified-by: bravebot_cli::running::auth_logout_chatgpt_forgets_the_sign_in_and_only_that_one`
+`verified-by: bravebot_cli::xai_sign_in::auth_login_xai_is_refused_before_a_code_is_asked_for_where_it_cannot_be_done`
+`verified-by: bravebot_cli::xai_sign_in::auth_logout_xai_forgets_the_sign_in_and_only_that_one`
+`verified-by: bravebot_ui_bridge::key_entry_tests::a_key_is_refused_in_order_before_it_is_typed`
+
+<a id="INCOG-8"></a>
+### INCOG-8: what the mode does not cover, and says so
+
+Ten things still reach the filesystem in an incognito session, each because refusing it would cost
+more than what it leaves behind:
+
+- **The workspace.** `write_file` and `edit_file` go on editing the project. Those edits are the
+  work rather than a trace of it, and a mode that silently declined them would be a broken agent
+  rather than a private one. [tools/write-file.md](tools/write-file.md) governs them.
+- **Subprocesses.** A program the user asked for runs with the access their own shell would give it
+  and may write whatever it likes. Confining it is [sandboxing.md](sandboxing.md)'s question, not
+  this one.
+- **The editor hand-off.** Opening the input box or the transcript in `$EDITOR` writes a scratch
+  file, because there is no way to hand an editor a buffer instead of a path. It goes to the
+  system temporary directory rather than `~/.bravebot`, is created `0600` and refuses to reuse an
+  existing name, and is unlinked on every path out of the function including the failing ones.
+- **The session's own scratch directory.** Somewhere to put a file that is not part of the project
+  is something a turn needs, and this mode does not take it away. It sits in the system temporary
+  directory beside the editor's hand-off file, on the same terms, and goes with the session. Its
+  name says which program made it and nothing about which project or which session, so an empty one
+  records that this program ran at this time. [trust-map.md](trust-map.md) governs it.
+- **A language server's index.** A server indexes the workspace to answer anything at all, and the
+  index is too large to hold in memory and rebuild per question. It is not kept, which is what this
+  mode asks for: it goes to a directory of its own in the system temporary directory, on the same
+  terms as the two above, and goes with the session, so the next one indexes again. What it must
+  not do instead is land in the workspace, which is [LSP-10](tools/lsp.md#LSP-10)'s rule and holds
+  in this mode as in any other.
+- **A local MCP server's home.** A runner keeps its cache under `HOME`, and one with nowhere to
+  write it does not start. It is not kept: it goes to a directory of its own in the system temporary
+  directory, on the same terms as the three above, and goes once the server has stopped, so a runner
+  fetches its package again each session. [SERVERS-10](mcp-servers.md#SERVERS-10) governs it.
+- **A ChatGPT sign-in whose access token was replaced.** A stored sign-in is used as in any session,
+  and when its access token is replaced the new tokens are written to `chatgpt-account.json` under
+  `~/.bravebot`, and a sign-in that OpenAI has ended is removed from it. The refresh token is replaced
+  each time it is used, so tokens that were not written would leave the file holding one the service no
+  longer accepts, and the person would find the sign-in ended at the first turn of the next session.
+  What the file ends up holding is the tokens of a sign-in made before the session, and nothing about
+  which project or which prompts. Replacing a token is not signing in, which [INCOG-7](#INCOG-7)
+  refuses outright, and the file is governed by [chatgpt-sign-in.md](chatgpt-sign-in.md)
+  ([CHATGPT-14](chatgpt-sign-in.md#CHATGPT-14)).
+- **An xAI sign-in whose access token was replaced.** A stored sign-in is used as in any session, and
+  when its access token is replaced the new tokens are written to `xai-account.json` under `~/.bravebot`,
+  and a sign-in that xAI has ended is removed from it, by the renewer both sign-ins share. The refresh
+  token was replaced when it was used, observed once with one account, so tokens that were not written
+  could leave the file holding one the service no longer accepts, and the person would find the sign-in
+  ended at the first turn of the next session. What the file ends up holding is the tokens of a sign-in
+  made before the session, and nothing about which project or which prompts. Replacing a token is not
+  signing in, which [INCOG-7](#INCOG-7) refuses outright, and the file is governed by
+  [xai-sign-in.md](xai-sign-in.md) ([XAI-6](xai-sign-in.md#XAI-6)).
+- **The copy of a picture a person is asked to open.** A vetting prompt about a picture hands them a
+  file to open in their own viewer, whether or not a terminal also draws the picture on the prompt. It goes to `bravebot/vetting`
+  under their cache directory rather than `~/.bravebot` or the system temporary directory, is
+  created `0600` and refuses to reuse an existing name, and is removed when the prompt closes. A
+  process killed with the prompt open leaves it behind. [VET-4](tools/vet-content.md#VET-4) governs
+  it.
+- **The record of a memory left untrusted.** A write that leaves a definition's memory untrusted is
+  recorded under `~/.bravebot`, naming its path and nothing else, so that no later session reads
+  what this one left untrusted as trusted. [MEMORY-5](definition-memory.md#MEMORY-5) governs it.
+
+[CHECKOUT-6](checkouts.md#CHECKOUT-6), which nothing yet builds, would add an eleventh: a delegate's
+checkout, made in the system temporary directory and gone with the session, and its entry under
+the person's `.git/worktrees/`, which goes with it and which a session killed outright leaves.
+
+**Why.** A stated limit is worth more than an unstated one. Someone who knows the third of these
+can decide not to open an editor; someone who assumed the mode covered it has been misled by their
+own tool.
+
+`verified-by: bravebot_tui::editor::the_scratch_file_does_not_outlive_the_edit`
+`verified-by: bravebot_lsp::server::an_index_a_session_keeps_nothing_of_goes_with_the_session`
+`verified-by: bravebot_agent::incognito::a_memory_left_untrusted_is_still_recorded`
+`verified-by: bravebot_agent::servers::a_started_server_in_a_session_that_keeps_nothing_has_a_home_that_goes_with_it`
+`verified-by: bravebot_cli::chatgpt_account::an_incognito_session_writes_the_renewal_of_its_sign_in`
+`verified-by: bravebot_cli::chatgpt_account::an_incognito_session_removes_a_sign_in_whose_refresh_is_refused_as_ended`
+`verified-by: bravebot_cli::xai_sign_in::an_incognito_session_writes_the_renewal_of_its_sign_in`
+`verified-by: bravebot_cli::xai_sign_in::an_incognito_session_removes_a_sign_in_whose_refresh_is_refused_as_ended`
+`verified-by: bravebot_skus::chatgpt::renew::a_refresh_refused_as_ended_removes_the_sign_in`

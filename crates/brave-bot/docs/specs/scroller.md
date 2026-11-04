@@ -1,0 +1,445 @@
+---
+id: SCROLL
+title: The scroller
+status: normative
+governs:
+  - crates/tui/src/app.rs
+  - crates/tui/src/app/keys.rs
+  - crates/tui/src/app/side_requests.rs
+  - crates/tui/src/app/terminal.rs
+  - crates/tui/src/app/turns.rs
+  - crates/tui/src/render.rs
+  - crates/tui/src/render/scroller.rs
+  - crates/tui/src/render/transcript.rs
+  - crates/tui/src/render/export.rs
+  - crates/tui/src/state.rs
+  - crates/tui/src/state/scroller.rs
+  - crates/tui/src/editor.rs
+  - crates/config/src/settings.rs
+documented-by: docs/website/docs/using/transcript.md
+---
+
+## Scope
+
+Reading back through what has already happened: the mode Ctrl-O opens over the transcript, the
+keys it answers, and the two ways out of the session it offers. What is drawn, and how untrusted
+content is marked wherever it appears, is [terminal-transcript.md](terminal-transcript.md). What
+the user types into at rest is [terminal-input.md](terminal-input.md).
+
+The transcript already scrolls: the wheel, the arrows and the page keys move it, and a scrolled
+view is held rather than dragged back to the tail. What is missing is everything a person does
+once they are reading rather than typing, which is to jump, to search, to see the part that was
+trimmed, and to get text out. Those need keys, and the keys they need are letters, so they need a
+mode.
+
+## Clauses
+
+<a id="SCROLL-1"></a>
+### SCROLL-1: Ctrl-O opens the scroller on the view already on the screen, and four keys close it
+
+Opening moves nothing. The scroller shows the same transcript at the same offset, so the row the
+person was looking at when they pressed the key is the row under their eyes afterwards. It is one
+view with two sets of keys over it, not a second copy of the transcript. The screen does change
+shape underneath it, since the box comes off and the transcript is given its rows, and the row at
+the top of the view is held across that: what is gained appears below what is already drawn, and
+what is given back when the scroller closes is covered by the box coming home.
+
+The scroller draws the transcript across the whole width of the screen, where the plain view wraps it
+to the columns the info panel and the scrollbar leave ([VIEW-39](terminal-transcript.md#VIEW-39)), so
+a row of one is not the same words as the same row of the other. What is held is the words at the top
+of the view: the entry that holds the first row on the screen and how many rows into its rows that
+row is, found in the layout the last frame drew. The same words are put at the top of the scroller,
+and again at the top of the first frame of the plain view when the scroller closes. A row that is
+past the end of an entry that takes fewer rows in the other layout is the entry's last.
+
+`q`, Escape and Ctrl-O each close it, and the view stays where the scroller left it. Escape
+abandons a count still waiting for its key first (SCROLL-3) and clears a standing search after
+that, since each is nearer. A selection made by the mouse and still marked is put away before
+either ([MOUSE-38](mouse.md#MOUSE-38)).
+
+Ctrl-C closes it as well, and does nothing else. The scroller is the nearest thing there is to
+stop, so a turn in flight goes on running and the press that reaches it is the next one. Each
+press has something of its own to answer and the screen says which, so no press silently does
+another one's job.
+
+**Why.** A viewer that jumps to the bottom on the way in has lost the thing the person opened it
+to look at. Escape stops the nearest thing and never leaves; Ctrl-C stops the nearest thing and
+leaves once there is nothing left. An open scroller is a thing to stop, and it is the innermost
+one.
+
+`verified-by: bravebot_tui::app::ctrl_o_opens_the_scroller`
+`verified-by: bravebot_tui::app::the_scroller_opens_on_the_view_that_was_already_there`
+`verified-by: bravebot_tui::app::q_escape_and_ctrl_o_each_close_the_scroller`
+`verified-by: bravebot_tui::app::closing_the_scroller_leaves_the_view_where_it_was`
+`verified-by: bravebot_tui::state::the_row_at_the_top_of_the_view_survives_the_screen_changing_shape`
+`verified-by: bravebot_tui::app::tests::scrollbar::opening_the_scroller_with_the_view_scrolled_back_beside_a_bar_leaves_the_same_words_at_the_top`
+`verified-by: bravebot_tui::app::tests::scrollbar::opening_the_scroller_beside_the_info_panel_and_while_a_turn_runs_holds_the_words_too`
+`verified-by: bravebot_tui::app::ctrl_c_closes_the_scroller_before_it_reaches_anything_else`
+`verified-by: bravebot_tui::app::the_scroller_answers_the_stop_keys_before_the_turn_does`
+`verified-by: bravebot_tui::app::a_turn_goes_on_running_while_the_scroller_is_open`
+`verified-by: bravebot_tui::app::the_scroller_left_open_under_a_running_command_still_closes`
+`verified-by: bravebot_tui::app::the_press_after_the_scroller_closes_stops_the_command`
+`verified-by: bravebot_tui::app::the_scroller_keeps_scrolling_under_a_running_command`
+`verified-by: bravebot_tui::app::the_chords_that_close_the_scroller_close_it_while_a_search_is_typed`
+`verified-by: bravebot_tui::app::escape_abandons_a_count_before_it_clears_a_search_or_closes_the_scroller`
+
+
+<a id="SCROLL-2"></a>
+### SCROLL-2: while it is open the keys are the scroller's, and the line in the box is untouched
+
+Every key in this file is answered here, and a key this file does not name does nothing at all. A
+character does not reach the box, Enter sends nothing, and nothing typed while the scroller is open
+becomes part of a prompt. The one key this file does not name that is answered here is the watch key
+([WATCH-7](watching.md#WATCH-7)), which opens from the scroller what it opens at the prompt: the
+list of the delegates where there are several, the view of the one where there is one, and nothing
+where the session has started none. The key that closes the view returns to the scroller
+([MOUSE-10](mouse.md#MOUSE-10)), and the key list names the chord as it is bound.
+
+The line keeps its text, its caret and whatever is attached to it, and comes back exactly as it was
+the moment the scroller closes.
+
+**Why.** The box takes letters, and so does a pager. One of them has to give. A mode that leaks
+its keystrokes into a box the person cannot see is the worse half of both: `j` scrolls and also
+types a `j`, and the prompt they had half written is quietly a different prompt by the time they
+come back to it.
+
+Nothing here is a difference about sending. Sending is what a running turn refuses; this is a mode
+the person opened with a key and closes with any of four.
+
+`verified-by: bravebot_tui::app::a_typed_character_does_not_reach_the_box_while_the_scroller_is_open`
+`verified-by: bravebot_tui::app::enter_sends_nothing_from_inside_the_scroller`
+`verified-by: bravebot_tui::app::a_key_the_scroller_does_not_take_does_nothing`
+`verified-by: bravebot_tui::app::a_chord_the_scroller_does_not_name_does_nothing`
+`verified-by: bravebot_tui::app::the_watch_key_opens_the_delegates_from_the_scroller_and_closing_returns_to_it`
+`verified-by: bravebot_tui::render::the_help_names_the_watch_chord_as_it_is_bound`
+`verified-by: bravebot_tui::app::the_line_comes_back_untouched_when_the_scroller_closes`
+`verified-by: bravebot_tui::app::a_paste_and_a_drop_do_not_reach_the_line_while_the_scroller_is_open`
+
+
+<a id="SCROLL-3"></a>
+### SCROLL-3: the keys that move the view
+
+| Keys | Where the view goes |
+|---|---|
+| Up / Down, `k` / `j`, `y` / `e`, Ctrl-Y / Ctrl-E, Ctrl-P / Ctrl-N | one line back / on |
+| Ctrl-U / Ctrl-D, `u` / `d` | half a screen back / on |
+| Space or `f` / `b`, Ctrl-F / Ctrl-B | a whole screen on / back |
+| `g` / `G`, `<` / `>`, Home / End | the first row / the last |
+| `{` / `}` | the prompt before this one / the prompt after |
+| the wheel | the configured number of rows, stopping at the ends as everything here does |
+
+Ctrl-N is a line on, and `n` alone is the next match (SCROLL-4).
+
+Each end is a stop rather than a count that keeps going: neither direction moves past the first row
+or the last, so a held key comes to rest somewhere the next press can move away from.
+
+One wheel event moves the number of rows `tui.wheelRows` names, and three where no settings file
+names one. The same distance at rest, in the scroller (the wheel being one of the keys here) and in the
+two panes of the info panel's files state ([MOUSE-19](mouse.md#MOUSE-19)): a transcript that moved
+by one figure and a scroller by another would be two movements under one gesture.
+
+The count is read once when the session opens, from the settings files as any other key of its kind
+is read: the home layer, a checkout's `.bravebot/settings.json` and `settings.local.json`, and a
+file the command line named, the later overriding the earlier. A checkout therefore names it, which
+is the layering every key that configures how the interface behaves gets, and the cost of it is the
+one written down under Known costs in [backends.md](backends.md). It is not one of the four names
+read from the home layer alone, because it decides no effect: the figure moves a view on this
+person's screen and reaches nothing else, so a checkout naming it changes what a gesture feels like
+and nothing about where a request goes or what is read. Nothing a response carries reaches it at
+all.
+
+A figure from one row to a hundred is taken as it stands, and a larger one is held to a hundred
+rather than refused, since the movement a figure asks for is on the screen the moment the wheel is
+turned and a figure past a screen's worth would move further in one event than the person can
+follow. Anything that is not a whole number above zero is read as absence rather than as a figure to
+bring into range, so a zero, a fraction, a negative or a word leaves the built-in three in force.
+That is the only thing a settings file can say below the range: the floor of one row is the bound
+the screen's own layer holds a figure to, and no file reaches it.
+
+Both promises above hold whatever the figure is: the wheel stops at the first row and the last, and
+it takes no count, so a count waiting for its key goes with the event rather than multiplying it.
+
+`{` and `}` land on the row a turn begins at, which is a prompt the person typed. Where they land
+is settled by what the person wrote and by nothing read out of the workspace.
+
+A count typed first goes that many times as far, on every key in the first three rows of the table
+and on `{`, `}`, `n` and `N`: `5j` is five lines, `3` Ctrl-D three half screens, `3}` three
+prompts on and `3n` three matches on, wrapping as `n` does (SCROLL-4). It is read as the box reads
+one ([INPUT-35](terminal-input.md#INPUT-35)): 1 to 9 begin it, 0 continues it, and it stops at a
+thousand. It stops where the key does as well: the view goes no further than the first row or the
+last, and the prompt keys stop at the first press that moves nothing. It is drawn at the start of
+the footer until the key it is for arrives, where the row has room for it beside the way out
+(SCROLL-7). Any other key drops it and does what it does alone, the wheel included, and Escape
+abandons it and does nothing else.
+
+The prompts that scroll a body (write, output, run, vetting, vouch, exposure, server, tool list,
+call and plan, and the questions a session opens with) take Up / Down, `k` / `j`, PageUp / PageDown
+and Home / End. A prompt takes that set whole, so a new prompt does not choose its own. `j` and `k`
+are never answers, so a person scrolling cannot write a grant: the run prompt remembers a requested
+reach for every session with `e` ([SANDBOX-27](sandboxing.md#SANDBOX-27)).
+
+**Why.** Two dialects, because the people who reach for a pager have `less` or `vi` in their hands
+already and neither group should have to learn the other's. A key that does nothing on arrival
+reads as a broken feature, and the cost of answering both is a row in this table.
+
+Terminals differ in how many events a notch or a trackpad swipe sends, so a fixed number of rows per
+event is a different amount of movement on each: on one the transcript crawls and on another it
+jumps a screen. Nothing the program can measure says which, so the figure is the person's to name.
+
+A count is how both dialects say how far, so a `5j` that moves one line is a key that did not
+listen. The box's reader is the one used, cap and all, so a count means one thing in both modes,
+and a thousand is further than anybody counts lines: `G` and `gg` reach the rest, and a thousand
+screens is past the end of any transcript. A count waiting for its key changes what that key does,
+so it is on the screen, as the box draws one beside its mode word. `3n` is `n` pressed three times, and takes no decision from untrusted bytes
+that the Known costs below do not already admit.
+
+`verified-by: bravebot_tui::app::the_line_keys_move_the_view_by_a_line`
+`verified-by: bravebot_tui::app::the_half_page_keys_move_the_view_by_half_a_screen`
+`verified-by: bravebot_tui::app::the_page_keys_move_the_view_by_a_whole_screen`
+`verified-by: bravebot_tui::confirm::j_and_k_scroll_each_prompt_a_line_as_the_arrows_do`
+`verified-by: bravebot_tui::confirm::j_and_k_scroll_the_run_prompt_where_keep_reach_is_offered_too`
+`verified-by: bravebot_tui::trust_prompt::j_and_k_scroll_the_question_a_line_and_answer_nothing`
+`verified-by: bravebot_tui::app::the_end_keys_reach_the_first_row_and_the_last`
+`verified-by: bravebot_tui::app::the_prompt_keys_land_on_the_turn_before_and_the_turn_after`
+`verified-by: bravebot_tui::app::the_view_stops_at_the_first_row_rather_than_scrolling_past_it`
+`verified-by: bravebot_tui::app::the_view_stops_at_the_last_row_rather_than_scrolling_past_it`
+`verified-by: bravebot_tui::app::the_wheel_scrolls_the_scroller_as_it_scrolls_the_transcript`
+`verified-by: bravebot_tui::app::the_wheel_moves_the_configured_number_of_rows`
+`verified-by: bravebot_tui::app::the_wheel_moves_three_rows_where_nothing_names_a_number`
+`verified-by: bravebot_tui::app::a_wheel_count_outside_the_range_is_held_to_it`
+`verified-by: bravebot_tui::app::a_configured_wheel_still_stops_at_the_ends_and_still_drops_a_count`
+`verified-by: bravebot_tui::files_mode::the_wheel_over_the_edits_scrolls_them_by_the_rows_a_wheel_event_moves`
+`verified-by: bravebot_tui::files_mode::the_wheel_over_the_list_scrolls_its_rows_and_moves_nothing_else`
+`verified-by: bravebot_config::settings::a_settings_file_names_how_far_the_wheel_moves_the_view`
+`verified-by: bravebot_tui::app::a_count_moves_the_view_that_many_times_as_far`
+`verified-by: bravebot_tui::app::a_count_stops_at_the_ends_of_the_transcript`
+`verified-by: bravebot_tui::app::a_count_on_the_prompt_keys_walks_that_many_prompts_and_stops_at_the_ends`
+`verified-by: bravebot_tui::app::a_count_on_n_walks_that_many_matches_and_wraps`
+`verified-by: bravebot_tui::app::a_key_that_takes_no_count_drops_it`
+`verified-by: bravebot_tui::app::escape_abandons_a_count_before_it_clears_a_search_or_closes_the_scroller`
+`verified-by: bravebot_tui::render::the_footer_draws_a_count_waiting_for_its_key`
+
+
+<a id="SCROLL-4"></a>
+### SCROLL-4: `/` searches what is drawn, literally, and `n` and `N` walk the matches
+
+The needle is typed at the foot of the screen. Enter runs it, and Escape abandons it and leaves
+the view where it was. Escape against a search that has already run clears it instead: the
+highlights come off and the view stays, and the press after that is the one that closes the
+scroller. It is the ladder every stop key in this interface walks, which is that a press answers
+the nearest thing there is to stop.
+
+It is matched as a substring, character for character, and never as a pattern: case-insensitive
+while the needle is all lower case, exact from the moment it holds a capital. What is searched is
+the text of the rows as they are drawn, so a match is always something the person can see: where a
+block replaces control characters with visible glyphs on its way to the screen, the glyphs are
+what a needle meets and the bytes behind them are not there to be found.
+
+Every match is drawn highlighted where it already is. `n` and `N` move to the next and the previous
+and wrap at the ends, and how many matches there are is drawn. Two matches on one row are two
+matches: the count says so, and the second is a press of its own, which moves the count on and
+leaves the view where it already is. A needle that matches nothing says so and moves nothing.
+
+**Why.** A pattern language is an interpreter reached by a line the person types over text an
+attacker may have written, and a backtracking one is a stall waiting to be found. Literal matching
+is also what somebody scanning a transcript for a filename actually wants.
+
+`verified-by: bravebot_tui::state::a_search_matches_a_substring_literally`
+`verified-by: bravebot_tui::state::a_needle_in_lower_case_matches_either_case`
+`verified-by: bravebot_tui::state::a_needle_holding_a_capital_matches_exactly`
+`verified-by: bravebot_tui::state::a_pattern_is_matched_as_the_characters_it_is_spelled_with`
+`verified-by: bravebot_tui::render::a_search_matches_what_is_drawn_and_not_the_bytes_behind_it`
+`verified-by: bravebot_tui::state::n_and_shift_n_walk_the_matches_and_wrap`
+`verified-by: bravebot_tui::render::a_search_that_matches_nothing_says_so_and_moves_nothing`
+`verified-by: bravebot_tui::app::escape_abandons_a_half_typed_search`
+`verified-by: bravebot_tui::app::escape_clears_a_finished_search_before_it_closes_the_scroller`
+`verified-by: bravebot_tui::app::backspacing_past_the_start_abandons_the_search`
+`verified-by: bravebot_tui::render::every_match_on_the_screen_is_highlighted`
+`verified-by: bravebot_tui::render::how_many_matches_there_are_is_drawn`
+`verified-by: bravebot_tui::render::a_line_holding_two_matches_is_counted_as_two`
+`verified-by: bravebot_tui::state::two_matches_on_one_row_are_two_steps_of_the_walk`
+
+
+<a id="SCROLL-5"></a>
+### SCROLL-5: a search matches untrusted content too, and never lifts it out of its block
+
+Quarantined content is searched along with everything else on the screen, and a match inside a
+quarantined block is highlighted inside that block. The footer says how many matches there are and
+which one the view is on. It never quotes one.
+
+Every row of a quarantined block carries the margin in the scroller exactly as it does in the
+transcript, under full detail as much as under a preview, and content still cannot draw a bar of
+its own.
+
+**Why the footer says a number and not a line.** A quoted match is untrusted content drawn outside
+a marked block, in the one row of the screen the interface speaks in its own voice. A count cannot
+be forged into a sentence; a quotation is a sentence already.
+
+**Why search it at all.** An interface that shows content and then refuses to let a person find
+it has protected nobody and made the audit worse. This is a decision taken from untrusted bytes,
+which the rest of the system does not do, so what it can and cannot buy an attacker is written out
+under Known costs rather than left to be found.
+
+`verified-by: bravebot_tui::render::a_search_matches_quarantined_content_too`
+`verified-by: bravebot_tui::render::a_match_inside_a_quarantined_block_stays_inside_it`
+`verified-by: bravebot_tui::render::the_search_footer_never_quotes_what_it_matched`
+`verified-by: bravebot_tui::render::two_matches_in_one_quarantined_row_are_counted_as_two`
+`verified-by: bravebot_tui::render::a_quarantined_row_is_marked_in_the_scroller_as_it_is_in_the_transcript`
+
+
+<a id="SCROLL-6"></a>
+### SCROLL-6: `v` opens the transcript in the user's editor, and reads nothing back
+
+What goes is the rows as they are drawn, margins and all, so untrusted content is marked in the
+file the way it is marked on the screen. The cells the interface draws for a click, the word that
+copies a fenced block and the blanks that put it at the right of its row, are not text of the
+transcript and are left out, as they are from a copy ([MOUSE-27](mouse.md#MOUSE-27)). It goes to a
+temporary file outside the workspace, opened
+with `$VISUAL` or `$EDITOR` the same way a prompt is, and the file goes when the editor exits. It
+does nothing while a turn runs, which is the answer the key that edits a prompt already gives: an
+editor needs the screen, and a running turn is drawing it.
+
+Nothing comes back. The key that edits a prompt takes back what was saved, because a prompt is a
+thing the person is still writing; a transcript is a record of what happened, and a record that can
+be edited into the session is not one. No later turn reads the file, and no path in the workspace
+gains anything from it having existed.
+
+**Why.** A pager can search a screen. Everything past that, meaning reading two passages side by
+side, keeping a copy, or grepping the lot, is a text editor's job, and the user has one.
+
+`verified-by: bravebot_tui::app::v_asks_for_the_editor`
+`verified-by: bravebot_tui::app::the_transcript_editor_key_does_nothing_while_a_turn_runs`
+`verified-by: bravebot_tui::render::what_goes_to_the_editor_is_marked_the_way_the_screen_is`
+`verified-by: bravebot_tui::render::what_goes_to_the_editor_leaves_out_the_word_that_copies_a_block`
+`verified-by: bravebot_tui::editor::a_transcript_opened_in_the_editor_is_written_outside_the_workspace`
+`verified-by: bravebot_tui::editor::a_transcript_opened_in_the_editor_is_never_read_back`
+`verified-by: bravebot_tui::editor::the_file_goes_when_the_editor_exits`
+
+
+<a id="SCROLL-7"></a>
+### SCROLL-7: the scroller says it is open, and `?` says what it takes
+
+A footer stands while the scroller is open, saying so and naming a key that closes it. `?` lists
+every key in this file, and the list renders on a terminal too short for it rather than pushing the
+way out off the screen: what a short terminal loses is rows from the middle, never the last one.
+A count waiting for its key (SCROLL-3) is drawn on the footer only where the row still holds the
+way out beside it. A needle wider than the row is cut from its head, while it is typed and once it
+is standing, to the columns the way out leaves, and the match count goes before any of the needle.
+
+The list is read instead of the transcript rather than alongside it, so any key at all puts it
+away and that press is spent doing so. The list says as much, because a key that quietly did two
+things would be worse than one that does the obvious one.
+
+**Why.** A mode where the letters a person types do nothing, with nothing on the screen to say why,
+is indistinguishable from an interface that has stopped responding. The way out is the one line
+that must never be the line that did not fit.
+
+`verified-by: bravebot_tui::render::the_scroller_says_it_is_open_and_which_key_closes_it`
+`verified-by: bravebot_tui::app::the_help_key_lists_the_keys`
+`verified-by: bravebot_tui::render::the_help_says_that_any_key_puts_it_away`
+`verified-by: bravebot_tui::render::the_help_names_every_key_the_scroller_spec_names`
+`verified-by: bravebot_tui::render::the_help_names_every_key_that_closes_the_scroller`
+`verified-by: bravebot_tui::render::the_help_renders_on_a_tiny_terminal`
+`verified-by: bravebot_tui::render::the_search_footer_names_the_way_out_with_a_turn_running_underneath`
+`verified-by: bravebot_tui::render::a_needle_wider_than_the_row_still_leaves_the_way_out`
+`verified-by: bravebot_tui::render::a_needle_wider_than_the_row_being_typed_still_leaves_the_way_out`
+`verified-by: bravebot_tui::render::a_long_needle_keeps_the_way_out_and_gives_up_what_the_turn_says`
+`verified-by: bravebot_tui::render::a_long_needle_being_typed_keeps_the_way_out_of_the_search`
+`verified-by: bravebot_tui::render::a_count_too_long_for_the_row_leaves_the_way_out_on_it`
+
+
+<a id="SCROLL-8"></a>
+### SCROLL-8: a turn goes on underneath, and the view does not move to follow it
+
+What arrives while the scroller is open joins the transcript and does not drag the view to the
+tail, in the frame it arrives in and not one frame later. The footer says that more has arrived
+below and how much, and `G` reaches it. It says that a turn is still running as well, in the word
+the indicator would have used, since the indicator is not on the screen for it to say so itself.
+
+**Why.** Holding the view is the whole of what the scroller is for. A person reading back through a
+turn that is going wrong is reading precisely because it is going wrong, and a view yanked to the
+bottom by the next line the model writes takes away the only thing they were trying to do.
+
+`verified-by: bravebot_tui::state::what_arrives_while_the_scroller_is_open_does_not_move_the_view`
+`verified-by: bravebot_tui::state::what_starts_without_a_press_leaves_an_open_scroller_where_its_reader_put_it`
+`verified-by: bravebot_tui::render::a_turn_writing_underneath_does_not_slide_the_view_between_frames`
+`verified-by: bravebot_tui::render::the_scroller_says_more_has_arrived_below`
+`verified-by: bravebot_tui::render::the_scroller_says_a_turn_is_still_running`
+`verified-by: bravebot_tui::render::a_standing_search_says_a_turn_is_running_and_how_much_arrived`
+`verified-by: bravebot_tui::render::a_half_typed_search_says_a_turn_is_running_and_how_much_arrived`
+`verified-by: bravebot_tui::state::the_last_row_reached_from_the_scroller_includes_what_arrived`
+
+<a id="SCROLL-9"></a>
+### SCROLL-9: the scroller has the whole screen but one row
+
+While it is open the transcript is drawn on every row of the screen except the last, which is the
+footer. The box goes, the indicator above it goes, and anything being offered beneath it goes. All
+of them come back the moment it closes.
+
+**Why.** Every one of those is a thing a person is invited to type at, and no key reaches any of
+them from in here: a box drawn under a mode that cannot reach it is rows of the screen spent
+inviting a keystroke that would do nothing, and a caret blinking in it is the interface saying the
+opposite of what is true. What they cost is given to the transcript, which is the whole of what
+somebody opened a pager to look at.
+
+`verified-by: bravebot_tui::render::the_scroller_takes_the_whole_screen_but_its_own_footer`
+`verified-by: bravebot_tui::render::the_usual_hint_comes_back_when_the_scroller_closes`
+`verified-by: bravebot_tui::render::the_scroller_draws_nothing_offered_beneath_the_box`
+
+<a id="SCROLL-10"></a>
+### SCROLL-10: `x` expands the call the view is on past its glimpse, and collapses it again
+
+The call nearest the top of the view that has more to show than it draws, among those on the
+screen, is expanded in place: a result the planner read shows every line the agent kept, and a
+write shows every change instead of the first twelve. A second press collapses it to the glimpse or
+the twelve lines drawn by [terminal-transcript.md](terminal-transcript.md), and the transcript is
+drawn collapsed again once the scroller closes. Expansion is a key the person pressed and is never
+decided by what a result contains. The key does nothing in a delegate's view and on a call with
+nothing more to show. A click on such a call at the plain prompt opens the scroller on it expanded
+([MOUSE-25](mouse.md#MOUSE-25)).
+
+Expanded lines are released through the same display gate as the glimpse, with control characters
+replaced by visible glyphs, and drawn behind the plain margin with each line cut to one row. A
+quarantined result has no plain expansion, and its marked block is unchanged.
+
+The agent keeps at most 500 lines of one result, and the session holds at most 20000 lines across
+all of them. Where either bound cut lines, the expanded rows end with the count of lines left out,
+as the glimpse does. A resumed session keeps no results, so only calls made in the running
+session expand.
+
+**Why.** The transcript shows five lines of a result and twelve of a write, and says how many it
+left out. Without a key the rest is reachable only by rerunning the command or opening the file.
+
+`verified-by: bravebot_tui::app::x_expands_the_call_the_view_is_on_and_a_second_press_collapses_it`
+`verified-by: bravebot_tui::render::the_expand_key_toggles_the_call_the_view_is_on`
+`verified-by: bravebot_tui::render::the_expand_key_does_nothing_where_a_call_has_no_more`
+`verified-by: bravebot_tui::render::an_expanded_result_shows_every_line_it_kept`
+`verified-by: bravebot_tui::render::an_expanded_result_says_how_many_lines_the_bound_cut`
+`verified-by: bravebot_tui::render::a_late_line_of_an_expanded_result_cannot_draw_its_own_escapes`
+`verified-by: bravebot_tui::render::an_expanded_write_shows_past_twelve_lines`
+`verified-by: bravebot_tui::render::a_transcript_at_rest_is_drawn_collapsed_after_the_scroller_closes`
+`verified-by: bravebot_tui::render::the_expand_key_leaves_a_call_below_the_screen_alone`
+`verified-by: bravebot_tui::state::a_session_holds_a_bounded_number_of_lines_for_expansion`
+`verified-by: bravebot_agent::turn::a_result_the_planner_read_is_glimpsed_under_its_call`
+
+## Known costs
+
+- **A search is a decision taken from untrusted bytes.** Nothing else in the driver does this, so
+  it is written down here rather than left to be discovered by somebody reading the code. Where the
+  view lands after `/` is derived from text that may have come out of a file nobody vouched for.
+
+  What that buys an attacker is the whole of this list:
+
+  - **Add matches.** Content can hold whatever a person is likely to search for, so a search for
+    `.env` can be answered by forty planted hits with the real one somewhere among them. Somebody
+    who gives up before walking them all has been made to give up. That is the real cost here, and
+    it is bounded by the count: `n` reaches every match, the footer says how many there are, and a
+    transcript with forty of something is itself a thing worth looking at.
+  - **Be found first.** Which match the view lands on first is the one nearest the view, so content
+    can arrange to be the first thing a person sees. It cannot be the only thing.
+
+  What is not on the list is the part that would matter. Content cannot remove a match, cannot stop
+  `n` reaching one, cannot quote itself into the footer, and cannot leave a quarantined block: a
+  match inside one is highlighted inside it, behind the same margin every other row of it carries.
+  Nothing is routed by this, nothing is written, nothing leaves the process, and no model is given
+  a byte of it. The view moves and the view is the only thing that moves.

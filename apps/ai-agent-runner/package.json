@@ -1,0 +1,20 @@
+{
+  "name": "@yolo-web/ai-agent-runner",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous AI Browser Agent Runner powered by Bun, Servo selectors, Obscura CDP/MCP, and Brave Shields",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "test": "bun test",
+    "check": "bun check"
+  },
+  "dependencies": {
+    "@yolo-web/shared": "workspace:*",
+    "@yolo-web/cdp-client": "workspace:*",
+    "@yolo-web/mcp-client": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/brave-shields": "workspace:*"
+  }
+}

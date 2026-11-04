@@ -1,0 +1,263 @@
+# Filing an issue
+
+The [issue-poster](../../agents/agents/issue-poster.md) definition is the only thing that files an
+issue from a session or a skill. It holds the procedure: search the backlog, apply the labels below,
+assign, cite or file an issue for each defect the body says is left unfixed, post, and read the issue
+back. A skill hands each draft to it, and no script under
+`agents/skills` runs `gh issue create`. This page holds what the labels mean, and the definition
+links here rather than copying it. `make check-spec` fails when the definition writes a label this
+page does not describe, and when a file under `agents/skills` files an issue itself.
+
+## The title
+
+The backlog is read as a list. A title is what somebody decides to open an issue from, and what
+somebody searching months later matches against, so the title carries the whole of the issue or
+the issue is invisible.
+
+**A title names the whole of the work, never one aspect of it.** A title that gives a consequence of
+the change, or the one part of it that was hardest to settle, makes a new subsystem read as a
+refinement to an existing one, and whoever is picking work up passes it over. "Add agents support"
+says what is not there today. "A delegate kind is one a person wrote down" is true of the same issue
+and says nothing about its size.
+
+**The verb first where something is missing, the finding where something is wrong.** A capability
+that does not exist yet names itself and starts with the verb: `Add persistent memory system`, `Fold
+brave-experiments/brave-bot-ui into bravebot`, `Enable Search tool`. An issue reporting something
+wrong states what is wrong instead, because the defect is the whole of the ask and stating it is what
+makes the list readable without opening anything.
+
+**Say the cost in the title wherever one sentence holds both.** `The aichat endpoint discards
+reasoning_effort, so /effort does nothing on Brave-served models` gives the defect and what it costs,
+and a reader who knew neither can order it against everything else. This is why titles here run long,
+and running long is not the defect: losing the end is. Titles in this backlog have been cut off
+mid-sentence by what filed them, and the end is where the cost was, so put the claim in the first
+clause and let the cost follow it.
+
+**No prefix for anything a label already says.** The area is `area/delegation`, and a label is
+queryable where a prefix is not: `is:open label:area/delegation` finds the issue, and a prefix spends
+the characters before the first useful word on something the sidebar is already showing. The same
+holds for the kind, since `bug:` says what the `bug` label says.
+
+**A clause id may lead a title, because nothing else records it.** `CRED-15:`, `LABEL-5:` and
+`DROP-4/DROP-6:` name the clause the issue is against, there is no label for a clause id, and the id
+is how somebody holding the spec finds the issue. Name every clause the issue is against, not the
+first one.
+
+**Use the word somebody would search for**, spelled the way the tree spells it. An issue about
+`.bravebot/agents` says "agents", an issue about the credential scan says "credential" rather than
+"secret", and an issue against a clause says the id. A title built out of general words is a title
+nobody finds twice.
+
+A title that diverges from this is not on its own worth a retitle, because a retitle reaches
+everybody subscribed and an awkward title costs less than that. The
+[triage-issues skill](../../agents/skills/triage-issues/SKILL.md) brings one into line when it is
+already editing the issue for another reason.
+
+## The kind, and the three axes
+
+The kind labels say what an issue **is**: `bug`, `security`, `spec-mismatch`, `spec-coverage`,
+`spec-bug`, `parity`, `beyond-parity`, `enhancement`, `refactor`. The three axes say what to **do** about it, and every open
+issue carries one value from each: an `importance`, an `urgency`, and a `size`.
+
+`refactor` is code to delete, share or split where what the program does stays the same: an
+item nothing uses, two copies of one block, a file too long to work on. Where the cleanup turns up
+something that does not work, the issue is a `bug` instead.
+
+More than one kind can be true at once, and a `spec-mismatch` usually carries a second: `bug` where
+the code attempts the clause's behaviour and gets it wrong, `enhancement` where nothing attempts it
+at all. Which it is answers a question the clause id cannot, and `is:open label:bug` is how somebody
+asks what is broken today rather than what diverges. A `spec-coverage` takes neither, because a
+clause nothing pins is a clause whose behaviour is right.
+
+A missing axis is not a low value. It means nobody has judged the issue, and an unjudged issue is
+invisible to every query built over the backlog: it is in no importance ordering, no urgency queue,
+and no list of what fits in an afternoon.
+
+**Importance is not urgency**, and they come apart in both directions. A hole in the guarantee that
+nothing currently reaches is `importance/p1` and `urgency/p3`: it has to be fixed, and the tree is
+no worse tomorrow for it. A parsing slip that eats a person's typed line is `importance/p4` and
+`urgency/p2`: small, and it costs somebody something every day it stands. Collapsing the two into
+one number is what loses the work in the middle.
+
+| `importance` | What leaving it costs |
+|---|---|
+| `importance/p1` | the guarantee, or a person's data; everything else is downstream of it holding |
+| `importance/p2` | central to what the tool is for |
+| `importance/p3` | an ordinary defect, or a capability worth having |
+| `importance/p4` | a narrow audience, or a small gain |
+| `importance/p5` | cosmetic, the tree is no worse for leaving it |
+
+| `urgency` | When it gets done |
+|---|---|
+| `urgency/p1` | stop other work and fix it |
+| `urgency/p2` | next, ahead of planned work |
+| `urgency/p3` | scheduled work, take it in turn |
+| `urgency/p4` | no deadline, do it when the area is open |
+| `urgency/p5` | indefinite, waiting on a decision or on work not done |
+
+`urgency/p1` says every other thing in flight should be put down, so the list is expected to be
+empty, and applying one is a claim about everybody's day rather than about the issue.
+
+What earns `urgency/p2` is a cost that grows: reachable now, worsening with time, or taking the
+session down under somebody who is using it. An issue that is merely important does not earn it,
+because `importance` already records that.
+
+| `size` | What it takes |
+|---|---|
+| `size/1` | an hour or less: one call site, and the test that pins it |
+| `size/2` | a sitting: one subsystem, a handful of call sites |
+| `size/3` | a few days: several files, a spec clause, new tests |
+| `size/4` | a week or more: crosses crates, or a design to settle first |
+| `size/5` | a project: a design document, several commits, a staged landing |
+
+Size counts everything that ships in the commit, the tests and the spec clause included, and not
+the lines of the fix alone. It is scheduling information and never a reason to skip something: a
+`size/4` at `importance/p1` is work to split, not work to leave.
+
+The three read together. Importance orders the backlog, urgency interrupts that order, and size
+says what fits in the time available.
+
+The [triage-issues skill](../../agents/skills/triage-issues/SKILL.md) assigns the triple to every
+issue that survives a run, and takes the meanings from here.
+
+## Where the work is
+
+An `area` label says which part of the tree an issue lands in: `area/trust`, `area/tools`,
+`area/turns`, `area/interface`, `area/cli`, `area/delegation`, `area/backends`, `area/skus`,
+`area/i18n`. `infrastructure` is the one that is not an `area`, because the build and the tracker
+are not part of the product and an issue about a workflow belongs to whoever owns the pipeline.
+
+An area is a fact about the issue rather than a judgement, so it can be applied by whoever files
+it. Apply none where the answer is not clear from the issue: an area guessed wrong is worse than
+one missing, because it routes the issue away from the person who would have found it.
+
+## Release-blocking and blocked
+
+`release-blocking` says the issue has to be resolved before the next release. `make bump-version`
+lists every open issue with it, with links, and asks before going on. The peer-advisories skill
+applies it to everything it files, since each is a defect another agent had and this tree may share.
+Remove it when the release no longer waits on the issue. The label is red, and a person creates it:
+
+```bash
+gh label create release-blocking --repo brave/bravebot --color d73a4a \
+  --description "Must be resolved before the next release"
+```
+
+`blocked/needs-planning` says the issue cannot be started until something else is decided or
+done. It is a statement about the issue's own progress and does not affect a release. It was
+previously named `blocked`:
+
+```bash
+gh label edit blocked --repo brave/bravebot --name blocked/needs-planning
+```
+
+## Flaky tests
+
+`flaky-test` says the issue is about a test whose outcome changes between runs of the same build.
+It marks what the issue is about and is not a kind, so `is:open label:flaky-test` lists every flake
+however it was filed.
+
+The Test determinism workflow files one issue per flaky test, titled `Flaky test: <name>`, through
+`contrib/measure-flakes.py`. It applies `flaky-test` and no other label, because nobody has read
+what it files, so no kind, `area` or axis is claimed for it. Those issues are authored by
+`app/github-actions`, a bot, and the [triage-issues skill](../../agents/skills/triage-issues/SKILL.md)
+skips a bot's issues except ones carrying `flaky-test`, so a triage run reads them, applies the
+kind, the `area` and the three axes, and closes one whose test no longer flakes. The poster applies `flaky-test` to an
+issue about a flaky test filed from a session, in addition to the kind and the `area` that issue
+would otherwise get. The poster refuses to post while `flaky-test` does not exist, because a person
+creates labels:
+
+```bash
+gh label create flaky-test --repo brave/bravebot --color 5ff714 \
+  --description "A test whose outcome changes between runs of the same build"
+```
+
+## Security
+
+`security` says the issue is about the guarantee this repository exists for, and it goes on with a
+kind label rather than instead of one. A `security` issue is almost always a `bug`, a `spec-bug` or
+a `spec-coverage` as well, and which of those it is decides what the fix is.
+
+`needs-security-review` says the finding has not been read by a person yet. Filing something at
+`severity/high` is a claim, and this label is what distinguishes a claim from an accepted one.
+Remove it once somebody has read the issue and agrees with it.
+
+| `severity` | What fails |
+|---|---|
+| `severity/high` | the rule does not hold on this path: untrusted content reaches a context closed to it, or steers an effect a person approved a different version of |
+| `severity/medium` | a real defect needing a precondition an attacker does not control on their own |
+| `severity/low` | nothing today: the behaviour holds, and what is wrong is that nothing keeps it holding |
+
+Severity is about reach and not about how interesting the defect is, which is why it is separate
+from `importance`: `importance` is what leaving the issue costs the project, and `severity` is what
+the defect costs on the path it is on. A `severity/low` finding that nothing pins can still be
+`importance/p1`, because the guarantee holding by accident is the thing this repository is against.
+
+The [security-audit skill](../../agents/skills/security-audit/SKILL.md) applies `security`,
+`needs-security-review`, a kind, a `severity` and an `area` to every finding it files, and no
+axis: an unread finding does not belong in anybody's queue.
+The [peer-advisories skill](../../agents/skills/peer-advisories/SKILL.md), which files what
+another coding agent's published advisory finds here, applies the same set, except that
+`security`, `needs-security-review` and `severity` go only on a finding about the guarantee.
+
+Every issue the peer-advisories skill files also carries `release-blocking`, described in
+[the next section](#release-blocking-and-blocked). The poster refuses to post while that label does
+not exist.
+
+The [peer-features skill](../../agents/skills/peer-features/SKILL.md), which files what other
+coding agents document that bravebot lacks or could do measurably better, applies a kind, an `area`
+and no axis. A missing capability is `parity`. A change that makes an existing capability about 10%
+better than the best other tool is `enhancement` with `beyond-parity`. The poster refuses to post
+while `beyond-parity` does not exist, because a person creates labels:
+
+```bash
+gh label create beyond-parity --repo brave/bravebot --color 0E8A16 \
+  --description "Better than what comparable tools offer, by a concrete margin"
+```
+
+The [session-review skill](../../agents/skills/session-review/SKILL.md), which files the problems
+bravebot gave a person in a recorded session, including signs of frustration and wasted context,
+cost or time whose cause is in the product, applies `bug` or `enhancement`, `session-analysis`, an
+`area` where one is clear, and no axis. `session-analysis` marks an issue found by reading a recorded
+session, and `is:open label:session-analysis` lists them. It files defects in the product only, and
+leaves out defects in this repository's skills, scripts, `Makefile`, `contrib/` and CI workflows. It
+never files a problem that touches the guarantee: it prints that to the person running it. An issue
+it files carries no text from the session. The poster refuses to post while `session-analysis` does
+not exist, because a person creates labels:
+
+```bash
+gh label create session-analysis --repo brave/bravebot --color 8cad49 \
+  --description "Found by reading a recorded bravebot session"
+```
+
+Issues labelled `BraveBot-Researcher` are filed from the BraveBot researcher, a tool kept outside
+this repository that reads papers, release notes and other tools' documentation for capabilities
+bravebot lacks. Before it files, it checks each finding against main the way the
+[peer-features skill](../../agents/skills/peer-features/SKILL.md) verifier does: it opens the sources,
+searches the specs and the code for the capability under other names, searches the tracker open and
+closed, and drops what the rule declines. It applies `BraveBot-Researcher`, a kind (`parity`, or
+`enhancement` where bravebot already has most of the capability), an `area` where one is clear, and no
+axis. Close its issues the usual way: completed when implemented, not planned when not wanted,
+including when bravebot already has it, and as a duplicate when another issue holds the work. The
+researcher reads which, and learns from it. A person creates the label:
+
+```bash
+gh label create BraveBot-Researcher --repo brave/bravebot --color c5def5 \
+  --description "Filed from the BraveBot researcher's findings"
+```
+
+Where an open issue already holds the work, the researcher files nothing. It adds its new sources
+to that issue as a comment and applies `BraveBot-Researcher-evidence`, which says the researcher
+added evidence to an issue it did not file. `is:issue label:BraveBot-Researcher,BraveBot-Researcher-evidence`
+lists everything it filed or added to. A person creates that label too:
+
+```bash
+gh label create BraveBot-Researcher-evidence --repo brave/bravebot --color e4ecf7 \
+  --description "The BraveBot researcher added evidence to this issue"
+```
+
+The [maintenance skill](../../agents/skills/maintenance/SKILL.md), which files dead code,
+duplication, files or functions past a length, and the other smells its lanes list, applies the existing `refactor` label, or `bug`
+where a reviewer found a defect, an `area` or `infrastructure` where one is clear, and no axis.
+It assigns every issue to netzenbot. If a required label is missing, the poster refuses and prints
+a creation command for a person. Do not create or use a `maintenance` label for these findings.

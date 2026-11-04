@@ -1,0 +1,428 @@
+//! A condition the session works towards.
+//!
+//! `/goal` holds one sentence a person typed and puts it to a judge when a turn ends. Where the
+//! judge says the condition does not hold yet, the work goes back for another turn; where it says
+//! anything else, the goal is over. The condition is settled the moment it is typed and never
+//! changes afterwards, so nothing a turn reads, writes or says can decide when this session is
+//! allowed to stop.
+//!
+//! A goal starts no work of its own. It has a condition and no prompt, so an armed goal sits there
+//! until the person sends something, and what it then keeps going is their own request.
+//!
+//! Nothing here is written to disk. A goal lives as long as the session that set it.
+
+/// The word that takes a goal off, rather than setting one called `clear`.
+const CLEAR: &str = "clear";
+
+/// The word that holds a goal still, rather than setting one called `pause`.
+const PAUSE: &str = "pause";
+
+/// The word that arms a held goal again, rather than setting one called `resume`.
+const RESUME: &str = "resume";
+
+/// How many times a goal may send the work back before it gives up.
+///
+/// Every one of these is a whole turn with the conversation re-sent, so this is what stands
+/// between a condition nobody can satisfy and a session that spends until somebody notices. It is
+/// generous enough for the multi-turn work a goal is for and small enough that the bill for
+/// getting a condition wrong is ten turns rather than an afternoon.
+const MAX_ROUNDS: usize = 10;
+
+/// How many rounds in a row may make no tool call before the goal stops sending the work back.
+///
+/// A turn that answers the judge in prose without running anything is sent back again with the
+/// whole conversation, and nothing about the next round makes it likelier to run something. Three
+/// leaves room for one reply that was only a question or a summary.
+const MAX_IDLE_ROUNDS: usize = 3;
+
+/// What a verdict of not-yet comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Send the work back for another turn.
+    SendBack,
+    /// The rounds are spent, which ends the goal.
+    Spent,
+    /// Consecutive rounds made no tool call. The goal stays set and waits for the next prompt.
+    Stalled,
+}
+
+/// What the argument to `/goal` asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asked {
+    /// The bare word: say what the goal is, or that there is none.
+    Report,
+    /// Take the goal off.
+    Clear,
+    /// Keep the goal and its condition, and stop judging turns against it.
+    Pause,
+    /// Judge turns against a paused goal again.
+    Resume,
+    /// Work towards this condition.
+    Set(String),
+}
+
+/// Read the argument to `/goal`.
+///
+/// Three literal words are reserved and the rest of the language is a condition, which is as narrow
+/// as the reservation can be made: `clear the build directory first` sets a goal, because the word
+/// is not the whole argument.
+pub fn parse(argument: &str) -> Asked {
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return Asked::Report;
+    }
+    match argument {
+        CLEAR => return Asked::Clear,
+        PAUSE => return Asked::Pause,
+        RESUME => return Asked::Resume,
+        _ => {}
+    }
+    Asked::Set(argument.to_string())
+}
+
+/// The goal a session is working towards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Running {
+    /// The condition, exactly as it was typed.
+    condition: String,
+    /// How many times the work has been sent back.
+    rounds: usize,
+    /// What the judge said last time it was asked.
+    last: Option<String>,
+    /// How many rounds in a row ended with no tool call made.
+    idle: usize,
+    /// Whether the person has held the goal still. The condition and the count are kept either way.
+    paused: bool,
+    /// Whether the last verdict stopped sending the work back with the goal still set (GOAL-20),
+    /// until the next verdict (OPEN-1).
+    stalled: bool,
+    /// When the goal was armed. Counted through a pause, since the goal is still set.
+    started: std::time::Instant,
+    /// The session's token total when the goal was armed, so what the goal has cost is the
+    /// difference and not a second tally kept beside the session's.
+    tokens_at_start: u64,
+    /// What the turns since the goal was armed did, for the judge (GROUND-4).
+    record: bravebot_agent::Work,
+    /// Whether a turn was running when the goal was armed. Its work began before the goal, so it
+    /// is left out of the record.
+    skip_the_running_turn: bool,
+}
+
+impl Running {
+    /// Arm a goal. Nothing is sent: a goal has a condition and no prompt.
+    ///
+    /// `tokens` is what the session has spent so far, which is where [`Running::spent`] counts from.
+    /// `mid_turn` says a turn is running, which the record leaves out.
+    pub fn begin(condition: String, tokens: u64, mid_turn: bool) -> Self {
+        Self {
+            condition,
+            rounds: 0,
+            last: None,
+            idle: 0,
+            paused: false,
+            stalled: false,
+            started: std::time::Instant::now(),
+            tokens_at_start: tokens,
+            record: bravebot_agent::Work::default(),
+            skip_the_running_turn: mid_turn,
+        }
+    }
+
+    /// Add what a turn did to the record, however it ended and whether or not the goal is paused,
+    /// since the work is done either way. The turn that was running when the goal was armed is
+    /// left out (GROUND-4).
+    pub fn worked(&mut self, work: bravebot_agent::Work) {
+        match std::mem::replace(&mut self.skip_the_running_turn, false) {
+            true => {}
+            false => self.record.then(work),
+        }
+    }
+
+    /// What the turns since the goal was armed did.
+    pub fn record(&self) -> bravebot_agent::Work {
+        self.record
+    }
+
+    /// How long the goal has been set, as of `now`.
+    pub fn elapsed(&self, now: std::time::Instant) -> std::time::Duration {
+        now.saturating_duration_since(self.started)
+    }
+
+    /// What the session has spent since the goal was armed, given the session's total now.
+    pub fn spent(&self, tokens: u64) -> u64 {
+        tokens.saturating_sub(self.tokens_at_start)
+    }
+
+    /// The moment the goal was armed, for a test that needs a clock it can move.
+    #[cfg(test)]
+    pub fn started(&self) -> std::time::Instant {
+        self.started
+    }
+
+    /// Whether turns are being judged against this goal, or the person has held it still.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Whether the goal is still set after it stopped sending the work back (GOAL-20).
+    pub fn is_stalled(&self) -> bool {
+        self.stalled
+    }
+
+    /// Hold the goal still, and say whether it was running. The condition and the rounds spent are
+    /// kept, so resuming picks up where this left off.
+    pub fn pause(&mut self) -> bool {
+        !std::mem::replace(&mut self.paused, true)
+    }
+
+    /// Arm a held goal again, and say whether it was paused.
+    pub fn resume(&mut self) -> bool {
+        std::mem::replace(&mut self.paused, false)
+    }
+
+    pub fn condition(&self) -> &str {
+        &self.condition
+    }
+
+    pub fn rounds(&self) -> usize {
+        self.rounds
+    }
+
+    /// What the judge said the last time it was asked, or `None` before it has been.
+    pub fn last_reason(&self) -> Option<&str> {
+        self.last.as_deref()
+    }
+
+    /// How many more times the work may be sent back.
+    pub fn left(&self) -> usize {
+        MAX_ROUNDS.saturating_sub(self.rounds)
+    }
+
+    /// Record a verdict of not-yet, and say what to do about it.
+    ///
+    /// `tool_calls` is how many calls the turn just judged made, a count the driver holds and not
+    /// anything a reply said. The reason is kept either way, because a goal that has just run out
+    /// of rounds is exactly when a person wants to read what the judge kept saying.
+    pub fn not_met(&mut self, reason: String, tool_calls: usize) -> Next {
+        self.last = Some(reason);
+        self.stalled = false;
+        if self.left() == 0 {
+            return Next::Spent;
+        }
+        self.idle = if tool_calls == 0 { self.idle + 1 } else { 0 };
+        if self.idle >= MAX_IDLE_ROUNDS {
+            // Counted again from the next prompt: that turn is judged on its own.
+            self.idle = 0;
+            self.stalled = true;
+            return Next::Stalled;
+        }
+        self.rounds += 1;
+        Next::SendBack
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bare_command_asks_what_the_goal_is() {
+        assert_eq!(parse(""), Asked::Report);
+        assert_eq!(parse("   "), Asked::Report);
+    }
+
+    #[test]
+    fn the_reserved_word_takes_the_goal_off() {
+        assert_eq!(parse("clear"), Asked::Clear);
+        assert_eq!(parse("  clear  "), Asked::Clear);
+    }
+
+    /// The reservation is one word and not a prefix, for the reason a command name is the whole
+    /// word: a person asking for the build directory to be cleaned must not have their goal
+    /// silently taken off instead.
+    #[test]
+    fn a_condition_that_begins_with_the_reserved_word_is_still_a_condition() {
+        assert_eq!(
+            parse("clear the build directory and cargo test exits 0"),
+            Asked::Set("clear the build directory and cargo test exits 0".to_string())
+        );
+    }
+
+    /// Same reservation as `clear`: the whole word, so a condition that opens with one is a
+    /// condition, and a person describing work is not silently holding their goal still.
+    #[test]
+    fn pause_and_resume_are_whole_words_and_not_prefixes() {
+        assert_eq!(parse("pause"), Asked::Pause);
+        assert_eq!(parse("  resume  "), Asked::Resume);
+        assert_eq!(
+            parse("pause the deploy before the tests pass"),
+            Asked::Set("pause the deploy before the tests pass".to_string())
+        );
+        assert_eq!(
+            parse("resume.txt exists"),
+            Asked::Set("resume.txt exists".to_string())
+        );
+    }
+
+    #[test]
+    fn pausing_keeps_the_condition_and_the_rounds_and_resuming_arms_it_again() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        goal.not_met("nothing ran them".to_string(), 1);
+        assert!(goal.pause());
+        assert!(!goal.pause(), "a second pause reported a change");
+        assert!(goal.is_paused());
+        assert_eq!(goal.condition(), "the tests pass");
+        assert_eq!(goal.rounds(), 1);
+        assert_eq!(goal.last_reason(), Some("nothing ran them"));
+        assert!(goal.resume());
+        assert!(!goal.resume(), "a second resume reported a change");
+        assert!(!goal.is_paused());
+        assert_eq!(goal.rounds(), 1);
+    }
+
+    #[test]
+    fn anything_else_is_the_condition_verbatim() {
+        assert_eq!(
+            parse("  cargo test -p bravebot-tui exits 0  "),
+            Asked::Set("cargo test -p bravebot-tui exits 0".to_string())
+        );
+    }
+
+    #[test]
+    fn a_fresh_goal_has_sent_nothing_back_and_has_heard_nothing() {
+        let goal = Running::begin("the tests pass".to_string(), 0, false);
+        assert_eq!(goal.rounds(), 0);
+        assert_eq!(goal.last_reason(), None);
+        assert_eq!(goal.left(), MAX_ROUNDS);
+    }
+
+    #[test]
+    fn a_verdict_of_not_yet_is_kept_and_counted() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        assert_eq!(
+            goal.not_met("nothing ran them".to_string(), 1),
+            Next::SendBack
+        );
+        assert_eq!(goal.rounds(), 1);
+        assert_eq!(goal.last_reason(), Some("nothing ran them"));
+    }
+
+    /// A condition nobody can satisfy would otherwise spend a session's whole budget re-sending a
+    /// conversation that grows every round.
+    #[test]
+    fn a_goal_stops_sending_the_work_back_once_its_rounds_are_spent() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        for round in 1..=MAX_ROUNDS {
+            assert_eq!(
+                goal.not_met("still nothing".to_string(), 1),
+                Next::SendBack,
+                "the goal gave up on round {round} of {MAX_ROUNDS}"
+            );
+        }
+        assert_eq!(goal.left(), 0);
+        assert_eq!(goal.not_met("still nothing".to_string(), 1), Next::Spent);
+    }
+
+    /// The round that runs out of budget is the one whose reason a person most wants to read, so
+    /// giving up must not also throw away what the judge said.
+    #[test]
+    fn the_reason_from_the_round_that_gave_up_is_still_kept() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        for _ in 0..MAX_ROUNDS {
+            goal.not_met("still nothing".to_string(), 1);
+        }
+        goal.not_met("the linker is missing".to_string(), 1);
+        assert_eq!(goal.last_reason(), Some("the linker is missing"));
+    }
+
+    /// What a goal has cost is counted from when it was armed, not from the start of the session,
+    /// and the time from the same moment.
+    #[test]
+    fn a_goal_counts_what_was_spent_and_how_long_from_the_moment_it_was_armed() {
+        let goal = Running::begin("the tests pass".to_string(), 4_000, false);
+
+        assert_eq!(goal.spent(4_000), 0);
+        assert_eq!(goal.spent(9_500), 5_500);
+        assert_eq!(goal.spent(100), 0, "a total that went down underflowed");
+        assert_eq!(
+            goal.elapsed(goal.started() + std::time::Duration::from_secs(125)),
+            std::time::Duration::from_secs(125)
+        );
+    }
+
+    /// A turn that answers in prose is sent back, and one that keeps doing it is not: the goal
+    /// stays set for the next prompt and the count starts again.
+    #[test]
+    fn rounds_with_no_tool_call_in_a_row_stop_the_goal_without_clearing_it() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        for _ in 1..MAX_IDLE_ROUNDS {
+            assert_eq!(goal.not_met("say it".to_string(), 0), Next::SendBack);
+        }
+        assert!(!goal.is_stalled());
+        assert_eq!(goal.not_met("say it".to_string(), 0), Next::Stalled);
+        assert!(goal.is_stalled(), "a stalled goal is an open loop (OPEN-1)");
+        assert_eq!(goal.last_reason(), Some("say it"));
+        assert_eq!(goal.not_met("say it".to_string(), 0), Next::SendBack);
+        assert!(!goal.is_stalled());
+    }
+
+    /// Only consecutive rounds count: a round that ran something starts the count over.
+    #[test]
+    fn a_round_that_made_a_call_starts_the_count_again() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        for calls in [0, 0, 1, 0, 0, 1] {
+            assert_eq!(goal.not_met("say it".to_string(), calls), Next::SendBack);
+        }
+    }
+
+    /// Two writes and a command after them, as a turn that edited and then built.
+    const BUILT: bravebot_agent::Work = bravebot_agent::Work {
+        writes: 2,
+        commands: 1,
+        ran_after_last_write: true,
+        last_command_failed: false,
+    };
+
+    /// GROUND-4. Every turn the goal drives adds to its record, a later write after an earlier
+    /// command included.
+    #[test]
+    fn the_record_adds_every_turn_the_goal_drives() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        goal.worked(BUILT);
+        goal.worked(bravebot_agent::Work {
+            writes: 1,
+            commands: 0,
+            ran_after_last_write: false,
+            last_command_failed: false,
+        });
+        assert_eq!(
+            goal.record(),
+            bravebot_agent::Work {
+                writes: 3,
+                commands: 1,
+                ran_after_last_write: false,
+                last_command_failed: false,
+            }
+        );
+    }
+
+    /// GROUND-4. The turn that was running when the goal was set began before it, so it is left
+    /// out, and the next one counts.
+    #[test]
+    fn a_turn_running_when_the_goal_was_set_is_not_counted() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, true);
+        goal.worked(BUILT);
+        assert_eq!(goal.record(), bravebot_agent::Work::default());
+        goal.worked(BUILT);
+        assert_eq!(goal.record(), BUILT);
+    }
+
+    /// GROUND-4. A paused goal still counts, since the work is done whether or not it is judged.
+    #[test]
+    fn a_turn_while_the_goal_is_paused_is_counted() {
+        let mut goal = Running::begin("the tests pass".to_string(), 0, false);
+        goal.pause();
+        goal.worked(BUILT);
+        assert_eq!(goal.record(), BUILT);
+    }
+}

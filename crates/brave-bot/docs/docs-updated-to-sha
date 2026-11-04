@@ -1,0 +1,15 @@
+# The commit the documentation site is current as of.
+#
+# Every page under docs/website describes behaviour specified clause by clause in
+# docs/specs. This file records how far along that history the site has been brought, so
+# the next update knows where to start reading.
+#
+# Run `make docs-changes` to see what has landed since, and the update-docs skill
+# (agents/skills/update-docs) to fold it in. The skill rewrites the sha below; nothing
+# else should.
+#
+# Add capability groups to the Brave extension, each off until a person grants its browser permissions (#3620)
+# 2026-11-01
+# https://github.com/brave/bravebot/commit/ea82976a155a98b642e89e362eed0b484bbf95a3
+
+ea82976a155a98b642e89e362eed0b484bbf95a3

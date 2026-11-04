@@ -1,0 +1,1623 @@
+//! Running programs, as a pipeline of separately approved stages.
+//!
+//! This is the one place the repository admits command execution, and the reason it can is
+//! narrow: **there is no command string.** A stage is a program name and a vector of arguments,
+//! executed directly. No shell interprets it, so there is no parser to defeat and no
+//! metacharacter to smuggle. An argument containing `; rm -rf /` is one argument and stays one
+//! argument, because nothing ever splits it.
+//!
+//! That is what restores the routing/content distinction the exclusion in CLAUDE.md was about. A
+//! shell string is destination and payload fused, with nothing a person could approve in
+//! isolation. An argv vector is a destination a person can read, approve, and have executed
+//! verbatim.
+//!
+//! # What is controlled, and what is not
+//!
+//! Not the programs. There is no allowlist, and spawned programs run with whatever access the
+//! user's own shell would give them. That is deliberate: `git push` needs `~/.ssh`, `npm install`
+//! reads `~/.npmrc` and writes `node_modules`, and the set of programs someone might reasonably
+//! ask for cannot be enumerated in advance. A confinement profile narrow enough to be worth
+//! having would break ordinary tools, so none is imposed.
+//!
+//! What is controlled is the boundary that holds *without* knowing what ran:
+//!
+//! - **argv is routing**, so it must be `(T,pub)` and endorsed by a person before anything
+//!   executes. This is the real control point, and it is the same one a write goes through.
+//! - **stdout and stderr are always `(U,priv)`.** Every stage, no exceptions, and nothing a
+//!   caller or the model can declare changes it. A program may print anything, including bytes an
+//!   earlier stage read out of a file an attacker wrote, so that is the only label that holds.
+//! - **stdin is content**, so it may be untrusted. It is carried into the process and never
+//!   consulted, which is what lets untrusted data reach `sed` or `awk` without the planner or the
+//!   driver reading it.
+//!
+//! # Why every run asks
+//!
+//! There is no read-only category, because there is no way to establish one. `foo --bar` might
+//! write to disk and nothing here can tell. An earlier draft had each stage declare whether it
+//! wrote or reached the network and used that to skip the prompt; it was dropped because a
+//! declaration is only worth something if it is honest, and an unprompted write from a stage that
+//! claimed otherwise is worse than a prompt nobody wanted. So the answer to "does this change
+//! anything" is always "assume so", and a person decides.
+//!
+//! Private stdin is a second, independent reason to ask. Untrusted is about integrity and is fine
+//! here, since carrying bytes decides nothing. Private is about confidentiality, and handing the
+//! user's data to a program releases it somewhere this policy no longer governs.
+
+use std::path::{Path, PathBuf};
+
+/// A path as a key made of text can hold it.
+///
+/// A path is bytes on Unix and UTF-16 on Windows, and neither is guaranteed to have a text
+/// spelling. `to_string_lossy` produces one anyway, by replacing every byte it cannot read with
+/// `U+FFFD`. That is the rendering a person should be shown and it is not something a key may be
+/// built from: two files whose names differ only in bytes that are not valid UTF-8 render to one
+/// string, so an answer given about one of them would cover the other, while the spawn takes the
+/// path itself and runs whichever file was named.
+///
+/// So a key spells a path as its own text where it has one and as its bytes where it does not. The
+/// two are never confusable, because whatever holds them says which it is: a string or a list of
+/// numbers in a record, a tagged branch in [`Plan::canonical`].
+///
+/// A path whose text holds `U+FFFD` is spelled by its bytes as well, which is what lets a reader
+/// treat a *text* spelling holding one as a rendering rather than a path. [`Spelling::into_path`]
+/// refuses those, and that is the one thing here that is not a round trip: the bytes behind a
+/// `U+FFFD` cannot be recovered, so an entry holding one names a file nobody can identify now, and
+/// reading it back as the path it renders to would hand an answer about one binary to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spelling {
+    /// The path's own text, which is every path anybody types.
+    Text(String),
+    /// The path's bytes, for a path that has no text of its own to be spelled by.
+    Bytes(Vec<u8>),
+}
+
+impl Spelling {
+    /// How this path is spelled.
+    pub fn of(path: &Path) -> Self {
+        match path.to_str() {
+            Some(text) if !text.contains(char::REPLACEMENT_CHARACTER) => {
+                Self::Text(text.to_string())
+            }
+            _ => Self::Bytes(bytes_of(path)),
+        }
+    }
+
+    /// The path this spells, or nothing where it spells no path anybody can name.
+    pub fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Text(text) if text.contains(char::REPLACEMENT_CHARACTER) => None,
+            Self::Text(text) => Some(PathBuf::from(text)),
+            Self::Bytes(bytes) => path_from_bytes(&bytes),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn bytes_of(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+/// The UTF-16 code units of the path, each little-endian, because a Windows path is UTF-16 and an
+/// unpaired surrogate in one is exactly what no text spelling survives.
+#[cfg(windows)]
+fn bytes_of(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+/// `None` for an odd number of bytes, which is half a code unit and so no path. Nothing here
+/// writes one; a record somebody edited by hand can hold one, and that entry covers nothing.
+#[cfg(windows)]
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let (pairs, half) = bytes.as_chunks::<2>();
+    if !half.is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+}
+
+/// One program in a pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stage {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Stage {
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+        }
+    }
+
+    /// The stage as a person should read it before approving.
+    ///
+    /// Each argument is shown separately, so a reviewer can see where one argument ends and the
+    /// next begins. That boundary is the whole point: it is what a shell would have decided and
+    /// what this leaves to nothing.
+    ///
+    /// The quoting has to be **unambiguous**, not merely readable, because an approval is bound to
+    /// what the person saw. Quoting only on whitespace was not: `["a b"]` and `["'a", "b'"]` both
+    /// came out as `prog 'a b'`, so a reviewer reading one could have been approving the other. So
+    /// a quote or a backslash forces quoting too, and both are escaped inside it. A control
+    /// character, white space other than a space and a character that draws as nothing or as a
+    /// blank cell are written inside the quoting as `\u{..}`, so two argument lists that differ in
+    /// one of them do not draw alike.
+    pub fn display(&self) -> String {
+        let mut out = String::from(&self.program);
+        for arg in &self.args {
+            out.push(' ');
+            out.push_str(&quoted(arg));
+        }
+        out
+    }
+}
+
+/// A path a program starts by and the file it leads to, drawn as `ls -l` draws a link.
+///
+/// The file alone where the two are one path.
+pub(crate) fn started_through(started_as: &Path, file: &Path) -> String {
+    if started_as == file {
+        file.to_string_lossy().into_owned()
+    } else {
+        format!(
+            "{} -> {}",
+            started_as.to_string_lossy(),
+            file.to_string_lossy()
+        )
+    }
+}
+
+/// One argument, quoted so that no two arguments can render alike.
+///
+/// A bare token is one with nothing in it that quoting is for. Anything else is wrapped, with a
+/// backslash and a quote escaped inside the wrapping, which is what makes the rendering reversible
+/// and therefore safe to bind an approval to. An argument holding `>` is wrapped too, so an
+/// argument list cannot draw as the arrow [`started_through`] puts between a link and its file.
+///
+/// A character that does not draw as itself is written inside the wrapping as `\u{..}`, its code
+/// point in hex: a control character, any white space other than a space, a character
+/// [`crate::invisible::draws_as_nothing`] holds and the blank braille pattern. Without that, a
+/// terminal skips a zero-width character and a control character moves the cursor, so `a.tmp` and
+/// `a<U+200B>.tmp` would draw alike, and an argument made only of such characters would draw as no
+/// argument. A literal backslash is written `\\`, so a spelled character cannot be confused with
+/// the text `\u{200b}`. The mapping reads no meaning from the argument.
+pub fn quoted(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && !arg.contains(|c: char| {
+            c == ' ' || c == '\'' || c == '\\' || c == '>' || needs_spelling(c)
+        });
+    if plain {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('\'');
+    for c in arg.chars() {
+        if c == '\'' || c == '\\' {
+            out.push('\\');
+        }
+        if needs_spelling(c) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Whether `c` is written out in [`quoted`] because it would not draw as itself: a control
+/// character, white space other than a space, a character that draws as nothing and the blank
+/// braille pattern.
+fn needs_spelling(c: char) -> bool {
+    c.is_control()
+        || (c.is_whitespace() && c != ' ')
+        || crate::invisible::draws_as_nothing(c)
+        || crate::invisible::draws_as_blank(c)
+}
+
+/// A sequence of stages, each feeding the next.
+///
+/// Composition is what makes this useful without a shell: narrowing output is a stage rather than
+/// a pipe character, so `git log` into `sed -n 1,10p` filters before anything is labelled. It also
+/// means untrusted content can be reshaped by real tools while never being read here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pipeline {
+    pub stages: Vec<Stage>,
+    /// The label of anything fed to the first stage's stdin.
+    ///
+    /// `None` when nothing is. Held on the pipeline rather than the stage because only the first
+    /// stage has a stdin of its own; the rest are fed by the stage before them.
+    pub stdin: Option<crate::label::Label>,
+}
+
+impl Pipeline {
+    pub fn new(stages: Vec<Stage>) -> Self {
+        Self {
+            stages,
+            stdin: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.stages.len()
+    }
+}
+
+/// How two parts of a plan are joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Joiner {
+    /// `&&`: the right side runs only if the left side succeeded.
+    And,
+    /// `||`: the right side runs only if the left side failed.
+    Or,
+    /// `;`: the right side runs either way.
+    Then,
+}
+
+/// Where one of a step's streams goes.
+///
+/// The paths are absolute and are not tidied. What is recorded is what will be opened, and
+/// rewriting a `..` away would make the two differ wherever a symlink is involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Stdout {
+        path: PathBuf,
+        append: bool,
+    },
+    Stdin {
+        path: PathBuf,
+    },
+    Stderr {
+        path: PathBuf,
+        append: bool,
+    },
+    Both {
+        path: PathBuf,
+    },
+    /// Standard error joins standard output, touching no file.
+    StderrToStdout,
+}
+
+/// The one redirection target that is not a file: output sent there is discarded.
+pub const NULL_DEVICE: &str = "/dev/null";
+
+/// Whether a redirection target is [`NULL_DEVICE`], spelled as such.
+///
+/// Matched on the exact spelling, so a link to the device, `/dev/../dev/null`, `/dev//null` and
+/// `/dev/./null` are ordinary paths and are confined as such. `Path` equality is not used because it
+/// ignores repeated and interior-dot separators.
+pub fn is_the_null_device(path: &Path) -> bool {
+    path.as_os_str() == NULL_DEVICE
+}
+
+/// One program in a plan, resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    /// The name the line used, which is what a reader recognises.
+    pub program: String,
+    /// The file that name resolved to, absolute.
+    ///
+    /// Resolved before anybody is asked, so that what a person endorsed and what executes are the
+    /// same value. This is what an endorsement is keyed on, never the name: `$PATH` decides what a
+    /// bare name means, so an approval recorded against the string would follow the name onto
+    /// whatever it later pointed at.
+    pub resolved: PathBuf,
+    /// The path the program is started by. It is the name the line used, made absolute, with no
+    /// link in it followed.
+    ///
+    /// Some programs read the path they were started by. A Python in a virtual environment finds
+    /// the environment from the link it was started through, and a multi-call binary picks which
+    /// tool to be from its name. This path is in every key [`Step::resolved`] is in, and it must
+    /// still lead to that file when the step starts ([RUN-2], [RUN-8]).
+    ///
+    /// [RUN-2]: ../../../docs/specs/tools/run.md
+    /// [RUN-8]: ../../../docs/specs/tools/run.md
+    pub started_as: PathBuf,
+    /// The argument vector, literal and final.
+    pub args: Vec<String>,
+    /// `NAME=value` written in front of this step's own program.
+    pub environment: Vec<(String, String)>,
+    /// Where this step's streams go.
+    pub routes: Vec<Route>,
+}
+
+impl Step {
+    /// The step as a person should read it before approving.
+    ///
+    /// The binary rather than the name, because that is what will run: the path it is started by
+    /// and the file that leads to, as [`Step::binary`] draws them. The file alone names another
+    /// program wherever a link leads to a multi-call binary: `cargo` served by rustup would read
+    /// `rustup test`. Every argument is quoted so that no two argument lists can render alike,
+    /// with a character that draws as nothing written out as [`quoted`] writes it.
+    pub fn display(&self) -> String {
+        self.render(&self.binary())
+    }
+
+    /// The file this step runs, after the path that starts it where that is another path.
+    ///
+    /// What a prompt shows under [`Step::as_written`], so the person answering sees both paths an
+    /// entry for the step is keyed on. It is also the program of [`Step::display`], so a result, a
+    /// job's line and a remembered line name the program as the prompt did.
+    pub fn binary(&self) -> String {
+        started_through(&self.started_as, &self.resolved)
+    }
+
+    /// The step as the line wrote it.
+    ///
+    /// The name rather than the file it resolved to, because that is what a reader recognises. It
+    /// is shown beside the file and never instead of it: a name is not a program, and a person
+    /// vouching for one should be looking at the binary they are vouching for.
+    pub fn as_written(&self) -> String {
+        self.render(&self.program)
+    }
+
+    fn render(&self, program: &str) -> String {
+        self.render_args(
+            program,
+            self.args.iter().map(|arg| quoted(arg)).collect(),
+            None,
+        )
+    }
+
+    /// [`Step::display`] with the arguments already rendered, for a caller whose arguments are not
+    /// all text. The caller owns the quoting of what it passes.
+    pub(crate) fn display_args(&self, args: Vec<String>) -> String {
+        self.render_args(&self.binary(), args, None)
+    }
+
+    /// [`Step::display_args`] naming the program by the path it was started as and not the file
+    /// that path leads to, for a sentence addressed to the planner.
+    ///
+    /// The planner typed that path. The file a link leads to is a name whoever wrote the tree
+    /// chose, so it stays out of text the driver writes to the planner ([TOOL-4], [CMDLINE-4]).
+    ///
+    /// [TOOL-4]: ../../../docs/specs/tools/tool-surface.md
+    /// [CMDLINE-4]: ../../../docs/specs/tools/command-line.md
+    ///
+    /// `targets` holds the file each redirection of the step names, as the line wrote it and
+    /// already quoted, in the order of the routes that name a file. A route's own path was joined
+    /// onto the directory the line landed in, which is where a link led.
+    pub(crate) fn told_args(&self, args: Vec<String>, targets: &[String]) -> String {
+        self.render_args(&self.started_as.to_string_lossy(), args, Some(targets))
+    }
+
+    fn render_args(&self, program: &str, args: Vec<String>, targets: Option<&[String]>) -> String {
+        let mut out = String::new();
+        for (name, value) in &self.environment {
+            out.push_str(&format!("{name}={} ", quoted(value)));
+        }
+        out.push_str(program);
+        for arg in args {
+            out.push(' ');
+            out.push_str(&arg);
+        }
+        let mut targets = targets.map(|targets| targets.iter());
+        for route in &self.routes {
+            out.push(' ');
+            let mut file = |path: &Path| match targets.as_mut() {
+                Some(targets) => targets.next().cloned().unwrap_or_default(),
+                None => quoted(&path.to_string_lossy()),
+            };
+            out.push_str(&match route {
+                Route::Stdout { path, append } => {
+                    format!("{} {}", if *append { ">>" } else { ">" }, file(path))
+                }
+                Route::Stdin { path } => format!("< {}", file(path)),
+                Route::Stderr { path, append } => {
+                    format!("{} {}", if *append { "2>>" } else { "2>" }, file(path))
+                }
+                Route::Both { path } => format!("&> {}", file(path)),
+                Route::StderrToStdout => "2>&1".to_string(),
+            });
+        }
+        out
+    }
+
+    /// The command an endorsement for this step would be recorded against, in `directory`.
+    ///
+    /// The tree comes from the plan rather than the step, because every step of a plan runs in one
+    /// directory and that is the one the prompt showed. An entry covers that tree and no other, so
+    /// passing a tree the person was not shown would record a grant nobody gave.
+    pub fn command(&self, directory: &Path) -> crate::programs::Command {
+        // Left out for the reasons `Policy::every_step_vouched` gives: an assignment is refused
+        // before an entry is offered, and a route is the write question's.
+        let Step {
+            program: _,
+            resolved,
+            started_as,
+            args,
+            environment: _,
+            routes: _,
+        } = self;
+        crate::programs::Command::new(resolved.clone(), args.clone(), directory)
+            .started_as(started_as.clone())
+    }
+}
+
+/// What a plan runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Steps {
+    /// Steps feeding one another, and a single step where the line had no pipe.
+    Pipeline(Vec<Step>),
+    /// Two of these joined by `&&`, `||` or `;`.
+    Join {
+        left: Box<Steps>,
+        joiner: Joiner,
+        right: Box<Steps>,
+    },
+    /// `( … )`, which groups and starts nothing of its own.
+    Group(Box<Steps>),
+}
+
+impl Steps {
+    /// Every step that could run, in the order the line writes them.
+    ///
+    /// Every one of them, including those a branch may not reach. A step that does not run is not
+    /// an effect, but it was still endorsed, and that is the conservative direction.
+    pub fn steps(&self) -> Vec<&Step> {
+        let mut out = Vec::new();
+        self.gather(&mut out);
+        out
+    }
+
+    /// The steps, where this is one pipeline and no step of it has a route.
+    ///
+    /// The one shape a background job can be: a join waits on its own parts to decide where to go
+    /// next, and a route is a destination the background has no reader for. Read off the routes
+    /// rather than the plan's write and read sets, because `2>&1` opens no file and so is in
+    /// neither of those.
+    pub fn unrouted_pipeline(&self) -> Option<&[Step]> {
+        match self {
+            Self::Pipeline(steps) if steps.iter().all(|step| step.routes.is_empty()) => Some(steps),
+            _ => None,
+        }
+    }
+
+    fn gather<'a>(&'a self, out: &mut Vec<&'a Step>) {
+        match self {
+            Self::Pipeline(steps) => out.extend(steps.iter()),
+            Self::Join { left, right, .. } => {
+                left.gather(out);
+                right.gather(out);
+            }
+            Self::Group(inner) => inner.gather(out),
+        }
+    }
+
+    /// The shape as a person should read it before approving.
+    pub fn display(&self) -> String {
+        match self {
+            Self::Pipeline(steps) => steps
+                .iter()
+                .map(Step::display)
+                .collect::<Vec<_>>()
+                .join(" | "),
+            Self::Join {
+                left,
+                joiner,
+                right,
+            } => {
+                let joiner = match joiner {
+                    Joiner::And => "&&",
+                    Joiner::Or => "||",
+                    Joiner::Then => ";",
+                };
+                format!("{} {joiner} {}", left.display(), right.display())
+            }
+            Self::Group(inner) => format!("( {} )", inner.display()),
+        }
+    }
+
+    /// The shape as [`Steps::display`] draws it, with each step's operands taken from `written`
+    /// instead of from the step: one list per step, in the order [`Steps::steps`] gives them.
+    ///
+    /// For a caller that holds the operands as the line spelled them. The operands of a compiled
+    /// step are what a pattern matched, which is a listing of a directory, and a sentence the
+    /// planner is shown cannot hold one. The caller owns the quoting of the words, as for
+    /// [`Step::told_args`], and passes the file each redirection names, as the line wrote it, in
+    /// `targets`: one list per step, in the order of the routes that name a file.
+    /// `None` where `written` or `targets` does not hold exactly one list per step.
+    pub fn display_with_operands(
+        &self,
+        written: &[Vec<String>],
+        targets: &[Vec<String>],
+    ) -> Option<String> {
+        if written.len() != targets.len() {
+            return None;
+        }
+        let mut rest = written.iter().zip(targets.iter());
+        let shown = self.draw_with_operands(&mut rest)?;
+        rest.next().is_none().then_some(shown)
+    }
+
+    /// These steps with each step's operands replaced by `written`: one list per step, in the order
+    /// [`Steps::steps`] gives them. `None` where `written` does not hold exactly one list per step.
+    ///
+    /// For a question about the plan's structure that must not turn on the names a pattern matched.
+    /// The result is not a plan to run.
+    pub fn with_operands(&self, written: &[Vec<String>]) -> Option<Steps> {
+        let mut rest = written.iter();
+        let rebuilt = self.rebuild_with_operands(&mut rest)?;
+        rest.next().is_none().then_some(rebuilt)
+    }
+
+    fn rebuild_with_operands(
+        &self,
+        written: &mut std::slice::Iter<'_, Vec<String>>,
+    ) -> Option<Steps> {
+        Some(match self {
+            Self::Pipeline(steps) => {
+                let mut rebuilt = Vec::with_capacity(steps.len());
+                for step in steps {
+                    rebuilt.push(Step {
+                        args: written.next()?.clone(),
+                        ..step.clone()
+                    });
+                }
+                Self::Pipeline(rebuilt)
+            }
+            Self::Join {
+                left,
+                joiner,
+                right,
+            } => {
+                let left = left.rebuild_with_operands(written)?;
+                let right = right.rebuild_with_operands(written)?;
+                Self::Join {
+                    left: Box::new(left),
+                    joiner: *joiner,
+                    right: Box::new(right),
+                }
+            }
+            Self::Group(inner) => Self::Group(Box::new(inner.rebuild_with_operands(written)?)),
+        })
+    }
+
+    fn draw_with_operands(
+        &self,
+        written: &mut std::iter::Zip<
+            std::slice::Iter<'_, Vec<String>>,
+            std::slice::Iter<'_, Vec<String>>,
+        >,
+    ) -> Option<String> {
+        Some(match self {
+            Self::Pipeline(steps) => {
+                let mut drawn = Vec::with_capacity(steps.len());
+                for step in steps {
+                    let (args, targets) = written.next()?;
+                    drawn.push(step.told_args(args.clone(), targets));
+                }
+                drawn.join(" | ")
+            }
+            Self::Join {
+                left,
+                joiner,
+                right,
+            } => {
+                let joiner = match joiner {
+                    Joiner::And => "&&",
+                    Joiner::Or => "||",
+                    Joiner::Then => ";",
+                };
+                let left = left.draw_with_operands(written)?;
+                let right = right.draw_with_operands(written)?;
+                format!("{left} {joiner} {right}")
+            }
+            Self::Group(inner) => format!("( {} )", inner.draw_with_operands(written)?),
+        })
+    }
+}
+
+/// A command line, compiled.
+///
+/// This is the routing field a raw string does not have: what will run, with which binary and
+/// which literal arguments, every file it may write, every file it reads by name, and the
+/// directory it runs in. A person endorses this rather than the text the planner sent, because
+/// after compilation this is what decides where an effect lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// The line as the planner spelled it.
+    ///
+    /// Context for a reader, and it binds nothing: two spellings that compile alike are one plan,
+    /// and one spelling that compiles two ways on two occasions is two.
+    pub line: String,
+    /// The directory every step runs in.
+    pub directory: PathBuf,
+    /// What runs, and how the parts are joined.
+    pub steps: Steps,
+    /// Every file the plan may write, in the order the line names them.
+    pub writes: Vec<PathBuf>,
+    /// Every file the plan reads by naming it as a source for a stream.
+    pub reads: Vec<PathBuf>,
+    /// The label of bytes the policy layer supplies to the first step's standard input.
+    ///
+    /// Only those. A `<` redirection is the other route to the same place, and it carries no
+    /// label here: it names a file the run opens itself, and it appears in that step's routes and
+    /// in [`Plan::reads`]. [`Plan::releases_private`] reads both.
+    pub stdin: Option<crate::label::Label>,
+}
+
+impl Plan {
+    /// Every step that could run.
+    pub fn steps(&self) -> Vec<&Step> {
+        self.steps.steps()
+    }
+
+    /// Whether running this would put the user's private data into a program.
+    ///
+    /// Two routes reach the same place and either one is enough. [`Plan::stdin`] is the label of
+    /// bytes the policy layer supplies, which may be anything the reference it came from was. A
+    /// `<` redirection carries no label: it names a file the run opens itself, and a file's bytes
+    /// are the user's own data whatever the trust map says about the path, by the same reasoning
+    /// that makes a file read private. So a redirection is a release whichever file it names,
+    /// which is what makes this answerable from the plan alone.
+    ///
+    /// Any step's redirection, not only the one at the head of the line: a step in the middle of
+    /// a pipeline is handed the file in place of what the step before it printed, and it is
+    /// opened for that step the same way.
+    pub fn releases_private(&self) -> bool {
+        self.stdin.is_some_and(|label| !label.is_public())
+            || self
+                .steps()
+                .iter()
+                .flat_map(|step| &step.routes)
+                .any(|route| matches!(route, Route::Stdin { .. }))
+    }
+
+    /// Whether any step carries an environment assignment written in front of its program.
+    ///
+    /// An assignment decides what a program loads and reads before its own arguments are looked at,
+    /// and a vouched entry records a program and its exact arguments and nothing else. So a standing
+    /// answer cannot cover a line carrying one, and this is what the gates ask.
+    ///
+    /// Any step, not the first: an assignment in front of a stage in the middle of a pipeline
+    /// decides what that stage loads, and what it prints is what the next stage reads.
+    pub fn carries_an_assignment(&self) -> bool {
+        self.steps().iter().any(|step| !step.environment.is_empty())
+    }
+
+    /// Whether an entry could record this line as the person read it.
+    ///
+    /// An entry holds a resolved program, its arguments and the tree it was given in, so a line
+    /// whose behaviour turns on anything else cannot be put in one: the entry would come out
+    /// covering a line nobody was shown. The reasons are kept in one place because two layers
+    /// refuse independently, the prompt where it is drawn and the tool where an answer is acted
+    /// on, and a reason added to one of them alone is a prompt offering a key the other honours.
+    ///
+    /// The directory is not among them, and that is what [RUN-8] settles rather than an omission:
+    /// the entry records the tree, so a line running outside the workspace root is a line an entry
+    /// can hold exactly as written.
+    ///
+    /// A redirection is among them, in both directions. An entry holds no destination any more than
+    /// it holds a source, so an entry made while output was redirected would cover the same program
+    /// with the redirection gone, which is a line nobody read. A line that writes is asked about
+    /// every time whatever is recorded, so the key stops no prompt for the line it was pressed on:
+    /// the only thing it could ever grant is the bare one.
+    ///
+    /// Nor is standard input fed from a reference, whatever the reference's label. An entry holds a
+    /// program and its arguments and not the bytes it reads, so one made for `python3 -` fed one
+    /// page would cover `python3 -` fed any other, and that other page would run unasked.
+    ///
+    /// Which reason it is belongs to whoever explains the refusal, not here.
+    ///
+    /// [RUN-8]: ../../../docs/specs/tools/run.md
+    pub fn can_be_remembered(&self) -> bool {
+        !self.releases_private()
+            && !self.carries_an_assignment()
+            && self.writes.is_empty()
+            && self.stdin.is_none()
+    }
+
+    /// The plan as a person should read it, in a prompt, in a result and in a job's line.
+    ///
+    /// Not the line. The line is shown beside this as context, and an endorsement binds here.
+    pub fn display(&self) -> String {
+        self.steps.display()
+    }
+
+    /// The exact value an endorsement for this plan is bound to.
+    ///
+    /// Length-prefixed rather than delimited, so no argument can contain whatever a delimiter
+    /// would have been, and prefix-coded over the shape, so `a && b` and `a ; b` cannot encode
+    /// alike. Two plans encode the same way only if they are the same plan, which is what a
+    /// single-use grant needs: a grant left unconsumed by a failed run must not be satisfiable by
+    /// a second plan the planner shapes to collide with the first.
+    ///
+    /// Keyed on each step's resolved file and the path it is started by rather than on the name the
+    /// line used, for the reason a vouched-for command is: `$PATH` decides what a bare name means,
+    /// and an endorsement must not follow a name onto a different binary. The line itself is not
+    /// part of this, because two spellings that reach one binary by one path are one plan.
+    ///
+    /// Every path in it is spelled by [`Spelling`], because a rendering of a path is not injective:
+    /// two files whose names differ only in bytes that are not valid UTF-8 render alike, and a
+    /// grant is redeemed by whatever encodes to the value it holds.
+    ///
+    /// What is fed to the first step is in it, because that is routing the planner chose as much
+    /// as a destination is: two lines differing only in whether a quarantined reference goes into
+    /// the first program are two different propositions, and an endorsement given for one must not
+    /// be redeemable by the other. The label rather than the bytes, which is what the plan holds.
+    ///
+    /// Not for a person to read. [`Plan::display`] is that, and the two exist separately because a
+    /// rendering has to be legible while this has to be injective.
+    pub fn canonical(&self) -> String {
+        let mut out = String::new();
+        length_prefixed_path(&mut out, &self.directory);
+        match self.stdin {
+            Some(label) => length_prefixed(&mut out, &format!("<{label}")),
+            None => length_prefixed(&mut out, ""),
+        }
+        encode(&mut out, &self.steps);
+        out
+    }
+}
+
+/// Append `text` so that no text can forge the boundary after it.
+fn length_prefixed(out: &mut String, text: &str) {
+    out.push_str(&format!("{}:{text}", text.len()));
+}
+
+/// Append a path, tagged by which spelling it has so the two cannot meet: a path whose text is
+/// `2f61` and a path whose bytes spell `/a` are different paths and encode differently.
+fn length_prefixed_path(out: &mut String, path: &Path) {
+    match Spelling::of(path) {
+        Spelling::Text(text) => {
+            out.push('t');
+            length_prefixed(out, &text);
+        }
+        Spelling::Bytes(bytes) => {
+            out.push('b');
+            length_prefixed(out, &hex(&bytes));
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn encode(out: &mut String, steps: &Steps) {
+    match steps {
+        Steps::Pipeline(list) => {
+            out.push_str(&format!("P{}|", list.len()));
+            for step in list {
+                encode_step(out, step);
+            }
+        }
+        Steps::Join {
+            left,
+            joiner,
+            right,
+        } => {
+            out.push_str(match joiner {
+                Joiner::And => "A|",
+                Joiner::Or => "O|",
+                Joiner::Then => "T|",
+            });
+            encode(out, left);
+            encode(out, right);
+        }
+        Steps::Group(inner) => {
+            out.push_str("G|");
+            encode(out, inner);
+        }
+    }
+}
+
+/// Destructured rather than read field by field, so that a field added to [`Step`] stops the build
+/// here instead of being left out of the key. A step carries what a person was shown, and an
+/// encoding that silently drops one of those things covers a line nobody read: the environment was
+/// once missing from a key this way ([RUN-8]).
+///
+/// [RUN-8]: ../../../docs/specs/tools/run.md
+fn encode_step(out: &mut String, step: &Step) {
+    let Step {
+        // The name the line used is for the screen. The file it resolved to is the identity, and
+        // the path it is started by is what else decides what runs, so between them they hold
+        // everything the name did.
+        program: _,
+        resolved,
+        started_as,
+        args,
+        environment,
+        routes,
+    } = step;
+    length_prefixed_path(out, resolved);
+    length_prefixed_path(out, started_as);
+    out.push_str(&format!("a{}|", args.len()));
+    for arg in args {
+        length_prefixed(out, arg);
+    }
+    out.push_str(&format!("e{}|", environment.len()));
+    for (name, value) in environment {
+        length_prefixed(out, name);
+        length_prefixed(out, value);
+    }
+    out.push_str(&format!("r{}|", routes.len()));
+    for route in routes {
+        let (tag, path) = match route {
+            Route::Stdout { path, append } => (if *append { ">>" } else { ">" }, Some(path)),
+            Route::Stdin { path } => ("<", Some(path)),
+            Route::Stderr { path, append } => (if *append { "2>>" } else { "2>" }, Some(path)),
+            Route::Both { path } => ("&>", Some(path)),
+            Route::StderrToStdout => ("2>&1", None),
+        };
+        out.push_str(tag);
+        out.push('|');
+        if let Some(path) = path {
+            length_prefixed_path(out, path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::label::Label;
+
+    fn step(program: &str, args: &[&str]) -> Step {
+        Step {
+            program: program.to_string(),
+            resolved: PathBuf::from(format!("/usr/bin/{program}")),
+            started_as: PathBuf::from(format!("/usr/bin/{program}")),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            environment: Vec::new(),
+            routes: Vec::new(),
+        }
+    }
+
+    fn plan(steps: Steps) -> Plan {
+        Plan {
+            line: String::new(),
+            directory: PathBuf::from("/work"),
+            steps,
+            writes: Vec::new(),
+            reads: Vec::new(),
+            stdin: None,
+        }
+    }
+
+    /// An endorsement is bound to this value, so two plans that would do different things must
+    /// never produce the same one. The shape counts: `a && b` runs `b` only on success and
+    /// `a ; b` runs it either way, so a grant for one must not satisfy the other.
+    #[test]
+    fn two_plans_never_encode_alike() {
+        let pair = || (step("a", &[]), step("b", &[]));
+        let (one, two) = pair();
+        let sequenced = plan(Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![one])),
+            joiner: Joiner::Then,
+            right: Box::new(Steps::Pipeline(vec![two])),
+        });
+        let (one, two) = pair();
+        let conditional = plan(Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![one])),
+            joiner: Joiner::And,
+            right: Box::new(Steps::Pipeline(vec![two])),
+        });
+        let (one, two) = pair();
+        let piped = plan(Steps::Pipeline(vec![one, two]));
+
+        assert_ne!(sequenced.canonical(), conditional.canonical());
+        assert_ne!(sequenced.canonical(), piped.canonical());
+        assert_ne!(conditional.canonical(), piped.canonical());
+    }
+
+    /// Only one pipeline with no route on any step is the shape a job can hold. `2>&1` is the case
+    /// that matters most, because it opens no file and so is in neither of the plan's sets: a
+    /// check that read those would hand a job a line whose standard error it never routes.
+    #[test]
+    fn only_a_pipeline_without_a_route_is_one_a_job_can_hold() {
+        let piped = Steps::Pipeline(vec![step("a", &[]), step("b", &[])]);
+        assert_eq!(piped.unrouted_pipeline().map(<[Step]>::len), Some(2));
+
+        let mut joined_stderr = step("b", &[]);
+        joined_stderr.routes = vec![Route::StderrToStdout];
+        let routed = Steps::Pipeline(vec![step("a", &[]), joined_stderr]);
+        assert!(
+            routed.unrouted_pipeline().is_none(),
+            "a `2>&1` was holdable"
+        );
+
+        let joined = Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![step("a", &[])])),
+            joiner: Joiner::And,
+            right: Box::new(Steps::Pipeline(vec![step("b", &[])])),
+        };
+        assert!(joined.unrouted_pipeline().is_none(), "a join was holdable");
+    }
+
+    /// A step boundary is part of what is endorsed, so splitting one command into two must not
+    /// encode the way one command with more arguments does.
+    #[test]
+    fn a_step_boundary_is_part_of_what_is_endorsed() {
+        let split = plan(Steps::Pipeline(vec![step("a", &["b"]), step("c", &[])]));
+        let joined = plan(Steps::Pipeline(vec![step("a", &["b", "c"])]));
+        assert_ne!(split.canonical(), joined.canonical());
+    }
+
+    /// An argument holding the encoding's own punctuation is data like any other, so it cannot
+    /// forge a boundary and make one plan encode as another.
+    #[test]
+    fn an_argument_cannot_forge_a_plans_encoding_boundary() {
+        let one = plan(Steps::Pipeline(vec![step("prog", &["a1|1:x"])]));
+        let other = plan(Steps::Pipeline(vec![step("prog", &["a1", "x"])]));
+        assert_ne!(one.canonical(), other.canonical());
+    }
+
+    /// Where the bytes go is what a person endorsed, so the same steps writing somewhere else are
+    /// a different plan.
+    #[test]
+    fn where_a_plan_writes_is_part_of_what_it_encodes() {
+        let with_route = |path: &str| {
+            let mut only = step("prog", &[]);
+            only.routes = vec![Route::Stdout {
+                path: PathBuf::from(path),
+                append: false,
+            }];
+            plan(Steps::Pipeline(vec![only]))
+        };
+        assert_ne!(
+            with_route("/work/a.txt").canonical(),
+            with_route("/work/b.txt").canonical()
+        );
+
+        let mut appending = step("prog", &[]);
+        appending.routes = vec![Route::Stdout {
+            path: PathBuf::from("/work/a.txt"),
+            append: true,
+        }];
+        assert_ne!(
+            with_route("/work/a.txt").canonical(),
+            plan(Steps::Pipeline(vec![appending])).canonical(),
+            "truncating and appending are different things to endorse"
+        );
+    }
+
+    /// A variable written in front of a program changes what it does, so the same steps run under
+    /// another value, or under a different variable, are a different plan.
+    #[test]
+    fn an_environment_assignment_makes_a_different_plan() {
+        let with_variable = |name: &str, value: &str| {
+            let mut only = step("prog", &[]);
+            only.environment = vec![(name.to_string(), value.to_string())];
+            plan(Steps::Pipeline(vec![only]))
+        };
+        let bare = plan(Steps::Pipeline(vec![step("prog", &[])]));
+        assert_ne!(
+            bare.canonical(),
+            with_variable("MODE", "fast").canonical(),
+            "a line gaining a variable encoded like one without"
+        );
+        assert_ne!(
+            with_variable("MODE", "fast").canonical(),
+            with_variable("MODE", "slow").canonical(),
+            "one variable under another value encoded alike"
+        );
+        assert_ne!(
+            with_variable("MODE", "fast").canonical(),
+            with_variable("OTHER", "fast").canonical(),
+            "another variable under the same value encoded alike"
+        );
+    }
+
+    /// The directory decides what a relative path in the plan means, so it is part of the plan.
+    #[test]
+    fn the_directory_a_plan_runs_in_is_part_of_what_it_encodes() {
+        let here = plan(Steps::Pipeline(vec![step("prog", &[])]));
+        let mut elsewhere = plan(Steps::Pipeline(vec![step("prog", &[])]));
+        elsewhere.directory = PathBuf::from("/somewhere-else");
+        assert_ne!(here.canonical(), elsewhere.canonical());
+    }
+
+    /// Keyed on the file, never on the name. `$PATH` decides what a bare name means, so an
+    /// endorsement recorded against the string would follow the name onto a different binary.
+    #[test]
+    fn a_plan_is_keyed_on_the_file_a_name_resolved_to() {
+        let mut written_short = step("grep", &["x"]);
+        written_short.program = "grep".to_string();
+        let mut written_long = step("grep", &["x"]);
+        written_long.program = "/usr/bin/grep".to_string();
+        assert_eq!(
+            plan(Steps::Pipeline(vec![written_short])).canonical(),
+            plan(Steps::Pipeline(vec![written_long])).canonical(),
+            "two spellings of one plan are one plan"
+        );
+    }
+
+    /// And on the path the file is started by, so a grant given for a venv's `python` is not
+    /// redeemable by the interpreter it links to (RUN-8).
+    #[test]
+    fn two_spellings_of_one_binary_encode_apart() {
+        let direct = step("python3.12", &["-V"]);
+        let mut through_a_link = step("python3.12", &["-V"]);
+        through_a_link.program = "venv/bin/python".to_string();
+        through_a_link.started_as = PathBuf::from("/work/venv/bin/python");
+        assert_ne!(
+            plan(Steps::Pipeline(vec![direct])).canonical(),
+            plan(Steps::Pipeline(vec![through_a_link])).canonical()
+        );
+    }
+
+    /// A path whose last byte is not valid UTF-8, so no rendering of it can show that byte.
+    #[cfg(unix)]
+    fn unshowable(last: u8) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = b"/work/".to_vec();
+        bytes.push(last);
+        PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
+    }
+
+    /// The hex of `/work/` followed by one byte, as [`length_prefixed_path`] spells it.
+    #[cfg(unix)]
+    const UNSHOWABLE_FF: &str = "b14:2f776f726b2fff";
+
+    /// The bytes of the file, not a rendering of them. `to_string_lossy` maps every byte that is
+    /// not valid UTF-8 onto one replacement character, so two binaries whose paths differ only
+    /// there encoded alike and an endorsement given for one was redeemable by the other.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_is_keyed_on_the_bytes_of_the_file_a_name_resolved_to() {
+        let resolving_to = |last: u8| {
+            let mut only = step("prog", &[]);
+            only.resolved = unshowable(last);
+            only.started_as = unshowable(last);
+            plan(Steps::Pipeline(vec![only]))
+        };
+        assert_ne!(
+            resolving_to(0xff).canonical(),
+            resolving_to(0xfe).canonical(),
+            "two binaries shared one endorsement"
+        );
+        assert_eq!(
+            resolving_to(0xff).canonical(),
+            // `0:` is the empty standard input, which every plan encodes whether it has one. The
+            // path twice, as the file and as the path that starts it.
+            format!("t5:/work0:P1|{UNSHOWABLE_FF}{UNSHOWABLE_FF}a0|e0|r0|"),
+            "the endorsement is bound to the path's own bytes"
+        );
+    }
+
+    /// The directory is a path too, and it decides what every relative path in the plan means, so
+    /// two trees differing only in bytes nothing can render are two things to endorse.
+    #[cfg(unix)]
+    #[test]
+    fn the_directory_a_plan_runs_in_is_keyed_on_its_bytes() {
+        let running_in = |last: u8| {
+            let mut whole = plan(Steps::Pipeline(vec![step("prog", &[])]));
+            whole.directory = unshowable(last);
+            whole
+        };
+        assert_ne!(
+            running_in(0xff).canonical(),
+            running_in(0xfe).canonical(),
+            "two trees shared one endorsement"
+        );
+        assert!(
+            running_in(0xff).canonical().contains(UNSHOWABLE_FF),
+            "the tree was not spelled by its bytes"
+        );
+    }
+
+    /// Where the bytes go is part of what was endorsed, so a destination differing only in bytes
+    /// nothing can render is a different destination.
+    #[cfg(unix)]
+    #[test]
+    fn where_a_plan_writes_is_keyed_on_its_bytes() {
+        let writing_to = |last: u8| {
+            let mut only = step("prog", &[]);
+            only.routes = vec![Route::Stdout {
+                path: unshowable(last),
+                append: false,
+            }];
+            plan(Steps::Pipeline(vec![only]))
+        };
+        assert_ne!(
+            writing_to(0xff).canonical(),
+            writing_to(0xfe).canonical(),
+            "two destinations shared one endorsement"
+        );
+        assert!(
+            writing_to(0xff).canonical().contains(UNSHOWABLE_FF),
+            "the destination was not spelled by its bytes"
+        );
+    }
+
+    /// A spelling is what a record holds, and what is read back out of it is what a later run is
+    /// matched against, so it has to name the path it was taken from and no other.
+    #[cfg(unix)]
+    #[test]
+    fn a_spelling_names_the_path_it_was_taken_from() {
+        let unrenderable = unshowable(0xff);
+        assert_eq!(
+            Spelling::of(&unrenderable).into_path().as_deref(),
+            Some(unrenderable.as_path())
+        );
+        assert_eq!(
+            Spelling::of(Path::new("/work/prog")).into_path(),
+            Some(PathBuf::from("/work/prog"))
+        );
+    }
+
+    /// A rendering is not a path. A record written where a build keyed on `to_string_lossy` holds a
+    /// replacement character in place of the byte, and every path that byte could have been is
+    /// equally consistent with it, so it has to name none rather than the wrong file.
+    #[test]
+    fn a_text_spelling_holding_a_replacement_character_names_no_path() {
+        assert_eq!(
+            Spelling::Text("/work/\u{fffd}".to_string()).into_path(),
+            None
+        );
+    }
+
+    /// Refusing that costs nothing, because a path that really does contain a replacement character
+    /// is spelled by its bytes and still names itself.
+    #[test]
+    fn a_path_that_really_holds_a_replacement_character_still_names_itself() {
+        let real = PathBuf::from("/work/\u{fffd}");
+        assert!(
+            matches!(Spelling::of(&real), Spelling::Bytes(_)),
+            "a path holding the character a rendering uses cannot be spelled as text"
+        );
+        assert_eq!(
+            Spelling::of(&real).into_path().as_deref(),
+            Some(real.as_path())
+        );
+    }
+
+    /// The line is context for a reader and binds nothing, so two spellings that compile alike
+    /// are one endorsement.
+    #[test]
+    fn the_line_a_plan_came_from_is_not_part_of_what_it_encodes() {
+        let mut one = plan(Steps::Pipeline(vec![step("prog", &["a b"])]));
+        one.line = "prog 'a b'".to_string();
+        let mut other = plan(Steps::Pipeline(vec![step("prog", &["a b"])]));
+        other.line = "prog \"a b\"".to_string();
+        assert_eq!(one.canonical(), other.canonical());
+    }
+
+    #[test]
+    fn the_same_plan_encodes_the_same_way() {
+        let build = || plan(Steps::Pipeline(vec![step("git", &["log"])]));
+        assert_eq!(build().canonical(), build().canonical());
+    }
+
+    /// A person reads the binary that will run and where each argument ends, because those are
+    /// exactly what no shell is deciding here.
+    #[test]
+    fn a_plan_shows_its_resolved_binaries_and_argument_boundaries() {
+        let shown = plan(Steps::Pipeline(vec![
+            step("git", &["commit", "-m", "two words"]),
+            step("head", &["-3"]),
+        ]))
+        .display();
+        assert_eq!(
+            shown,
+            "/usr/bin/git commit -m 'two words' | /usr/bin/head -3"
+        );
+    }
+
+    /// A program started through a link is shown by the link and the file it leads to, as the
+    /// prompt shows it. The file alone names a different program: `cargo` served by rustup would
+    /// read `rustup test`, a command that does not exist.
+    #[test]
+    fn a_plan_shows_a_program_started_through_a_link_as_the_link_and_its_file() {
+        let mut cargo = step("cargo", &["test", "-p", "bravebot-core"]);
+        cargo.started_as = PathBuf::from("/home/me/.cargo/bin/cargo");
+        cargo.resolved = PathBuf::from("/home/me/.cargo/bin/rustup");
+        let shown = plan(Steps::Pipeline(vec![cargo, step("tail", &["-n", "5"])])).display();
+        assert_eq!(
+            shown,
+            "/home/me/.cargo/bin/cargo -> /home/me/.cargo/bin/rustup test -p bravebot-core \
+             | /usr/bin/tail -n 5"
+        );
+    }
+
+    /// What the planner is told names a program by the path it typed. The file a link leads to is
+    /// a name whoever wrote the tree chose, so no arrow and no landed name reach a sentence for
+    /// the planner, while the plan the person approves still draws both.
+    #[test]
+    fn what_the_planner_is_told_names_a_program_by_its_link_alone() {
+        let mut cargo = step("cargo", &["test"]);
+        cargo.started_as = PathBuf::from("/home/me/.cargo/bin/cargo");
+        cargo.resolved = PathBuf::from("/home/me/.cargo/bin/HOSTILE-landed");
+        let steps = Steps::Pipeline(vec![cargo, step("tail", &["-n", "5"])]);
+        let told = steps
+            .display_with_operands(
+                &[vec!["test".into()], vec!["-n".into(), "5".into()]],
+                &[vec![], vec![]],
+            )
+            .expect("one list per step");
+        assert_eq!(told, "/home/me/.cargo/bin/cargo test | /usr/bin/tail -n 5");
+        assert!(steps.display().contains("HOSTILE-landed"));
+    }
+
+    /// Operands put in place of a step's own keep the rest of the step and the shape of the line,
+    /// and a list count that does not match the steps is refused.
+    ///
+    /// Rejects a rebuild that drops the join shape, keeps the matched names, or accepts too few or
+    /// too many lists.
+    #[test]
+    fn steps_take_the_operands_given_and_keep_the_shape() {
+        let steps = Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![
+                step("ls", &["matched-a", "matched-b"]),
+                step("wc", &["-l"]),
+            ])),
+            joiner: Joiner::And,
+            right: Box::new(Steps::Pipeline(vec![step("cp", &["x", "y"])])),
+        };
+        let rebuilt = steps
+            .with_operands(&[
+                vec!["*".into()],
+                vec!["-l".into()],
+                vec!["x".into(), "y".into()],
+            ])
+            .expect("one list per step");
+        let args: Vec<&Vec<String>> = rebuilt.steps().into_iter().map(|one| &one.args).collect();
+        assert_eq!(
+            args,
+            vec![
+                &vec!["*".to_string()],
+                &vec!["-l".to_string()],
+                &vec!["x".to_string(), "y".to_string()]
+            ]
+        );
+        assert!(matches!(
+            rebuilt,
+            Steps::Join {
+                joiner: Joiner::And,
+                ..
+            }
+        ));
+        assert!(steps.with_operands(&[vec![], vec![]]).is_none());
+        assert!(
+            steps
+                .with_operands(&[vec![], vec![], vec![], vec![]])
+                .is_none()
+        );
+    }
+
+    /// The arrow separates a link from its file, so arguments that spell one cannot be drawn as
+    /// one: a person reading the first line could otherwise be reading the second.
+    #[test]
+    fn arguments_that_spell_a_link_draw_apart_from_the_link_in_a_plan() {
+        let mut link = step("b", &[]);
+        link.started_as = PathBuf::from("/work/a");
+        let mut spelled = step("a", &["->", "/usr/bin/b"]);
+        spelled.resolved = PathBuf::from("/work/a");
+        spelled.started_as = PathBuf::from("/work/a");
+        assert_ne!(
+            plan(Steps::Pipeline(vec![link])).display(),
+            plan(Steps::Pipeline(vec![spelled])).display()
+        );
+    }
+
+    #[test]
+    fn a_plan_shows_where_its_streams_go_and_how_its_parts_are_joined() {
+        let mut writing = step("prog", &[]);
+        writing.routes = vec![
+            Route::Stdout {
+                path: PathBuf::from("/work/out.txt"),
+                append: true,
+            },
+            Route::StderrToStdout,
+        ];
+        let shown = plan(Steps::Join {
+            left: Box::new(Steps::Group(Box::new(Steps::Pipeline(vec![step(
+                "a",
+                &[],
+            )])))),
+            joiner: Joiner::Or,
+            right: Box::new(Steps::Pipeline(vec![writing])),
+        })
+        .display();
+        assert_eq!(
+            shown,
+            "( /usr/bin/a ) || /usr/bin/prog >> /work/out.txt 2>&1"
+        );
+    }
+
+    /// A `<` redirection names a file the run opens itself, and a file holds the user's own data
+    /// whatever the trust map says about the path. Nobody hands the plan a label for those bytes,
+    /// so a plan that reported only the labels it was given would report no release for the one
+    /// route by which private input actually reaches a program.
+    #[test]
+    fn a_file_redirected_into_a_program_is_private_input() {
+        let mut reading = step("cat", &[]);
+        reading.routes = vec![Route::Stdin {
+            path: PathBuf::from("/home/someone/.ssh/id_rsa"),
+        }];
+        assert!(
+            plan(Steps::Pipeline(vec![reading])).releases_private(),
+            "a file fed to a program was not counted as private input"
+        );
+    }
+
+    /// Not only the step at the head of the line. A step in the middle of a pipeline is handed
+    /// the file in place of what the step before it printed, and it is opened for that step the
+    /// same way, so it releases the same data.
+    #[test]
+    fn a_redirection_on_a_later_step_is_private_input() {
+        let mut reading = step("cat", &[]);
+        reading.routes = vec![Route::Stdin {
+            path: PathBuf::from("/home/someone/.ssh/id_rsa"),
+        }];
+        let line = Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![step("echo", &["x"])])),
+            joiner: Joiner::Then,
+            right: Box::new(Steps::Pipeline(vec![step("wc", &["-l"]), reading])),
+        };
+        assert!(
+            plan(line).releases_private(),
+            "a file fed to a step further down the line was not counted"
+        );
+    }
+
+    /// A plan that feeds a program nothing releases nothing, and where its bytes *go* is a
+    /// separate question with a gate of its own: a destination is not private input.
+    #[test]
+    fn a_plan_that_feeds_a_program_nothing_releases_nothing() {
+        let mut writing = step("cat", &[]);
+        writing.routes = vec![Route::Stdout {
+            path: PathBuf::from("/work/out.txt"),
+            append: false,
+        }];
+        assert!(!plan(Steps::Pipeline(vec![writing])).releases_private());
+    }
+
+    /// Every step that could run is listed, including one a branch may not reach: it was still
+    /// endorsed, and that is the conservative direction.
+    #[test]
+    fn a_plan_lists_every_step_that_could_run() {
+        let shape = Steps::Join {
+            left: Box::new(Steps::Pipeline(vec![step("a", &[]), step("b", &[])])),
+            joiner: Joiner::And,
+            right: Box::new(Steps::Group(Box::new(Steps::Pipeline(vec![step(
+                "c",
+                &[],
+            )])))),
+        };
+        let whole = plan(shape);
+        let listed: Vec<&str> = whole
+            .steps()
+            .iter()
+            .map(|step| step.program.as_str())
+            .collect();
+        assert_eq!(listed, ["a", "b", "c"]);
+    }
+
+    /// Argument boundaries have to be visible, because that boundary is exactly what no shell is
+    /// deciding here and what a reviewer is being asked to approve.
+    #[test]
+    fn a_stage_shows_its_argument_boundaries() {
+        let stage = Stage::new(
+            "git",
+            vec!["commit".into(), "-m".into(), "two words".into()],
+        );
+        assert_eq!(stage.display(), "git commit -m 'two words'");
+    }
+
+    /// An empty argument is real and must not vanish from the display, or a reviewer would approve
+    /// something other than what runs.
+    #[test]
+    fn an_empty_argument_is_still_shown() {
+        assert_eq!(Stage::new("prog", vec![String::new()]).display(), "prog ''");
+    }
+
+    /// Two different argument lists must never render alike. An approval is bound to what the
+    /// person read, so a rendering that collides lets a reviewer approve one argv while another
+    /// runs. Quoting on whitespace alone collided here: both of these came out as `prog 'a b'`.
+    #[test]
+    fn two_argument_lists_cannot_look_alike() {
+        let one = Stage::new("prog", vec!["a b".into()]);
+        let other = Stage::new("prog", vec!["'a".into(), "b'".into()]);
+        assert_ne!(
+            one.display(),
+            other.display(),
+            "two argument lists rendered identically, so an approval cannot name either"
+        );
+    }
+
+    /// A quote in an argument is data, so it survives the rendering rather than being read as the
+    /// end of a quoted run.
+    #[test]
+    fn a_quote_in_an_argument_is_escaped() {
+        let stage = Stage::new("prog", vec!["it's".into()]);
+        assert_eq!(stage.display(), r"prog 'it\'s'");
+    }
+
+    /// An argument holding `>` is quoted, so it cannot draw as the arrow between a link and the file
+    /// it leads to.
+    #[test]
+    fn an_argument_holding_an_arrow_is_quoted() {
+        let stage = Stage::new("prog", vec!["->".into(), "/usr/bin/b".into()]);
+        assert_eq!(stage.display(), "prog '->' /usr/bin/b");
+    }
+
+    /// A character that draws as nothing or moves the cursor in an argument is written out inside
+    /// the quoting, so the drawn text holds none of them. A terminal skips a zero-width character,
+    /// so an argument left bare would draw as the name without it.
+    #[test]
+    fn an_argument_holding_an_invisible_character_is_spelled() {
+        for arg in [
+            "a\u{200b}.tmp",
+            "a\u{202e}b",
+            "a\u{7}b",
+            "\u{200b}",
+            "a\u{e0041}",
+            "a\u{2800}b",
+            "a\u{a0}b",
+            "a\tb",
+            "a\nb",
+            "a\u{1b}[2Jb",
+            "a\u{85}b",
+        ] {
+            let drawn = quoted(arg);
+            assert!(
+                !drawn.chars().any(|c| c.is_control()
+                    || (c.is_whitespace() && c != ' ')
+                    || crate::invisible::draws_as_nothing(c)
+                    || crate::invisible::draws_as_blank(c)),
+                "{arg:?} drew as {drawn:?}"
+            );
+            assert!(drawn.starts_with('\'') && drawn.ends_with('\''), "{drawn}");
+        }
+        assert_eq!(quoted("a\u{200b}.tmp"), r"'a\u{200b}.tmp'");
+        assert_eq!(quoted("\u{200b}"), r"'\u{200b}'");
+        assert_eq!(quoted("a\u{e0041}"), r"'a\u{e0041}'");
+    }
+
+    /// Two file names that differ only in a zero-width character are two arguments that draw
+    /// apart, so a yes cannot cover the one that was not drawn. What a terminal does with the
+    /// drawn text is modelled by dropping the zero-width and control characters.
+    #[test]
+    fn two_argument_lists_that_differ_in_an_invisible_character_draw_apart() {
+        let undrawn = |text: String| -> String {
+            text.chars()
+                .filter(|c| !c.is_control() && !crate::invisible::draws_as_nothing(*c))
+                .collect()
+        };
+        let plain = Stage::new("rm", vec!["a.tmp".into(), "a.tmp".into()]);
+        let hidden = Stage::new("rm", vec!["a.tmp".into(), "a\u{200b}.tmp".into()]);
+        assert_ne!(undrawn(plain.display()), undrawn(hidden.display()));
+        assert_eq!(
+            undrawn(hidden.display()),
+            r"rm a.tmp 'a\u{200b}.tmp'",
+            "the spelled token has to survive a terminal that skips zero-width characters"
+        );
+    }
+
+    /// An argument made only of characters that draw as nothing is still one argument, and the
+    /// list that holds it draws apart from the list without it.
+    #[test]
+    fn an_argument_of_invisible_characters_alone_is_still_drawn_as_an_argument() {
+        let one = Stage::new("rm", vec!["a".into(), "\u{200b}".into()]);
+        let none = Stage::new("rm", vec!["a".into()]);
+        assert_eq!(one.display(), r"rm a '\u{200b}'");
+        assert_ne!(one.display(), none.display());
+    }
+
+    /// The text `\u{200b}` is an argument of its own: its backslash is escaped, so it cannot draw
+    /// as the character it spells.
+    #[test]
+    fn the_text_of_a_spelling_draws_apart_from_the_character_it_spells() {
+        let character = Stage::new("rm", vec!["\u{200b}".into()]);
+        let text = Stage::new("rm", vec![r"\u{200b}".into()]);
+        assert_ne!(character.display(), text.display());
+        assert_eq!(text.display(), r"rm '\\u{200b}'");
+    }
+
+    /// An environment value and a redirection path are drawn through the same function, so a
+    /// character that draws as nothing in either is spelled too.
+    #[test]
+    fn an_invisible_character_in_an_environment_value_or_a_redirect_is_spelled() {
+        let mut one = step("prog", &[]);
+        one.environment = vec![("NAME".into(), "a\u{200b}b".into())];
+        one.routes = vec![Route::Stdout {
+            path: PathBuf::from("/work/o\u{202e}ut"),
+            append: false,
+        }];
+        let drawn = one.as_written();
+        assert!(drawn.starts_with(r"NAME='a\u{200b}b' prog"), "{drawn}");
+        assert!(drawn.ends_with(r"> '/work/o\u{202e}ut'"), "{drawn}");
+    }
+
+    /// A backslash is what does the escaping, so an argument containing one has to escape it too
+    /// or a trailing backslash would escape the closing quote.
+    #[test]
+    fn a_backslash_in_an_argument_is_escaped() {
+        let stage = Stage::new("prog", vec![r"c:\path".into()]);
+        assert_eq!(stage.display(), r"prog 'c:\\path'");
+    }
+
+    /// A shell metacharacter is data here, so it is shown as the ordinary argument it is rather
+    /// than as syntax. Nothing will re-parse it.
+    #[test]
+    fn a_metacharacter_is_shown_as_the_argument_it_is() {
+        let stage = Stage::new("git", vec!["commit".into(), "-m".into(), "fix; ok".into()]);
+        assert_eq!(stage.display(), "git commit -m 'fix; ok'");
+    }
+
+    /// Untrusted content may be fed to a command. It is carried into the process, never consulted,
+    /// so there is nothing for it to steer: that is what makes a command line usable on data an
+    /// attacker wrote.
+    #[test]
+    fn untrusted_content_may_be_fed_in_without_a_release() {
+        let mut fed = plan(Steps::Pipeline(vec![step("sed", &["-n", "1,5p"])]));
+        fed.stdin = Some(Label::untrusted_public());
+        assert!(
+            !fed.releases_private(),
+            "carrying untrusted content is not a release"
+        );
+    }
+
+    /// Private content going into a program is a release to somewhere this policy stops governing.
+    #[test]
+    fn private_content_is_a_release() {
+        let mut fed = plan(Steps::Pipeline(vec![step("sed", &["-n", "1,5p"])]));
+        fed.stdin = Some(Label::untrusted_private());
+        assert!(fed.releases_private());
+    }
+
+    /// Integrity and confidentiality gate separately: vouching for what a file contains is not
+    /// consenting to send it somewhere.
+    #[test]
+    fn trusted_private_content_is_still_a_release() {
+        let mut fed = plan(Steps::Pipeline(vec![step("sed", &["-n", "1,5p"])]));
+        fed.stdin = Some(Label::trusted_private());
+        assert!(fed.releases_private());
+    }
+
+    /// What goes into the first program is part of what an endorsement covers, so the three cases
+    /// encode apart: nothing fed in, a reference nobody vouched for, and the user's own data. Two
+    /// of them sharing an encoding would make an answer given for one redeemable for another, which
+    /// is what a single-use grant exists to prevent.
+    #[test]
+    fn a_plan_fed_a_reference_encodes_apart_from_the_same_plan_fed_nothing() {
+        let fed = |label: Option<Label>| {
+            let mut out = plan(Steps::Pipeline(vec![Step {
+                program: "sed".to_string(),
+                resolved: PathBuf::from("/usr/bin/sed"),
+                started_as: PathBuf::from("/usr/bin/sed"),
+                args: vec!["-n".into(), "2p".into()],
+                environment: Vec::new(),
+                routes: Vec::new(),
+            }]));
+            out.stdin = label;
+            out
+        };
+
+        let bare = fed(None).canonical();
+        let page = fed(Some(Label::untrusted_public())).canonical();
+        let theirs = fed(Some(Label::trusted_private())).canonical();
+
+        assert_ne!(bare, page, "a line fed a page encoded like one fed nothing");
+        assert_ne!(
+            page, theirs,
+            "a line fed a page encoded like one fed the user's own data"
+        );
+        assert_ne!(bare, theirs);
+    }
+}

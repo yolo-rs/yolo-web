@@ -1,0 +1,22 @@
+[package]
+name = "bravebot-aichat"
+description = "Client for the OpenAI-compatible aichat backend"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-config = { path = "../config" }
+bravebot-core = { path = "../core" }
+bravebot-diag = { path = "../diag" }
+bravebot-net = { path = "../net" }
+bravebot-signing = { path = "../signing" }
+ruzstd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

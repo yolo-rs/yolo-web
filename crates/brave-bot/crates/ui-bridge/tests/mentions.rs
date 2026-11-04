@@ -1,0 +1,301 @@
+//! NAME-9: the window names a file with `@` through the bridge, on the terminal's rules.
+
+use bravebot_ui_bridge::bridge::Bridge;
+use bravebot_ui_bridge::protocol::{Event, Request};
+use serde_json::{Value, json};
+
+use std::sync::{Arc, Mutex};
+
+fn harness() -> (Bridge, Arc<Mutex<Vec<Event>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let bridge = Bridge::new(Box::new(move |event| {
+        sink.lock().expect("not poisoned").push(event);
+    }));
+    (bridge, events)
+}
+
+/// The answer, or the refusal's message.
+fn call(bridge: &mut Bridge, method: &str, params: Value) -> Result<Value, String> {
+    let line = json!({ "id": 1, "method": method, "params": params }).to_string();
+    let request = Request::parse(&line).expect("well formed");
+    bridge
+        .dispatch(&request)
+        .map_err(|failure| format!("{:?}: {}", failure.code, failure.message))
+}
+
+/// A project beside a file outside it, with a session opened on the project and its trust
+/// question answered.
+struct Project {
+    _held: tempfile::TempDir,
+    root: std::path::PathBuf,
+    session: String,
+}
+
+fn project(bridge: &mut Bridge) -> Project {
+    let held = tempfile::tempdir().expect("scratch");
+    let root = held.path().join("project");
+    for directory in ["src", "node_modules", ".git", "docs"] {
+        std::fs::create_dir_all(root.join(directory)).expect("create");
+    }
+    std::fs::write(root.join("README.md"), "read me\n").expect("write");
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write");
+    std::fs::write(
+        root.join("picture.png"),
+        [0x89, b'P', b'N', b'G', 0, 0, 0, 13],
+    )
+    .expect("write");
+    std::fs::write(held.path().join("outside.txt"), "secret\n").expect("write");
+    let opened = call(
+        bridge,
+        "session.new",
+        json!({ "directory": root.display().to_string() }),
+    )
+    .expect("opens");
+    let session = opened["session"].as_str().expect("a handle").to_string();
+    call(
+        bridge,
+        "trust.reply",
+        json!({ "session": &session, "trusted": false }),
+    )
+    .expect("answered");
+    Project {
+        _held: held,
+        root,
+        session,
+    }
+}
+
+fn offered(answer: &Value) -> Vec<&str> {
+    answer["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("a path"))
+        .collect()
+}
+
+/// NAME-4, NAME-5: the window's list is the terminal's, drawn from the session's project.
+#[test]
+fn the_window_is_offered_the_terminals_list_of_the_project() {
+    let (mut bridge, _) = harness();
+    let project = project(&mut bridge);
+    let offer = |bridge: &mut Bridge, line: &str| {
+        call(
+            bridge,
+            "mentions.offer",
+            json!({ "session": &project.session, "line": line }),
+        )
+        .expect("answered")
+    };
+
+    let root = offer(&mut bridge, "what is in @");
+    assert_eq!(root["typed"], json!(""));
+    assert_eq!(
+        offered(&root),
+        vec!["docs/", "src/", "README.md", "picture.png"],
+        "directories first, without version control or dependencies"
+    );
+    assert_eq!(root["entries"][0]["directory"], json!(true));
+
+    let nested = offer(&mut bridge, "@src/m");
+    assert_eq!(offered(&nested), vec!["src/main.rs"]);
+    assert_eq!(
+        nested["completes"],
+        json!(true),
+        "a half-typed name completes"
+    );
+
+    let finished = offer(&mut bridge, "Summarise @README.md");
+    assert_eq!(
+        finished["completes"],
+        json!(false),
+        "Enter sends a finished name"
+    );
+
+    assert!(
+        offered(&offer(&mut bridge, "@../")).is_empty(),
+        "climbing out"
+    );
+    assert_eq!(
+        offer(&mut bridge, "@README.md ")["typed"],
+        Value::Null,
+        "a space finishes the name and closes the list"
+    );
+    assert_eq!(
+        offer(&mut bridge, "an ordinary prompt")["typed"],
+        Value::Null
+    );
+}
+
+/// NAME-1, NAME-5, NAME-6: the files a prompt names are the ones the turn can read, and a name the
+/// read would refuse is refused with a message naming it.
+#[test]
+fn a_prompt_names_only_text_files_inside_the_project() {
+    let (mut bridge, _) = harness();
+    let project = project(&mut bridge);
+    let named = |bridge: &mut Bridge, prompt: &str| {
+        call(
+            bridge,
+            "mentions.named",
+            json!({ "session": &project.session, "prompt": prompt }),
+        )
+    };
+
+    assert_eq!(
+        named(
+            &mut bridge,
+            "compare @README.md with @src/main.rs and not @docs/ or me@example.com @"
+        )
+        .expect("named")["files"],
+        json!(["README.md", "src/main.rs"])
+    );
+
+    let outside = project.root.parent().expect("a parent").join("outside.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, project.root.join("leads-out")).expect("link");
+    let mut refused = vec![
+        ("@../outside.txt", "is not a file in this project"),
+        ("@missing.md", "is not a file in this project"),
+        ("@src", "is not a file in this project"),
+        ("@picture.png", "is not a text file"),
+    ];
+    let absolute = format!("@{}", outside.display());
+    refused.push((&absolute, "is not a file in this project"));
+    #[cfg(unix)]
+    refused.push(("@leads-out", "is not a file in this project"));
+    for (prompt, said) in refused {
+        let refusal = named(&mut bridge, &format!("read {prompt}")).expect_err(prompt);
+        assert!(
+            refusal.starts_with("BadRequest") && refusal.contains(prompt) && refusal.contains(said),
+            "{prompt}: {refusal}"
+        );
+    }
+}
+
+/// NAME-8, NAME-9: the window splices what the bridge writes for an entry, so a name holding a
+/// no-break space or ending in a backslash arrives escaped and the prompt that results names the
+/// file picked and not the one beside it. A name that ends in a no-break space is left out of the
+/// list, since the window trims the prompt it sends.
+#[cfg(unix)]
+#[test]
+fn an_entry_holding_a_no_break_space_is_written_so_the_prompt_names_it() {
+    let (mut bridge, _) = harness();
+    let project = project(&mut bridge);
+    for name in ["a b.md", "a.md", "a.md\u{a0}", "a.md\\", "a\u{a0}b.md"] {
+        std::fs::write(project.root.join(name), "text\n").expect("write");
+    }
+
+    let offer = call(
+        &mut bridge,
+        "mentions.offer",
+        json!({ "session": &project.session, "line": "read @a" }),
+    )
+    .expect("answered");
+    // The rows for the prefix come first, and names a fragment finds below the root follow them.
+    let listed: Vec<&str> = offered(&offer)
+        .into_iter()
+        .filter(|path| path.starts_with('a'))
+        .collect();
+    assert_eq!(listed, vec!["a b.md", "a.md", "a.md\\", "a\u{a0}b.md"]);
+    assert_eq!(offered(&offer)[..4], listed[..]);
+    assert_eq!(offer["entries"][2]["written"], json!("a.md\\\\"));
+    assert_eq!(offer["entries"][3]["written"], json!("a\\\u{a0}b.md"));
+    for (row, file) in [(2, "a.md\\"), (3, "a\u{a0}b.md")] {
+        let written = offer["entries"][row]["written"].as_str().expect("written");
+        let named = call(
+            &mut bridge,
+            "mentions.named",
+            json!({ "session": &project.session, "prompt": format!("read @{written} now") }),
+        )
+        .expect("named");
+        assert_eq!(named["files"], json!([file]));
+    }
+}
+
+/// NAME-9: `turn.send` reads the names out of the prompt itself and refuses one that cannot go,
+/// before a turn starts, and a prompt the app composed names nothing.
+#[test]
+fn a_send_naming_a_file_that_cannot_go_is_refused_before_the_turn() {
+    let (mut bridge, events) = harness();
+    let project = project(&mut bridge);
+
+    let refusal = call(
+        &mut bridge,
+        "turn.send",
+        json!({ "session": &project.session, "prompt": "read @../outside.txt" }),
+    )
+    .expect_err("an outside name");
+    assert!(refusal.contains("@../outside.txt"), "{refusal}");
+    assert!(
+        !events
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .any(|event| event.name == "turn.started"),
+        "a turn started for a refused send"
+    );
+
+    let composed = call(
+        &mut bridge,
+        "turn.send",
+        json!({
+            "session": &project.session,
+            "prompt": "bring your memory up to date, @../outside.txt",
+            "composed": "consolidation",
+        }),
+    );
+    assert!(
+        !composed
+            .as_ref()
+            .is_err_and(|refusal| refusal.contains("@../outside.txt")),
+        "a prompt the app composed was read for names: {composed:?}"
+    );
+}
+
+/// REFER-6: the window is offered a reference's alias and the files behind it, and a prompt naming
+/// one of them is accepted. The bridge builds the alias list from the settings itself, so a front
+/// end that passed none would offer the window nothing and refuse the name as not in the project.
+#[test]
+fn the_window_names_a_file_under_a_reference_alias() {
+    let held = tempfile::tempdir().expect("scratch");
+    let library = held.path().join("library");
+    std::fs::create_dir_all(library.join("src")).expect("create");
+    std::fs::write(library.join("src/lexer.rs"), "fn lex() {}\n").expect("write");
+    let settings = held.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({ "references": { "parser": { "path": library.display().to_string() } } })
+            .to_string(),
+    )
+    .expect("settings");
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let mut bridge = Bridge::new(Box::new(move |event| {
+        sink.lock().expect("not poisoned").push(event);
+    }))
+    .with_settings(Some(settings));
+    let project = project(&mut bridge);
+    let offer = |bridge: &mut Bridge, line: &str| {
+        call(
+            bridge,
+            "mentions.offer",
+            json!({ "session": &project.session, "line": line }),
+        )
+        .expect("answered")
+    };
+
+    assert!(offered(&offer(&mut bridge, "@par")).contains(&"parser/"));
+    assert_eq!(
+        offered(&offer(&mut bridge, "@parser/src/")),
+        vec!["parser/src/lexer.rs"]
+    );
+    let named = call(
+        &mut bridge,
+        "mentions.named",
+        json!({ "session": &project.session, "prompt": "read @parser/src/lexer.rs" }),
+    )
+    .expect("a file under a reference is a named file");
+    assert_eq!(named["files"].as_array().expect("files").len(), 1);
+}

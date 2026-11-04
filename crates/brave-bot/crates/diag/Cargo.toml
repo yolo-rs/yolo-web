@@ -1,0 +1,14 @@
+[package]
+name = "bravebot-diag"
+description = "The diagnostic log: what went wrong, as hosts, counts and words, never content"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = { workspace = true }

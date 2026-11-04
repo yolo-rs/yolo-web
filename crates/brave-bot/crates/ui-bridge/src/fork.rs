@@ -1,0 +1,565 @@
+//! Cutting a conversation in front of something the user said.
+//!
+//! A fork is a session that begins with part of another one. What decides "part" is a place in
+//! the transcript, and a transcript is [`Conversation::recounted`] — a *projection* of the
+//! stored messages, not the messages themselves. So the front-end names a place in the
+//! projection, an ordinal over the prompts it drew, and this module turns that back into an
+//! index into the messages.
+//!
+//! # Why the alignment is exact
+//!
+//! `recounted` reports a `Role::User` message as something other than a prompt in one case: the
+//! record says the agent composed it, as a file somebody named, a watch, a tool result sent as
+//! prose, a resume note or a compaction summary. That decision is a function of the role and the
+//! recorded tag, and of nothing else. A message whose tag is absent and whose text *equals* the
+//! text of a prompt the transcript showed therefore cannot have been one of them, whatever words
+//! it opens with.
+//!
+//! So walking the messages and consuming the drawn prompts in order is not a guess and not a
+//! second copy of upstream's filter rules. It matches on what upstream published rather than on
+//! how upstream decided it, which is the same discipline the rest of this crate follows with
+//! tags. If a future build filters on something the walk cannot see, it runs out of matches and
+//! this returns `None`, a refusal rather than a cut in the wrong place.
+//!
+//! Every user-role message the agent or a front end composed is tagged (LAYER-6), whether a
+//! context file somebody named, a watch that fired, a nudge for spending the tool budget or a shell
+//! line a person ran themselves. A tagged message is drawn as one of the interface's own rows or
+//! plainly, and is a prompt to neither side, so it shifts no ordinal. Only an untagged message is a
+//! place to cut, which includes one of these in a session recorded before the tag existed. Which is why the caller still checks the prompt's *text* against the ordinal before
+//! cutting anything.
+
+use bravebot_agent::conversation::{Composed, Said, Snapshot, Stored};
+use bravebot_aichat::protocol::Role;
+
+/// A conversation cut in front of a prompt, and the prompt it was cut in front of.
+pub struct Cut {
+    /// Everything said before it, ready for `Conversation::restored`.
+    pub before: Snapshot,
+    /// What the user had asked there, for the composer to open with.
+    pub prompt: String,
+}
+
+/// The prompts a transcript drew, in the order it drew them.
+pub fn prompts(said: &[Said]) -> Vec<&str> {
+    said.iter()
+        .filter_map(|entry| match entry {
+            Said::User(text, _) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether any of these were copied in from another program rather than said in this session.
+pub fn imported_in(archive: &[Stored]) -> bool {
+    archive
+        .iter()
+        .any(|stored| stored.composed == Some(Composed::Imported))
+}
+
+/// Cut in front of the `ordinal`-th thing the user said.
+///
+/// `None` when there is no such prompt, or when the walk cannot find the message it came from.
+/// Both are refusals rather than approximations: a fork taken a few messages away from where
+/// somebody pointed is worse than one that did not happen.
+pub fn cut(snapshot: &Snapshot, said: &[Said], ordinal: usize) -> Option<Cut> {
+    // Refused whole. A cut inside the archive moves its words into the child's request, which
+    // copied words never were in, and the turn numbers a cut counts from do not include them.
+    if imported_in(&snapshot.archive) {
+        return None;
+    }
+    let prompts = prompts(said);
+    let wanted = (*prompts.get(ordinal)?).to_string();
+
+    // The archive first, because that is the order `recounted` walks and the order the
+    // transcript is drawn in: what compaction took out of the request is still the session.
+    let mut seen = 0usize;
+    let mut cut_at = None;
+    for (index, stored) in snapshot
+        .archive
+        .iter()
+        .chain(snapshot.messages.iter())
+        .enumerate()
+    {
+        // A message the agent composed is not one of the places a fork may be taken, whatever it
+        // says. Skipped from the tag rather than from the prose, which is why the ordinal a window
+        // sends and the one resolved here are counted over the same list.
+        // An imported prompt is drawn as one, so it is counted as one.
+        if stored.message.role != Role::User
+            || stored
+                .composed
+                .as_ref()
+                .is_some_and(|why| *why != Composed::Imported)
+        {
+            continue;
+        }
+        // Anything that does not match the prompt we are expecting next is one of the user-role
+        // messages the transcript never showed. Skipped rather than counted.
+        if stored.message.content.text() != *prompts[seen] {
+            continue;
+        }
+        if seen == ordinal {
+            cut_at = Some(index);
+            break;
+        }
+        seen += 1;
+    }
+    let cut_at = cut_at?;
+
+    // A cut inside the archive takes the whole of the child's history out of it: there is no
+    // request left for a compaction summary to stand in for, so what compaction removed goes
+    // back in and the archive empties. A cut after it keeps both, and the summary that stands in
+    // for the archive is still at the head of the messages where it was.
+    let archived = snapshot.archive.len();
+    let (messages, archive) = if cut_at <= archived {
+        // Without the skills a compaction sent again: the results they repeat are in the same
+        // list, and both in one request would put the skill in it twice.
+        let restored = snapshot.archive[..cut_at]
+            .iter()
+            .filter(|stored| !matches!(stored.composed, Some(Composed::SkillKept { .. })))
+            .cloned()
+            .collect();
+        (restored, Vec::new())
+    } else {
+        (
+            snapshot.messages[..cut_at - archived].to_vec(),
+            snapshot.archive.clone(),
+        )
+    };
+
+    Some(Cut {
+        before: Snapshot {
+            messages,
+            // Carried verbatim, and never raised. Integrity is met over a session's whole life
+            // and no message records its own, so it cannot be recomputed for a prefix — and the
+            // only direction it may be wrong in is downwards.
+            context: snapshot.context.clone(),
+            // Carried too, though the child may name fewer slots than the counter has handed
+            // out. It exists so a name is never handed out twice, and lowering it would let the
+            // child mint a name a message it kept already used.
+            references: snapshot.references,
+            archive,
+            // Dropped, for the reason upstream drops it after compacting: the figure described a
+            // conversation that no longer exists, and a child that inherited it would open by
+            // trying to compact a history it has not sent yet.
+            measured: 0,
+            // Dropped as well: it says whether the parent's last turns asked to write, and the
+            // child ends earlier than they did. False costs at most one needless line to the
+            // planner, where true could withhold one a turn needed.
+            asked_to_write: false,
+            // Carried verbatim. When the cut took the plan notice away, true costs one needless
+            // "plan mode has ended" line. When the parent ended plan mode after the cut point, the
+            // kept notice still says plan mode is on and the child is not told otherwise (#3703);
+            // the message list holds no tag that says which notice is which, so this is not decided
+            // here.
+            plan_mode_told: snapshot.plan_mode_told,
+            // Carried verbatim, like the integrity and for the same reason on the other axis.
+            holds: snapshot.holds.clone(),
+        },
+        prompt: wanted,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bravebot_agent::Conversation;
+    use bravebot_agent::conversation::{
+        COMPACTED_PREFIX, Composed, RESUMED_PREFIX, Stored, TOOL_RESULT_PREFIX,
+    };
+    use bravebot_aichat::protocol::{Message, ToolCallRequest, ToolCallRequestFunction};
+
+    /// Messages as the record holds them, none of them composed by the agent.
+    fn plain(messages: Vec<Message>) -> Vec<Stored> {
+        messages.into_iter().map(Stored::plain).collect()
+    }
+
+    fn snapshot(messages: Vec<Message>) -> Snapshot {
+        Snapshot {
+            messages: plain(messages),
+            context: "trusted".into(),
+            references: 3,
+            archive: Vec::new(),
+            measured: 4096,
+            asked_to_write: true,
+            plan_mode_told: false,
+            holds: "public".into(),
+        }
+    }
+
+    /// What a transcript would have drawn for a snapshot, which is what a front-end counts.
+    fn drawn(snapshot: &Snapshot) -> Vec<Said> {
+        Conversation::restored(snapshot.clone()).recounted()
+    }
+
+    fn call(id: &str) -> ToolCallRequest {
+        ToolCallRequest {
+            id: id.into(),
+            kind: "function".into(),
+            function: ToolCallRequestFunction {
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            extra_content: None,
+        }
+    }
+
+    fn texts(messages: &[Stored]) -> Vec<String> {
+        messages.iter().map(|m| m.message.content.text()).collect()
+    }
+
+    #[test]
+    fn cutting_in_front_of_a_prompt_keeps_everything_before_it() {
+        let before = snapshot(vec![
+            Message::user("first"),
+            Message::assistant("one"),
+            Message::user("second"),
+            Message::assistant("two"),
+        ]);
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert_eq!(cut.prompt, "second");
+        assert_eq!(texts(&cut.before.messages), vec!["first", "one"]);
+    }
+
+    #[test]
+    fn a_cut_never_separates_a_call_from_its_result() {
+        let before = snapshot(vec![
+            Message::user("first"),
+            Message::assistant_calling("looking", vec![call("c1")]),
+            Message::tool_result("c1", "the contents"),
+            Message::assistant("one"),
+            Message::user("second"),
+        ]);
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        let request = Conversation::restored(cut.before).with_system("system");
+        assert!(
+            !request
+                .iter()
+                .any(|m| m.content.text().contains("did not run")),
+            "a cut in front of a prompt left nothing for the filler to answer",
+        );
+    }
+
+    #[test]
+    fn a_call_the_cut_left_unanswered_is_answered_before_it_is_sent() {
+        // The converse, and the reason no pairing logic is written here: even a history that
+        // ends mid-round assembles into a well-formed request, because the agent fills the gap.
+        let before = snapshot(vec![
+            Message::user("first"),
+            Message::assistant_calling("looking", vec![call("c1")]),
+        ]);
+        let request = Conversation::restored(before).with_system("system");
+        assert!(
+            request
+                .iter()
+                .any(|m| m.content.text().contains("did not run"))
+        );
+    }
+
+    #[test]
+    fn a_prompt_the_transcript_never_showed_is_not_a_fork_point() {
+        let mut before = snapshot(vec![Message::user("first")]);
+        before.messages.push(Stored {
+            message: Message::user(format!("{TOOL_RESULT_PREFIX}read_file: contents")).into(),
+            composed: Some(Composed::ToolResult),
+            address: None,
+            source: None,
+        });
+        before.messages.push(Stored {
+            message: Message::user(format!("{RESUMED_PREFIX} references are dead")).into(),
+            composed: Some(Composed::Resumed),
+            address: None,
+            source: None,
+        });
+        before
+            .messages
+            .push(Stored::plain(Message::assistant("one")));
+        before.messages.push(Stored::plain(Message::user("second")));
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec!["first", "second"]);
+
+        let cut = cut(&before, &said, 1).expect("a second prompt");
+        assert_eq!(cut.prompt, "second");
+        // Everything before it, the agent's own messages included: they were never the user's
+        // to cut at, but they are still what the model was working from.
+        assert_eq!(cut.before.messages.len(), 4);
+    }
+
+    /// A person typed a prompt that opens with the words the agent's notes open with. It is
+    /// recorded untagged, so it is a prompt and a fork in front of it lands on it.
+    #[test]
+    fn a_typed_prompt_that_opens_like_a_note_is_a_fork_point() {
+        let typed = format!("{TOOL_RESULT_PREFIX}my experiment: please explain it");
+        let before = snapshot(vec![
+            Message::user("first"),
+            Message::assistant("one"),
+            Message::user(typed.clone()),
+            Message::assistant("two"),
+        ]);
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec!["first", typed.as_str()]);
+
+        let cut = cut(&before, &said, 1).expect("the prompt somebody typed");
+        assert_eq!(cut.prompt, typed);
+        assert_eq!(cut.before.messages.len(), 2);
+    }
+
+    /// A file the agent put in front of the planner is not a prompt, so the prompts after it keep
+    /// the numbers a window drew them with.
+    #[test]
+    fn a_file_the_agent_put_in_front_of_the_planner_is_not_a_prompt() {
+        let mut before = snapshot(vec![Message::user("first")]);
+        before.messages.push(Stored {
+            message: Message::user("Contents of readme.md:\n\nread the briefing and carry on")
+                .into(),
+            composed: Some(Composed::Attached {
+                path: "readme.md".into(),
+            }),
+            address: None,
+            source: None,
+        });
+        before.messages.push(Stored::plain(Message::user("second")));
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec!["first", "second"]);
+
+        let cut = cut(&before, &said, 1).expect("a second prompt");
+        assert_eq!(cut.prompt, "second");
+        // The file is kept, because the model was working from it. It was never a place to cut.
+        assert_eq!(texts(&cut.before.messages).len(), 2);
+    }
+
+    /// And the converse, which is the reason the walk reads the tag rather than the words: somebody
+    /// may type the sentence the agent writes in front of a file, and a fork asked for in front of
+    /// *their* line must not land in front of the file that sentence imitates.
+    #[test]
+    fn a_prompt_that_reads_like_a_composed_message_is_still_where_the_cut_lands() {
+        let imitation = "Contents of readme.md:\n\nread the briefing and carry on";
+        let mut before = snapshot(Vec::new());
+        before.messages.push(Stored {
+            message: Message::user(imitation).into(),
+            composed: Some(Composed::Attached {
+                path: "readme.md".into(),
+            }),
+            address: None,
+            source: None,
+        });
+        before
+            .messages
+            .push(Stored::plain(Message::assistant("one")));
+        before
+            .messages
+            .push(Stored::plain(Message::user(imitation)));
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec![imitation], "one of the two was typed");
+
+        let cut = cut(&before, &said, 0).expect("the prompt somebody typed");
+        assert_eq!(texts(&cut.before.messages), vec![imitation, "one"]);
+    }
+
+    #[test]
+    fn a_fork_inside_the_archive_puts_what_compaction_took_back_into_the_request() {
+        let mut before = snapshot(Vec::new());
+        before.messages.push(Stored {
+            message: Message::user(format!("{COMPACTED_PREFIX}\n\nearlier, in short")).into(),
+            composed: Some(Composed::Summary),
+            address: None,
+            source: None,
+        });
+        before.messages.push(Stored::plain(Message::user("third")));
+        before.archive = plain(vec![
+            Message::user("first"),
+            Message::assistant("one"),
+            Message::user("second"),
+            Message::assistant("two"),
+        ]);
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec!["first", "second", "third"]);
+
+        let cut = cut(&before, &said, 1).expect("the archived second prompt");
+        assert_eq!(cut.prompt, "second");
+        assert_eq!(texts(&cut.before.messages), vec!["first", "one"]);
+        assert!(
+            cut.before.archive.is_empty(),
+            "nothing is left standing in for"
+        );
+    }
+
+    /// A skill a compaction sent again repeats a result that is in the archive too, and a fork
+    /// that restored both would put the skill in the child's request twice.
+    #[test]
+    fn a_fork_inside_the_archive_leaves_out_the_skills_a_compaction_sent_again() {
+        let mut before = snapshot(Vec::new());
+        before.messages.push(Stored::plain(Message::user("third")));
+        before.archive = plain(vec![Message::user("first"), Message::assistant("one")]);
+        before.archive.push(Stored {
+            message: Message::user("You loaded the skill commit-style earlier. BODY").into(),
+            composed: Some(Composed::SkillKept {
+                name: "commit-style".into(),
+            }),
+            address: None,
+            source: None,
+        });
+        before.archive.extend(plain(vec![
+            Message::user("second"),
+            Message::assistant("two"),
+        ]));
+        let said = drawn(&before);
+        assert_eq!(prompts(&said), vec!["first", "second", "third"]);
+
+        let cut = cut(&before, &said, 1).expect("the archived second prompt");
+        assert_eq!(texts(&cut.before.messages), vec!["first", "one"]);
+    }
+
+    #[test]
+    fn a_fork_never_moves_copied_words_into_the_request() {
+        let mut before = snapshot(Vec::new());
+        before.archive = ["first", "one", "second", "two"]
+            .iter()
+            .enumerate()
+            .map(|(index, words)| Stored {
+                message: if index % 2 == 0 {
+                    Message::user(*words)
+                } else {
+                    Message::assistant(*words)
+                }
+                .into(),
+                composed: Some(Composed::Imported),
+                address: None,
+                source: None,
+            })
+            .collect();
+        before.messages.push(Stored::plain(Message::user("third")));
+        let said = drawn(&before);
+        assert_eq!(
+            prompts(&said),
+            vec!["first", "second", "third"],
+            "drawn as the prompts they were"
+        );
+
+        for ordinal in 0..3 {
+            assert!(
+                cut(&before, &said, ordinal).is_none(),
+                "a fork at {ordinal}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_standing_in_for_the_archive_survives_a_later_cut() {
+        let mut before = snapshot(Vec::new());
+        before.messages.push(Stored {
+            message: Message::user(format!("{COMPACTED_PREFIX}\n\nearlier, in short")).into(),
+            composed: Some(Composed::Summary),
+            address: None,
+            source: None,
+        });
+        before.messages.extend(plain(vec![
+            Message::user("third"),
+            Message::assistant("three"),
+            Message::user("fourth"),
+        ]));
+        before.archive = plain(vec![Message::user("first"), Message::assistant("one")]);
+        let said = drawn(&before);
+
+        let cut = cut(&before, &said, 2).expect("the fourth prompt");
+        assert_eq!(cut.prompt, "fourth");
+        assert_eq!(cut.before.archive.len(), 2, "the archive is untouched");
+        assert!(
+            cut.before.messages[0]
+                .message
+                .content
+                .text()
+                .starts_with(COMPACTED_PREFIX),
+            "the summary is still at the head of the request",
+        );
+        assert_eq!(cut.before.messages.len(), 3);
+    }
+
+    #[test]
+    fn the_measurement_does_not_survive_a_cut() {
+        let before = snapshot(vec![Message::user("first"), Message::user("second")]);
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert_eq!(cut.before.measured, 0);
+        assert_eq!(
+            cut.before.references, 3,
+            "but the names handed out are remembered"
+        );
+    }
+
+    /// The kept messages may hold a plan-mode notice, and the flag says whether it is the last
+    /// thing they say about the mode. A cut that reset it would leave the child's planner reading
+    /// that notice as current, with nothing to retract it when the child starts outside plan mode.
+    /// The child is the conversation restored from the cut, and a turn that starts outside plan
+    /// mode retracts the notice when that conversation reports the flag (MODE-8), so the flag is
+    /// read from the restored conversation. That the turn then retracts is pinned in the agent's
+    /// tests listed under MODE-8.
+    #[test]
+    fn a_cut_leaves_the_child_recording_that_its_last_plan_mode_notice_said_plan_mode_is_on() {
+        let mut before = snapshot(vec![Message::user("first"), Message::user("second")]);
+        before.plan_mode_told = true;
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert!(
+            cut.before.plan_mode_told,
+            "the cut lost the record that the last notice said plan mode is on"
+        );
+        assert!(
+            Conversation::restored(cut.before).plan_mode_told(),
+            "the child's conversation does not report the notice it keeps as plan mode being on"
+        );
+    }
+
+    /// The parent's record of a write says what its last turns did, and a fork ends before them.
+    /// Carried over, it would keep a child that never asked to write from being told so.
+    #[test]
+    fn a_write_the_parent_asked_for_does_not_survive_a_cut() {
+        let before = snapshot(vec![Message::user("first"), Message::user("second")]);
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert!(
+            !cut.before.asked_to_write,
+            "the child inherited a write it never asked for"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_conversation_forks_untrusted() {
+        let mut before = snapshot(vec![Message::user("first"), Message::user("second")]);
+        before.context = "untrusted".into();
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert_eq!(cut.before.context, "untrusted");
+    }
+
+    #[test]
+    fn a_conversation_whose_planner_was_shown_private_content_forks_private() {
+        let mut before = snapshot(vec![Message::user("first"), Message::user("second")]);
+        before.holds = "private".into();
+        let cut = cut(&before, &drawn(&before), 1).expect("a second prompt");
+
+        assert_eq!(cut.before.holds, "private");
+    }
+
+    #[test]
+    fn an_ordinal_past_the_last_prompt_is_no_cut_at_all() {
+        let before = snapshot(vec![Message::user("first")]);
+        assert!(cut(&before, &drawn(&before), 1).is_none());
+        assert!(cut(&snapshot(Vec::new()), &[], 0).is_none());
+    }
+
+    #[test]
+    fn two_identical_prompts_fork_at_the_one_that_was_asked_for() {
+        let before = snapshot(vec![
+            Message::user("again"),
+            Message::assistant("one"),
+            Message::user("again"),
+            Message::assistant("two"),
+        ]);
+        let said = drawn(&before);
+
+        assert_eq!(cut(&before, &said, 0).unwrap().before.messages.len(), 0);
+        assert_eq!(cut(&before, &said, 1).unwrap().before.messages.len(), 2);
+    }
+}

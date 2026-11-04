@@ -1,0 +1,27 @@
+[package]
+name = "bravebot-update"
+description = "Whether a newer bravebot has been published, asked at most once an hour"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+# Where the record is kept, through the writing answer that incognito mode answers nothing to.
+bravebot-agent = { path = "../agent" }
+# How this copy was installed, the literal command that updates it, and the variable that turns the
+# check off.
+bravebot-config = { path = "../config" }
+bravebot-core = { path = "../core" }
+# The startup line, in the terminal's catalog.
+bravebot-i18n = { path = "../i18n" }
+# The one request, through the egress gate like every other.
+bravebot-net = { path = "../net" }
+# The audit trail the gate writes its decision to, which nothing reads for this request.
+bravebot-session = { path = "../session" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

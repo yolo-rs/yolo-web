@@ -1,0 +1,531 @@
+//! The everyday workflows, run under the sandbox default ([SANDBOX-21]).
+//!
+//! Each test skips where this machine cannot apply a profile, which includes a suite run from inside
+//! another profile.
+//!
+//! [SANDBOX-21]: ../../../docs/specs/sandboxing.md
+#![cfg(unix)]
+
+use bravebot_agent::usability::{
+    self, Expect, Failure, Kind, Outcome, Report, Stage, Unavailable, Workflow,
+};
+use bravebot_sandbox::rules::{Entry, Lists};
+use std::path::{Path, PathBuf};
+
+fn root(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/test-scratch")
+        .join(format!("usability-{name}"))
+}
+
+fn run(name: &str, workflows: &[Workflow]) -> Report {
+    let root = root(name);
+    let _ = std::fs::remove_dir_all(&root);
+    usability::run(&root, workflows).expect("the suite runs")
+}
+
+fn only_failure(report: &Report) -> &Failure {
+    match report.rows.as_slice() {
+        [row] => match &row.outcome {
+            Outcome::Failed(failure) => failure,
+            other => panic!("expected a failure, got {other:?}"),
+        },
+        rows => panic!("expected one row, got {}", rows.len()),
+    }
+}
+
+/// The regression it rejects: a default that breaks an everyday program. Every workflow in the
+/// suite is run under the confinement a session gives a `run` stage, and one that does not work
+/// fails the test with the stage it stopped at and where its output went.
+#[test]
+fn every_workflow_works_under_the_default() {
+    if !usability::available() {
+        return;
+    }
+    let report = run("all", &usability::workflows());
+
+    for row in report.skipped() {
+        eprintln!("skipped {}: {}: {:?}", row.group, row.name, row.outcome);
+    }
+    let failures: Vec<String> = report
+        .failed()
+        .into_iter()
+        .map(|row| format!("{}: {}: {:?}", row.group, row.name, row.outcome))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    eprintln!(
+        "{} passed, {} skipped",
+        report.passed(),
+        report.skipped().len()
+    );
+}
+
+/// The regression it rejects: a suite that shrinks without anyone deciding it should. A group
+/// dropped from the list, or the rows that must be refused, are no longer checked, and nothing
+/// else would say so.
+#[test]
+fn the_suite_covers_each_everyday_program_and_the_rows_that_stay_refused() {
+    let workflows = usability::workflows();
+    for group in [
+        "git", "gh", "script", "make", "rust", "node", "python", "go", "search", "editor",
+    ] {
+        assert!(
+            workflows
+                .iter()
+                .any(|workflow| workflow.group == group && workflow.expect == Expect::Works),
+            "no workflow for {group}"
+        );
+    }
+    for name in [
+        "sort and uniq count lines",
+        "xargs passes a list of files to one program",
+        "find -exec {} + passes a list of files to one program",
+    ] {
+        assert!(
+            workflows
+                .iter()
+                .any(|workflow| workflow.name == name && workflow.expect == Expect::Works),
+            "no workflow named {name}"
+        );
+    }
+    let refused = workflows
+        .iter()
+        .filter(|workflow| workflow.expect == Expect::Refused)
+        .count();
+    assert!(
+        refused >= 3,
+        "only {refused} rows are expected to be refused"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            workflows
+                .iter()
+                .any(|workflow| workflow.expect == Expect::Refused
+                    && workflow.name == "a script writes a git hook"),
+            "no row holds a script to the `.git` refusal"
+        );
+    }
+}
+
+/// The regression it rejects: a failing workflow that leaves the suite green, which is every
+/// default change shipping unseen. A write outside the session is refused under the sandbox and
+/// works outside it, so the failure is the sandbox's and the report says so.
+#[test]
+fn a_workflow_the_sandbox_refuses_fails_the_suite() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "refused-work",
+        &[Workflow::new("test", "a write it needs")
+            .stage(Stage::new("true", &[]))
+            .stage(Stage::new("touch", &["{beside}/needed.txt"]))],
+    );
+
+    assert!(!report.is_green());
+    let failure = only_failure(&report);
+    assert_eq!(failure.kind, Kind::Refused);
+    assert_eq!(failure.stage, 2);
+    assert_eq!(failure.program, "touch");
+}
+
+/// The regression it rejects: a workflow that is broken on its own read as the sandbox's fault, or
+/// worse as a pass. `false` fails with or without the sandbox, and the report says the sandbox is
+/// not the cause.
+#[test]
+fn a_workflow_that_fails_without_the_sandbox_is_not_blamed_on_it() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "broken",
+        &[Workflow::new("test", "broken").stage(Stage::new("false", &[]))],
+    );
+
+    assert!(!report.is_green());
+    assert_eq!(only_failure(&report).kind, Kind::WithoutTheSandbox);
+}
+
+/// The regression it rejects: a row expected to stay refused that passes because the sandbox
+/// started letting the program through. Writing inside the session is permitted, so this row
+/// fails as the row for a key that became readable would.
+#[test]
+fn a_row_expected_to_stay_refused_fails_when_the_program_gets_through() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "allowed",
+        &[Workflow::new("test", "a write that is permitted")
+            .stage(Stage::new("touch", &["{session}/inside.txt"]))
+            .refused()],
+    );
+
+    assert!(!report.is_green());
+    assert_eq!(only_failure(&report).kind, Kind::Allowed);
+    assert_eq!(only_failure(&report).code, Some(0));
+}
+
+/// The regression it rejects: a row that stays "refused" because the file is not there. Reading a
+/// path nothing created fails with and without the sandbox, so the row is a failure and not a
+/// refusal the sandbox made.
+#[test]
+fn a_refusal_of_a_file_that_is_not_there_is_not_a_refusal() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "missing-file",
+        &[Workflow::new("test", "a key that is not there")
+            .stage(Stage::new("cat", &["{home}/.ssh/id_rsa"]))
+            .refused()],
+    );
+
+    assert_eq!(only_failure(&report).kind, Kind::WithoutTheSandbox);
+}
+
+/// The regression it rejects: the probe of a refused row being reached late, so that an earlier
+/// stage's refusal is read as the probe's. Only the last stage is the one expected to be refused.
+#[test]
+fn a_refusal_before_the_last_stage_of_a_refused_row_is_not_the_expected_one() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "early",
+        &[Workflow::new("test", "refused too soon")
+            .stage(Stage::new("touch", &["{beside}/first.txt"]))
+            .stage(Stage::new("cat", &["{home}/.ssh/id_ed25519"]))
+            .refused()],
+    );
+
+    let failure = only_failure(&report);
+    assert_eq!(failure.kind, Kind::Refused);
+    assert_eq!(failure.stage, 1);
+}
+
+/// The regression it rejects: a setup that fails read as the sandbox's refusal. Setup runs outside
+/// the sandbox, so its failure is named as setup.
+#[test]
+fn a_setup_that_fails_is_named_as_setup() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "setup",
+        &[Workflow::new("test", "bad setup")
+            .setup(Stage::new("false", &[]))
+            .stage(Stage::new("true", &[]))],
+    );
+
+    assert_eq!(only_failure(&report).kind, Kind::Setup);
+    assert_eq!(only_failure(&report).code, Some(1));
+}
+
+/// Holds this agent's signing key in the environment of this process while it is alive, and puts
+/// back what was there. The tests that read the environment of a program the suite starts share it,
+/// since the environment belongs to the process.
+struct SigningKey {
+    previous: [Option<std::ffi::OsString>; 2],
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl SigningKey {
+    const NAME: &'static str = "SERVICES_KEY_AICHAT";
+    /// The switch that turns the removal off, which a machine may have set.
+    const SWITCH: &'static str = "BRAVEBOT_SUBPROCESS_ENV_SCRUB";
+
+    fn held() -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = [std::env::var_os(Self::NAME), std::env::var_os(Self::SWITCH)];
+        // SAFETY: the lock serialises the tests that set these, and `drop` puts them back.
+        unsafe {
+            std::env::set_var(Self::NAME, "a-live-signing-key");
+            std::env::remove_var(Self::SWITCH);
+        }
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for SigningKey {
+    fn drop(&mut self) {
+        // SAFETY: as in `held`.
+        for (name, previous) in [Self::NAME, Self::SWITCH].into_iter().zip(&self.previous) {
+            match previous {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+    }
+}
+
+/// CRED-14: neither a setup stage, which runs outside the sandbox with the person's access, nor a
+/// stage under it is handed this agent's signing key. Each stage fails if the variable is set. The
+/// regression it rejects: starting the suite's programs with the environment this process holds,
+/// which hands the key to a program a workflow's author chose.
+#[test]
+fn a_program_the_suite_starts_is_not_handed_this_agents_signing_key() {
+    if !usability::available() {
+        return;
+    }
+    let _key = SigningKey::held();
+    let unset = || Stage::new("sh", &["-c", "test -z \"$SERVICES_KEY_AICHAT\""]);
+
+    let report = run(
+        "signing-key",
+        &[Workflow::new("test", "a stage that reads the signing key")
+            .setup(unset())
+            .stage(unset())],
+    );
+
+    assert!(
+        report.is_green(),
+        "a program the suite started was handed the signing key: {:?}",
+        report.rows
+    );
+}
+
+/// CRED-14: the `gh` the stored-login row asks for a token is not handed the signing key either,
+/// outside the sandbox or under it. The stub fails if the variable is set, and a `gh` that fails
+/// outside the sandbox gives no row.
+#[test]
+fn the_gh_the_login_row_starts_is_not_handed_this_agents_signing_key() {
+    if !usability::available() {
+        return;
+    }
+    let _key = SigningKey::held();
+    let (root, gh, home) = login_fixture(
+        "login-signing-key",
+        r#"test -z "$SERVICES_KEY_AICHAT" || exit 1"#,
+    );
+
+    let row = usability::login_row_for(&root, &gh, &home, &Lists::default())
+        .expect("the probe runs")
+        .expect("the stub failed, so it was handed the signing key");
+
+    assert_eq!(row.outcome, Outcome::Passed);
+}
+
+/// The regression it rejects: a program that is not installed read as a failure, which fails the
+/// suite on a machine without `go`, or dropped without a word, which hides that the workflow was
+/// never checked.
+#[test]
+fn a_program_that_is_not_installed_is_skipped_by_name() {
+    let report = run(
+        "skipped",
+        &[Workflow::new("test", "a tool nobody has")
+            .stage(Stage::new("bravebot-no-such-program", &[]))],
+    );
+
+    assert!(report.is_green());
+    assert_eq!(report.skipped().len(), 1);
+    assert_eq!(
+        report.skipped()[0].outcome,
+        Outcome::Skipped(vec!["bravebot-no-such-program".to_string()])
+    );
+}
+
+/// The regression it rejects: a program started from inside a shell line that is not installed,
+/// which the shell reports as exit 127 with and without the sandbox, so the row is a failure on a
+/// machine without `go` or `patch` instead of a skip.
+#[test]
+fn a_program_a_shell_line_starts_is_skipped_by_name_when_it_is_not_installed() {
+    let report = run(
+        "shell-skipped",
+        &[Workflow::new("test", "a tool a script starts")
+            .stage(Stage::new(
+                "sh",
+                &["-c", "bravebot-no-such-program --version"],
+            ))
+            .needing(&["bravebot-no-such-program"])],
+    );
+
+    assert!(report.is_green());
+    assert_eq!(
+        report.skipped()[0].outcome,
+        Outcome::Skipped(vec!["bravebot-no-such-program".to_string()])
+    );
+}
+
+/// The regression it rejects: the report carrying what a program printed. Output is content, and
+/// the report is shown to a person and pasted into issues. The marker is printed by the failing
+/// stage and appears in its log and nowhere in the report.
+#[test]
+fn the_report_holds_no_program_output() {
+    if !usability::available() {
+        return;
+    }
+    let report = run(
+        "output",
+        &[Workflow::new("test", "noisy").stage(Stage::new(
+            "sh",
+            &["-c", "echo MARKER-FROM-A-PROGRAM; exit 3"],
+        ))],
+    );
+
+    let failure = only_failure(&report);
+    assert!(!format!("{report:?}").contains("MARKER-FROM-A-PROGRAM"));
+    let log = std::fs::read_to_string(failure.log.as_ref().expect("a log")).expect("log");
+    assert!(log.contains("MARKER-FROM-A-PROGRAM"));
+    assert_eq!(failure.code, Some(3));
+}
+
+/// The regression it rejects: workflows run where the temporary directory makes every write
+/// permitted, which turns every refused row into a failure of the check itself.
+#[test]
+fn the_suite_will_not_run_under_the_temporary_directory() {
+    let under_temporary =
+        std::env::temp_dir().join(format!("bravebot-usability-root-{}", std::process::id()));
+
+    let refused = usability::run(&under_temporary, &[]);
+
+    assert!(matches!(refused, Err(Unavailable::Root(_))));
+    let _ = std::fs::remove_dir_all(under_temporary);
+}
+
+/// A scratch home holding a credential file the sandbox refuses and one it allows, and a `gh`
+/// whose `auth token` runs `script`. Returns the root, the stub and the home.
+fn login_fixture(name: &str, script: &str) -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = root(name);
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".ssh")).expect("ssh dir");
+    std::fs::create_dir_all(home.join(".config/gh")).expect("gh dir");
+    std::fs::write(home.join(".ssh/id_ed25519"), "TOKEN-IN-A-REFUSED-FILE").expect("key");
+    std::fs::create_dir_all(home.join(".aws")).expect("aws dir");
+    std::fs::write(home.join(".aws/credentials"), "TOKEN-IN-A-REFUSED-FILE").expect("aws");
+    std::fs::write(home.join(".config/gh/hosts.yml"), "TOKEN-IN-HOSTS").expect("hosts");
+    let gh = root.join("gh");
+    std::fs::write(&gh, format!("#!/bin/sh\n{script}\n")).expect("stub");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    (root.join("run"), gh, home)
+}
+
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The regression it rejects: a doctor that is green while `gh` holds a login the sandbox keeps it
+/// from reading. The stub reads a file the base refuses, as `gh` does a keychain item, and
+/// succeeds outside the sandbox only.
+#[test]
+fn a_login_the_sandbox_refuses_is_reported_as_a_login_failure() {
+    if !usability::available() {
+        return;
+    }
+    let (root, gh, home) = login_fixture(
+        "login-refused",
+        r#"cat "$HOME/.ssh/id_ed25519" >/dev/null || exit 1"#,
+    );
+
+    let row = usability::login_row_for(&root, &gh, &home, &Lists::default())
+        .expect("the probe runs")
+        .expect("a row");
+
+    match row.outcome {
+        Outcome::Failed(failure) => assert!(matches!(failure.kind, Kind::Login)),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+/// The regression it rejects: a probe that reports a login `gh` can read. The stub reads the file
+/// `gh` keeps with `--insecure-storage`, which the remote scope lets through.
+#[test]
+fn a_login_the_sandbox_lets_through_passes() {
+    if !usability::available() {
+        return;
+    }
+    let (root, gh, home) = login_fixture(
+        "login-allowed",
+        r#"cat "$HOME/.config/gh/hosts.yml" >/dev/null || exit 1"#,
+    );
+
+    let row = usability::login_row_for(&root, &gh, &home, &Lists::default())
+        .expect("the probe runs")
+        .expect("a row");
+
+    assert_eq!(row.outcome, Outcome::Passed);
+}
+
+/// The regression it rejects: a false alarm for a person with no login. A `gh` that cannot print a
+/// token outside the sandbox gives no row, so the doctor says nothing about it.
+#[test]
+fn no_login_outside_the_sandbox_gives_no_row() {
+    if !usability::available() {
+        return;
+    }
+    let (root, gh, home) = login_fixture("login-none", "exit 1");
+
+    let row =
+        usability::login_row_for(&root, &gh, &home, &Lists::default()).expect("the probe runs");
+
+    assert!(row.is_none());
+}
+
+/// The regression it rejects: the probe keeping the token. The stub prints a marker on both
+/// streams; it appears in neither the report row nor any file the probe leaves under the root.
+#[test]
+fn the_login_probe_keeps_no_token() {
+    if !usability::available() {
+        return;
+    }
+    let (root, gh, home) = login_fixture(
+        "login-output",
+        r#"echo MARKER-TOKEN; echo MARKER-TOKEN >&2; cat "$HOME/.ssh/id_ed25519" || exit 1"#,
+    );
+
+    let row =
+        usability::login_row_for(&root, &gh, &home, &Lists::default()).expect("the probe runs");
+
+    assert!(!format!("{row:?}").contains("MARKER-TOKEN"));
+    for file in files_under(&root) {
+        let content = std::fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            !content.contains("MARKER-TOKEN") && !content.contains("TOKEN-IN-A-REFUSED-FILE"),
+            "{} holds the token",
+            file.display()
+        );
+    }
+}
+
+/// The regression it rejects: a fix that names `sandbox.filesystem.allowRead` and a probe that
+/// ignores it, which leaves the row red after the person has done what it says. The same stub that
+/// is refused by default passes once its file is on the person's allowRead list.
+#[test]
+fn a_login_file_on_the_allow_read_list_passes() {
+    if !usability::available() {
+        return;
+    }
+    let (root, gh, home) = login_fixture(
+        "login-allow-read",
+        r#"cat "$HOME/.aws/credentials" >/dev/null || exit 1"#,
+    );
+    let lists = Lists {
+        allow_read: vec![Entry {
+            path: "~/.aws/credentials".to_string(),
+            by: None,
+            pinned: false,
+        }],
+        ..Lists::default()
+    };
+
+    let row = usability::login_row_for(&root, &gh, &home, &lists)
+        .expect("the probe runs")
+        .expect("a row");
+
+    assert_eq!(row.outcome, Outcome::Passed);
+}

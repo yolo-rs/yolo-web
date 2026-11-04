@@ -1,0 +1,1250 @@
+---
+id: PERM
+title: Permission rules
+status: normative
+governs:
+  - crates/core/src/permissions.rs
+  - crates/core/src/spelling.rs
+  - crates/core/src/protected.rs
+  - crates/config/src/settings.rs
+  - crates/config/src/managed.rs
+  - crates/agent/src/permissions.rs
+  - crates/agent/src/workspace.rs
+  - crates/agent/src/workspace/error.rs
+  - crates/agent/src/workspace/other_names.rs
+  - crates/agent/src/workspace/reach.rs
+  - crates/agent/src/workspace/resolve.rs
+  - crates/tui/src/trust_prompt.rs
+  - crates/tui/src/app.rs
+  - crates/tui/src/app/directories.rs
+  - crates/tui/src/app/opening.rs
+  - crates/tui/src/app/actions.rs
+guards:
+  - symbol: Policy::with_permissions
+  - symbol: Policy::before_read
+  - symbol: Policy::read_is_denied
+  - symbol: Policy::refuse_denied_write
+  - symbol: Policy::before_plan_rules
+documented-by:
+  - docs/website/docs/customize/configuration.md
+  - docs/website/docs/security/permissions.md
+  - docs/website/docs/security/permission-modes.md
+  - docs/website/docs/security/permission-rules.md
+  - docs/website/docs/customize/managed-settings.md
+---
+
+## Scope
+
+Rules a person writes down in advance, in the `permissions` block of `~/.bravebot/settings.json`,
+about which actions to ask them about and which to refuse outright. The same three lists Claude
+Code keeps, with the same spellings, so a block copied out of `~/.claude/settings.json` governs
+this agent unedited.
+
+A checkout carries settings files too, and they are not the same claim: whoever wrote the checkout
+wrote them. `deny` and `ask` are read from every layer because both only narrow what would
+otherwise happen. `allow` is the one list that grants, and [PERM-14](#PERM-14) says which layers it
+is read from; a checkout's entry is a request the person grants at a question naming it, which is
+[PERM-15](#PERM-15).
+
+What a rule may decide is narrow, and the boundary is the point. A rule decides **whether a person
+is asked** and **whether an action happens at all**. It never decides what a value is trusted for,
+which is [labels.md](labels.md), and never what is reachable, which is
+[trust-map.md](trust-map.md). `defaultMode` is read and acted on by nothing: this spec covers the
+three lists, `additionalDirectories`, and the two keys of the block that are not rules.
+
+Those two are the block's other half and are not rules at all. `readsStayInWorkspace`
+([PERM-16](#PERM-16)) and `bypassUnreachable` ([PERM-17](#PERM-17)) name nothing they refuse, so no
+path, program or host is outside them, and neither decides whether a person is asked: each states an
+invariant that holds against a rule, against a mode, and against an answer given during the session.
+Every layer may write one and the strictest value any layer named is what holds, which is
+[PERM-18](#PERM-18). They are the one thing here that does decide what is reachable, and
+[trust-map.md](trust-map.md) is where reach is otherwise settled, so PERM-16 says what it takes back
+from [TRUST-9](trust-map.md#TRUST-9) and what it leaves alone.
+
+Who answers a prompt a rule permitted to exist is [permission-modes.md](permission-modes.md). The
+two are separate: a rule decides whether there is a question, and a mode answers one. A `deny` rule
+therefore holds in every mode, including the mode that asks about nothing.
+
+## What a rule is
+
+<a id="PERM-1"></a>
+### PERM-1: a rule names a family of tools, and matches on routing only
+
+A rule is `Tool` or `Tool(specifier)`. Five families exist: `Read` covers every tool that reads or
+enumerates a file, `Edit` covers every tool that changes one, `Bash` covers running a program,
+`WebFetch` covers fetching a URL, and `Mcp` covers calling a tool of a server a person declared
+([mcp-servers.md](mcp-servers.md)). They are categories rather than tool names, and `Bash` names no
+shell: there is none, and a specifier is matched against one stage's program and arguments.
+
+A specifier is matched against a **routing** field and nothing else: a path, a stage's argv, a
+host, or a server's alias and tool name. Never a file's contents, never a program's output, never a
+call's arguments, never anything else a turn observed.
+
+`WebFetch` takes `domain:` and nothing else, so `WebFetch(domain:example.com)` covers that host and
+its subdomains. A URL prefix would read as covering a path, and the boundary is a label boundary: a
+rule about `example.com` never covers `notexample.com`. A host written with a trailing dot, as in
+`example.com.`, is the same host, so the dot is dropped before a rule is compared. What a matching rule decides for a fetch,
+and what it does not decide, is [fetch-url.md](tools/fetch-url.md).
+
+`Mcp(weather)` and `Mcp(weather:*)` cover every tool of the server declared as `weather`, and
+`Mcp(weather:get_forecast)` covers one of them. Both names are matched whole, so `Mcp(weather)` does
+not cover `weather2`. A specifier that could name nothing callable, such as one holding a space, a
+second colon, or a `*` anywhere but as the whole tool, is unreadable ([PERM-11](#PERM-11)).
+
+An entry in `deny`, `ask` or `allow` is written either as the rule text or as an object holding the
+rule text and why it was written: `{"rule": "Bash(git push *)", "reason": "ask me before a push"}`.
+Both forms are the same rule, anchored the same way ([PERM-3](#PERM-3)) and deciding the same thing.
+The reason is display text: it is shown to the person beside the rule and is never matched,
+compared, or branched on. An object with no `rule` string is unreadable ([PERM-11](#PERM-11)), and a
+`reason` that is blank or not a string is no reason at all.
+
+A `reason` is read from the person's own `~/.bravebot/settings.json` and ignored in a project, local
+or `--settings` layer, which is the layering `summaryModel` and the `provider` block already have.
+The rule itself is unaffected: a lower layer's `deny` or `ask` rule decides what it decided before,
+and its `reason` is not read at all.
+
+**Why.** Routing is trusted and public before it reaches any gate, so matching on it is the driver
+deciding from trusted input, which is what the driver is for. A rule matched against observed bytes
+would be the driver branching on untrusted content, whatever the rule said. A reason says why a
+person wrote a rule, and every surface shows it as their words, so a sentence a checkout wrote is
+not read: a checkout could otherwise write in the person's voice about a refusal they did not
+explain.
+
+`verified-by: bravebot_core::permissions::a_bare_family_name_covers_every_use_of_it`
+`verified-by: bravebot_core::permissions::a_rule_for_one_family_does_not_decide_another`
+`verified-by: bravebot_core::permissions::a_domain_rule_covers_the_host_and_its_subdomains`
+`verified-by: bravebot_core::permissions::a_domain_rule_stops_at_a_label_boundary`
+`verified-by: bravebot_core::permissions::a_domain_rule_ignores_case`
+`verified-by: bravebot_core::permissions::a_domain_rule_matches_the_trailing_dot_spelling`
+`verified-by: bravebot_core::permissions::for_host_strips_the_trailing_dot_and_ignores_case`
+`verified-by: bravebot_core::permissions::a_bare_web_fetch_deny_still_covers_a_host_of_only_a_dot`
+`verified-by: bravebot_core::permissions::a_bare_web_fetch_rule_covers_every_host`
+`verified-by: bravebot_core::permissions::a_web_fetch_rule_decides_nothing_about_other_families`
+`verified-by: bravebot_core::permissions::an_mcp_rule_is_its_own_family`
+`verified-by: bravebot_core::permissions::an_mcp_rule_covers_the_server_or_the_tool_it_names`
+`verified-by: bravebot_core::permissions::a_rule_carries_no_reason_until_one_is_attached`
+`verified-by: bravebot_core::permissions::explain_attaches_a_reason_by_list_and_written_text`
+`verified-by: bravebot_core::permissions::a_reason_decides_nothing`
+`verified-by: bravebot_config::settings::a_reason_in_the_persons_own_file_is_read_back_with_the_rule`
+`verified-by: bravebot_config::settings::a_reason_another_layer_wrote_is_not_read_back_and_its_rule_still_holds`
+`verified-by: bravebot_config::settings::a_reason_that_is_blank_or_not_a_string_is_absence`
+`verified-by: bravebot_config::settings::a_rule_written_as_a_line_carries_no_reason`
+`verified-by: bravebot_agent::permissions::a_reason_the_person_wrote_reaches_the_rule_and_a_checkouts_does_not`
+`verified-by: bravebot_agent::permissions::a_reason_a_checkout_wrote_does_not_reach_a_rule_the_person_granted`
+
+<a id="PERM-2"></a>
+### PERM-2: deny, then ask, then allow, and the first match decides
+
+Specificity does not enter into it. A broad deny beats a narrow allow, so a deny rule cannot carry
+exceptions, and a matching ask rule prompts even where a more specific allow rule also matches.
+
+**Why.** It is what makes a deny rule readable as a flat statement about what will not happen. A
+list where the narrowest rule won could not be checked by reading it.
+
+An ask rule is also the setting that restores asking for every line in a directory the person trusted
+([RUN-5](tools/run.md#RUN-5)): `Bash(*)` in `permissions.ask` matches every line, any layer may write it, and
+a checkout's file included, since it only asks for more.
+
+`verified-by: bravebot_core::permissions::deny_beats_ask_and_ask_beats_allow_however_specific_the_loser`
+`verified-by: bravebot_core::permissions::deny_beats_ask_for_the_same_subject`
+
+<a id="PERM-3"></a>
+### PERM-3: a path specifier is gitignore-shaped, and says where it starts
+
+`*` matches within one segment and `**` across them. A trailing `/**` covers the directory it names
+as well as what is under it. Four anchors decide where a pattern begins:
+
+| Written | Starts at |
+|---|---|
+| `//x` | the filesystem root |
+| `~/x` | the user's home directory |
+| `/x` | the workspace, in `.bravebot/settings.json` and `.bravebot/settings.local.json`; the directory the settings file is in, in `~/.bravebot/settings.json` and a file `--settings` names |
+| `x` or `./x` | the workspace |
+
+A single leading slash is therefore **not** the filesystem root. A specifier with no slash in it is
+a name and matches at any depth, so `Read(.env)` and `Read(**/.env)` are one rule, while one written
+from `./` stays at the top of the workspace in every list ([PERM-4](#PERM-4)). The checkout's two
+files start a `/x` rule at the workspace however they were reached, `--settings` naming one of them
+included. Relative and
+absolute patterns are separate namespaces and neither reaches into the other: a pattern is matched
+against the path as a gate holds it, which is relative for a file in the project and in full for one
+outside, and a rule written one way says nothing about the other, except that [PERM-7](#PERM-7) has a `deny` or `ask` rule
+written in full also cover a place inside the workspace by its relative name. A `/x` rule is in the namespace of
+the place it starts: one that starts at the workspace or a directory inside it is written and matched
+as the relative pattern from the workspace, so `Read(/x)` in `.bravebot/settings.json` is
+`Read(./x)`, and one that starts anywhere else is the full path. A pattern whose anchor is unknown, such as `~/` on a machine with no home
+directory, is reported as unusable rather than silently matching nothing.
+
+A path specifier with whitespace at either end is not read and is reported ([PERM-11](#PERM-11)).
+Whitespace there is part of the name of a file that has it ([TRUST-2](trust-map.md#TRUST-2)) and as
+likely padding inside the brackets. Read as the name, `Read( .env )` would cover a file nobody meant
+and leave `.env` open. Trimmed, `Read(./a.md )` would cover `a.md` and not the file it names, and as
+an `allow` rule would grant it. Neither reading is one to guess at. Whitespace between the first and
+last character is part of the name, so `Read(./my notes.md)` is about the file `my notes.md`, and a
+name that starts with whitespace is written from `./` or `**/`, as `Read(./ a.md)`. Brackets holding
+only whitespace are empty. The line around the rule is trimmed, and so is the specifier of every
+other family, where padding inside the brackets says nothing.
+
+A path specifier written inside double quotes is one name and not a pattern. It is quoted when its
+first and its last character are both `"`, and the text between them is taken as written: whitespace
+at either end is part of the name, and `*` and `**` are ordinary characters. The anchors `//`, `~/`,
+`/` and `./` apply to the text inside the quotes, and a name with no slash in it still matches at
+any depth. A leading `**/` does not: inside quotes `**` is a segment called `**`, so `Read("**/a")`
+is about the file `a` in a directory called `**`, and not about every file `a`. The host's
+separator still applies to the text inside the quotes. Where a backslash separates it is a separator
+there too, since no file on that host has one in its name, so `Read("./d\a ")` is about `d/a `;
+where a slash is the only separator a backslash is a byte of the name. So
+`Read("./a.md ")` is about the file `a.md ` alone, `Read("./ ")` about the file called a space, and
+`Read("./*.md")` about the file called `*.md` alone, in `deny`, `ask` and `allow`. This is the
+spelling of a name that ends with whitespace, is only whitespace, or holds a `*`. Quotes inside a
+quoted specifier are ordinary characters too, so a name that itself begins and ends with a quote is
+written inside one more pair, as `Read(""a"")` for the file `"a"`, and `Read("a"b")` is the file
+`a"b`. A lone `"` has a quote at one end only and is the pattern for the file called `"`. Quotes
+holding nothing are reported ([PERM-11](#PERM-11)), since no file has an empty name.
+Padding outside the quotes, as in `Read( "./a.md" )`, is whitespace at an end and is reported. A
+specifier with a quote at only one of its ends is a pattern.
+
+**Why a quoted name.** The escape has to be a spelling no file with a legal name needs, and a byte
+of a name cannot be set aside for it: only `/` and NUL are excluded from names where a path is
+bytes. A backslash is a separator on the hosts that separate with one and an ordinary byte on the
+others, and a bracket class changes what `[` and `]` mean in every name that holds them. A quoted
+specifier changes the reading of only the rules whose specifier both begins and ends with a quote,
+which name a file whose name does, and the person respells those with one more pair. Leaving the
+names unspellable and reporting a rule for them is not enough, because a rule for a name holding
+`*` is a valid pattern and nothing can tell it from a wildcard on purpose.
+
+Segments are separated by `/`. A path pattern and the path it is matched against are both spelled
+that way first, whatever the host separates with, and both are respelled where the rules are read
+and where they are asked rather than at each gate: a gate added later cannot be the one that forgot.
+The host's answer is supplied to the rule language rather than asked for by it, since nothing there
+has a filesystem, and it is the same answer the keys [trust-map.md](trust-map.md) holds its rules
+under are spelled with. Where a backslash separates, a name rooted at a drive letter is spelled the
+way those keys are, from `/` with the drive as its first segment, so `D:\added\secret`,
+`D:/added/secret` and `\\?\D:\added\secret` are all `/D:/added/secret`. That is a full path, so
+`Read(//D:/added/**)` covers it and `Read(.env)`, which is about the workspace, does not. The home
+and settings directories a `~/` or `/` pattern starts at are spelled the same way, and so is a
+specifier written from a drive letter without the `//`: `Read(D:\added\**)` is the same rule as
+`Read(//D:/added/**)`. `Read(/D:/added/**)`, with one slash, still starts where any `/x` rule does.
+The drive letter is read in upper case on both sides, since that host never tells `d:` from `D:`:
+`Read(//D:/added/**)` covers `d:\added\secret`. Nothing else in a name is folded.
+
+Two things are left as they arrive. A command specifier is matched against argv, where a backslash
+is an argument's own byte because there is no shell (PERM-1). And a name carrying a root there is no
+`/`-spelling for stays one opaque name: a share, a device path, a name from the current drive's root
+such as `\x`, and one such as `C:x` that is relative to wherever the process last was on that drive.
+Respelling decides how a name is spelled and not which of the two namespaces it is in. Such a name
+reads as relative here, so cutting it into segments would match it against the patterns written
+about the workspace, and a rule anchored at the project would reach a file outside it.
+
+Where a slash is the only separator a backslash is a legal filename byte, so a name holding one is
+one segment and no rule about a directory reaches it. Without the respelling that is what *every*
+path below the workspace root is on a host that separates with something else: `Read(src/**)` covers
+nothing under `src`, `Read(.env)` covers nothing called `.env` below the top, and a rule written with
+the host's own separator is one segment while the path it names is several, so every path rule a
+person wrote is inert in both directions. A name on a drive left as it arrived reads as relative, so
+the rules miss it the other way round: `Read(//D:/added/**)` refuses nothing, and `Edit(*.md)` in
+`allow` grants `D:\added\a.md`, which is not in the project.
+
+Whether two spellings that differ only in case are one file is a fact about the volume the workspace
+is on (the trust map asks it the same way, [trust-map.md](trust-map.md)), so the caller asks the volume and hands the answer to
+the rules, which ask nothing. Where the volume folds case, both the pattern and the path have their
+letter case folded segment by segment before they are matched, so `Read(.env)` covers `.ENV`, which
+opens the same file. Each letter is taken to upper case and then to lower case, so `ſrc` meets the
+`src` APFS opens it as, though `ſ` is its own lower case. A rule in any list is read this way, allow included: there the two spellings name one file,
+so an allow rule covers the same file the deny rule would. Where the volume keeps the spellings apart,
+or the caller could not tell, the match is byte-exact and a rule about `Docs` decides nothing about
+`docs`, in either polarity: the answer only widens what a rule reaches, so an unknown answer is read
+as the narrower one.
+
+**Why.** A checkout's two settings files are about the checkout, and Claude Code starts a single
+slash in its project and local files at the project as well, so a rule copied from one covers the
+same file here. The file tools hold a file in the project by its relative name, so a rule about one
+spelled as a full path would refuse nothing asked for by that name.
+
+`verified-by: bravebot_core::permissions::a_path_rule_covers_the_file_it_names_wherever_a_backslash_separates`
+`verified-by: bravebot_core::permissions::a_deny_rule_covers_the_case_spelling_a_folding_volume_would_open`
+`verified-by: bravebot_core::permissions::a_tree_rule_covers_the_folded_spelling_of_its_path`
+`verified-by: bravebot_core::permissions::an_allow_rule_covers_the_folded_spelling_on_a_folding_volume`
+`verified-by: bravebot_core::permissions::a_rule_does_not_cover_a_case_variant_on_a_volume_that_keeps_them_apart`
+`verified-by: bravebot_core::permissions::rules_read_without_an_answer_about_the_volume_compare_bytes`
+`verified-by: bravebot_agent::permissions::rules_take_the_case_answer_of_the_volume_the_workspace_is_on`
+`verified-by: bravebot_core::permissions::a_name_holding_a_backslash_is_one_segment_where_a_slash_is_the_only_separator`
+`verified-by: bravebot_core::permissions::a_pattern_written_with_the_hosts_own_separator_is_the_same_rule`
+`verified-by: bravebot_core::permissions::a_command_rule_keeps_a_backslash_where_a_path_rule_would_not`
+`verified-by: bravebot_core::permissions::a_workspace_rule_does_not_reach_a_path_carrying_a_root_of_its_own`
+`verified-by: bravebot_core::permissions::a_rule_about_a_full_path_on_a_drive_covers_the_file_it_names`
+`verified-by: bravebot_core::permissions::a_rule_anchored_at_a_home_on_a_drive_covers_the_file_it_names`
+`verified-by: bravebot_core::permissions::a_rule_written_from_a_drive_letter_is_about_the_full_path_it_names`
+`verified-by: bravebot_core::permissions::a_drive_letter_names_one_drive_whichever_case_it_is_written_in`
+`verified-by: bravebot_core::spelling::a_name_rooted_at_a_drive_letter_is_keyed_from_slash_where_a_backslash_separates`
+`verified-by: bravebot_core::spelling::a_name_with_no_slash_spelling_is_not_keyed_as_a_full_path`
+`verified-by: bravebot_core::spelling::a_name_below_a_root_is_respelled_where_a_backslash_separates`
+`verified-by: bravebot_core::spelling::a_name_holding_a_backslash_is_left_alone_where_a_slash_is_the_only_separator`
+`verified-by: bravebot_core::spelling::a_name_carrying_a_root_of_its_own_is_left_whole`
+`verified-by: bravebot_core::permissions::a_bare_name_matches_at_any_depth_in_every_list`
+`verified-by: bravebot_core::permissions::each_anchor_points_where_its_leader_says`
+`verified-by: bravebot_core::permissions::one_star_stays_in_a_segment_and_two_cross_them`
+`verified-by: bravebot_core::permissions::whitespace_inside_a_path_specifier_is_part_of_the_name`
+`verified-by: bravebot_core::permissions::padding_inside_the_brackets_of_a_command_host_or_tool_rule_is_dropped`
+`verified-by: bravebot_config::settings::a_slash_rule_keeps_the_whitespace_at_an_end_of_its_specifier`
+`verified-by: bravebot_core::permissions::a_quoted_path_specifier_is_about_the_one_file_it_spells`
+`verified-by: bravebot_core::permissions::a_quoted_name_keeps_the_depth_an_unquoted_one_has`
+`verified-by: bravebot_core::permissions::a_quote_at_one_end_is_part_of_a_pattern_and_padding_outside_quotes_is_reported`
+`verified-by: bravebot_core::permissions::a_lone_quote_is_a_pattern_for_the_file_called_a_quote`
+`verified-by: bravebot_core::permissions::a_quote_inside_a_quoted_name_is_part_of_the_name`
+`verified-by: bravebot_core::permissions::a_double_star_segment_inside_quotes_is_a_directory_called_that`
+`verified-by: bravebot_core::permissions::a_backslash_inside_quotes_follows_the_hosts_separator`
+`verified-by: bravebot_core::permissions::a_trailing_double_star_covers_the_directory_it_names`
+`verified-by: bravebot_core::permissions::a_relative_rule_says_nothing_about_an_absolute_path`
+`verified-by: bravebot_core::permissions::an_anchored_pattern_matches_only_where_it_is_anchored`
+`verified-by: bravebot_core::permissions::a_pattern_whose_anchor_is_unknown_is_reported_rather_than_matching_nothing`
+`verified-by: bravebot_agent::permissions::a_single_slash_rule_is_anchored_at_the_settings_directory`
+`verified-by: bravebot_agent::permissions::a_checkouts_slash_rule_starts_at_the_workspace`
+`verified-by: bravebot_config::settings::a_slash_rule_starts_at_the_workspace_in_a_checkouts_file_and_beside_any_other`
+`verified-by: bravebot_config::settings::a_slash_rule_starting_inside_the_workspace_is_spelled_from_it`
+`verified-by: bravebot_config::settings::a_checkouts_file_named_on_the_command_line_still_starts_at_the_workspace`
+`verified-by: bravebot_agent::turn::a_single_slash_deny_in_the_project_file_refuses_a_read_of_the_file_it_names`
+`verified-by: bravebot_agent::turn::a_single_slash_edit_deny_in_the_local_file_stops_a_write_and_an_edit`
+`verified-by: bravebot_agent::turn::a_single_slash_ask_rule_in_the_project_file_asks_before_a_write`
+`verified-by: bravebot_agent::turn::a_single_slash_deny_in_a_named_file_inside_the_project_starts_beside_that_file`
+`verified-by: bravebot_agent::home::a_settings_rule_is_anchored_at_the_home_directory_the_accessor_names`
+`verified-by: bravebot_config::settings::an_object_entrys_rule_is_anchored_where_a_line_is`
+
+<a id="PERM-4"></a>
+### PERM-4: a one-segment relative pattern floats where it restricts, not where it grants
+
+`Edit(src/**)` in `deny` or `ask` covers a `src` directory at any depth, including a nested copy
+under `vendor`. The same pattern in `allow` covers only the `src` at the top. A pattern written
+from `./` does not float in any list, so `Edit(./src/**)` covers only the `src` at the top.
+
+**Why.** A rule that restricts should cover the copy somebody forgot about; a rule that grants
+should cover what it says and no more. Anchoring the pattern, as `Edit(./src/**)` or
+`Edit(/src/**)`, pins it to one place in every list.
+
+`verified-by: bravebot_core::permissions::a_single_segment_directory_floats_when_it_restricts_and_not_when_it_grants`
+`verified-by: bravebot_core::permissions::a_dotted_pattern_of_several_segments_stays_at_the_top_in_every_list`
+
+<a id="PERM-5"></a>
+### PERM-5: a command specifier matches a stage's words, with `*` standing in for any text
+
+A rule with no `*` matches one exact command. A trailing ` *` also matches the bare command, but
+only when it is the rule's only wildcard, so `Bash(ls *)` covers `ls` and `Bash(* --help *)` does
+not cover `npm --help`. The space before a trailing `*` is part of the rule: `Bash(ls *)` does not
+match `lsof` and `Bash(ls*)` does. A trailing `:*` is the same rule as a trailing ` *`, and a colon
+anywhere else is an ordinary character.
+
+A rule is written as a line and matched against a stage's program word and arguments, each one word
+as the compiler split them. A space in an `allow` rule covers only the gap between two words, so
+`Bash(ls *)` does not cover `"ls /x"`, one program word naming a script at `ls /x`, and
+`Bash(python3 script.py *)` does not cover `python3 "script.py x"`. A space in a `deny` or `ask` rule
+covers a space inside a word as well, so the same two rules in either of those lists cover both
+lines. A `*` covers any text in every list, spaces and gaps included, so `Bash(ls*)` covers
+`"ls /x"`. An `allow` rule therefore cannot spell out a word holding a space:
+`Bash(python3 my script.py)` names three words, and only a `*` in the space's place covers
+`python3 "my script.py"`.
+
+**Why.** Matched against the words run together into one line, `"ls /x"` read as `ls` given `/x`,
+so `Bash(ls *)` stopped the prompt and a script nobody had seen ran unasked. The asymmetry is
+[PERM-4](#PERM-4)'s: a rule that restricts covers everything it covered when the words were run
+together, and a rule that grants covers what it names.
+
+`verified-by: bravebot_core::permissions::a_command_pattern_matches_where_the_documented_table_says`
+`verified-by: bravebot_core::permissions::a_trailing_colon_star_is_a_trailing_wildcard_and_a_colon_elsewhere_is_not`
+`verified-by: bravebot_core::permissions::a_space_in_an_allow_rule_covers_only_the_gap_between_two_words`
+`verified-by: bravebot_core::permissions::a_space_in_a_deny_or_ask_rule_covers_a_space_inside_a_word_too`
+`verified-by: bravebot_core::permissions::a_star_in_an_allow_rule_covers_any_text_and_a_space_after_it_only_a_gap`
+`verified-by: bravebot_core::policy::an_allow_rule_does_not_cover_a_program_whose_name_holds_a_space`
+`verified-by: bravebot_core::policy::a_deny_rule_still_covers_a_program_whose_name_holds_a_space`
+`verified-by: bravebot_agent::turn::an_allow_rule_does_not_run_a_program_whose_name_holds_a_space_unasked`
+
+<a id="PERM-6"></a>
+### PERM-6: every stage of a pipeline is judged on its own
+
+Restricting any one stage restricts the pipeline. Granting it needs every stage granted: one stage
+no rule covers is a program nobody has answered for, and what it prints is what the next stage
+reads.
+
+An argument is never re-split, so a denied program cannot be smuggled inside one. The splitting is
+done once, here, and nothing re-splits afterwards: a stage's argv is final by the time a rule is
+matched against it, whether the stage arrived as an argument list or was compiled from a command
+line. No shell ever sees either.
+
+`verified-by: bravebot_core::permissions::a_pipeline_is_allowed_only_when_every_stage_is`
+`verified-by: bravebot_core::permissions::restricting_one_stage_restricts_the_whole_pipeline`
+`verified-by: bravebot_core::policy::a_denied_step_refuses_the_whole_line`
+`verified-by: bravebot_core::policy::a_denied_program_cannot_be_smuggled_inside_an_argument`
+
+## What a rule does
+
+<a id="PERM-7"></a>
+### PERM-7: a deny rule refuses before anything is opened or started
+
+A denied file is not read, not enumerated, and not written, a denied program does not run, and a
+denied host is not fetched: the refusal comes before the file is opened, before the program is
+looked for, and before the request goes out. A `Read` deny rule also stops a write to the path it
+covers.
+
+The rule is about the file, not about the spelling used to ask for it. Naming a path through a
+reference reaches the same refusal, including on the one route that may read quarantined content: a
+processor is handed no denied file either. The planner is told the rule refused and that retrying is
+not the answer, and where the path arrived through a reference the refusal names the reference rather
+than the path, as everything else that goes back to the planner does. Where the person's own file
+gave the rule a reason ([PERM-1](#PERM-1)), the refusal carries that sentence as they wrote it,
+including a path it names: the reference-not-path rule is about the name the call used, and this is
+the person's own text. A `reason` any other layer wrote is in no refusal the planner is given,
+because the planner is given nothing a checkout wrote.
+
+The file a name lands on is judged as well as the name. A call is checked against the rules under
+the name it gave and again under the name it reaches once every symbolic link on the way is followed
+and the volume has given the stored spelling, so a link to a denied file is refused, a case variant
+of a denied directory is refused whether or not the volume's case handling could be probed, and an
+`ask` rule still asks for a write that comes through a link. A file tool's path that starts with `~`
+is also judged under the absolute path it stands for ([READ-4](tools/read-file.md#READ-4)), since a
+rule anchored at the home directory never matches the spelling `~/x`, and that name is reachable only
+once the home is opened. A `run` redirection whose target climbs with `..` is also judged under the
+name with each `..` taken out where the entry before it is not a link, and under the file it opens
+once everything is followed, so `config/sub/../app.env`, or `../app.env` run from `config/sub`, is
+refused by a rule naming `config/app.env` whether or not `config` or the file is a link. A file with more than one hard link is also judged
+under each other name the open directories hold for it, found by device and inode, so a hard link to
+a denied file is refused in a read and in a write. The walk covers every directory, and where
+it reaches the search cap or cannot list a directory while a `Read` or `Edit` deny rule is in force
+the call is refused. A file under an open directory that is the same directory as another open one
+(a macOS firmlink or a Linux bind mount, once a person has opened it with `/add-dir`) is also judged
+under its name beneath each of them, found by device and inode of the directory. This is on Unix
+only. The second name can add a refusal or a question and never removes one. On Windows a name
+that reads as something other than the file it spells (a stream, a device, a trailing dot or space, an 8.3 short name) is refused outright, since
+the rules cannot be matched against a spelling that is not the file's. A `run` redirection's
+target, read or written, is held to the same refusal as a file tool's path. A short name is
+accepted only in the spelling of the open directory the target lands in, which names that one
+directory; in a target that reaches no open directory through an ancestor of its own it is refused
+wherever it appears.
+
+The same holds for the spelling a rule is written in. A `deny` or `ask` path rule whose segments
+before the first `*` pass through a symbolic link also covers the place the link reaches, under the
+name a gate holds that place by ([PERM-3](#PERM-3)): with `linked` a link to `real`,
+`Read(linked/**)` refuses `real/secret.txt` asked for by that name, in a call or in a walk, and a
+`//` rule written through a link to an added directory covers the files in it. A name is a place
+at the top of the workspace too, so with `.env` a link, `Read(.env)` covers the file it reaches. A
+`deny` or `ask` rule written as a full path, or from `~/`, that lies inside the workspace also
+covers the place under the workspace-relative name the file tools ask by, so with a session opened
+in the home directory `Read(~/.ssh/**)` refuses `.ssh/id_ed25519`; a rule about a place outside the
+workspace is left as written. The rule stays one rule, and the name it
+reaches is covered at that place only, not wherever it appears as the written pattern may be
+([PERM-4](#PERM-4)). An `allow` rule is matched as written, so a grant does not reach further than
+the spelling the person approved.
+
+A `deny` or `ask` path rule is also about the file whichever Unicode form of its name the rule or
+the call is spelled in. Both are compared in the one form every canonically equivalent spelling of a
+name shares, so `Read(caf\u{e9}.md)` refuses `cafe\u{301}.md` and the reverse, on a volume that
+opens a file under either form and on one that does not, where covering both costs a refusal and
+never grants one. Compatibility forms are not equivalents: a full-width letter is not the letter. An
+`allow` rule is matched as written.
+
+Nor is it about the directory a call happened to name, so it holds whichever way a walk arrives at
+the file. A listing or a search consults the rules for every entry its walk reaches as well as for
+the directory it was asked for, and an entry a rule covers is left out before the file is opened or
+its name is reported. A directory a rule covers is not descended into. Both are decided ahead of
+the walk's own caps, so a rule never costs a listing or a search the files it was asked about. A walk
+does not follow a symbolic link it meets: the entry is neither reported nor descended into, but it
+is counted, and a listing or a search says how many it did not enter
+([LIST-6](tools/list-files.md#LIST-6), [SEARCH-13](tools/search.md#SEARCH-13)). A link to a denied
+file is not a second name a listing or a search hands back, because the count holds no name. A hard link is a
+regular file under another name, so a walk reaches it, and an entry is left out when a rule covers
+any name its file has, found by device and inode as for a call that names it. A hard link to a
+denied file is left out of a listing, a search and a repository map as the file is, whichever
+directory the call named. An entry reached by a second path to an open tree (a firmlink or a bind
+mount opened with `/add-dir`) is left out when a rule covers its name beneath the first path, and
+so is a directory. Where the search for the other names reaches the search cap or cannot list a
+directory, or a name of the file is not UTF-8, an entry with more than one name is left out while a
+`Read` deny rule is in force. This is on Unix only.
+
+The files this program reads from the project on its own account are judged the same way. The
+project's instructions file, the file it points at, and a skill or a definition the project holds,
+where a rule covers it under the name it was found by or the one it lands on, are left out of the
+turn and the person is told, so a checkout cannot put a denied file into the system prompt by
+committing a link to it or a short file naming it.
+
+What comes back says a rule was the reason only where the rule is the whole reason: a search that
+had nothing left to read reports that and that retrying is not the answer, and one that read the
+rest of the tree reports what it found and nothing more. Saying which entries were left out, or how
+many, would hand over the names the rule is keeping back, and a planner able to narrow a glob until
+the notice appears has the names either way.
+
+What a `WebFetch` rule reaches is the fetch tool. This program's own connection to its backend is
+egress too and no rule about a website governs it, which [fetch-url.md](tools/fetch-url.md) sets
+out, and a command line that talks to the network is judged as the command line it is.
+
+A file named with `@`, `--file` or a drop is judged the same way before it is vouched for or opened,
+and a covered one is left out of the turn with a notice to the person. An `lsp` answer leaves out a
+location in a covered file without saying how many it left out, and its hover text, which names no
+file, is withheld while any rule covers reading a path.
+
+**Why.** A file whose contents are off limits is not protected if it can be overwritten, so the two
+families are consulted together for a write. Enumerating a directory and searching it both report
+what is in it, so a rule that fences a tree fences those too. A processor is the component allowed
+to read what nobody vouched for, which makes it the route a rule most needs to cover rather than the
+one it can afford to miss.
+
+A deny rule also holds against a workspace the user vouched for, which is what makes one worth
+writing: saying yes at startup trusts the whole tree, and a rule is how one file is kept out of that
+answer without declining the rest of it. It holds against a mode that answers every prompt for the
+same reason: the refusal comes before there is a prompt, so there is nothing for a mode to answer.
+
+`verified-by: bravebot_agent::tools::a_rule_over_a_home_file_refuses_a_path_spelled_from_the_home_directory`
+`verified-by: bravebot_core::permissions::a_deny_or_ask_rule_covers_every_canonical_spelling_of_a_name`
+`verified-by: bravebot_core::permissions::a_rule_about_a_name_does_not_cover_the_name_with_whitespace_at_an_end`
+`verified-by: bravebot_agent::workspace::a_rule_about_one_name_decides_no_file_the_volume_holds_apart_from_it`
+`verified-by: bravebot_core::permissions::a_canonical_spelling_is_covered_in_any_case_on_a_folding_volume`
+`verified-by: bravebot_core::permissions::an_allow_rule_is_matched_in_the_spelling_it_was_written_in`
+`verified-by: bravebot_core::policy::a_denied_step_refuses_the_whole_line`
+`verified-by: bravebot_agent::turn::a_named_file_a_deny_rule_covers_is_left_out_of_the_turn`
+`verified-by: bravebot_agent::lsp::a_location_in_a_denied_file_is_left_out_of_an_answer`
+`verified-by: bravebot_agent::cmdline::a_rule_refuses_a_line_before_its_program_is_looked_for`
+`verified-by: bravebot_agent::turn::a_denied_program_is_refused_by_the_rule_and_not_for_being_absent`
+`verified-by: bravebot_agent::turn::a_project_relative_deny_rule_refuses_a_redirection_to_the_file`
+`verified-by: bravebot_agent::turn::a_project_relative_deny_rule_refuses_a_redirection_that_reads_the_file`
+`verified-by: bravebot_agent::turn::a_deny_rule_on_a_file_refuses_a_redirection_that_reaches_it_through_a_parent_directory`
+`verified-by: bravebot_agent::turn::a_deny_rule_on_a_file_refuses_a_redirection_that_reads_it_through_a_parent_directory`
+`verified-by: bravebot_agent::turn::a_redirection_through_a_link_and_a_parent_directory_is_judged_by_the_file_it_opens`
+`verified-by: bravebot_agent::turn::a_rule_written_through_a_link_refuses_a_redirection_that_reaches_its_file_through_a_parent_directory`
+`verified-by: bravebot_agent::turn::a_redirection_through_a_parent_directory_to_a_file_no_rule_names_still_runs`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_read_and_its_contents_do_not_reach_the_planner`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_written_even_where_writes_are_approved`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_read_by_a_processor_either`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_written_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_edited_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_read_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::each_alias_in_the_table_is_refused_by_a_deny_rule_unless_it_is_a_listed_gap`
+`verified-by: bravebot_agent::workspace::a_hard_link_is_found_by_device_and_inode_and_the_walk_gives_up_at_its_cap`
+`verified-by: bravebot_agent::tools::a_hard_link_is_refused_when_the_walk_for_its_other_names_gives_up_under_a_write_rule`
+`verified-by: bravebot_agent::workspace::a_name_is_respelled_under_each_open_directory_that_is_the_same_directory`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_read_through_a_second_path_to_the_tree`
+`verified-by: bravebot_agent::turn::a_file_an_edit_rule_denies_is_not_written_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_file_an_edit_rule_denies_is_not_edited_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_denied_file_is_not_created_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_link_to_a_directory_a_rule_covers_is_not_read_through`
+`verified-by: bravebot_agent::turn::a_link_to_a_directory_a_rule_covers_is_not_written_through`
+`verified-by: bravebot_agent::turn::a_link_to_a_directory_a_rule_covers_is_not_listed_or_searched_through`
+`verified-by: bravebot_agent::turn::an_ask_rule_still_prompts_for_a_write_through_a_link_to_the_file`
+`verified-by: bravebot_agent::turn::a_denied_directory_is_not_written_under_another_case_of_its_name`
+`verified-by: bravebot_agent::turn::a_denied_file_does_not_reach_the_system_prompt_through_an_agents_file_linking_to_it`
+`verified-by: bravebot_agent::turn::a_denied_file_an_agents_file_points_at_does_not_reach_the_system_prompt`
+`verified-by: bravebot_agent::skills::a_skill_a_deny_rule_covers_is_offered_nowhere_through_a_link_to_it`
+`verified-by: bravebot_agent::agents::a_definition_a_deny_rule_covers_is_selectable_nowhere_through_a_link_to_it`
+`verified-by: bravebot_agent::turn::a_file_a_rule_names_through_a_link_is_not_read_or_written_by_its_own_name`
+`verified-by: bravebot_agent::turn::a_file_a_rule_names_through_a_link_is_not_listed_or_searched`
+`verified-by: bravebot_agent::turn::a_full_path_rule_through_a_link_to_an_added_directory_covers_its_files`
+`verified-by: bravebot_agent::turn::an_ask_rule_spelled_through_a_link_still_prompts_for_a_write_to_its_target`
+`verified-by: bravebot_agent::permissions::a_restricting_rule_spelled_through_a_link_covers_the_file_it_reaches`
+`verified-by: bravebot_agent::permissions::an_unattended_run_follows_a_rule_spelled_through_a_link_too`
+`verified-by: bravebot_agent::permissions::the_name_a_link_reaches_is_covered_at_that_place_only`
+`verified-by: bravebot_agent::permissions::an_allow_rule_spelled_through_a_link_grants_only_the_spelling_it_names`
+`verified-by: bravebot_agent::permissions::a_rule_through_a_link_covers_its_target_on_whichever_side_of_the_root_it_is`
+`verified-by: bravebot_agent::permissions::a_rule_under_a_linked_home_directory_covers_the_directory_it_reaches`
+`verified-by: bravebot_agent::permissions::a_rule_naming_a_link_covers_the_file_it_reaches`
+`verified-by: bravebot_agent::permissions::a_full_path_rule_with_no_link_in_it_covers_a_project_file_by_its_relative_name`
+`verified-by: bravebot_agent::permissions::a_home_rule_covers_the_relative_name_in_a_session_opened_in_the_home_directory`
+`verified-by: bravebot_agent::tools::a_home_rule_refuses_the_relative_name_in_a_session_opened_in_the_home_directory`
+`verified-by: bravebot_core::permissions::a_restricting_path_rule_is_followed_from_the_segments_before_its_first_star`
+`verified-by: bravebot_core::permissions::a_landing_is_read_in_the_spelling_a_path_is_matched_in`
+`verified-by: bravebot_agent::workspace::names_windows_reads_as_something_else_are_refused_there_only`
+`verified-by: bravebot_agent::workspace::a_path_a_run_opens_is_refused_where_windows_reads_a_name_in_it_as_another_file`
+`verified-by: bravebot_agent::tools::a_redirection_through_a_name_windows_reads_as_another_file_is_refused_before_it_runs`
+`verified-by: bravebot_agent::turn::a_redirection_through_a_name_windows_reads_as_another_file_is_refused`
+`verified-by: bravebot_agent::turn::a_denied_host_is_refused_without_asking`
+`verified-by: bravebot_agent::turn::a_deny_rule_holds_against_a_trusted_workspace`
+`verified-by: bravebot_agent::turn::a_deny_rule_holds_where_every_permission_check_is_bypassed`
+`verified-by: bravebot_agent::turn::a_deny_rule_holds_when_a_search_walks_the_directory_above_the_file`
+`verified-by: bravebot_agent::turn::a_deny_rule_holds_when_a_listing_walks_the_directory_above_the_file`
+`verified-by: bravebot_agent::workspace::a_search_does_not_open_a_file_a_deny_rule_covers`
+`verified-by: bravebot_agent::workspace::a_listing_does_not_enumerate_a_tree_a_deny_rule_covers`
+`verified-by: bravebot_agent::workspace::a_denied_file_does_not_spend_a_searchs_budget`
+`verified-by: bravebot_agent::turn::a_walk_does_not_report_a_link_to_a_denied_file`
+`verified-by: bravebot_agent::turn::a_walk_does_not_read_a_hard_link_to_a_denied_file`
+`verified-by: bravebot_agent::workspace::a_search_does_not_open_a_hard_link_to_a_file_a_deny_rule_covers`
+`verified-by: bravebot_agent::workspace::a_search_leaves_out_a_file_with_two_names_where_the_walk_for_the_other_name_gives_up`
+`verified-by: bravebot_agent::workspace::a_file_with_a_name_that_is_not_utf8_is_covered_and_not_spelled_as_its_lossy_lookalike`
+`verified-by: bravebot_agent::workspace::a_search_leaves_out_a_file_with_a_name_no_rule_can_be_written_about_and_only_that_file`
+`verified-by: bravebot_agent::workspace::a_search_of_a_second_path_to_the_tree_does_not_open_a_file_a_deny_rule_covers`
+`verified-by: bravebot_agent::workspace::a_listing_of_a_second_path_to_the_tree_does_not_name_a_directory_a_deny_rule_covers`
+`verified-by: bravebot_agent::tools::a_read_refused_by_a_rule_with_a_reason_says_the_reason`
+`verified-by: bravebot_agent::tools::a_write_refused_by_a_rule_with_a_reason_says_the_deciding_rules_reason`
+`verified-by: bravebot_agent::tools::a_reason_a_checkout_wrote_is_not_in_a_refusal_and_the_persons_own_is`
+`verified-by: bravebot_agent::turn::a_reason_a_checkout_wrote_is_not_in_the_refusal_the_planner_is_given`
+
+<a id="PERM-8"></a>
+### PERM-8: an allow rule answers a prompt and grants nothing else
+
+It stops the asking. It does **not** make a program's output trusted, and it does not raise any
+label: output carries what it would have carried, which is untrusted unless a person vouched for
+every stage.
+
+The rule is the person's own, which [PERM-14](#PERM-14) and [PERM-15](#PERM-15) are what decide:
+stopping the asking is a capability, so the rule is one they wrote in their own file or one they
+granted at a question that named it. This clause is about a rule that reached the gate rather than
+about every line spelling `allow` in every file that was read.
+
+**Why.** Vouching at a prompt grants those two things together because a person is looking at one
+command and can answer for both. A pattern covers commands nobody has read, so it cannot carry the
+second claim. If a rule could trust output, one line in a settings file would turn fetched bytes
+into routing, which is the whole thing labels exist to prevent.
+
+`verified-by: bravebot_core::policy::a_rule_the_user_wrote_in_advance_answers_the_run_prompt`
+`verified-by: bravebot_core::policy::an_allow_rule_stops_the_prompt_and_does_not_trust_what_the_command_prints`
+`verified-by: bravebot_agent::turn::an_allow_rule_reaches_the_path_it_names_and_no_other`
+
+<a id="PERM-9"></a>
+### PERM-9: five prompts no rule can answer
+
+A run that would put the user's private data into a program asks whatever the rules say. A write
+whose destination is known only through a reference asks whatever the rules say. A run carrying an
+environment assignment written in front of one of its programs asks whatever the rules say. A call
+that would put the user's private data into a server's tool asks whatever the rules say, and
+whatever a standing answer says ([SERVERS-7](mcp-servers.md#SERVERS-7)). A write whose destination
+is a protected path asks whatever the rules say, an `Edit` allow rule and the trust map included, and
+whatever the mode says short of bypassing ([MODE-2](permission-modes.md#MODE-2)). The paths are any
+`.git`, `.bravebot` or `.husky` component and the files `.gitmodules`, `.gitconfig` and
+`.pre-commit-config.yaml`, compared as a volume that folds case and normalizes opens them (`.GIT`,
+`.huſky`) and with a trailing dot or space dropped. The destination is read as named, as it lands after links are followed, and under each other
+name of a file with a hard link (PERM-7).
+
+**Why.** None of them is the question a rule answers. The first and the fourth are about
+confidentiality: a rule saying which commands may run or which tools may be called is not consent
+to hand one the user's data, exactly as vouching for a command is not, and a server is further from
+the person than a local program is. The second is structural: that prompt is the only moment such a path is shown to
+anybody, and the endorsement is minted for the path the person saw, so nothing a pattern says can
+stand in for having looked. The third is about what a rule can say at all: a rule is matched against
+the program's name and its arguments ([PERM-5](#PERM-5)), and an assignment is in neither, so `Bash(git log)` matches `LD_PRELOAD=./evil.so git log` and no rule anybody could write
+distinguishes them. An assignment decides what a program loads before its arguments are read
+([tools/run.md](tools/run.md)), so allowing the one is not allowing the other. The fifth is about
+what a write is: a file under `.git/hooks` or `.git/config` runs with the person's rights the next
+time git runs, so an allow rule for a tree is not consent to plant one, and the decision reads only
+the planner's routing path, as a deny rule does.
+
+`verified-by: bravebot_core::policy::private_input_asks_even_for_a_line_a_rule_allows`
+`verified-by: bravebot_core::policy::a_reference_named_write_asks_whatever_a_rule_says`
+`verified-by: bravebot_core::policy::an_environment_assignment_asks_even_for_a_line_a_rule_allows`
+`verified-by: bravebot_core::policy::private_arguments_ask_even_for_a_tool_a_rule_allows`
+`verified-by: bravebot_core::policy::a_protected_path_asks_whatever_a_rule_or_the_trust_map_says`
+`verified-by: bravebot_core::protected::a_git_component_anywhere_in_the_path_is_protected`
+`verified-by: bravebot_core::protected::an_ordinary_path_and_a_lookalike_are_not_protected`
+`verified-by: bravebot_agent::permission_mode::accepting_edits_puts_a_protected_write_to_the_person_and_bypassing_answers_it`
+`verified-by: bravebot_agent::turn::accepting_edits_and_an_allow_rule_do_not_answer_a_write_that_runs_code_later`
+`verified-by: bravebot_agent::turn::a_write_through_a_hard_link_to_a_hook_is_put_to_the_person`
+`verified-by: bravebot_agent::turn::accepting_edits_puts_an_edit_of_a_hook_to_the_person`
+`verified-by: bravebot_agent::turn::accepting_edits_puts_a_download_into_a_hook_to_the_person`
+`verified-by: bravebot_agent::manifest::accepting_edits_puts_a_planned_write_to_a_hook_to_the_person`
+`verified-by: bravebot_agent::mcp::a_call_after_a_servers_answer_was_vetted_asks_though_a_rule_allows_it`
+`verified-by: bravebot_agent::mcp::reading_workspace_files_leaves_a_call_a_rule_allows_unasked`
+
+The planner's arguments to a server's tool are private once private content was let out of
+quarantine for it, by `vet_content`, `read_output` or a delegate's report, and they stay private
+from then on, a resumed session included, unless the turn that let it out is undone and takes it
+back out of the conversation ([LABEL-8](labels.md#LABEL-8)). So the fourth prompt is reached by
+every call after such a release. A workspace file the planner was shown does not make them private,
+since that is the project's own data. A command line or a url the planner writes is not labelled
+this way: those are read as the planner's routing, and the first prompt is about a program's
+input, not its command line.
+
+<a id="PERM-10"></a>
+### PERM-10: no rule extends reach, and `additionalDirectories` asks before it opens
+
+An allow rule cannot make a path reachable that the workspace and the directories the user opened
+do not already cover. A directory named in `additionalDirectories` is put to the person as a
+question of its own when the session opens, and one they accept is opened by the same route
+`/add-dir` takes and trusted for the session on the same terms. One they decline is neither
+reachable nor vouched for. A relative name in it means a path under the workspace.
+
+The mode that answers every permission question answers these too. A session resumed with the map
+its own user left is asked nothing and opens none of them, since the directories it has open are
+the ones its own record reopened. `/clear` closes the ones that were open and opens none, because
+the answer that opened one was given by the session being cleared.
+
+**Why.** Reach and asking are separate questions, and a rule about prompts must not answer the
+other one by accident. These files are read before anything runs and the layers a checkout carries
+arrive with the checkout, so a name in one that opened a directory by itself would be reach and
+trust granted by whatever last edited the file: naming a directory asks for it, and a person grants
+it. Sharing the route with `/add-dir` past that point is what keeps a directory a file named and a
+directory a person typed from being reachable on different terms.
+
+`verified-by: bravebot_agent::permissions::the_directories_a_file_named_come_back_in_order`
+`verified-by: bravebot_tui::trust_prompt::a_directory_a_file_named_is_opened_only_where_the_person_accepts_it`
+`verified-by: bravebot_tui::app::a_person_asked_about_the_workspace_is_asked_about_each_named_directory`
+`verified-by: bravebot_tui::app::a_resume_that_brought_its_own_map_opens_no_directory_a_file_named`
+`verified-by: bravebot_tui::app::an_accepted_directory_is_opened_and_trusted_like_one_typed`
+`verified-by: bravebot_tui::app::clearing_closes_the_directories_a_file_named_and_opens_none`
+
+## The file
+
+<a id="PERM-11"></a>
+### PERM-11: an unreadable rule is dropped, named, and takes nothing with it
+
+A line that is not a rule, names no family this agent has, has no anchor to resolve, holds a path
+with whitespace at an end ([PERM-3](#PERM-3)), or holds a quoted path specifier with nothing between
+the quotes (`Read("")`, which has its own wording and does not advise dropping the brackets alone)
+is dropped, and the rest of the file still applies. So
+is an entry that is not a line at all: a number, or a rule nested one array too deep. So is a `deny`,
+`ask` or `allow` value that is not an array, and a `permissions` block that is not an object, each
+named with the keys that lead to it and the file that wrote it. Every one dropped is reported: on
+`doctor`, and in the session where the file was read, named in the spelling the file used, with each
+control character drawn as its picture ([LAYER-3](layering.md#LAYER-3)). The desktop window's
+sentence about a dropped rule quotes the rule and the file spelled as in
+[PROMPT-1](prompting.md#PROMPT-1), so an invisible character or a trailing space in it is
+written out.
+
+**Why.** A misspelled deny rule reads as protection that is not there, which is the one failure
+here worth interrupting somebody over. Refusing the whole file instead would mean a typo in an
+allow rule quietly removed a deny rule's protection.
+
+`verified-by: bravebot_core::permissions::a_rule_that_cannot_be_read_is_dropped_and_reported`
+`verified-by: bravebot_core::permissions::brackets_holding_only_whitespace_are_empty_in_every_family`
+`verified-by: bravebot_core::permissions::a_path_specifier_with_whitespace_at_an_end_is_reported_and_decides_nothing`
+`verified-by: bravebot_agent::permissions::a_settings_rule_whose_path_has_whitespace_at_an_end_is_reported_and_decides_nothing`
+`verified-by: bravebot_core::permissions::one_unreadable_rule_does_not_discard_the_others`
+`verified-by: bravebot_config::settings::an_entry_that_is_not_a_rule_is_carried_out_to_be_reported`
+`verified-by: bravebot_config::settings::an_unreadable_entry_is_carried_out_of_whichever_rule_list_held_it`
+`verified-by: bravebot_config::settings::a_malformed_permissions_block_carries_no_rules`
+`verified-by: bravebot_config::settings::a_rule_list_that_is_not_a_list_is_carried_out_to_be_reported`
+`verified-by: bravebot_cli::running::doctor_keeps_the_home_rules_under_a_checkout_block_that_is_not_an_object`
+`verified-by: bravebot_cli::running::doctor_draws_the_control_characters_of_a_checkouts_settings_as_pictures`
+`verified-by: bravebot_cli::running::a_one_shot_run_draws_the_control_characters_of_a_checkouts_rule_as_pictures`
+`verified-by: bravebot_agent::permissions::a_line_that_is_not_a_rule_is_reported`
+`verified-by: bravebot_agent::permissions::an_entry_that_is_not_a_line_is_reported`
+`verified-by: bravebot_agent::permissions::an_entry_that_is_not_a_line_is_reported_to_a_run_nobody_is_watching`
+`verified-by: bravebot_agent::permissions::a_rule_list_that_is_not_a_list_is_reported_with_its_file`
+`verified-by: bravebot_agent::permissions::a_blank_rule_is_reported_as_empty`
+`verified-by: bravebot_core::permissions::a_dropped_rule_is_named_in_the_spelling_the_file_used`
+`verified-by: bravebot_agent::permissions::a_padded_unreadable_rule_is_reported_in_the_spelling_the_file_used`
+`verified-by: bravebot_ui_bridge::rules::a_padded_unreadable_rule_is_not_listed_as_in_force`
+`verified-by: bravebot_ui_bridge::rules::the_sentence_about_an_unreadable_rule_quotes_it_spelled`
+`verified-by: bravebot_agent::permissions::every_reason_a_rule_is_dropped_for_says_something_of_its_own`
+`verified-by: bravebot_agent::permissions::a_rule_with_quotes_around_nothing_is_not_told_to_mean_every_use_alone`
+`verified-by: bravebot_cli::running::doctor_names_a_permission_entry_that_is_not_a_rule`
+`verified-by: bravebot_cli::running::doctor_names_a_padded_path_rule_that_an_earlier_version_read_as_the_file_without_the_padding`
+`verified-by: bravebot_agent::permissions::a_checkouts_unreadable_allow_entry_is_named_to_a_run_nobody_is_watching`
+`verified-by: bravebot_config::settings::an_object_entry_with_no_rule_is_carried_out_to_be_reported`
+
+<a id="PERM-12"></a>
+### PERM-12: no rules means no change
+
+A session with no `permissions` block behaves exactly as one did before the block existed: every
+gate asks what it asked before, and nothing is refused for being unmentioned. The rules are read
+once per session, so a file edited while a session is open describes the next one.
+
+**Why.** The lists are empty by default and the empty case is the common one. A feature that
+altered a session nobody had configured would be a change to every session.
+
+`verified-by: bravebot_core::permissions::no_rules_decide_nothing`
+`verified-by: bravebot_agent::permissions::no_block_is_no_rules`
+`verified-by: bravebot_config::settings::the_permissions_block_and_the_env_block_do_not_need_each_other`
+`verified-by: bravebot_ui_bridge::rules::a_rule_written_after_a_session_opened_governs_the_next_one`
+
+## The question
+
+<a id="PERM-13"></a>
+### PERM-13: a question about a named directory names the directory it would open
+
+A name in `additionalDirectories` is resolved before it is put to anybody, and the question shows
+what it resolved to. A name that cannot be opened whatever the answer is reported instead of asked
+about, and a directory two layers both named is one question. A relative name is taken against the
+working directory as `/add-dir` takes one ([TRUST-9](trust-map.md#TRUST-9)), so it is reported where
+that directory's name is not text.
+
+**Why.** Opening a directory follows a name wherever it leads, so a question about the spelling
+collects an answer about a different tree: a link inside a checkout resolves somewhere else
+entirely, and the path in the box would begin with the person's own project while the grant landed
+outside it. A question that changes nothing either way, and one already answered a box ago, both
+train the habit of answering without reading, which is the whole of what asking is worth.
+
+`verified-by: bravebot_tui::app::a_named_directory_is_resolved_before_it_is_asked_about`
+`verified-by: bravebot_tui::app::a_directory_two_layers_both_named_is_asked_about_once`
+`verified-by: bravebot_tui::app::a_name_that_cannot_be_opened_is_said_so_rather_than_asked_about`
+`verified-by: bravebot_tui::app::a_relative_name_is_refused_against_a_working_directory_whose_name_is_not_text`
+
+## Which file a rule may be written in
+
+<a id="PERM-14"></a>
+### PERM-14: only the person's own file may write a rule that grants
+
+An `allow` rule is read from `~/.bravebot/settings.json`, and from a file `--settings` named that
+resolves outside the workspace and outside the one the session opened in. An `allow` rule in
+`.bravebot/settings.json`, in `.bravebot/settings.local.json`, or in a `--settings` file that resolves
+inside either takes
+effect on being read by nothing: it answers no prompt and permits no fetch. Every one is reported,
+with the file it was written in, on `doctor` and in the session that read the file: as dropped, or as
+granted where the person granted it at the question [PERM-15](#PERM-15) puts.
+
+`deny` and `ask` are read from every layer and are unaffected. So are the names in
+`additionalDirectories`, which [PERM-10](#PERM-10) already puts to the person one question at a
+time. An entry that is not a rule at all is reported under [PERM-11](#PERM-11) whatever layer wrote
+it, and is not also reported here: a rule nothing can act on is nobody's grant.
+
+**Why.** Every other list narrows; this one grants. A settings file in a checkout arrives with the
+checkout, so an `allow` entry read out of one would let whoever last edited the repository answer an
+approval prompt on behalf of whoever cloned it: a `Bash` entry runs a program with that person's
+privileges, an `Edit` entry writes without the question, and a `WebFetch` entry turns a redirect to
+a host nobody was shown from a refusal into a success. That is the capability
+[backends.md](backends.md#BACKEND-1) says no settings file grants, and it is the reading
+[#140](https://github.com/brave/bravebot/issues/140) already settled for `additionalDirectories`: a
+name in a checkout's file is a request, not a grant. The local layer is the same file under another
+name, since nothing stops one being committed, which is why `vetting` reads the two identically. A
+`--settings` file is a path somebody typed at this invocation, which is their own claim, but the
+flag can name a file inside the checkout and a README saying so would be the same grant by another
+route. Moving out of that checkout with `/cd` does not change who wrote the file. The report is [PERM-11](#PERM-11)'s reasoning applied to a readable rule: a rule dropped in
+silence reads to whoever wrote it as one in force.
+
+`verified-by: bravebot_config::settings::a_project_layer_allow_rule_is_not_granted`
+`verified-by: bravebot_config::settings::the_local_layer_allow_rule_is_not_granted_either`
+`verified-by: bravebot_config::settings::the_home_layer_may_write_an_allow_rule`
+`verified-by: bravebot_config::settings::a_project_layer_does_not_add_to_the_home_layers_allow_rules`
+`verified-by: bravebot_config::settings::a_project_layers_deny_and_ask_rules_still_apply`
+`verified-by: bravebot_config::settings::a_project_layer_may_still_name_a_directory_to_ask_about`
+`verified-by: bravebot_config::settings::a_named_layer_outside_the_workspace_may_write_an_allow_rule`
+`verified-by: bravebot_config::settings::a_named_layer_inside_the_workspace_is_the_checkouts_file_under_another_name`
+`verified-by: bravebot_config::settings::a_named_layer_inside_where_the_session_began_grants_nothing_after_it_moves`
+`verified-by: bravebot_tui::app::a_named_file_in_the_checkout_left_behind_is_still_asked_about_after_moving`
+`verified-by: bravebot_agent::permissions::a_checkout_cannot_write_a_rule_that_answers_a_prompt`
+`verified-by: bravebot_config::settings::a_blank_allow_entry_is_not_reported_as_a_rule_that_was_withheld`
+`verified-by: bravebot_cli::running::doctor_names_an_allow_rule_a_checkout_wrote`
+`verified-by: bravebot_agent::permissions::an_allow_entry_a_checkout_wrote_is_proposed_only_where_it_is_a_rule`
+`verified-by: bravebot_cli::running::doctor_names_a_checkouts_unreadable_allow_entry_rather_than_offering_it`
+`verified-by: bravebot_cli::running::a_session_in_lines_names_an_allow_rule_a_checkout_wrote`
+
+<a id="PERM-15"></a>
+### PERM-15: a checkout proposes an allow rule, and a question naming every one grants them
+
+A checkout's `allow` entries are put to the person as one question when the session opens, after the
+workspace's own. It lists every rule it would grant, in the order the files wrote them, with the file
+each came from. Accepting grants exactly those rules, for this session and for later sessions opened
+in that workspace on the surface that asks; declining grants none and the session continues. Leaving
+at it starts no session.
+
+A list longer than the box scrolls between the question and the keys, which stay on the screen, and
+the row above the keys says how many rules have not been shown. A yes is taken only once every rule
+has been on the screen with its file, the rule and the file whole in one draw, and only at a draw
+with the question and the keys whole; until then `y` grants nothing, while `n` and leaving answer
+from the first draw. A rule too long for the box to show whole, a rule past the last row a scroll
+reaches, and a terminal too small to show the question, one rule with its file and the keys at once,
+are all places where no yes is taken; where a rule not shown yet is taller than the box, the row
+above the keys says it does not fit rather than pointing at the arrows. A page moves one row fewer
+than the box shows, so a rule of two rows split by the bottom edge is whole on the next page.
+
+The surface that asks is the interface. A run nobody is watching installs no `allow` rule at all
+([PERM-8](#PERM-8)'s reasoning, as `for_an_unattended_run` applies it), and a session in lines asks
+nothing here and so grants nothing: a grant is read where it can be asked for, and neither of those
+is a place that could have collected it. Both are the direction that asks.
+
+One question for the list rather than one per rule. Nothing is asked where nothing is proposed, and
+nothing is asked again about a rule that workspace's own record already holds. A rule that cannot be
+read is reported under [PERM-11](#PERM-11) rather than offered, and a granted rule is reported as in
+force on `doctor` and in the session that read it, where [PERM-14](#PERM-14) reports a dropped one.
+
+**What the answer is recorded in.** `~/.bravebot/granted/<key>.jsonl`, one file per workspace, keyed
+as the remembered command lines are ([tools/run.md](tools/run.md)) and covered by
+[state-directory.md](state-directory.md). One JSON object per line, appended. An entry holds the rule
+text as the person saw it and the file that proposed it, so a checkout that edits its rule after a
+grant is asked about again. Everything degrades to asking. No home directory, an unreadable file, a
+line this build cannot account for, a failed write: each means the record says nothing, and a record
+that says nothing is a session that asks. An incognito session writes none of it
+([incognito.md](incognito.md)) and still reads what is there.
+
+The mode that answers every permission question answers this one, on the terms it answers the
+workspace's, and records nothing: a grant written down for somebody who was never asked would outlive
+the flag that made it. A session resumed with the map its own user left is asked nothing and holds
+what its workspace's record already says, which is [PERM-10](#PERM-10)'s treatment of a resume that
+brought its own map.
+
+**Moving and starting over.** `/cd` reads the settings of the directory it moves to and builds the
+rules again from them, as a session begun there would. That checkout's `deny` and `ask` rules are in
+force from the first turn, what it proposes is put to the person in this question, and a rule granted
+for the checkout left behind is not in force. The mode that answers every question answers this one
+too, and leaving at it ends the session. `/clear` does the same for the directory it is in. The
+person's own layer and the file `--settings` named are read from the same place before and after
+either, and the named file grants only on [PERM-14](#PERM-14)'s terms. A subdirectory of the
+checkout reads no project layer, as a session begun there reads none, so moving into one leaves the
+checkout's own `deny` and `ask` rules behind with its grants.
+
+**Why.** [PERM-14](#PERM-14) closes the hole and costs the per-project answer with it. This is the
+way back: the checkout proposes and the person grants, which is what [#140](https://github.com/brave/bravebot/issues/140)
+and [PERM-10](#PERM-10) already settled for `additionalDirectories`.
+
+The list is what makes trust an acceptable gate here. The startup question asks about a directory, so
+granting these on that answer alone would collect an answer about a tree's content and spend it on
+capability, which is the defect wearing a consent story rather than consent to it. Naming each rule
+makes the answer informed consent for specific grants, on the reasoning [PERM-13](#PERM-13) gives for
+resolving a directory before showing it.
+
+Listed means shown, because one key grants the whole list. The checkout's author chooses the list,
+its order and the length of each rule, and so which rules fall below the bottom edge; a `y` that
+granted those would install a rule nobody was shown, and that rule answers the run prompt for every
+command it matches, in this session and every later one in the workspace
+([#954](https://github.com/brave/bravebot/issues/954)). Reaching the bottom is not the test: a jump
+to the end passes over the rules between, and a rule counted as shown on any one of its rows would be
+granted on a part of it.
+
+One question rather than thirty is the other half. A directory grants reach over a tree of its own,
+which is why [PERM-10](#PERM-10) asks about each; rules are a list a person reads at once, and the
+known cost recorded below about `additionalDirectories` opening thirty boxes is the thing not to
+repeat. A box about an empty list, or about a rule already answered, trains answering without
+reading, which is the whole of what asking is worth.
+
+Recording the rule text rather than the file's identity is what keeps the grant to what was on the
+screen. A checkout that changes its rule after a grant is proposing something nobody read, and the
+record in the person's own directory rather than in the tree it governs is [PERM-14](#PERM-14) one
+level up: a grant written inside the checkout could be committed.
+
+A grant is for one file in one workspace, so a session that carried it through `/cd` would be
+answering a prompt in a tree nobody was asked about, with another checkout's script run on an answer
+about the first one's ([#843](https://github.com/brave/bravebot/issues/843)).
+
+`verified-by: bravebot_tui::trust_prompt::the_rules_are_granted_only_where_the_person_accepts_them`
+`verified-by: bravebot_tui::app::a_checkouts_entry_is_proposed_here_only_where_it_is_a_rule`
+`verified-by: bravebot_tui::trust_prompt::nothing_is_asked_where_there_is_nothing_to_grant`
+`verified-by: bravebot_tui::trust_prompt::leaving_at_the_rules_question_grants_nothing_and_starts_no_session`
+`verified-by: bravebot_tui::trust_prompt::the_rules_prompt_names_every_rule_and_the_file_it_came_from`
+`verified-by: bravebot_tui::trust_prompt::the_rules_prompt_explains_what_granting_does`
+`verified-by: bravebot_tui::trust_prompt::a_list_longer_than_the_box_keeps_the_question_and_the_keys_and_says_how_many_rules_are_below`
+`verified-by: bravebot_tui::trust_prompt::y_grants_nothing_while_a_rule_has_not_been_on_the_screen`
+`verified-by: bravebot_tui::trust_prompt::jumping_to_the_end_of_a_list_leaves_the_rules_it_skipped_unread`
+`verified-by: bravebot_tui::trust_prompt::a_rule_that_wraps_past_the_box_is_never_granted`
+`verified-by: bravebot_tui::trust_prompt::a_terminal_too_small_for_a_rule_and_the_keys_grants_nothing`
+`verified-by: bravebot_tui::trust_prompt::a_rule_past_the_last_row_a_scroll_reaches_is_never_granted`
+`verified-by: bravebot_tui::trust_prompt::a_question_a_small_terminal_cuts_off_takes_no_answer`
+`verified-by: bravebot_tui::trust_prompt::the_hint_says_when_no_scroll_can_show_what_a_key_waits_for`
+`verified-by: bravebot_tui::trust_prompt::paging_through_a_list_on_a_short_terminal_reads_every_rule`
+`verified-by: bravebot_tui::app::a_person_asked_about_the_workspace_is_asked_about_the_rules_a_checkout_proposed`
+`verified-by: bravebot_tui::app::a_rule_granted_in_an_earlier_session_is_in_force_rather_than_asked_about_again`
+`verified-by: bravebot_tui::app::one_rule_text_in_two_files_is_granted_for_the_file_it_was_granted_in`
+`verified-by: bravebot_tui::app::bypassing_grants_the_rules_a_checkout_proposed_without_asking`
+`verified-by: bravebot_tui::app::a_resume_grants_only_the_rules_the_record_already_held`
+`verified-by: bravebot_tui::app::a_rule_granted_in_one_checkout_is_not_in_force_after_moving_to_another`
+`verified-by: bravebot_tui::app::moving_to_a_checkout_puts_its_own_deny_rules_in_force`
+`verified-by: bravebot_tui::app::a_rule_the_checkout_moved_to_proposes_is_asked_about_and_granted_there`
+`verified-by: bravebot_tui::app::leaving_at_the_rules_question_after_moving_leaves_the_session`
+`verified-by: bravebot_tui::app::bypassing_grants_what_the_checkout_moved_to_proposes_without_asking`
+`verified-by: bravebot_tui::app::reading_the_rules_again_in_the_same_checkout_asks_nothing_granted_and_reads_the_file_anew`
+`verified-by: bravebot_agent::permissions::a_rule_the_person_granted_answers_the_prompt_and_one_they_did_not_does_not`
+`verified-by: bravebot_agent::permissions::a_granted_rule_does_not_beat_a_deny_rule`
+`verified-by: bravebot_agent::permissions::a_granted_line_that_is_not_a_rule_is_reported_and_decides_nothing`
+`verified-by: bravebot_agent::granted::a_rule_granted_by_one_session_is_read_back_by_another`
+`verified-by: bravebot_agent::granted::a_rule_granted_in_one_workspace_is_not_granted_in_another`
+`verified-by: bravebot_agent::granted::a_rule_edited_since_it_was_granted_is_not_granted`
+`verified-by: bravebot_agent::granted::a_grant_for_one_file_is_not_a_grant_for_another`
+`verified-by: bravebot_agent::granted::a_rule_the_record_does_not_hold_is_not_granted`
+`verified-by: bravebot_agent::granted::a_second_grant_is_added_rather_than_replacing_the_first`
+`verified-by: bravebot_agent::granted::a_workspace_sharing_a_key_with_another_is_not_answered_by_its_lines`
+`verified-by: bravebot_agent::granted::a_record_that_cannot_be_read_grants_nothing`
+`verified-by: bravebot_agent::granted::an_entry_this_build_does_not_fully_understand_grants_nothing`
+`verified-by: bravebot_agent::granted::a_line_nothing_can_read_leaves_the_rest_of_the_record_answering`
+`verified-by: bravebot_agent::incognito::no_granted_rule_is_written_down`
+`verified-by: bravebot_agent::incognito::a_rule_an_earlier_session_granted_is_still_honoured`
+`verified-by: bravebot_cli::running::doctor_says_an_allow_rule_a_checkout_wrote_is_granted_where_it_was`
+
+## Refusals nobody has to enumerate
+
+<a id="PERM-16"></a>
+### PERM-16: `readsStayInWorkspace` holds the file tools to the workspace, whatever else is written
+
+`"permissions": { "readsStayInWorkspace": true }` refuses every path outside the working directory,
+in every mode. No directory may be opened beside the workspace, whatever a rule, a mode, or an answer
+given during the session would otherwise open: `/add-dir` and `--add-dir` are refused, a name in
+`additionalDirectories` is refused rather than put to anybody, and a directory that was already open
+when the key was read is not reachable either, which is what a resume reopening the directories its
+own record holds arrives as ([PERM-10](#PERM-10)).
+
+[CHECKOUT-7](checkouts.md#CHECKOUT-7) makes a delegate's checkout its
+workspace, so for that delegate this key refuses every path outside the checkout, the working
+directory among them.
+
+The working directory may not move outward either. `/cd` into the tree is allowed, and `/cd` to a
+parent or a sibling is refused, because a parent holds whatever was refused beside the old root and
+the move would reach by relocation what the key refuses by name. The destination is judged by where
+it lands rather than by how it is spelled, so a name inside the root that reaches outside it, a link
+among them, is refused as a move outward.
+
+**Where the refusal is made.** In the workspace, at the two places the reach exists: the one function
+every door onto a directory by name resolves through, and the test of where a path lands that every
+read, write, listing and search already goes through ([TRUST-10](trust-map.md#TRUST-10)). Not in the
+command that typed the path, because `/add-dir`, `--add-dir` and a name a settings file asked about
+are three doors onto one thing and a refusal written at one of them is two doors left open. Not in
+the kernel either: it does no I/O ([layering.md](layering.md#LAYER-1)), and where a path lands is a
+question only something that can resolve a name can answer, which is why the confinement this
+tightens is already there rather than in a policy gate. The value reaching the workspace is a boolean
+read from a settings file by whoever assembled the session, on the footing the search caps are read
+([SEARCH-9](tools/search.md#SEARCH-9)): nothing in the workspace reads a settings file, and nothing
+here is decided from a byte of content.
+
+A refusal says which key made it. Nothing a session did explains one, so a refusal that named neither
+the key nor a file would send somebody looking for a fault in the program. An absolute path refused
+for leaving the workspace names the key too, and offers a call that reads the drop and not `/add-dir`,
+which the same key refuses. A call that writes, edits, lists or searches is offered neither.
+
+**What it does not refuse.** The directory the session was given for itself stays reachable: nobody
+was asked for it, no rule opened it, and a session whose own directory went unreachable would fail
+every read and write it makes there ([TRUST-16](trust-map.md#TRUST-16)). `/cd` into the working
+directory is not refused: it replaces the workspace and closes what it left
+([TRUST-13](trust-map.md#TRUST-13)), and a directory inside the root was reachable already, so the
+move opens nothing. A file a
+person dropped on the window keeps the reach [dropping.md](dropping.md) gives it, for the reason
+stated there: the path is fixed into routing by a gesture before a turn starts, so it is not reach a
+rule, a mode or an answer opened.
+
+**Why.** `deny` refuses, and every `deny` rule names the thing it refuses, so confinement written that
+way is a list of what somebody thought of and a path nobody named is a path no rule covers. This is
+the same refusal stated once, as an invariant rather than an enumeration: there is nothing to keep up
+to date and nothing to leave out. Refusing the question rather than asking it is what makes it an
+invariant at all, since a box that can only be answered one way trains answering without reading,
+which is [PERM-13](#PERM-13)'s reasoning about a question that changes nothing.
+
+`verified-by: bravebot_agent::workspace::a_directory_by_name_is_refused_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::a_directory_already_open_is_unreachable_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::a_refusal_where_reads_stay_in_the_workspace_names_the_key_and_not_add_dir`
+`verified-by: bravebot_agent::workspace::a_directory_is_not_offered_to_be_opened_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::the_sessions_own_directory_stays_reachable_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::a_move_outward_is_refused_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::the_rule_holding_the_file_tools_to_the_workspace_holds_inside_a_checkout`
+`verified-by: bravebot_agent::workspace::a_move_inward_is_allowed_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_agent::workspace::a_move_through_a_link_out_of_the_tree_is_refused_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_tui::app::a_named_directory_is_refused_rather_than_asked_about_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_tui::app::add_dir_is_refused_where_reads_stay_in_the_workspace`
+`verified-by: bravebot_ui_bridge::workspace::a_turn_is_held_inside_the_project_where_its_settings_ask_for_it`
+`verified-by: bravebot_cli::running::add_dir_is_refused_where_a_layer_keeps_reads_in_the_workspace`
+
+<a id="PERM-17"></a>
+### PERM-17: `bypassUnreachable` makes the mode that asks about nothing unreachable, and refuses the flag
+
+`"permissions": { "bypassUnreachable": true }` puts the mode that answers every permission question
+out of reach on this machine, in this checkout, or for this person, depending on which layer wrote it.
+`--dangerously-skip-permissions` is then **refused** rather than ignored: the run stops, and what it
+says names the key and the file that asked for it, since the flag is documented and works everywhere
+else.
+
+**Where the refusal is made.** At the entry point, where the flag is taken off the command line
+before anything dispatches on it, so a session, a resumed session, a one-shot run and a session in
+lines are refused alike ([MODE-5](permission-modes.md#MODE-5)). In a session the same key is read when
+the session starts and again when it moves to another directory, and the mode is left off the ladder
+the key walks, so the flag and the key cannot disagree about whether the mode is available. A session
+already in the mode when a layer wrote the key is put back to asking.
+
+Refused rather than downgraded to asking. A run told to stop asking and carried on with a notice is a
+run whose author believes it is unattended, and the notice is on a stream nobody is reading.
+
+**Why.** The mode is reachable by the key in every session ([MODE-5](permission-modes.md#MODE-5)),
+so a person or an administrator who wants it out of reach on a machine has nothing else to write.
+What the mode gives up is written down under Known costs in
+[permission-modes.md](permission-modes.md), and the place it is wrong is a working machine, which is
+exactly the machine somebody else may have a legitimate say in.
+
+`verified-by: bravebot_cli::main::the_bypass_flag_is_refused_where_a_layer_made_the_mode_unreachable`
+`verified-by: bravebot_cli::running::the_skip_permissions_flag_is_refused_where_a_layer_made_bypass_unreachable`
+`verified-by: bravebot_tui::app::reading_the_rules_of_a_checkout_that_forbids_bypassing_takes_bypass_away`
+
+<a id="PERM-18"></a>
+### PERM-18: every layer may write either, and the strictest value any layer named holds
+
+Both keys are read from `~/.bravebot/settings.json`, from `.bravebot/settings.json`, from
+`.bravebot/settings.local.json`, from a file `--settings` named, and from the file an administrator
+pinned ([backends.md](backends.md)). A weaker layer asking for the restriction gets it, and no layer
+above can lift it: the merge takes the strictest value any layer named rather than the value of the
+strongest layer, which is the one merge rule here that is not the ordinary one.
+
+Absence means unset, the way `vetting.auto` does. A file naming neither key behaves exactly as one
+did before the keys existed ([PERM-12](#PERM-12)). `true` is the restrictive answer, and anything that
+is not a boolean is absence: `"true"` as a string, a number, a list, `null`. Each such key is
+reported, on `doctor` and in the session that read the file, with the file it was written in.
+`false` is an answer rather than absence, so a file that wrote it is reported as having named the key,
+and it does not lift what another layer asked for. Each key is read on its own: a file asking for one
+says nothing about the other.
+
+**Why.** `vetting.auto` is read from the home layer alone because a checkout could otherwise turn a
+person's screening *off*, and `allow` is read from the person's own file alone
+([PERM-14](#PERM-14)) because it grants. Neither of those is what these are. Both only ever refuse, so
+a checkout asking for one takes nothing from whoever cloned it, and the harm those two rules exist to
+stop cannot be done here in either direction. That also removes the ordering puzzle: with no raisable
+counterpart there is nothing for a stronger layer to lift, so "strictest wins" is not a precedence
+rule to remember but the only reading under which writing the key means anything.
+
+Reading them from every layer is what makes them worth having. A team that wants one checkout
+confined writes it in the checkout, a person who wants every session of theirs confined writes it in
+their own file, and an administrator who wants a machine confined pins it: the ordinary merge would
+have made each of those three depend on nobody else having spoken.
+
+`verified-by: bravebot_config::settings::a_file_naming_neither_refusing_key_refuses_nothing`
+`verified-by: bravebot_config::settings::any_layer_may_ask_for_either_refusal`
+`verified-by: bravebot_config::settings::a_stronger_layer_cannot_lift_what_a_weaker_one_asked_for`
+`verified-by: bravebot_config::settings::each_refusing_key_is_read_on_its_own`
+`verified-by: bravebot_config::settings::a_refusing_key_that_is_not_a_boolean_is_absence_and_is_named`
+`verified-by: bravebot_config::settings::saying_no_to_a_refusing_key_is_an_answer_rather_than_absence`
+`verified-by: bravebot_config::managed::the_two_keys_that_only_refuse_are_pinnable`
+`verified-by: bravebot_config::managed::a_pinned_refusal_that_is_not_a_boolean_is_absence_and_is_named`
+`verified-by: bravebot_cli::running::doctor_names_a_refusing_key_that_is_not_a_boolean`
+
+<a id="PERM-19"></a>
+### PERM-19: an administrator's `deny` and `ask` rules are added to every layer's, and `allow` is never read from the file
+
+The file an administrator pinned ([backends.md](backends.md)) may write `permissions.deny` and
+`permissions.ask`, in the spellings every other file uses. They are added to the rules every other
+layer wrote, ahead of them, so a refusal that both a person's rule and the administrator's would have
+made names the administrator's file. No other layer removes or overrides one: the lists only grow, and
+`deny` holds in every mode and over every `allow` rule, as it does for any layer ([PERM-2](#PERM-2)).
+A `/x` path rule in that file starts at the directory the file is in, and a `reason` is not read from
+it ([PERM-1](#PERM-1)). `allow` is not read from that file, and an entry of it is not reported.
+
+A line that is not a rule, an entry that is not a line, and a `permissions` block, `deny` or `ask`
+that is not the shape rules are read from are reported as they are for any layer
+([PERM-11](#PERM-11)), the last with the managed file named. `doctor` names `permissions.deny` and
+`permissions.ask` among what the file pinned.
+
+**Why.** A team that wants `Read(.env)` or `Bash(git push *)` refused on every machine otherwise has
+to ask each person to write it in a file they can edit. A rule that only narrows is one two parties
+may both have a say in, on the reasoning [PERM-18](#PERM-18) gives for its two keys and
+[BACKEND-38](backends.md#BACKEND-38) gives for the server and model lists. A grant is the person's own
+([PERM-14](#PERM-14)), so `allow` stays out: an administrator can take capability away and never add
+it. A rule matches routing only ([PERM-1](#PERM-1)), so the rule is kept as written.
+
+`verified-by: bravebot_config::managed::a_pinned_deny_or_ask_rule_is_read_and_named_as_pinned`
+`verified-by: bravebot_config::managed::a_pinned_allow_rule_is_not_read_or_reported`
+`verified-by: bravebot_config::managed::a_pinned_rule_list_that_is_not_readable_is_carried_out_to_be_reported`
+`verified-by: bravebot_config::settings::a_managed_rule_is_added_to_every_layers_and_names_the_managed_file`
+`verified-by: bravebot_config::settings::a_managed_slash_rule_starts_at_the_managed_directory`
+`verified-by: bravebot_config::settings::a_machine_with_only_pinned_rules_has_no_settings_of_its_own`
+`verified-by: bravebot_agent::permissions::a_managed_deny_holds_against_the_persons_allow_and_a_checkouts_layer`
+
+<a id="PERM-20"></a>
+### PERM-20: a deny or ask rule also covers the program under a wrapper
+
+A `deny` or `ask` rule is matched against a stage as it was written and against what is left of it
+after each leading wrapper, so `Bash(git push *)` in `deny` refuses `timeout 30 git push`, `nice -n 5
+git push` and `timeout 5 nice git push`. A wrapper is one of a fixed table of programs whose first
+word that is not an option is the program they run: `timeout`, `time`, `nice`, `nohup`, `stdbuf`,
+`command`, `builtin`, `noglob` and `env`. The table is not configurable, and each entry has the
+options it reads: `timeout` its signal and kill-after options and its duration, `nice` an adjustment,
+`stdbuf` its three buffer options, `command` `-p`, `time` `-p`, `-v`, `-a`, `-f` and `-o`, and `env`
+its `-i`, its `-u`, `NAME=value` words and `--`. A wrapper with an option the table does not list, a
+`command -v`, a wrapper with nothing after it to run, a wrapper named by a path, and a program that
+only runs another one by another way (`xargs`, `npx`, `devbox run`, `docker exec`) are left whole,
+so a rule is matched against the words that were written and never against a reading of them.
+
+An `allow` rule is matched as written. `Bash(git push *)` in `allow` does not grant
+`timeout 30 git push`, which is a program the rule never named, and a deny rule written for the
+wrapper itself, `Bash(timeout *)`, still matches the whole stage.
+
+**Why.** A deny rule is a statement about what will not happen, and a rule that a prefix defeats is
+a statement that is not true. Looking through the wrapper costs a person a second rule for each one
+otherwise. It is [PERM-4](#PERM-4)'s asymmetry: a rule that restricts covers more and a rule that
+grants covers what it names, and [RUN-20](tools/run.md#RUN-20) declines the same widening for a
+vouch for the same reason. The decision reads the argv and nothing else.
+
+`verified-by: bravebot_core::permissions::a_restricting_rule_covers_the_program_under_a_wrapper`
+`verified-by: bravebot_core::permissions::an_allow_rule_does_not_look_through_a_wrapper`
+`verified-by: bravebot_core::permissions::a_wrapper_the_table_cannot_read_is_left_whole`
+`verified-by: bravebot_core::permissions::a_rule_naming_the_wrapper_still_matches_the_whole_stage`
+
+## Known costs
+
+- **How many questions a session opens with is the file's to choose.** Every name in
+  `additionalDirectories` is one box, so a file naming thirty directories is thirty of them before
+  the first prompt can be typed, and the way out of a list somebody does not want to answer is
+  Ctrl-C, which starts no session. A cap would be worse: the names past it would be dropped in
+  silence, which reads as a setting that does nothing. What limits the damage is that no box grants
+  anything by itself.
+- **A rule a checkout proposes is waived for that checkout only, and only where somebody grants
+  it.** PERM-15 is the per-project answer, so `Bash(cargo test)` waived in one repository is a box at
+  the first session there rather than a line in a file that applies to every session anywhere. What
+  it costs is the box: a checkout whose rules change gets another one, and a person who declines is
+  asked about each action as they were before. The way to waive a prompt everywhere is still the
+  person's own file, or a file `--settings` names for one run.
+- **A long list is read through before it is granted.** Thirty rules on a short terminal are
+  several screens to scroll through before `y` does anything, and a rule longer than the box can
+  show, or a terminal too small for one rule and the keys, is never granted there at all. Both fail
+  closed: `n` still answers, and the person is asked about each action as they would have been.
+- **A grant outlives the session that gave it, which no other answer here does.** PERM-15's record
+  makes a later session in that workspace honour a rule without asking, where a startup trust
+  answer is honoured only for a yes, and then only for that one directory or the root of its git
+  worktree ([trust-map.md](trust-map.md#TRUST-23)). The narrowness is what
+  makes it sound: an entry covers one rule text from one file in one workspace, so what a second
+  session honours unasked is exactly what a person read and accepted. Deleting the line, or the
+  file, is the way back, and `doctor` names both.
+- **A grant names its workspace by path.** A checkout removed and cloned again at the same path,
+  with the same rule text in the same settings file, is covered by what was granted for the one
+  before it, since an entry holds no identity of the directory where the startup answer does
+  ([TRUST-23](trust-map.md#TRUST-23)).
+- **A grant given at the interface is not read by a session in lines.** `bravebot -p` installs no
+  `allow` rule at all, and the session that puts its questions as lines rather than as panels
+  ([cli.md](cli.md)) asks nothing here, so a rule granted in the panel is a prompt again on either.
+  Both fail closed, and putting the question on a surface is what would fix it rather than reading the
+  record on one that cannot ask.
+- **The desktop application grants no rule a checkout proposes, and opens no directory a file
+  names.** It has neither the question [PERM-15](#PERM-15) puts nor the one
+  [PERM-10](#PERM-10) puts, so it reads no grant recorded at the terminal and opens nothing
+  `additionalDirectories` names. Both fail closed. Each rule and each directory passed over is
+  named as the session opens, with the file that wrote the rule, so a prompt the rule was written
+  to answer does not read as a second fault. `deny` and `ask` rules from every layer, and `allow`
+  rules from the person's own file, hold there as they do in the terminal.
+- **A manifest run reads no rule but the ones about a server's tool.** The runner builds its policy
+  without the rules the session holds, so a `deny` rule does not refuse a step of a plan and an
+  `ask` rule puts no question about one. The `Mcp` rules are kept, since a plan's call to a
+  server's tool is decided as a turn's is ([MANIFEST-15](manifest.md#MANIFEST-15)). What stands in a run is the plan question and the write question
+  ([manifest.md](manifest.md#MANIFEST-10)). The desktop application says so on the plan it puts
+  to the person, where the session holds a `deny` or an `ask` rule.
+- **Declining to trust the workspace still leads to the question.** The two are separate claims, so
+  somebody who said the tree's content is not theirs is still offered its rules, and may grant them.
+  That is the point of asking separately, and it is also the odd case: a person who has just said
+  they did not write this code has said something about whoever wrote the rules too.
+- **A rule is matched against argv, not against what a program does.** `Bash(git *)` covers
+  `git -c core.fsmonitor=<script> diff`, which runs a program the rule never named, and
+  `Bash(devbox run *)` covers whatever follows `run`. A deny or ask rule looks through the wrappers
+  of [PERM-20](#PERM-20) and no further, so `devbox run git push` and `npx git push` are not
+  covered by `Bash(git push *)`. A pattern constraining arguments is weaker
+  than it looks, and a `deny` list is not a sandbox: [sandboxing.md](sandboxing.md) is what
+  confines a process, and the label on a program's output is what holds regardless.
+- **A path rule does not reach a program's own file access.** `Read` and `Edit` rules govern the
+  tools that read and write files. A program is argv to this agent, so `run cat .env` is checked
+  against the `Bash` rules and against the run prompt, not against a `Read` rule covering `.env`.
+  Every run asks unless a person vouched for that exact command, so the prompt is what stands
+  there; a `Bash` deny rule, or the sandbox, is what closes it. Naming a path in `deny` and
+  expecting it to fence every subprocess would be believing something that is not true.
+- **`readsStayInWorkspace` is read when the session opens, so `/cd` does not read it again.** The two
+  keys are read once per session with the rest of the block ([PERM-12](#PERM-12)), and `/cd` reads the
+  destination's rules again but not these. A session already confined keeps the key set wherever it
+  moves, and it may only move further in, so the reach never grows; a session that was not confined
+  and moves into a checkout asking for it is confined from the next session there rather than from
+  that turn. Closing it would mean the restriction arriving partway through a session, and the file
+  the session started under is the one its author read.
+- **`/cd` is one way under `readsStayInWorkspace`.** A session may move further into its tree and not
+  back out, so a person who moves into a subdirectory and then wants the directory above has to start
+  a session there. Allowing the move back would allow every move outward, since the key cannot tell a
+  return from a widening: both name a directory that holds the root. Starting again is the same answer
+  the key gives to a sibling checkout in the known cost below.
+- **A link in a rule's spelling is followed when the rules are read.** [PERM-7](#PERM-7) has a rule
+  written through a link cover the place the link reached then, and the rules are read once per
+  session ([PERM-12](#PERM-12)). A link made, removed or repointed later is followed again only when
+  the rules are read again, at the next session or a `/cd`; until then the rule covers the place the
+  link used to reach as well as its own spelling, and a call through the link is still checked under
+  the name it reaches. Following the rule's links at every call would put I/O in every match. Only
+  the place a rule names is followed, not the nested copies a restricting pattern floats to
+  ([PERM-4](#PERM-4)): with `vendor/secrets` a link to `vault`, `Read(secrets/**)` covers
+  `vendor/secrets/key` and not `vault/key`, since finding every copy is a walk of the tree. And
+  the place is looked up in the spelling the rule is stored in, folded where the volume folds case,
+  so a link behind a name the volume does not open in its folded spelling is not followed.
+- **A hard link, or a second path to an open tree, reaches a denied file through the files the
+  program looks for itself.** The instructions file and the files it points at, a skill, a
+  definition, a style, a file named with `@`, `--file` or a drop, and an `lsp` location are judged
+  under the name they were found by and the one they land on ([PERM-7](#PERM-7)). A hard link to a
+  denied file, or a file's name beneath a second path to an open tree, is not covered there, though
+  a call that names it is refused and a walk leaves it out. Covering them takes a walk of the open
+  directories for each file that has more than one name, which a repository of hard-linked objects
+  pays once per object, and a walk that cannot finish would leave out a hard-linked instructions
+  file the person wants read.
+- **`readsStayInWorkspace` does not confine a program a `run` starts.** It governs the file tools, as
+  the path rules do, and the known cost above about a path rule not reaching a program's own file
+  access holds here word for word: `run cat ~/.ssh/id_rsa` is judged against the `Bash` rules and the
+  run prompt. [sandboxing.md](sandboxing.md) is what confines a process.
+- **Neither key can be written by a turn, and neither can be lifted by one.** That is the point, and
+  it is also the cost: a person who confines a session and then wants a sibling checkout open has to
+  edit a file and start again, with no way to say yes once. A prompt would be the way to say yes once,
+  and a prompt is what the key exists to remove.
+- **`defaultMode` is read and does nothing.** The key is parsed so the file is not rejected for
+  carrying it, and no mode is selected from it. A person who wrote `acceptEdits` gets the prompts
+  they would have got without it. The modes exist, and the command line and the mode key are what
+  choose one: [permission-modes.md](permission-modes.md).

@@ -1,0 +1,20 @@
+[package]
+name = "bravebot-net"
+description = "The single network egress path, gated by the information-flow policy"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-core = { path = "../core" }
+bravebot-diag = { path = "../diag" }
+bravebot-sandbox = { path = "../sandbox" }
+pkcs8 = { workspace = true }
+rustls = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

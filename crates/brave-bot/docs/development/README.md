@@ -1,0 +1,48 @@
+# Development
+
+Requires a recent stable Rust toolchain.
+
+```sh
+cargo build
+cargo test
+make check     # fmt, clippy -D warnings, tests, and toolchain age: what CI enforces
+```
+
+The desktop front end is built from `ui/`, and additionally needs Node 22.12+ and pnpm (`corepack enable` provides the version `ui/package.json`
+pins):
+
+```sh
+cd ui
+pnpm install --frozen-lockfile
+pnpm run dev    # builds bravebot-rpc and bravebot-ui-files, then starts Electron
+```
+
+`cargo build` at the root already compiles those two binaries, as workspace members like
+any other; `pnpm run dev` builds them through `ui/scripts/build-bridge.sh`, which loads
+backend credentials where a checkout has them. What a built binary holds is
+[configuration.md](configuration.md), and the front end's own commands, packaging and
+tests are [ui/docs/development.md](../../ui/docs/development.md).
+
+| Read | For |
+|---|---|
+| [checks.md](checks.md) | what to run and when, why local clippy is not CI's, and a failure that is not yours |
+| [build-cache.md](build-cache.md) | sccache setup for a shorter first build in a new checkout or worktree, and how much it saves |
+| [commits.md](commits.md) | what one commit contains, what its message says, what closes an issue, and how to open the pull request |
+| [reviewing-for-the-rule.md](reviewing-for-the-rule.md) | reading a diff against the guarantee the repository exists for |
+| [spec-enforced-development.md](spec-enforced-development.md) | developing against the mini-specs, and what ships with a clause |
+| [fuzzing.md](fuzzing.md) | the fuzz targets for code that reads outside input, running one, adding one, and what to do with a crash |
+| [maintainer-jobs.md](maintainer-jobs.md) | the skills a maintainer runs on a schedule, what each files, and the ledger each leaves to commit |
+| [branch-protection.md](branch-protection.md) | the review settings branch protection holds `main` to, which no file in a checkout can read |
+| [security-scan.md](security-scan.md) | the scan that comments on pull requests, run before pushing |
+| [configuration.md](configuration.md) | direnv, what the build captures, and what a built binary holds |
+| [agent-configuration.md](agent-configuration.md) | `agents/` as the one source, and the links `make init` creates |
+| [localization.md](localization.md) | the catalogs, adding a message or a language, and who a string is for |
+| [testing-the-interface.md](testing-the-interface.md) | driving a real terminal for the wiring `cargo test` cannot reach |
+| [delegate-file-authority.md](delegate-file-authority.md) | testing file trust during overlapping parent and delegate writes |
+| [undo-coverage.md](undo-coverage.md) | testing undo across file writes, trust decisions and session records |
+| [labelling-issues.md](labelling-issues.md) | what a title carries, and the kind, the area, the severity and the three axes every open issue does |
+| [version-stamp.md](version-stamp.md) | which build produced a session, and reading a transcript against it |
+| [releasing.md](releasing.md) | cross-builds, naming a version, and the two manual publishes |
+
+[../best_practices.md](../best_practices.md) is what a pull request is reviewed
+against: the rules nothing mechanical can decide.

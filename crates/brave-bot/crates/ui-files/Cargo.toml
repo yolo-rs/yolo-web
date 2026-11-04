@@ -1,0 +1,30 @@
+[package]
+name = "bravebot-ui-files"
+description = "Reads and writes files for the graphical front end, under a pinned directory"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+# The agent's own test for whether a file is text, so a file this helper passes is one a turn reads.
+bravebot-filetype = { path = "../filetype" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+# Already in the lockfile for sandbox and skus. The features add the kernel-mode calls the walk is
+# made of, since Win32 has no open relative to a directory, and nothing to the tree.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,128 @@
+---
+id: SCHED
+title: schedule_next
+status: normative
+governs:
+  - crates/agent/src/tools.rs
+  - crates/agent/src/tools/offered.rs
+documented-by: docs/website/docs/reference/tools.md
+---
+
+## Scope
+
+Saying when this turn should be asked again. `delay_seconds` and `noop` are routing; `reason` is
+content. The result is a confirmation naming the wait that will actually happen.
+
+What a loop is, where its prompt comes from, and what ends one is [loop.md](../loop.md).
+
+## Clauses
+
+<a id="SCHED-1"></a>
+### SCHED-1: the only thing this decides is a moment
+
+There is no argument for what the next run asks. The prompt is the line the person typed, held by
+the interface, and it is sent again unchanged.
+
+**Why.** This is what makes the routing approvable on its own. "Ask me that again in twenty
+minutes" can be read and agreed to without knowing what "that" is; a field naming the next prompt
+would make the same call unreadable, and would let a turn write its own next instruction.
+
+`verified-by: bravebot_agent::tools::nothing_on_this_tool_says_what_the_next_turn_asks`
+
+<a id="SCHED-2"></a>
+### SCHED-2: withdrawn, it is offered to a tick of a self-paced loop and to nothing else
+
+Replaced by [SCHED-6](#SCHED-6), which offers it to every turn that will be asked again. The
+rule it stated left a session asked to report a change with nothing to report it from: one turn
+cannot both read a file now and see it change later, so a turn that could not arrange the later
+look answered from a single read and left nothing watching. SCHED-1 is what the rule was protecting
+and SCHED-1 is untouched: a turn may still choose only a moment, and never what the next one asks.
+
+<a id="SCHED-3"></a>
+### SCHED-3: the wait is held to its bounds before it is reported back
+
+Between a second and an hour. The number the planner is told is the number it is getting, not the
+number it asked for.
+
+**Why.** A tool that echoed what it was given would have the next answer describing a schedule
+that is not going to happen.
+
+`verified-by: bravebot_agent::tools::a_wait_outside_the_bounds_is_reported_as_the_one_that_will_happen`
+
+<a id="SCHED-4"></a>
+### SCHED-4: a call missing a delay or a verdict is refused rather than filled in
+
+`delay_seconds` and `noop` are both required, and nothing is scheduled without them. A tick of a
+self-paced loop may instead send `stop: true`, which ends that loop and needs no `delay_seconds`;
+`noop` is still required. `stop` is offered to that tick and to no other turn, and where a turn
+that arranges a look sends it, it is not read and the call needs the same fields as any other.
+
+**Why.** Whether a tick found anything is what the count of quiet ticks is built from, so a turn
+that leaves it out is asking for a number to be invented on its behalf and shown to somebody as
+an observation. `stop` is one routing boolean a person could approve alone ("end this loop"). It can
+only end a loop the person started, never start, lengthen or change what runs, and the reason that
+goes with it is content released only for display ([SCHED-5](#SCHED-5)).
+
+`verified-by: bravebot_agent::tools::a_schedule_missing_what_it_needs_is_refused`
+`verified-by: bravebot_agent::tools::a_finished_loop_is_ended_rather_than_given_another_wait`
+`verified-by: bravebot_agent::tools::stop_from_a_turn_arranging_a_look_is_not_read`
+`verified-by: bravebot_agent::tools::stop_is_offered_only_to_a_tick_of_a_self_paced_loop`
+
+<a id="SCHED-5"></a>
+### SCHED-5: what the turn says it is waiting on reaches a screen and stops there
+
+`reason` is the planner's own words, carried at the integrity of the context they came from and
+released for display like any other line a tool puts on the screen. Nothing waits on it, no later
+turn reads it back, and it is not sent anywhere.
+
+`verified-by: bravebot_agent::tools::what_the_turn_is_waiting_on_reaches_the_person_watching`
+`verified-by: bravebot_agent::tools::the_reason_is_labelled_from_its_context_and_released_for_display_alone`
+
+<a id="SCHED-6"></a>
+### SCHED-6: a turn that will be asked again may arrange the next look
+
+A turn nobody is looping, on a caller that will send its line again after a wait, is offered this,
+and the wait it gives starts a loop over the line the person typed
+([LOOP-14](../loop.md#LOOP-14)). A tick of a self-paced loop is offered it and sets the pace of the
+next tick.
+
+Three turns are offered nothing, and a call from any of them is answered the way any other name
+nobody offered is: no such tool. A tick of a loop the person gave an interval for. A delegate. And
+a turn nothing will ask again, which is a surface that runs one turn and exits, or a line the
+driver wrote rather than the person: the wait it names is discarded when the turn ends.
+
+Which caller that is, the caller says: a turn carries whether its line will be sent again, and a
+caller that says nothing is one that will not.
+
+The confirmation says which of the two offered cases happened, because the answer the turn is
+writing differs: a tick reports what this look found and leaves the rest to the next one, while a
+turn that has just arranged the first later look is telling somebody a watch now exists and needs
+nothing from them.
+
+The two descriptions that route a request to be told when something changes, the read whose change
+token is compared and the run whose output is watched, say where the next look comes from, and say
+the same thing this clause does about the turn they are offered to.
+
+**Why.** A request to be told when something changes cannot be answered inside one turn, and a rule
+withholding the tool from every turn but a tick leaves the only honest answer a single read and a
+suggestion that the person arrange the rest themselves. A tick the person timed is the one turn
+with nothing to decide: the interval already says when it runs, so a wait asked for there would be
+dropped, and a tool present but inert is one the planner has to be told to ignore. A turn nothing
+will ask again has the same wait dropped for the opposite reason, and the confirmation is why it
+matters more: the planner is told a later look is arranged and needs nothing from the person, and
+it writes that to somebody who then believes a watch exists that nothing is keeping.
+
+`verified-by: bravebot_agent::tools::any_turn_may_arrange_the_next_look_and_is_told_which_case_it_is`
+`verified-by: bravebot_agent::tools::a_tick_the_person_timed_is_offered_no_way_to_schedule_one`
+`verified-by: bravebot_agent::tools::a_turn_nothing_will_ask_again_is_offered_no_way_to_schedule_one`
+`verified-by: bravebot_agent::tools::a_turn_outside_a_loop_is_told_the_next_look_is_already_arranged`
+`verified-by: bravebot_agent::tools::a_call_from_a_turn_this_was_withheld_from_is_answered_as_an_unknown_name`
+`verified-by: bravebot_agent::tools::what_a_watch_request_is_told_about_the_next_look_matches_what_this_turn_can_arrange`
+`verified-by: bravebot_agent::turn::a_turn_that_is_not_a_tick_can_arrange_the_next_look`
+`verified-by: bravebot_agent::turn::a_turn_nothing_will_ask_again_cannot_arrange_a_later_look`
+`verified-by: bravebot_agent::turn::a_tick_the_person_timed_cannot_reschedule_itself`
+`verified-by: bravebot_agent::turn::a_tick_of_a_self_paced_loop_says_when_to_run_again`
+`verified-by: bravebot_agent::tools::a_delegate_is_offered_no_task_list_and_no_way_to_ask`
+`verified-by: bravebot_agent::tools::a_delegates_descriptions_do_not_name_schedule_next`
+`verified-by: bravebot_cli::running::a_one_shot_run_offers_no_way_to_arrange_a_later_look`
+`verified-by: bravebot_tui::app::only_a_turn_whose_wait_would_be_kept_is_offered_a_later_look`

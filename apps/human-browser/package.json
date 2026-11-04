@@ -1,0 +1,21 @@
+{
+  "name": "@yolo-web/human-browser",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive Human + AI Co-Pilot Browser Workbench powered by Bun.serve, Servo, Obscura CDP, and Brave Shields",
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "test": "bun test",
+    "check": "bun check"
+  },
+  "dependencies": {
+    "@yolo-web/shared": "workspace:*",
+    "@yolo-web/cdp-client": "workspace:*",
+    "@yolo-web/mcp-client": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/brave-shields": "workspace:*"
+  }
+}

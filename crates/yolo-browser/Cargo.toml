@@ -1,0 +1,67 @@
+[package]
+name = "yolo-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified Chromium-compatible browser engine in full Rust for AI agents and humans, consolidating Servo, Obscura, and Brave crates."
+
+[features]
+default = ["render"]
+render = [
+    "obscura/render",
+    "obscura-browser/render",
+    "obscura-cdp/render",
+    "obscura-js/render",
+    "obscura-mcp/render",
+    "obscura-render/paint",
+]
+stealth = [
+    "obscura/stealth",
+    "obscura-browser/stealth",
+    "obscura-cdp/stealth",
+    "obscura-js/stealth",
+    "obscura-mcp/stealth",
+    "obscura-net/stealth",
+]
+
+[dependencies]
+# Consolidated Obscura crates
+obscura = { workspace = true }
+obscura-browser = { workspace = true }
+obscura-cdp = { workspace = true }
+obscura-dom = { workspace = true }
+obscura-js = { workspace = true }
+obscura-mcp = { workspace = true }
+obscura-net = { workspace = true }
+obscura-render = { workspace = true }
+obscura-ssrf = { workspace = true }
+
+# Consolidated Servo crates
+html5ever = { workspace = true }
+markup5ever = { workspace = true }
+xml5ever = { path = "../servo-xml5ever" }
+selectors = { workspace = true }
+servo_arc = { workspace = true }
+cssparser = { workspace = true }
+euclid = { path = "../servo-euclid", features = ["serde"] }
+smallvec = { workspace = true }
+tendril = { workspace = true }
+uluru = { path = "../servo-uluru" }
+fnv = { path = "../servo-fnv" }
+servo-svg = { path = "../servo-svg" }
+servo-webvtt = { path = "../servo-webvtt" }
+url = { workspace = true }
+
+# Consolidated Brave crates
+adblock = { workspace = true }
+kuchikiki = { workspace = true }
+bravebot-core = { workspace = true }
+
+# Async & serialization
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

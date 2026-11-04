@@ -1,0 +1,17 @@
+[package]
+name = "bravebot-core"
+version = "0.20.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Bravebot information-flow kernel: labels, slots, capabilities, and policy gates"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+[lib]
+name = "bravebot_core"
+path = "crates/core/src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+unicode-normalization = "=0.1.25"

@@ -1,0 +1,1392 @@
+//! Where global state lives on disk.
+//!
+//! `~/.bravebot` holds anything that should outlive a session: prompt history, the model the user
+//! chose, the theme they paint the interface in, and how they edit text. The directory rather than a
+//! per-project file, for the same reason in each case: a question worth asking again is usually worth
+//! asking in another checkout too, and which model to think with, which theme to draw in and which
+//! keys move the caret are not properties of a checkout.
+//!
+//! Every operation here degrades to doing nothing. A missing home directory, a read-only disk, a
+//! corrupt file: none of that is worth refusing to start over, because the session works without
+//! any of it, falling back to the configured default.
+//!
+//! An incognito session is the same shape deliberately rather than by accident: [`writable`]
+//! answers `None`, and every write below takes the branch it already had for a machine with no
+//! home. Reads are untouched, so the session still opens with the model and theme the user chose.
+//!
+//! [`load_vetting`] is the one read resolved through [`writable`] as well, so a session that adds
+//! nothing here inherits nothing from that file either. The model and the theme decide what a
+//! session looks like; that one decides whether somebody is asked before content nobody vouched
+//! for reaches the planner, and a private session is the wrong place to inherit an answer to it.
+//!
+//! # What comes back is not trusted
+//!
+//! A history file can be edited, and on a shared machine it can be edited by someone else. So a
+//! recalled prompt is not fed to a turn: it is placed in the input box, where the user reads it
+//! and presses Enter. That keystroke is what makes it trusted, exactly as typing it would have.
+//!
+//! The model file is a name, not an instruction, and it lands in a request's routing field. What
+//! makes that safe is not the file: it is that the whole directory is the user's own configuration
+//! surface, on the footing [`bravebot_core::policy::Policy::label_user_configuration`] describes, and
+//! that a name the server does not recognise is reset to [`bravebot_config::DEFAULT_MODEL`] rather
+//! than obeyed.
+
+/// Re-exported so a caller can hold what [`effort`] answered with.
+///
+/// The level is a field of the protocol that carries it, and the crates that resolve one do not all
+/// speak that protocol: `bravebot-cli` reaches a model through `bravebot-agent` and names nothing of
+/// the wire format ([layering](../../../docs/specs/layering.md)). It already takes this type from
+/// here and hands it back; naming it through the same door is what lets it keep one.
+pub use bravebot_aichat::protocol::Effort;
+use std::io::Write;
+use std::path::PathBuf;
+
+/// One prompt as it was sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// What was typed, newlines and all.
+    pub prompt: String,
+    /// When it was sent, in seconds since the epoch.
+    ///
+    /// `None` for an entry stored before times were kept. Read as "no age to show" rather than as
+    /// the epoch, which would date every old prompt to 1970.
+    pub at: Option<u64>,
+    /// The workspace it was sent from.
+    ///
+    /// `None` for an entry stored before that was kept, and for one sent from nowhere in
+    /// particular. Such an entry belongs to no project and so is never what a narrowed search
+    /// answers with, but it is still there under the wider one.
+    pub project: Option<String>,
+}
+
+impl Entry {
+    /// A prompt sent now, from `project`.
+    pub fn sent(prompt: impl Into<String>, project: Option<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            at: Some(now()),
+            project,
+        }
+    }
+
+    /// A prompt read back from a file that stored nothing else about it.
+    pub fn recalled(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            at: None,
+            project: None,
+        }
+    }
+
+    /// The first line, which is what a one-row list can show of a paragraph.
+    pub fn opening(&self) -> &str {
+        self.prompt.lines().next().unwrap_or("")
+    }
+
+    /// How many lines the prompt runs to.
+    pub fn lines(&self) -> usize {
+        self.prompt.lines().count().max(1)
+    }
+}
+
+/// Seconds since the epoch, or zero on a clock that cannot say.
+///
+/// Zero rather than a failure: a prompt is still worth storing on a machine whose clock is wrong,
+/// and an age nobody can compute is a missing column rather than a reason to lose the prompt.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// The history file inside the global state directory.
+const HISTORY_FILE: &str = "history";
+
+/// Held while the history file is appended to or replaced.
+const HISTORY_LOCK_FILE: &str = "history.lock";
+
+/// The chosen model, one line, inside the global state directory.
+const MODEL_FILE: &str = "model";
+
+/// The chosen theme, one line, inside the global state directory.
+const THEME_FILE: &str = "theme";
+
+/// The chosen effort level, one line, inside the global state directory.
+const EFFORT_FILE: &str = "effort";
+
+/// The chosen style of editing, one line, inside the global state directory.
+///
+/// Named for the setting a file spells rather than for the type here, so somebody looking at both
+/// sees one name.
+const EDITING_FILE: &str = "editor-mode";
+
+/// The language the person chose with `/language`, one locale tag, inside the global state
+/// directory.
+///
+/// Named for the settings key rather than for the command, as the editing style's file is, so
+/// somebody looking at the file and at `language` in a settings file sees one name.
+const LANGUAGE_FILE: &str = "language";
+
+/// The standing answer about auto-vetting, one word, inside the global state directory.
+///
+/// Named for the setting rather than for the type, as the editing style's file is, so somebody
+/// looking at the file and at `vetting.auto` in a settings file sees one name.
+const VETTING_FILE: &str = "vetting";
+
+/// Whether the info panel was last left open, one word, inside the global state directory.
+const PANEL_FILE: &str = "panel";
+
+/// How many columns the info panel was last dragged to, a number, inside the global state
+/// directory.
+const PANEL_WIDTH_FILE: &str = "panel-width";
+
+/// Whether the person has read what `/caffeinate` does and turned it on, one word, inside the
+/// global state directory.
+const CAFFEINATE_FILE: &str = "caffeinate";
+
+/// The longest model name worth reading back.
+///
+/// A name goes into a request field, and one this long is not a name the endpoint listed. Bounded
+/// so a corrupt or overwritten file cannot turn into an absurd request.
+const MAX_MODEL_BYTES: usize = 128;
+
+/// The longest theme name worth reading back.
+///
+/// A name is only looked up in the built-in set and in `~/.bravebot/themes`. Bounded so a corrupt
+/// file cannot turn into an absurd lookup.
+const MAX_THEME_BYTES: usize = 128;
+
+/// The longest language tag worth reading back.
+///
+/// The tag is only matched against the catalogs that shipped, so what is bounded here is a file
+/// anybody with the account can edit being handed on at any length.
+const MAX_LANGUAGE_BYTES: usize = 128;
+
+/// The longest style of editing worth reading back.
+///
+/// The word is only matched against the styles the interface knows, and it used to come back as one
+/// of them: the type made the bound. What crosses this boundary now is a word, so the bound is
+/// stated here instead, and a caller that does something other than match it is not handed an
+/// arbitrary file.
+const MAX_EDITING_BYTES: usize = 128;
+
+/// Prompts kept on disk.
+///
+/// Bounded so the file cannot grow without limit on a machine that is used for years. The oldest
+/// entries are dropped, since recall walks backwards from the newest.
+const MAX_ENTRIES: usize = 1_000;
+
+/// The longest prompt worth storing.
+///
+/// A pasted file would otherwise sit in history forever, and recalling it is not useful: it is far
+/// past what the input box can show at once.
+const MAX_ENTRY_BYTES: usize = 4_096;
+
+/// The longest stored line worth reading back.
+///
+/// A line holds the prompt and the two facts recorded beside it, so it is the prompt's cap plus
+/// room for a stamp and a path rather than the cap itself.
+const MAX_LINE_BYTES: usize = MAX_ENTRY_BYTES + 1_024;
+
+/// What separates the fields of a stored line.
+///
+/// A tab because a path may hold spaces, and because a prompt that holds tabs is stored with them
+/// escaped, so nothing inside a field can be read as the end of it.
+const FIELD: char = '\t';
+
+/// The global state directory, or `None` when there is no home to put it in.
+///
+/// Delegated rather than computed again here: the agent reads standing instructions and skills
+/// from the same directory, and two definitions of where it is would eventually disagree.
+pub fn directory() -> Option<PathBuf> {
+    bravebot_agent::home::directory()
+}
+
+/// The global state directory when it may be written to, or `None` when it may not.
+///
+/// Every function below that writes resolves the directory through this rather than through
+/// [`directory`], so an incognito session finds no directory to write into and takes the path each
+/// of them already had for a machine with no home. Reading is unchanged: a private session still
+/// recalls the model and theme the user chose, it simply adds nothing to them.
+fn writable() -> Option<PathBuf> {
+    bravebot_agent::home::writable()
+}
+
+/// Read stored prompts, oldest first.
+///
+/// Returns an empty list when there is nothing to read, or when what is there cannot be parsed.
+/// Lines are trimmed of the newline they are stored with; blank lines are skipped so a
+/// hand-edited file cannot inject empty entries.
+pub fn load_history() -> Vec<Entry> {
+    let Some(path) = directory().map(|dir| dir.join(HISTORY_FILE)) else {
+        return Vec::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_history(&contents)
+}
+
+/// Turn a file's contents into entries.
+///
+/// Separate from the I/O so the decoding is testable, and because the rules matter: a prompt
+/// containing a newline was stored escaped, and an over-long line is dropped rather than truncated
+/// to half a question.
+pub fn parse_history(contents: &str) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        // The line first, which bounds the work, and then the prompt inside it, which is what the
+        // cap is about: a pasted file is not worth storing and would not be worth recalling.
+        .filter(|line| line.len() <= MAX_LINE_BYTES)
+        .map(parse_entry)
+        .filter(|entry| entry.prompt.len() <= MAX_ENTRY_BYTES)
+        .collect();
+
+    // A file longer than the cap is read from its end: those are the entries recall reaches first.
+    if entries.len() > MAX_ENTRIES {
+        entries.drain(..entries.len() - MAX_ENTRIES);
+    }
+    entries
+}
+
+/// One stored line as an entry.
+///
+/// Two shapes are read. The one written here is three fields: when it was sent, where from, and
+/// the prompt. A line that is not that shape is a prompt on its own, which is what every line of a
+/// file written before those two facts were kept looks like. Read rather than discarded, because
+/// somebody's history is the one file here whose loss they would notice.
+///
+/// The prompt is last so that a tab inside it needs no thought: only the first two are split on.
+fn parse_entry(line: &str) -> Entry {
+    let mut fields = line.splitn(3, FIELD);
+    let (Some(at), Some(project), Some(prompt)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return Entry::recalled(unescape(line));
+    };
+    let Ok(at) = at.parse::<u64>() else {
+        // A first field that is not a number is not a stamp, so the line is a prompt that happens
+        // to hold tabs rather than a record written by this program.
+        return Entry::recalled(unescape(line));
+    };
+
+    let project = unescape(project);
+    Entry {
+        prompt: unescape(prompt),
+        at: Some(at),
+        project: (!project.is_empty()).then_some(project),
+    }
+}
+
+/// One entry as a line, without its newline.
+fn encode(entry: &Entry) -> String {
+    match entry.at {
+        // Written back the way it was read, since inventing a time for it would date a prompt to
+        // whenever the file was next rewritten.
+        None => escape(&entry.prompt),
+        Some(at) => format!(
+            "{at}{FIELD}{}{FIELD}{}",
+            escape(entry.project.as_deref().unwrap_or_default()),
+            escape(&entry.prompt)
+        ),
+    }
+}
+
+/// Append one prompt to the history file.
+///
+/// Best-effort by design: a failure here must not interrupt a session, so nothing is reported.
+/// Appending rather than rewriting keeps the cost independent of how much history exists.
+pub fn append_history(entry: &Entry) {
+    if entry.prompt.trim().is_empty() || entry.prompt.len() > MAX_ENTRY_BYTES {
+        return;
+    }
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let line = format!("{}\n", encode(entry));
+    // Held so a removal that is rewriting the file cannot rename over this line. An append that
+    // cannot take the lock is still written, since losing one prompt here is worse than racing.
+    let _lock = lock_history(&dir);
+    let _ = bravebot_agent::home::append_to_file(&dir.join(HISTORY_FILE))
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+}
+
+/// Hold the history file's lock until the returned handle is dropped.
+fn lock_history(dir: &std::path::Path) -> Option<std::fs::File> {
+    let file = bravebot_agent::home::append_to_file(&dir.join(HISTORY_LOCK_FILE)).ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+/// Remove the one stored line that is `entry`, leaving every other stored prompt in place.
+///
+/// For a cancelled prompt. The stored file is read again under the lock rather than replaced with
+/// this session's list, because other sessions have appended to it since this one loaded it. The
+/// newest matching line is the one removed, which is the one this session wrote. Nothing is
+/// written when no line matches.
+pub fn remove_history_entry(entry: &Entry) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    let Some(_lock) = lock_history(&dir) else {
+        return;
+    };
+    let path = dir.join(HISTORY_FILE);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut entries = parse_history(&contents);
+    let Some(at) = entries.iter().rposition(|stored| stored == entry) else {
+        return;
+    };
+    entries.remove(at);
+    write_history(&dir, &entries);
+}
+
+/// Rewrite the file with exactly these entries.
+///
+/// Replaces whatever is stored, so a caller that holds only what it loaded at the start would take
+/// away what other sessions added since. A cancelled prompt is removed with
+/// [`remove_history_entry`]. Written to a temporary file and renamed so an interrupted write
+/// cannot leave a half-truncated history.
+pub fn save_history(entries: &[Entry]) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    let _lock = lock_history(&dir);
+    write_history(&dir, entries);
+}
+
+/// Write the entries within the cap. The caller holds the lock.
+fn write_history(dir: &std::path::Path, entries: &[Entry]) {
+    if bravebot_agent::home::create_directory(dir).is_err() {
+        return;
+    }
+
+    let start = entries.len().saturating_sub(MAX_ENTRIES);
+    let body: String = entries[start..]
+        .iter()
+        .filter(|entry| !entry.prompt.trim().is_empty() && entry.prompt.len() <= MAX_ENTRY_BYTES)
+        .map(|entry| format!("{}\n", encode(entry)))
+        .collect();
+
+    let _ = bravebot_agent::home::replace(&dir.join(HISTORY_FILE), body.as_bytes());
+}
+
+/// The model the user chose, or `None` if they never have.
+///
+/// Global rather than per-directory: a preference about which model to think with is not a
+/// property of a checkout, and answering it once per project is answering it repeatedly.
+pub fn load_model() -> Option<String> {
+    let path = directory()?.join(MODEL_FILE);
+    parse_model(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the model out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. A blank or over-long file is no choice at all
+/// rather than a choice of nothing: the caller then falls back to the configured default, which is
+/// what a user who has never picked one gets.
+pub fn parse_model(contents: &str) -> Option<String> {
+    let name = contents.lines().next()?.trim();
+    if name.is_empty() || name.len() > MAX_MODEL_BYTES {
+        return None;
+    }
+    Some(normalize_saved_model(name))
+}
+
+/// Rewrite Leo's automatic routing name to bravebot's.
+fn normalize_saved_model(name: &str) -> String {
+    bravebot_config::normalize_model(name).to_string()
+}
+
+/// Record the model the user chose.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice
+/// rather than a half-written name. Best-effort like everything else here: a choice that could not
+/// be saved still applies to the session that made it.
+pub fn save_model(model: &str) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let _ = bravebot_agent::home::replace(&dir.join(MODEL_FILE), format!("{model}\n").as_bytes());
+}
+
+/// Record the model the user chose, as `config` says it is to be recorded: the tier word where a tier
+/// variable named the model, so the record follows the variable when an inference-profile ARN is
+/// replaced ([BACKEND-47](../../../docs/specs/backends.md#BACKEND-47)).
+///
+/// The one way a pick is written, for the picker and for the start that asks which model to use.
+pub fn record_model(config: &bravebot_config::Config, model: &str) {
+    save_model(config.name_to_record(model));
+}
+
+/// The theme the user chose, or `None` if they never have.
+///
+/// Global rather than per-directory: which inks the interface draws in is not a property of a
+/// checkout.
+pub fn load_theme() -> Option<String> {
+    let path = directory()?.join(THEME_FILE);
+    parse_theme(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the theme out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. A blank or over-long file is no choice at all
+/// rather than a choice of nothing: the caller then falls back to `brave`.
+pub fn parse_theme(contents: &str) -> Option<String> {
+    let name = contents.lines().next()?.trim();
+    if name.is_empty() || name.len() > MAX_THEME_BYTES {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Record the theme the user chose.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice
+/// rather than a half-written name. Best-effort like everything else here.
+pub fn save_theme(theme: &str) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let _ = bravebot_agent::home::replace(&dir.join(THEME_FILE), format!("{theme}\n").as_bytes());
+}
+
+/// The effort level the user chose, or `None` if they never have.
+///
+/// Global rather than per-directory: how hard to think is a preference about the work, not a
+/// property of a checkout, and answering it once per project is answering it repeatedly.
+pub fn load_effort() -> Option<Effort> {
+    let path = directory()?.join(EFFORT_FILE);
+    parse_effort(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the level out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. A blank file, or one naming something that is
+/// not a level, is no choice at all rather than a choice of nothing: the caller then sends no
+/// level and the service applies its own default. A word this program does not know must never
+/// reach a request field, so nothing here passes an unrecognised one through.
+pub fn parse_effort(contents: &str) -> Option<Effort> {
+    Effort::named(contents.lines().next()?)
+}
+
+/// The saved model pick, where it is in force over the settings.
+///
+/// The pick ranks as the person's own settings file does: above what that file names, below what a
+/// checkout's file or the one `--settings` named does
+/// ([BACKEND-11](../../../docs/specs/backends.md#BACKEND-11)). A pick recorded once per person
+/// cannot tell two checkouts apart, so a checkout that names a model is the one that knows.
+///
+/// Both answers are arguments rather than read here, so nothing about the rule depends on what is on
+/// the machine running the test.
+pub fn model(recorded: Option<String>, settings: &bravebot_config::Settings) -> Option<String> {
+    recorded.filter(|_| !settings.model_outranks_a_pick())
+}
+
+/// The level in force, given the pick that was recorded and the settings in force.
+///
+/// Ranked as [`model`] is: a checkout's file, or the one `--settings` named, answers over the pick,
+/// and the pick answers over the person's own file. Where neither says anything the request carries
+/// no level at all ([BACKEND-43](../../../docs/specs/backends.md#BACKEND-43)).
+///
+/// A word neither this program nor the protocol defines is no choice at all, whichever of the two
+/// spelled it: both come out of a file somebody may have edited by hand, so both are read by the one
+/// rule here rather than each being trusted where it came from. A checkout's file naming nonsense
+/// therefore leaves the request carrying nothing, rather than putting a word a service has never
+/// heard of into a request field or handing the question back to the pick it outranks.
+pub fn effort(recorded: Option<Effort>, settings: &bravebot_config::Settings) -> Option<Effort> {
+    let configured = || Effort::named(settings.effort()?);
+    match settings.effort_outranks_a_pick() {
+        true => configured(),
+        false => recorded.or_else(configured),
+    }
+}
+
+/// Record the effort level the user chose, or forget the choice where they asked for none.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice
+/// rather than a half-written word. Best-effort like everything else here.
+pub fn save_effort(effort: Option<Effort>) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    // Removed rather than written empty. A person asking for no level is asking for the state they
+    // were in before they ever chose, and an empty file read back is the same answer either way.
+    let Some(effort) = effort else {
+        let _ = std::fs::remove_file(dir.join(EFFORT_FILE));
+        return;
+    };
+
+    let _ = bravebot_agent::home::replace(
+        &dir.join(EFFORT_FILE),
+        format!("{}\n", effort.as_str()).as_bytes(),
+    );
+}
+
+/// The word naming the style of editing the user chose, or `None` if they never chose one.
+///
+/// Global rather than per-directory, on the same footing as the effort level: how somebody edits text
+/// is a habit of theirs, not a property of a checkout.
+///
+/// A word rather than a style, as the model and the theme are: which words name a style is a fact
+/// about the box being typed into, and a record on disk outlives the set of boxes there are. The
+/// caller resolves the word, so a file and a settings file are read by one set of rules.
+pub fn load_editing() -> Option<String> {
+    let path = directory()?.join(EDITING_FILE);
+    parse_editing(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the word out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. A blank or over-long file is no choice at all:
+/// the caller then falls back to what the settings say and to the ordinary box. A word this program
+/// does not know is no choice either, which is the caller's rule to apply rather than this one's.
+pub fn parse_editing(contents: &str) -> Option<String> {
+    let word = contents.lines().next()?.trim();
+    if word.is_empty() || word.len() > MAX_EDITING_BYTES {
+        return None;
+    }
+    Some(word.to_string())
+}
+
+/// Record the style of editing the user chose.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice rather
+/// than a half-written word. Best-effort like everything else here.
+///
+/// The ordinary style is written rather than removing the file, unlike the effort level: there the
+/// absent file and the chosen absence are the same request, and here they are not. Somebody who turns
+/// vi editing off has made a choice that has to outlast the session, and removing the file would let a
+/// settings file turn it back on for them tomorrow.
+pub fn save_editing(word: &str) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let _ = bravebot_agent::home::replace(&dir.join(EDITING_FILE), format!("{word}\n").as_bytes());
+}
+
+/// The language tag the person chose with `/language`, or `None` if they never have.
+///
+/// Global rather than per-directory: which language somebody reads is not a property of a
+/// checkout. Read for every session, an incognito one included, since it decides what the
+/// interface says and nothing about what the session keeps.
+///
+/// Read ahead of the command line, for every command, so a file that is not a regular file or that
+/// has grown past what a tag can be is no choice rather than something every start waits on.
+pub fn load_language() -> Option<String> {
+    use std::io::Read;
+    let path = directory()?.join(LANGUAGE_FILE);
+    // Asked before the open, which a pipe would block.
+    if !std::fs::metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_LANGUAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    parse_language(&String::from_utf8_lossy(&bytes))
+}
+
+/// Read the tag out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. A blank or over-long file is no choice at all,
+/// which leaves the settings file and the environment to answer. Whether the tag names a catalog is
+/// the caller's to decide: a tag nobody translated is read as the reference, as it is from the
+/// environment.
+pub fn parse_language(contents: &str) -> Option<String> {
+    let tag = contents.lines().next()?.trim();
+    if tag.is_empty() || tag.len() > MAX_LANGUAGE_BYTES {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// Record the language tag the person chose, or forget the choice where they asked for none, and
+/// say whether that was done.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice
+/// rather than half a tag. Unlike its neighbours this answers whether the write happened, because
+/// a language applies from the next start and nothing in this session changes with it: a choice
+/// that could not be kept has no other effect for the person to notice.
+pub fn save_language(tag: Option<&str>) -> bool {
+    let Some(dir) = writable() else {
+        return false;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return false;
+    }
+
+    // Removed rather than written empty, as the effort level is: asking for no choice is asking for
+    // the state before there was one. A file that is not there is already that state.
+    let Some(tag) = tag else {
+        return match std::fs::remove_file(dir.join(LANGUAGE_FILE)) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+    };
+
+    bravebot_agent::home::replace(&dir.join(LANGUAGE_FILE), format!("{tag}\n").as_bytes()).is_ok()
+}
+
+/// The standing answer about auto-vetting, or `None` where nobody has recorded one.
+///
+/// Resolved through [`writable`] rather than [`directory`], which is the one read here that is,
+/// and the reason is what this answer decides: a session that records nothing must not pick up a
+/// developer's standing answer to whether content is promoted with nobody asked. The model and the
+/// theme are read in such a session because they decide what it looks like; this decides whether
+/// somebody is asked.
+pub fn load_vetting() -> Option<bool> {
+    let path = writable()?.join(VETTING_FILE);
+    parse_vetting(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the answer out of the file's contents.
+///
+/// Separate from the I/O so the rules are testable. Exactly the two words, after trimming: a blank
+/// file, a corrupt one, and one holding a word this program does not know are all no answer at
+/// all, which leaves the settings file's answer standing and the asking in place. Nothing here
+/// guesses, because guessing wrong in one direction stops a person being asked.
+pub fn parse_vetting(contents: &str) -> Option<bool> {
+    match contents.lines().next()?.trim() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Record the answer about auto-vetting the person gave.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous answer
+/// rather than half a word. Best-effort like everything else here.
+///
+/// Off is written rather than the file removed, for the reason the editing style is: the absent
+/// file and the chosen absence are not the same request here. Somebody who turned auto-vetting off
+/// has made a decision that has to outlast the session, and removing the file would let a settings
+/// file turn it back on for them tomorrow.
+pub fn save_vetting(auto: bool) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let word = match auto {
+        true => "on",
+        false => "off",
+    };
+    let _ = bravebot_agent::home::replace(&dir.join(VETTING_FILE), format!("{word}\n").as_bytes());
+}
+
+/// Whether the person last left the info panel open, or `None` where they never pressed its key.
+///
+/// Global rather than per-directory, as the theme is: whether somebody wants the panel beside the
+/// transcript is about their screen and not about a checkout.
+pub fn load_panel() -> Option<bool> {
+    let path = directory()?.join(PANEL_FILE);
+    parse_panel(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the choice out of the file's contents.
+///
+/// Exactly the two words, after trimming. Anything else is no choice, and the caller then leaves
+/// the panel closed, which is what a person who never pressed the key sees.
+pub fn parse_panel(contents: &str) -> Option<bool> {
+    match contents.lines().next()?.trim() {
+        "open" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
+/// Record whether the person left the info panel open.
+///
+/// Written to a temporary file and renamed, so an interrupted write leaves the previous choice.
+/// Best-effort like everything else here.
+pub fn save_panel(open: bool) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let word = match open {
+        true => "open",
+        false => "closed",
+    };
+    let _ = bravebot_agent::home::replace(&dir.join(PANEL_FILE), format!("{word}\n").as_bytes());
+}
+
+/// The width the person last dragged the info panel to, or `None` where they never did.
+///
+/// Global as the open/closed choice is: it is about their screen and not about a checkout.
+pub fn load_panel_width() -> Option<u16> {
+    let path = directory()?.join(PANEL_WIDTH_FILE);
+    parse_panel_width(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Read the width out of the file's contents.
+///
+/// A single whole number, after trimming. Anything else is no choice and the panel keeps its
+/// default. How far the number may reach is the interface's to decide, since it depends on the
+/// terminal; a number that cannot be a width at all is refused here.
+pub fn parse_panel_width(contents: &str) -> Option<u16> {
+    contents
+        .lines()
+        .next()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|width| *width > 0)
+}
+
+/// Record the width the person dragged the info panel to.
+///
+/// Written as [`save_panel`] is: to a temporary file and renamed, best-effort.
+pub fn save_panel_width(width: u16) {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+
+    let _ =
+        bravebot_agent::home::replace(&dir.join(PANEL_WIDTH_FILE), format!("{width}\n").as_bytes());
+}
+
+/// Whether the person has agreed to `/caffeinate` before, so it turns on without the explanation.
+///
+/// Read through [`writable`], as [`load_vetting`] is: the answer is to a warning about leaving a
+/// machine running unlocked, and a private session is the wrong place to inherit one.
+pub fn load_caffeinate_confirmed() -> bool {
+    writable()
+        .and_then(|dir| std::fs::read_to_string(dir.join(CAFFEINATE_FILE)).ok())
+        .is_some_and(|contents| parse_caffeinate(&contents))
+}
+
+/// Read the answer out of the file's contents: the one word, after trimming, and nothing else.
+pub fn parse_caffeinate(contents: &str) -> bool {
+    contents
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "confirmed")
+}
+
+/// Record that the person read what `/caffeinate` does and turned it on.
+///
+/// Written to a temporary file and renamed, as the panel's choice is.
+pub fn save_caffeinate_confirmed() {
+    let Some(dir) = writable() else {
+        return;
+    };
+    if bravebot_agent::home::create_directory(&dir).is_err() {
+        return;
+    }
+    let _ = bravebot_agent::home::replace(&dir.join(CAFFEINATE_FILE), b"confirmed\n");
+}
+
+/// Encode a prompt as one line.
+///
+/// A prompt may contain newlines, which would otherwise become several entries on the way back
+/// in. Backslash is escaped first so the encoding round-trips.
+fn escape(prompt: &str) -> String {
+    prompt
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        // A tab ends a field, so one inside a prompt has to stop looking like the end of it.
+        .replace('\t', "\\t")
+}
+
+/// Decode one stored line.
+///
+/// A trailing lone backslash and an unknown escape are both passed through rather than dropped: a
+/// hand-edited file should come back as close to what it says as possible.
+fn unescape(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The prompts of what was parsed, for the tests that are about the prompt surviving rather
+    /// than about what is recorded beside it.
+    fn prompts(entries: &[Entry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.prompt.as_str()).collect()
+    }
+
+    /// One line as this program writes it.
+    fn stored(entry: &Entry) -> String {
+        format!("{}\n", encode(entry))
+    }
+
+    #[test]
+    fn entries_round_trip_through_the_file_format() {
+        let entries = vec![
+            Entry::sent("first", Some("/work/here".to_string())),
+            Entry::sent("second", None),
+        ];
+        let encoded: String = entries.iter().map(stored).collect();
+        assert_eq!(parse_history(&encoded), entries);
+    }
+
+    /// When a prompt was sent and where from are what the search shows beside it, so both have to
+    /// survive the file: an age read back as nothing is a column of blanks.
+    #[test]
+    fn when_and_where_a_prompt_was_sent_survive_a_round_trip() {
+        let entry = Entry {
+            prompt: "why is this slow?".to_string(),
+            at: Some(1_700_000_000),
+            project: Some("/Users/somebody/projects/thing".to_string()),
+        };
+        let read = parse_history(&stored(&entry));
+        assert_eq!(read, vec![entry]);
+    }
+
+    /// Every line of a history written before those two facts were kept is a bare prompt, and
+    /// somebody's history is the one file here whose loss they would notice.
+    #[test]
+    fn a_line_from_an_older_history_is_still_a_prompt() {
+        let read = parse_history(
+            "what does this do?
+and this?
+",
+        );
+        assert_eq!(prompts(&read), ["what does this do?", "and this?"]);
+        assert_eq!(read[0].at, None, "an age was invented for it");
+        assert_eq!(read[0].project, None, "a project was invented for it");
+    }
+
+    /// A prompt is written back the way it was read, so a rewrite for any other reason does not
+    /// date every old prompt to whenever that happened.
+    #[test]
+    fn a_prompt_with_no_stamp_is_not_given_one_on_the_way_out() {
+        let read = parse_history(&stored(&Entry::recalled("from before")));
+        assert_eq!(read, vec![Entry::recalled("from before")]);
+    }
+
+    /// A tab ends a field, so one inside a prompt has to stop looking like the end of it. A line
+    /// of a hand-written file whose first field is not a stamp is a prompt, tabs and all.
+    #[test]
+    fn a_prompt_holding_tabs_is_still_one_prompt() {
+        let prompt = "fix this:\n\tif (x) {\n\t\treturn;";
+        let read = parse_history(&stored(&Entry::sent(prompt, None)));
+        assert_eq!(prompts(&read), [prompt]);
+
+        let hand_written = parse_history("a\tb\tc\n");
+        assert_eq!(prompts(&hand_written), ["a\tb\tc"]);
+    }
+
+    /// A prompt with a newline must come back as one entry, not two.
+    #[test]
+    fn a_multiline_prompt_stays_one_entry() {
+        let prompt = "explain this:\nfn main() {}";
+        let encoded = stored(&Entry::sent(prompt, None));
+        assert_eq!(prompts(&parse_history(&encoded)), [prompt]);
+    }
+
+    /// The escape itself must survive, or a prompt about backslashes would corrupt on reload.
+    #[test]
+    fn backslashes_round_trip() {
+        for prompt in [r"a\b", r"trailing\", r"\n literal", r"\\"] {
+            let encoded = stored(&Entry::sent(prompt, None));
+            assert_eq!(
+                prompts(&parse_history(&encoded)),
+                [prompt],
+                "{prompt:?} did not round-trip"
+            );
+        }
+    }
+
+    /// A hand-edited file must not produce empty entries, which would look like broken recall.
+    #[test]
+    fn blank_lines_are_skipped() {
+        assert_eq!(prompts(&parse_history("one\n\n   \ntwo\n")), ["one", "two"]);
+    }
+
+    /// An unreadable or absent file is not an error: the session works without history.
+    #[test]
+    fn nothing_to_read_is_an_empty_history() {
+        assert!(parse_history("").is_empty());
+        assert!(parse_history("\n\n").is_empty());
+    }
+
+    /// The file cannot grow without bound on a machine used for years.
+    #[test]
+    fn the_entry_count_is_capped_on_read() {
+        let contents: String = (0..MAX_ENTRIES + 500)
+            .map(|n| format!("prompt {n}\n"))
+            .collect();
+        let entries = parse_history(&contents);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        // Kept from the end, since recall walks backwards from the newest.
+        assert_eq!(
+            entries.last().unwrap().prompt,
+            format!("prompt {}", MAX_ENTRIES + 499)
+        );
+    }
+
+    /// A pasted file is not worth storing, and recalling it would not be useful either.
+    #[test]
+    fn over_long_entries_are_dropped_on_read() {
+        let huge = "x".repeat(MAX_ENTRY_BYTES + 1);
+        let contents = format!("keep\n{huge}\nkeep too\n");
+        assert_eq!(prompts(&parse_history(&contents)), ["keep", "keep too"]);
+    }
+
+    /// A prompt exactly at the limit is kept, so the boundary is not off by one.
+    #[test]
+    fn an_entry_at_the_limit_is_kept() {
+        let exact = "x".repeat(MAX_ENTRY_BYTES);
+        assert_eq!(prompts(&parse_history(&format!("{exact}\n"))), [&exact]);
+    }
+
+    #[test]
+    fn a_stored_model_is_read_back_without_its_newline() {
+        assert_eq!(
+            parse_model("claude-3-sonnet\n").as_deref(),
+            Some("claude-3-sonnet")
+        );
+    }
+
+    /// Leo's automatic routing name is rewritten to bravebot's own entry.
+    #[test]
+    fn the_legacy_automatic_name_is_rewritten_on_read() {
+        assert_eq!(
+            parse_model("automatic\n").as_deref(),
+            Some(bravebot_config::DEFAULT_MODEL)
+        );
+    }
+
+    /// Nothing recorded means no choice, and the caller falls back to the configured default. An
+    /// empty file must not become a request for a model named "".
+    #[test]
+    fn an_empty_file_is_not_a_choice() {
+        for contents in ["", "\n", "   \n"] {
+            assert_eq!(parse_model(contents), None, "{contents:?} became a choice");
+        }
+    }
+
+    /// The file is one line. A second one is not a second choice, and taking the last would let
+    /// anything appended to the file decide what gets requested.
+    #[test]
+    fn only_the_first_line_is_read() {
+        assert_eq!(parse_model("first\nsecond\n").as_deref(), Some("first"));
+    }
+
+    /// The name goes into a request field, so a corrupt file must not turn into an absurd request.
+    #[test]
+    fn an_over_long_name_is_not_a_choice() {
+        let huge = "x".repeat(MAX_MODEL_BYTES + 1);
+        assert_eq!(parse_model(&huge), None);
+        let exact = "x".repeat(MAX_MODEL_BYTES);
+        assert_eq!(parse_model(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    #[test]
+    fn a_stored_effort_is_read_back_without_its_newline() {
+        assert_eq!(parse_effort("xhigh\n"), Some(Effort::Xhigh));
+    }
+
+    /// A word this program does not know must not reach a request field, so an edited or corrupt
+    /// file is no choice rather than a level nobody defined.
+    #[test]
+    fn a_file_naming_no_level_is_not_a_choice() {
+        for contents in ["", "\n", "   \n", "highest\n", "9\n"] {
+            assert_eq!(parse_effort(contents), None, "{contents:?} became a choice");
+        }
+    }
+
+    #[test]
+    fn only_the_first_effort_line_is_read() {
+        assert_eq!(parse_effort("low\nmax\n"), Some(Effort::Low));
+    }
+
+    /// Settings read from a scratch home and checkout, the person's own file saying `home` and the
+    /// checkout's saying `project`, for the rules that turn on which of the two named a key.
+    fn layered(name: &str, home: &str, project: &str) -> bravebot_config::Settings {
+        let root = crate::testutil::scratch_dir(&format!("bravebot-store-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let checkout = root.join("cwd").join(".bravebot");
+        std::fs::create_dir_all(&checkout).expect("scratch checkout");
+        std::fs::create_dir_all(root.join("home")).expect("scratch home");
+        std::fs::write(root.join("home").join("settings.json"), home).expect("home layer");
+        std::fs::write(checkout.join("settings.json"), project).expect("project layer");
+        bravebot_config::Settings::layered(Some(root.join("home")), Some(&root.join("cwd")), None)
+    }
+
+    /// BACKEND-11. A checkout cannot pick a model, so the pick, which is recorded once per person
+    /// and cannot tell two checkouts apart, answers over one; the person's own file does not
+    /// outrank the pick either, the pick being the later thing they said there.
+    #[test]
+    fn a_checkouts_model_cannot_displace_the_saved_pick_and_the_home_file_does_not() {
+        let picked = || Some("picked".to_string());
+        let checkout = layered(
+            "model-checkout",
+            r#"{"model": "mine"}"#,
+            r#"{"model": "its"}"#,
+        );
+        assert_eq!(
+            model(picked(), &checkout).as_deref(),
+            Some("picked"),
+            "a checkout displaced the pick"
+        );
+        assert_eq!(
+            checkout.model(),
+            Some("mine"),
+            "the merged settings do not hold the home file's key"
+        );
+        assert_eq!(
+            checkout.model_ignored().count(),
+            1,
+            "the checkout's key is not what is reported as ignored"
+        );
+
+        let own = layered("model-own", r#"{"model": "mine"}"#, "{}");
+        assert_eq!(model(picked(), &own).as_deref(), Some("picked"));
+
+        let blank = layered("model-blank", "{}", r#"{"model": "  "}"#);
+        assert_eq!(
+            model(picked(), &blank).as_deref(),
+            Some("picked"),
+            "a blank key displaced the pick"
+        );
+        assert_eq!(
+            blank.model(),
+            None,
+            "a blank key named a model in the merged settings"
+        );
+    }
+
+    /// BACKEND-43, on BACKEND-11's footing: a checkout's level outranks the pick, the pick outranks
+    /// the person's own file, and with nothing recorded the file answers, which on a machine where
+    /// nobody opens the interface is every run.
+    #[test]
+    fn a_checkouts_level_outranks_the_saved_pick_and_the_home_file_does_not() {
+        let checkout = layered(
+            "effort-checkout",
+            r#"{"effort": "low"}"#,
+            r#"{"effort": "max"}"#,
+        );
+        assert_eq!(
+            effort(Some(Effort::Low), &checkout),
+            Some(Effort::Max),
+            "the pick outranked a checkout"
+        );
+
+        let own = layered("effort-own", r#"{"effort": "max"}"#, "{}");
+        assert_eq!(
+            effort(Some(Effort::Low), &own),
+            Some(Effort::Low),
+            "the person's own file outranked their pick"
+        );
+        assert_eq!(effort(None, &own), Some(Effort::Max));
+        assert_eq!(effort(None, &bravebot_config::Settings::default()), None);
+
+        let blank = layered("effort-blank", r#"{"effort": "max"}"#, r#"{"effort": ""}"#);
+        assert_eq!(
+            effort(Some(Effort::Low), &blank),
+            Some(Effort::Low),
+            "a blank key outranked the pick"
+        );
+    }
+
+    /// A word the protocol does not define must not reach a request field, wherever it was spelled.
+    /// A settings file gets the reading a hand-edited record gets, because both are a file somebody
+    /// may have typed into. A checkout naming one still outranks the pick: the closest layer that
+    /// named the key answers, and its answer is no level.
+    #[test]
+    fn a_settings_file_naming_no_level_asks_for_none() {
+        for word in ["highest", "9", "MAXIMUM"] {
+            let own = bravebot_config::Settings::parse(&format!(r#"{{"effort": "{word}"}}"#));
+            assert_eq!(effort(None, &own), None, "{word:?} became a choice");
+            let checkout = layered(
+                "effort-nonsense",
+                "{}",
+                &format!(r#"{{"effort": "{word}"}}"#),
+            );
+            assert_eq!(
+                effort(Some(Effort::Low), &checkout),
+                None,
+                "{word:?} handed the question back to the pick"
+            );
+        }
+        let capitals = bravebot_config::Settings::parse(r#"{"effort": "HIGH"}"#);
+        assert_eq!(
+            effort(None, &capitals),
+            Some(Effort::High),
+            "a level spelled in capitals is the same request"
+        );
+    }
+
+    /// Both answers round-trip, and off is an answer rather than absence: somebody who turned
+    /// auto-vetting off has to stay turned off against a settings file that asks for it.
+    #[test]
+    fn a_recorded_answer_about_vetting_is_read_back_both_ways() {
+        assert_eq!(parse_vetting("on\n"), Some(true));
+        assert_eq!(parse_vetting("off\n"), Some(false));
+    }
+
+    /// A corrupt or hand-edited file must leave the asking in place. Read as `on`, a word this
+    /// program does not know would stop a person being asked before content nobody vouched for
+    /// reached the planner, and the typo that caused it is the one thing they cannot see.
+    #[test]
+    fn a_file_naming_no_answer_about_vetting_is_not_a_choice() {
+        for contents in ["", "\n", "   \n", "true\n", "yes\n", "auto\n", "1\n"] {
+            assert_eq!(
+                parse_vetting(contents),
+                None,
+                "{contents:?} became a choice"
+            );
+        }
+    }
+
+    /// An empty or corrupt file has to leave the panel closed, which is the state of somebody
+    /// who never pressed the key, rather than opening it on a word nobody wrote.
+    #[test]
+    fn only_the_two_panel_words_are_a_choice() {
+        assert_eq!(parse_panel("open\n"), Some(true));
+        assert_eq!(parse_panel("closed\n"), Some(false));
+        for contents in ["", "\n", "   \n", "on\n", "true\n", "opened\n"] {
+            assert_eq!(parse_panel(contents), None, "{contents:?} became a choice");
+        }
+    }
+
+    /// A file that does not hold a plain positive number is no width, so the panel keeps its 36
+    /// columns rather than taking whatever a half-written or hand-edited file made of it.
+    #[test]
+    fn only_a_positive_whole_number_is_a_panel_width() {
+        assert_eq!(parse_panel_width("40\n"), Some(40));
+        assert_eq!(parse_panel_width("  52  \n"), Some(52));
+        for contents in ["", "\n", "0\n", "-3\n", "wide\n", "40.5\n", "99999999\n"] {
+            assert_eq!(
+                parse_panel_width(contents),
+                None,
+                "{contents:?} became a width"
+            );
+        }
+    }
+
+    /// Only the word the interface writes is an agreement, so a stray or half-written file does not
+    /// turn `/caffeinate` on without the warning being read.
+    #[test]
+    fn only_the_confirmed_word_is_an_agreement_to_caffeinate() {
+        assert!(parse_caffeinate("confirmed\n"));
+        assert!(parse_caffeinate("  confirmed  \n"));
+        for contents in [
+            "",
+            "\n",
+            "yes\n",
+            "confirmed-not\n",
+            "true\n",
+            "\nconfirmed\n",
+        ] {
+            assert!(
+                !parse_caffeinate(contents),
+                "{contents:?} became an agreement"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_first_vetting_line_is_read() {
+        assert_eq!(parse_vetting("off\non\n"), Some(false));
+    }
+
+    #[test]
+    fn a_stored_style_of_editing_is_read_back_without_its_newline() {
+        assert_eq!(parse_editing("vim\n").as_deref(), Some("vim"));
+        assert_eq!(parse_editing("  emacs  \n").as_deref(), Some("emacs"));
+    }
+
+    /// A corrupt or hand-edited file must leave the box everybody has. An empty word read back as a
+    /// choice would be looked up as a style and found to be none, which works, but it would also be
+    /// written back as the choice on the next save, so the file has to stop being one here. Which
+    /// words name a style is checked where the styles are, by `vim::Editing::named`.
+    #[test]
+    fn a_file_naming_no_style_of_editing_is_not_a_choice() {
+        for contents in ["", "\n", "   \n", "\nvim\n"] {
+            assert_eq!(
+                parse_editing(contents),
+                None,
+                "{contents:?} became a choice"
+            );
+        }
+    }
+
+    /// The word used to come back as a style, so its length was the type's business. It comes back
+    /// as a word now, and a word crossing a crate boundary from a file anybody with the account can
+    /// edit is bounded here rather than wherever it ends up.
+    #[test]
+    fn an_over_long_style_of_editing_is_not_a_choice() {
+        let huge = "x".repeat(MAX_EDITING_BYTES + 1);
+        assert_eq!(parse_editing(&huge), None);
+        let exact = "x".repeat(MAX_EDITING_BYTES);
+        assert_eq!(parse_editing(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    #[test]
+    fn a_stored_theme_is_read_back_without_its_newline() {
+        assert_eq!(parse_theme("nord\n").as_deref(), Some("nord"));
+    }
+
+    #[test]
+    fn an_empty_theme_file_is_not_a_choice() {
+        for contents in ["", "\n", "   \n"] {
+            assert_eq!(parse_theme(contents), None, "{contents:?} became a choice");
+        }
+    }
+
+    #[test]
+    fn only_the_first_theme_line_is_read() {
+        assert_eq!(parse_theme("nord\ndracula\n").as_deref(), Some("nord"));
+    }
+
+    #[test]
+    fn an_over_long_theme_name_is_not_a_choice() {
+        let huge = "x".repeat(MAX_THEME_BYTES + 1);
+        assert_eq!(parse_theme(&huge), None);
+        let exact = "x".repeat(MAX_THEME_BYTES);
+        assert_eq!(parse_theme(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    #[test]
+    fn a_stored_language_is_read_back_without_its_newline() {
+        assert_eq!(parse_language("fr\n").as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn an_empty_language_file_is_not_a_choice() {
+        for contents in ["", "\n", "   \n"] {
+            assert_eq!(
+                parse_language(contents),
+                None,
+                "{contents:?} became a choice"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_first_language_line_is_read() {
+        assert_eq!(parse_language("fr\nja\n").as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn an_over_long_language_tag_is_not_a_choice() {
+        let huge = "x".repeat(MAX_LANGUAGE_BYTES + 1);
+        assert_eq!(parse_language(&huge), None);
+        let exact = "x".repeat(MAX_LANGUAGE_BYTES);
+        assert_eq!(parse_language(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    /// The language is read before the command line is, for every command. A pipe where the file
+    /// should be blocks the open, so a read that did not ask what the path is would hold up every
+    /// start of the program.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_language_file_should_be_is_no_choice_and_holds_nothing_up() {
+        if !crate::test_profile::in_isolated_profile() {
+            return;
+        }
+        assert!(save_language(Some("fr")));
+        let path = directory().expect("a state directory").join(LANGUAGE_FILE);
+        std::fs::remove_file(&path).expect("the saved file");
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("mkfifo is not installed, so a pipe is not tried");
+            return;
+        }
+
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(load_language());
+        });
+
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the read waited on the pipe"),
+            None
+        );
+    }
+
+    /// Only the first line is a tag, so a file grown past the bound still answers with it. A read
+    /// that refused a file for its size, or stopped short of the first line, would drop a choice
+    /// the person made.
+    #[test]
+    fn a_language_file_grown_large_still_answers_with_its_first_line() {
+        if !crate::test_profile::in_isolated_profile() {
+            return;
+        }
+        assert!(save_language(Some("fr")));
+        let path = directory().expect("a state directory").join(LANGUAGE_FILE);
+        std::fs::write(&path, format!("fr\n{}", "x".repeat(1 << 20))).expect("a large file");
+
+        assert_eq!(load_language().as_deref(), Some("fr"));
+    }
+
+    /// A choice that was written is the one read back, a second replaces the first, and asking for
+    /// none leaves nothing to read, whether or not there was one. A save that reported success
+    /// without writing, or a clear that left the file, answers differently from one of these.
+    #[test]
+    fn a_saved_language_is_read_back_replaced_and_forgotten() {
+        if !crate::test_profile::in_isolated_profile() {
+            return;
+        }
+        assert_eq!(load_language(), None);
+        assert!(save_language(None), "forgetting nothing is done already");
+
+        assert!(save_language(Some("fr")));
+        assert_eq!(load_language().as_deref(), Some("fr"));
+        assert!(save_language(Some("en-US")));
+        assert_eq!(load_language().as_deref(), Some("en-US"));
+
+        assert!(save_language(None));
+        assert_eq!(load_language(), None);
+    }
+}

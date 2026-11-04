@@ -1,0 +1,6534 @@
+//! Configuration read from the environment, populated by direnv, falling back to
+//! whatever was baked in at build time.
+//!
+//! The signing key is wrapped in [`Secret`] so it cannot be printed. That matters
+//! more than usual here: this is a public repository, and the natural debugging
+//! reflex, dumping the config, would otherwise put a live credential in a log or
+//! an issue report.
+
+#![forbid(unsafe_code)]
+
+// The seam that points the ChatGPT account's requests at a stand-in exists for tests, and a release
+// build that turned it on would let a variable choose where an access token goes. The refusal reads
+// the two settings the release profile has and a test build does not, as `bravebot-skus` does for the
+// same reason.
+#[cfg(all(feature = "test-hosts", any(not(debug_assertions), panic = "abort")))]
+compile_error!(
+    "the test-hosts feature is for tests: it is refused where debug assertions are off or a panic aborts, as in a release build"
+);
+
+use bravebot_sandbox::swap::LockedText;
+use std::env;
+use std::fmt;
+use std::time::Duration;
+
+/// Environment variable names, kept together so the set is auditable at a glance.
+pub mod env_var {
+    include!("env_var.rs");
+}
+
+pub mod brave_key;
+pub mod connectors;
+pub mod git_identities;
+pub mod hooks;
+pub mod install;
+pub mod keys;
+pub mod limit;
+pub mod lsp;
+mod managed;
+pub mod mcp;
+mod obfuscate;
+mod run_network;
+pub mod sandbox;
+mod sandbox_filesystem;
+pub mod sandbox_network;
+pub mod scrub;
+mod settings;
+#[cfg(test)]
+mod testutil;
+pub mod time;
+
+pub use managed::{Managed, ModelRefusal, Models, Refusal, Rule, Server, managed_file};
+pub use run_network::{
+    Decided, RunNetwork, resolve as resolve_run_network, run_network, settle_run_network,
+    settle_run_network_in, settled_run_network,
+};
+pub use sandbox_filesystem::{
+    Filesystem, holds_back_temporary_directory, resolve as resolve_sandbox_filesystem,
+    sandbox_filesystem, settle_sandbox_filesystem, settle_sandbox_filesystem_in,
+    settled_sandbox_filesystem,
+};
+pub use settings::{
+    Attribution, DEFAULT_RETENTION_DAYS, Narrowing, NotADocument, PermissionLists, Reference,
+    ReferenceFault, Retention, RunDeadlines, Settings, check_document, local_settings_file, lock,
+    locked, name_a_settings_file, named_settings_file, processor_model_named,
+    project_settings_file, user_settings_file,
+};
+
+pub mod bedrock;
+pub mod import;
+pub mod provider;
+
+include!(concat!(env!("OUT_DIR"), "/baked.rs"));
+
+/// The server treats an unrecognised model as [`DEFAULT_MODEL`], so that is also our default rather
+/// than pinning a name that may silently stop existing.
+///
+/// Bravebot's own triage entry. Leo uses `automatic` for a different routing policy; requests from
+/// this product identify themselves with `Brave-Product: bravebot` so the listing and completions
+/// endpoints offer this name instead.
+pub const DEFAULT_MODEL: &str = "automatic-bravebot";
+
+/// Where Brave's premium service is, for a build whose free endpoint is a development one.
+///
+/// Compiled in rather than configured: the key a person types with `bravebot auth login brave` goes
+/// to this host, so no variable or settings file is what decides where it goes. The two constants
+/// below are one value while the premium service is live only in development, and are two so that
+/// production can move without touching how the choice is made.
+pub const DEV_PREMIUM_ENDPOINT: &str = "https://ai-gateway-api.bsg.brave.software";
+
+/// Where Brave's premium service is, for every other build.
+pub const PROD_PREMIUM_ENDPOINT: &str = "https://ai-gateway-api.bsg.brave.software";
+
+/// The premium host compiled in for a build whose free endpoint is `free`.
+///
+/// A development endpoint is one under `brave.software` or `bravesoftware.com`; every other host,
+/// including one that names nothing, is production's.
+fn compiled_in_premium_endpoint(free: &str) -> &'static str {
+    let development = provider::reached_at(free).is_some_and(|(host, _)| {
+        host.ends_with(".brave.software") || host.ends_with(".bravesoftware.com")
+    });
+    match development {
+        true => DEV_PREMIUM_ENDPOINT,
+        false => PROD_PREMIUM_ENDPOINT,
+    }
+}
+
+/// The automatic routing name Leo uses. Remembered choices and configuration may still say it from
+/// before bravebot had its own entry; [`normalize_model`] rewrites those to [`DEFAULT_MODEL`].
+const LEGACY_AUTOMATIC: &str = "automatic";
+
+/// Rewrite a model name from an older choice or configuration to what this product sends now.
+pub fn normalize_model(name: &str) -> &str {
+    if name == LEGACY_AUTOMATIC {
+        DEFAULT_MODEL
+    } else {
+        name
+    }
+}
+
+/// The model a name asks for: a tier word resolved to a model that exists, anything else as written.
+///
+/// `opus`, `sonnet` and `haiku` name a tier rather than a model, which is what those words mean in
+/// the settings file the model key is copied from. Left as the word they reach a service that has
+/// never heard of them, so they are resolved: the tier's own ARN where an AWS account named one,
+/// and the Brave roster's name for that tier otherwise.
+///
+/// The AWS account wins where it named the tier, because somebody who configured it asked for it
+/// by name. A tier they left unset falls through to Brave rather than being guessed at, an ARN not
+/// being derivable from a word, except on a build that cannot reach Brave: there a Brave name
+/// reaches a service this build cannot sign for, so the strongest tier the AWS account did name is
+/// the only thing that could answer.
+///
+/// `reaches_brave` is whether this build holds the credentials to sign a Brave request, which is
+/// [`holds_brave_credentials`], and `bedrock` is whichever configured AWS account would serve the
+/// request, which is [`tier_account`]. An endpoint on its own decides neither: a source build with
+/// a URL and no key id signs nothing, and an account a `provider` block named answers as readily as
+/// one the tier variables did.
+///
+/// Shared by every route to a model rather than belonging to the settings key, so a name means the
+/// same model wherever it was written down. See [`Config::model_named`].
+fn resolved_model(name: &str, bedrock: Option<&bedrock::Bedrock>, reaches_brave: bool) -> String {
+    let named = match bedrock::Tier::from_alias(name) {
+        Some(tier) => match bedrock {
+            Some(bedrock) => bedrock
+                .model_for(tier)
+                .or_else(|| match reaches_brave {
+                    false => bedrock.default_model(),
+                    true => None,
+                })
+                .unwrap_or(tier.brave_model()),
+            None => tier.brave_model(),
+        },
+        None => name,
+    };
+    normalize_model(named).to_string()
+}
+
+/// Whether this build holds everything needed to sign a request to the Brave backend.
+///
+/// All three fields, because a request needs all three: the URL to send to, the key id naming the
+/// credential, and the key that signs with it. Any one of them blank leaves a request that fails
+/// unsigned, so a build in that state cannot reach Brave whatever the other two say. A `provider`
+/// block or a Bedrock account makes each of them optional independently, which is how "endpoint
+/// set, credentials blank" arises. See [`Config::serves_aichat`].
+fn holds_brave_credentials(endpoint: &str, key_id: &str, signing_key: &str) -> bool {
+    !endpoint.is_empty() && !key_id.is_empty() && !signing_key.is_empty()
+}
+
+/// The AWS account a tier word resolves against: the tier variables' account, else a `provider`
+/// block's.
+///
+/// The tier variables are asked first, being the older way to name a Bedrock model and the one a
+/// tier word names a tier of, which is the order [`Config::bedrock_for`] resolves a model in. An
+/// account that named no model at all is passed over rather than shadowing one that did, since a
+/// `BRAVEBOT_USE_BEDROCK=1` with a region and no tier set is an account nothing can be asked of.
+///
+/// One account, not the strongest model across all of them. Comparing two accounts' models would
+/// mean ranking an inference-profile ARN against another one, which nothing here can do: a block
+/// names models rather than tiers, so there is no tier to compare them by.
+fn tier_account<'a>(
+    bedrock: Option<&'a bedrock::Bedrock>,
+    providers: &'a [provider::Provider],
+) -> Option<&'a bedrock::Bedrock> {
+    bedrock
+        .into_iter()
+        .chain(providers.iter().filter_map(|entry| entry.bedrock.as_ref()))
+        .find(|account| account.default_model().is_some())
+}
+
+/// How many prompt tokens a conversation may reach before it is compacted.
+///
+/// Low enough to be under any window worth calling a context window, since a budget above the
+/// real one never fires and the session dies of the thing compaction exists to prevent. The cost
+/// of being wrong downward is a summary sooner than it was needed; the cost of being wrong upward
+/// is the feature not existing. See [`Config::context_budget`].
+///
+/// Only a fallback now. Where the endpoint says what a model's window is, that is used instead:
+/// see [`budget_for_window`]. This stands in for [`DEFAULT_MODEL`], whose model is chosen per
+/// request so no one window describes it, and for an entry that reports nothing.
+///
+/// This was 100_000, which is not under any window the backend serves, so compaction could not
+/// fire: recorded sessions ended at 28,600, 34,751 and 34,800 prompt tokens having never once been
+/// summarised. Chosen to sit under the smallest window on the roster rather than to suit the
+/// largest, because being wrong upward costs a summary sooner than it was needed and being wrong
+/// downward removes compaction altogether.
+///
+/// [`env_var::CONTEXT_BUDGET`] overrides both this and anything discovered.
+pub const DEFAULT_CONTEXT_BUDGET: u64 = 24_000;
+
+/// The smallest context window worth using, in prompt tokens.
+///
+/// Not a limit anything enforces. It exists so [`DEFAULT_CONTEXT_BUDGET`] can be checked against
+/// the claim its own documentation makes, which is the claim that quietly stopped being true.
+pub const SMALLEST_USEFUL_WINDOW: u64 = 32_000;
+
+/// What the endpoint sends for a model whose window it does not know.
+///
+/// Not a small window: a placeholder standing where a figure would be. Taken as nothing said, since
+/// a budget of one token would compact before a turn could start.
+const NO_WINDOW_ADVERTISED: u64 = 1;
+
+/// The budget to use for a model the endpoint described, or `None` to fall back.
+///
+/// `advertised` is what `/v1/models` reported, which is already a token count with a fifth held
+/// back for the reply. It is used as it stands: there is nothing to convert, and no reserve to take
+/// off a figure that arrives discounted.
+///
+/// A small figure is taken at its word rather than raised to something more comfortable. Some models
+/// on the roster really do have windows of a few thousand tokens, and a floor that lifted them to
+/// the default would put the budget above the window, which does not make compaction late but
+/// removes it: every round asks, no round qualifies, and the session runs to exhaustion looking
+/// exactly like one with nothing to summarise. That is the failure this budget exists to prevent, so
+/// a cramped budget is the better of the two wrongs.
+///
+/// `None` only where nothing was advertised, which is the caller's cue to use
+/// [`DEFAULT_CONTEXT_BUDGET`].
+pub fn budget_for_window(advertised: Option<u64>) -> Option<u64> {
+    advertised.filter(|window| *window > NO_WINDOW_ADVERTISED)
+}
+
+// Checked where it cannot be skipped. A budget above the window does not make compaction late, it
+// removes it, and the removal is silent: every round asks, no round qualifies, and the session
+// runs to exhaustion looking exactly like one that had nothing to summarise. A compile is a
+// better place to find that out than a transcript.
+const _: () = assert!(DEFAULT_CONTEXT_BUDGET < SMALLEST_USEFUL_WINDOW);
+
+/// A value that must not be printed.
+///
+/// `Debug` and `Display` are deliberately redacting, and the inner value is only
+/// reachable through [`Secret::expose`], a name chosen so that reading a credential
+/// is visible at the call site during review.
+///
+/// Intentionally missing: equality, `Deref`, `AsRef`, `Borrow`, `Serialize` and `From`.
+/// An operator that answers a question about the bytes recovers them a guess at a time, and
+/// the derived answer takes time proportional to the shared prefix, so a credential that has
+/// to be compared is compared in constant time by the component that owns it.
+///
+/// Constructing one and asking whether it is empty is ordinary, which is what makes the
+/// refusal below a refusal of equality rather than of the name:
+///
+/// ```
+/// use bravebot_config::Secret;
+/// assert!(!Secret::new("a").is_empty());
+/// ```
+///
+/// Comparing two of them does not compile:
+///
+/// ```compile_fail
+/// use bravebot_config::Secret;
+/// let _ = Secret::new("a") == Secret::new("a");
+/// ```
+///
+/// The value is held in pages of its own, which the kernel is asked to keep out of swap and which
+/// are overwritten before they are handed back
+/// ([CRED-23](../../../docs/specs/credential-protection.md#CRED-23)). The `String` it was made from
+/// is overwritten once the value has been copied out of it. Cloning makes a second copy, held and
+/// cleared the same way.
+///
+/// What this reaches is the value this type holds and a `String` it was handed, which is what
+/// CRED-23 promises and all it promises. Handed a `&str`, it copies it into a `String` of its own
+/// first, so the buffer that borrow points into is the caller's to clear. A value that was copied
+/// on its way in, by an allocator growing a `String` or by a library between here and a socket,
+/// left a copy nothing here holds a pointer to.
+#[derive(Clone)]
+pub struct Secret(LockedText);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        let mut value = value.into();
+        Self(hold(&mut value))
+    }
+
+    /// Read the secret. Call sites should be rare and obvious.
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.as_str().is_empty()
+    }
+}
+
+/// Copy a credential into pages of its own and overwrite the string it arrived in, which would
+/// otherwise go back to the allocator holding it on the heap the lock was taken to keep it off.
+fn hold(value: &mut String) -> LockedText {
+    let held = LockedText::new(value);
+    scrub(value);
+    held
+}
+
+/// Overwrite a string's bytes where they lie, leaving the buffer as many zero bytes long as the
+/// value was.
+///
+/// `clear` is not this and is the mistake it exists to avoid: it sets the length to nothing and
+/// leaves every byte where it was, so the credential is still in the allocation when the
+/// allocator hands it to whoever asks next. Clearing and then pushing the replacement back writes
+/// over the original bytes in place, because `clear` keeps the capacity and the replacement is
+/// exactly as long as what it replaces, so nothing reallocates.
+///
+/// The write is held down by handing the bytes to [`std::hint::black_box`]. Nothing reads them
+/// back, and a compiler that can see the whole life of the buffer is entitled to delete a store
+/// no one observes; an opaque use of the bytes is how safe code says otherwise. It is a barrier
+/// rather than a guarantee the language makes, which is the price of doing this in a crate that
+/// forbids `unsafe` and so cannot write the bytes volatile.
+pub(crate) fn scrub(value: &mut String) {
+    let length = value.len();
+    value.clear();
+    value.extend(std::iter::repeat_n('\0', length));
+    std::hint::black_box(value.as_bytes());
+}
+
+/// Overwrite every value in a parsed settings document, which is where the copy of a credential the
+/// parse made lives until the document goes.
+///
+/// Every value rather than the names a credential is known to arrive under: whoever wrote the file
+/// chose where a token went, and by the time this runs the document has been read and nothing will
+/// ask it anything again. What a map's keys are cannot be reached through one and is a name rather
+/// than a value, so what this covers is what each name was set to.
+///
+/// Assigning `Value::Null` over a string is the mistake available here: it drops the string, which
+/// is the thing that leaves the bytes where the allocator can hand them on.
+pub(crate) fn scrub_document(root: &mut serde_json::Map<String, serde_json::Value>) {
+    root.values_mut().for_each(scrub_value);
+}
+
+/// Overwrite one value of a parsed document, and whatever is under it.
+///
+/// Public because a parse is how a credential arrives in more than one crate: a settings file
+/// here, and the JSON the AWS CLI answers a credential request with. A crate that may depend on
+/// this one uses this rather than spelling the walk again, which is the arrangement
+/// [CRED-23](../../../docs/specs/credential-protection.md#CRED-23) names.
+///
+/// Recursive over a shape a parse produced, which is a shape [`serde_json`] refused past 128 levels
+/// of nesting, so the depth here is the parser's bound rather than the file's.
+pub fn scrub_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => scrub(text),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(scrub_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(scrub_value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+/// Overwrite a byte buffer where it lies, leaving it as many zero bytes long as it was.
+///
+/// What [`scrub`] promises, for bytes that were never a `String`. A credential arrives this way
+/// whenever a subprocess writes one to a pipe: what the AWS CLI answers with is a `Vec<u8>` of
+/// JSON holding a live session key, and it is as readable there as in any other buffer.
+///
+/// A slice rather than a `Vec`, so that truncating the buffer is not one of the things a caller
+/// can reach for. The length is where the credential is, and setting it to nothing leaves every
+/// byte of it for whoever the allocator hands the memory to next.
+pub fn scrub_bytes(bytes: &mut [u8]) {
+    bytes.fill(0);
+    // The barrier [`scrub`] explains: nothing reads these zeros back, and a compiler that can see
+    // the whole life of the buffer is entitled to delete a store no one observes.
+    std::hint::black_box(&*bytes);
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+impl fmt::Display for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// Which of the three gates between the tiers a credential's walk failed at.
+///
+/// Numbered top down from Delegated, as the walk asks them: gate 1 separates Delegated from
+/// Granted, gate 2 Granted from Held briefly, gate 3 Held briefly from Held. A drop names the
+/// gate rather than the tier it landed on because the gate is the question that was answered,
+/// and the tier is only where answering it left the credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// Can something the agent cannot impersonate decide each use, and refuse?
+    One,
+    /// Can the issuer mint a bounded derivative, enforced beyond the agent's reach?
+    Two,
+    /// Can the issuer mint on demand and enforce death, unrefreshable without authority?
+    Three,
+}
+
+impl Gate {
+    /// The number the walk asks this gate at, which is what a report states.
+    ///
+    /// Taken from the record rather than written into each sentence a person reads, so a report
+    /// cannot name a gate the record did not fail.
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+        }
+    }
+}
+
+/// One condition of one gate, which is what CRED-3 asks a drop to name.
+///
+/// The set is the questions the gates ask rather than the answers this configuration happens to
+/// record: a gate fails on a condition, and a record holding only the conditions something fails
+/// on today could not say that a second one had started failing too.
+///
+/// Which gate a condition belongs to is [`Condition::gate`] and not a field beside it, since a
+/// condition is a condition of exactly one gate and a pair of fields can be set to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Condition {
+    /// Gate 1: nothing the agent cannot impersonate decides each use.
+    ///
+    /// CRED-6 is what this asks: where the agent can redeem what it holds unaided, the thing it
+    /// holds is the credential under another name.
+    NothingDecidesEachUse,
+    /// Gate 1: what decides each use cannot refuse one.
+    ///
+    /// Separate from the condition above because a performer that cannot say no is an
+    /// authorisation step that always authorises.
+    NothingCanRefuseAUse,
+    /// Gate 2: no bound on what the value may do is fixed before it is issued.
+    ///
+    /// CRED-7's first half. A value that arrives carrying whatever its holder already had is
+    /// unbounded whoever minted it.
+    NoBoundFixedBeforeIssue,
+    /// Gate 2: the bound is checked within the agent's reach.
+    ///
+    /// CRED-7's second half: a program running as the person presents itself as any other, so a
+    /// bound the agent's own code enforces answers to whoever is asking.
+    BoundEnforcedWithinReach,
+    /// Gate 2: the bound has no end.
+    ///
+    /// CRED-8. Narrow and permanent is a static secret with a small reach.
+    BoundWithNoEnd,
+    /// Gate 3: the value is not minted for one named step.
+    NotMintedForOneStep,
+    /// Gate 3: the issuer puts no end on it.
+    IssuerEndsNothing,
+    /// Gate 3: the agent can renew it without further authority.
+    ///
+    /// CRED-9's false pass: a fifteen-minute token the agent refreshes by itself is a permanent
+    /// credential with extra steps.
+    RenewableWithoutAuthority,
+}
+
+impl Condition {
+    /// Every condition a gate asks about, so something reporting a walk can be held to all of
+    /// them rather than to the ones a credential happens to fail on today.
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::NothingDecidesEachUse,
+            Self::NothingCanRefuseAUse,
+            Self::NoBoundFixedBeforeIssue,
+            Self::BoundEnforcedWithinReach,
+            Self::BoundWithNoEnd,
+            Self::NotMintedForOneStep,
+            Self::IssuerEndsNothing,
+            Self::RenewableWithoutAuthority,
+        ]
+    }
+
+    /// The gate this condition is a condition of.
+    pub const fn gate(self) -> Gate {
+        match self {
+            Self::NothingDecidesEachUse | Self::NothingCanRefuseAUse => Gate::One,
+            Self::NoBoundFixedBeforeIssue
+            | Self::BoundEnforcedWithinReach
+            | Self::BoundWithNoEnd => Gate::Two,
+            Self::NotMintedForOneStep
+            | Self::IssuerEndsNothing
+            | Self::RenewableWithoutAuthority => Gate::Three,
+        }
+    }
+}
+
+/// Whether a condition went unmet because the counterparty refused or because nobody attempted it.
+///
+/// CRED-3 keeps these apart because they end at the same tier and mean opposite things. A refusal
+/// is a fact about the world, and nothing on this side changes it by trying harder. An unattempted
+/// gate is a decision somebody made here, and it is the one that is ours to revisit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    /// The counterparty offers the arrangement to nobody, so asking for it changes nothing.
+    Refused,
+    /// The counterparty offers the arrangement, or could, and nothing here asks for it.
+    NotAttempted,
+}
+
+/// One drop of a credential's gate walk: the condition of the gate that failed, and whether the
+/// counterparty refused or nobody attempted it.
+///
+/// Both halves, because CRED-3 asks for both and a tier without them is an assertion: Held says
+/// where a credential stands and says nothing about whether it could have stood anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateDrop {
+    /// Which of the gate's conditions was not met. The gate is [`Condition::gate`].
+    pub condition: Condition,
+    /// Which of the two answers the condition has.
+    pub attempt: Attempt,
+}
+
+/// Where a credential's walk down the gates stopped, which is its tier.
+///
+/// CRED-2 asks that every credential in use carry one, and that it be arrived at by walking down
+/// from [`Tier::Delegated`] rather than asserted. The walk is what separates a credential somebody
+/// reasoned about from one that ended up wherever it ended up, so the default for custody with no
+/// recorded walk is [`Tier::Held`], the tier that assumes nothing: a tier that defaulted upward
+/// would let silence claim the strongest one.
+///
+/// Four tiers and three gates, and a drop is worth one tier: gate 1 asks whether something this
+/// program cannot impersonate decides each use, gate 2 whether the issuer mints a bounded
+/// derivative it enforces beyond this program's reach, and gate 3 whether the issuer mints on
+/// demand and ends the value without this program's help. Passing a gate stops the walk where it
+/// is, which is why [`Tier::Granted`] and [`Tier::HeldBriefly`] are both bounded and expiring
+/// arrangements: they differ in whether the bound or the lifetime is the thing the issuer enforces.
+///
+/// A credential with no custody and no refusal is on no tier at all, which CRED-5 covers and this
+/// type deliberately cannot express: an arrangement nobody can refuse would otherwise be recorded
+/// at the top of a scale it is not on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Nothing is held here and something this program cannot impersonate decides each use.
+    Delegated,
+    /// A real secret, bounded before it was issued by an issuer that enforces the bound.
+    Granted,
+    /// A real secret whose lifetime, rather than its reach, is what its issuer enforces.
+    HeldBriefly,
+    /// A permanent secret, bounded by the surface that revokes it and by nothing else.
+    Held,
+}
+
+impl Tier {
+    /// Every tier a credential can stand at, so something reporting them cannot omit one.
+    ///
+    /// Written from the top down, in walk order, because that is the order the gates are asked in
+    /// and a reader checking a record against the walk reads them the same way.
+    pub const ALL: [Self; 4] = [
+        Self::Delegated,
+        Self::Granted,
+        Self::HeldBriefly,
+        Self::Held,
+    ];
+}
+
+/// Whether a derived credential can be used only by the party it was issued to, or by whoever holds
+/// the value.
+///
+/// CRED-26 asks for the sender-constrained form (mutual TLS, a proof-of-possession scheme such as
+/// DPoP, or a workload identity the issuer checks) wherever the issuer offers one, and asks the
+/// record to say so where none is held. Scope and expiry say what a credential may do and for how
+/// long; this says whether a copy taken from this machine is usable elsewhere. It sits beside the
+/// tier and moves none: a bound and an unbound derivative that pass gate 2 are both Granted.
+///
+/// A bearer secret carries the same two answers a drop of the gate walk does, for the same reason:
+/// an issuer that offers no bound form is a fact about the world, and one that might offer it and
+/// is not asked is a decision made here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// The issuer checks who presents the credential, and this program asked for that form.
+    SenderConstrained,
+    /// Whoever holds the value can use it. [`Attempt::Refused`] records that the issuer offers no
+    /// sender-constrained form, and [`Attempt::NotAttempted`] that it may and nothing here asks.
+    Bearer(Attempt),
+}
+
+/// A credential this program holds itself, and so owes an account of what would end it.
+///
+/// CRED-25 asks three things about every credential at Held or Held briefly: who issued it, the
+/// surface that revokes it, and anything minted from it that revocation would not reach. All three
+/// are facts about the arrangement a credential arrived under rather than about its bytes, so what
+/// is recorded beside the value is which arrangement it is, and the three answers follow from that.
+/// The words a person reads are in the message catalog, since this crate holds none of its own.
+///
+/// CRED-2 asks a fourth thing of every credential in the list, whatever its tier: the tier itself,
+/// arrived at by walking down from Delegated. [`Held::tier`] is that record, and it is the one fact
+/// here that is not a CRED-25 obligation, which is why the list reaches past the two tiers CRED-25
+/// asks an account of. A credential in use with no recorded tier is the outcome CRED-2 forbids, so
+/// the record naming the arrangements is where the tier belongs: the alternative is a second list
+/// that can be short by one.
+///
+/// CRED-10 asks a fifth thing, of every credential at Held briefly and of any other worth saying it
+/// of: how quickly a leak of one would be noticed and acted on. That figure is a judgement about
+/// the deployment rather than a fact about the arrangement, and it establishes no tier and moves
+/// none, so it is recorded here beside the tier rather than derived from it: [`Held::tier`] and
+/// [`Held::noticed_within`].
+///
+/// CRED-3 asks a sixth thing, of every credential here: how it reached the tier it stands at. Each
+/// drop of the walk down from Delegated records which of the gate's conditions failed and whether
+/// the counterparty refused or nobody attempted it, which is [`Held::walk`]. A tier without that
+/// is an assertion, and the two answers matter separately: a gate the counterparty refused is a
+/// fact about the world, and a gate nobody attempted is a decision made here.
+///
+/// The obligation is detection followed by something a person can act on. An expiry, which is all
+/// that was kept before, says when a credential stops working and nothing about how to stop it
+/// working sooner; removing the file it came from ends this run's custody and leaves it live at its
+/// issuer.
+///
+/// A gateway's bearer token is in this list on the same footing as the rest. It is not this
+/// build's own credential, but a block that named a variable or wrote a token into a settings
+/// file is one this configuration holds for the length of a run, and `provider.rs` is the third
+/// path CRED governs, so the clause reaches it. That the block names no issuer is the answer to a
+/// different question: the host it names is the surface the token is presented to and the only one
+/// that revokes it, which is the address the clause asks be written down.
+///
+/// The premium key is in it on the same footing: this build or this shell holds a bearer key for
+/// the length of a run, and presents it with every premium request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held<'a> {
+    /// The HMAC signing key baked into this build, which signs every request to the Brave backend.
+    ///
+    /// Held. It carries no expiry, and one build's key is every install's, so nothing on this
+    /// machine ends it: the surface is the backend that derives its copy from a master seed and
+    /// [`Config::key_id`], and revoking means retiring that id there and shipping another build.
+    SigningKey,
+    /// A long-lived AWS access key, as the AWS CLI resolved it for a profile.
+    ///
+    /// Held. `aws iam delete-access-key` ends it at IAM, and does not reach a session credential
+    /// already minted from it.
+    AwsAccessKey,
+    /// An AWS session credential: an SSO session or an assumed role, as the AWS CLI resolved it.
+    ///
+    /// Held. It states an expiry, and the expiry ends that copy rather than this program's
+    /// access: credentials are resolved as each request is built, and the export that renews them
+    /// asks nobody. Ending it is done at its issuer, because `aws sso logout` clears this
+    /// machine's copy rather than the session.
+    AwsSession,
+    /// The bearer token a `provider` block carries or names a variable for, held for the run.
+    ///
+    /// Held. It carries no expiry and nothing on this machine ends it: `host` is where the token
+    /// is presented, so it is both the issuer as far as this program can know one and the only
+    /// surface that revokes it. Deleting the value from the settings file, or unsetting the
+    /// variable, ends this machine's custody and leaves the token live there.
+    ///
+    /// The host rather than the block's id, because the id is a name somebody chose for a section
+    /// of their own file and the report is read by somebody going to the gateway to end a token.
+    GatewayToken {
+        /// The host the block's endpoint names, from [`provider::Provider::host`].
+        host: &'a str,
+    },
+    /// The key the premium host authorises a request with, kept in `~/.bravebot/brave-key.json`
+    /// and sent as a bearer token with every premium request.
+    ///
+    /// Held. It carries no expiry, and this program presents it itself with nothing deciding a
+    /// use: the premium host is both the issuer and the only surface that revokes it, and it
+    /// offers no narrower or shorter form. `bravebot auth logout brave` ends this machine's
+    /// custody and leaves the key live there.
+    ///
+    /// No parameter. The host is Brave's premium deployment, which [`Config::premium_endpoint`]
+    /// names, and the key is one value whatever the person.
+    PremiumKey,
+    /// The sign-in a person made to OpenAI with a ChatGPT account, kept in
+    /// `~/.bravebot/chatgpt-account.json` as an access token and the refresh token that replaces it.
+    ///
+    /// Held. The refresh token mints an access token without asking anybody, so what this program
+    /// holds is permanent whatever the access token's stated lifetime: gate 1 fails because this
+    /// program presents the token itself, gate 2 because nothing narrows what the token may do to
+    /// this run, and gate 3 on being renewed without further authority, which is the false pass
+    /// CRED-9 names. One entry for the pair, as for the batch, since the two are one arrangement
+    /// ended at one surface: signing out of the account, or removing this program's access in the
+    /// account's settings, at OpenAI.
+    ///
+    /// No parameter. The file holds one sign-in whatever the account, and an identifier or an email
+    /// in a pasted report is the one thing in it that says whose account it was.
+    ChatgptAccount,
+    /// The sign-in a person made to xAI with a SuperGrok subscription, kept in
+    /// `~/.bravebot/xai-account.json` as an access token and the refresh token that replaces it.
+    ///
+    /// Held, on the same walk as [`Held::ChatgptAccount`] and for the same reasons: this program holds
+    /// the access token itself and nothing is asked to authorise a use of it, nothing asks xAI to
+    /// narrow it to this run, and the refresh token replaces it without asking anybody. One entry for
+    /// the pair, since the two are one arrangement.
+    ///
+    /// The surface that ends it is xAI, and what ends each token is different. The access token was
+    /// issued for 21600 seconds, observed once with one account, and what the serving host answers a
+    /// token past that instant was not observed. The
+    /// refresh token ends when xAI revokes it: its revocation endpoint did so on 2026-10-26, and a
+    /// refresh afterwards was refused as `invalid_grant`. This program does not call that endpoint, so
+    /// signing out here ends this machine's custody and nothing at xAI. One request made right after
+    /// that revocation, with an access token issued before it, was accepted, once with one account. How
+    /// long such a token keeps working was not observed.
+    ///
+    /// No parameter, for the reason the ChatGPT sign-in has none.
+    XaiAccount,
+}
+
+impl<'a> Held<'a> {
+    /// Every credential this program can hold, so something reporting them cannot omit one.
+    ///
+    /// The gateway arrangement is a credential plus the host that would end it, so a list of the
+    /// kinds has to be given one: a caller walking this is asking which arrangements exist rather
+    /// than which are configured, and the host it passes is what the gateway entry will name.
+    pub const fn all(gateway_host: &'a str) -> [Self; 7] {
+        [
+            Self::SigningKey,
+            Self::AwsAccessKey,
+            Self::AwsSession,
+            Self::GatewayToken { host: gateway_host },
+            Self::PremiumKey,
+            Self::ChatgptAccount,
+            Self::XaiAccount,
+        ]
+    }
+
+    /// Every drop of this credential's walk down from Delegated, in the order the gates are asked.
+    ///
+    /// CRED-2 puts a credential's tier at where its walk stopped, and CRED-3 asks each drop to say
+    /// which of that gate's conditions failed and whether the counterparty refused or nobody
+    /// attempted it. Recorded per credential rather than per tier, because two credentials at Held
+    /// can have got there for opposite reasons and only one of them is worth revisiting.
+    ///
+    /// The length is the tier: failing a gate drops exactly one tier and nothing skips one, so one
+    /// drop is Granted, two is Held briefly and three is Held. That is the same claim
+    /// [`Held::tier`] makes, and the two are pinned against each other rather than derived from one
+    /// another, so a walk revised without the tier fails rather than quietly restating it.
+    ///
+    /// Every drop here is one nobody attempted. Each of these credentials is handed over whole and
+    /// used directly, and at each gate the counterparty either offers the stronger arrangement
+    /// already, as AWS does in minting a bounded session, or has never been asked for it. None of
+    /// them is a refusal, so none of them is excused by the world being as it is.
+    pub fn walk(self) -> &'static [GateDrop] {
+        match self {
+            // The key signs the request digest in this process, so nothing decides a use. The
+            // backend derives its copy from a master seed and the key id and offers nothing
+            // narrower and nothing shorter, and it is this project's own backend: what stops each
+            // of these gates is that nobody has built the other side of it.
+            Self::SigningKey => &[
+                GateDrop {
+                    condition: Condition::NothingDecidesEachUse,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NoBoundFixedBeforeIssue,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NotMintedForOneStep,
+                    attempt: Attempt::NotAttempted,
+                },
+            ],
+            // AWS mints a session bounded by a policy it enforces and the agent cannot widen, and
+            // ends it, which is gates 2 and 3 both answered on the counterparty's side. What this
+            // program does with a long-lived key is sign with it, so all three drops are ours.
+            Self::AwsAccessKey => &[
+                GateDrop {
+                    condition: Condition::NothingDecidesEachUse,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NoBoundFixedBeforeIssue,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NotMintedForOneStep,
+                    attempt: Attempt::NotAttempted,
+                },
+            ],
+            // Three drops, although the session states an expiry and the issuer that minted it
+            // could end it early. Gate 2 fails on the bound: the session carries whatever the
+            // profile's role or SSO grant allows, and nothing here asks STS to narrow it to this
+            // run. Gate 3 fails on renewal, which is CRED-9's false pass. Credentials are resolved
+            // as each request is built, and what renews them is `aws configure
+            // export-credentials`, which asks nobody: the next session is minted from whatever the
+            // profile chains to, for as long as that lasts. How long that is is a question about
+            // `~/.aws/config`, which nothing here reads. A `role_arn` over a long-lived key in a
+            // file lasts until somebody deletes the key, and an SSO chain until its own token runs
+            // out; the two arrive here as one arrangement, the CLI answering an export.
+            //
+            // Not attempted rather than refused: reading the profile chain, and finding one whose
+            // renewal a person has to sit through, would be a different arrangement and would
+            // answer differently, and nothing here has asked for one.
+            Self::AwsSession => &[
+                GateDrop {
+                    condition: Condition::NothingDecidesEachUse,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NoBoundFixedBeforeIssue,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::RenewableWithoutAuthority,
+                    attempt: Attempt::NotAttempted,
+                },
+            ],
+            // A block names a host and a variable and never an issuer, so there is nothing here
+            // to ask for a performer, a narrower token or a shorter one. Not attempted rather
+            // than refused: what the gateway at the other end offers is not something this
+            // program has been told. The premium key is the same arrangement: one bearer value the
+            // premium host issued, presented by this program, with nothing asked of that host for
+            // something narrower or shorter.
+            Self::GatewayToken { .. } | Self::PremiumKey => &[
+                GateDrop {
+                    condition: Condition::NothingDecidesEachUse,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NoBoundFixedBeforeIssue,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NotMintedForOneStep,
+                    attempt: Attempt::NotAttempted,
+                },
+            ],
+            // Three drops, on the same conditions as an AWS session and for the same reasons: the
+            // token is presented by this program, nothing here asks OpenAI to narrow it to a run,
+            // and the refresh token replaces it without anybody being asked. Not attempted rather
+            // than refused: nothing here asks OpenAI for a narrower or bound form, so no refusal of
+            // one has been seen.
+            Self::ChatgptAccount | Self::XaiAccount => &[
+                GateDrop {
+                    condition: Condition::NothingDecidesEachUse,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::NoBoundFixedBeforeIssue,
+                    attempt: Attempt::NotAttempted,
+                },
+                GateDrop {
+                    condition: Condition::RenewableWithoutAuthority,
+                    attempt: Attempt::NotAttempted,
+                },
+            ],
+        }
+    }
+
+    /// Where this credential's walk down the gates stopped, which CRED-2 asks every credential in
+    /// use to carry.
+    ///
+    /// A claim about the arrangement, so it moves only when the arrangement does: CRED-4. Nothing
+    /// a person could rewrite is in it, and no variant stands at [`Tier::Delegated`], because
+    /// every arrangement here hands material over and this program presents it itself.
+    ///
+    /// The reasoning for each answer is on the variant, where the arrangement it describes is, and
+    /// not repeated here: a second copy of it is a second thing to keep true.
+    pub fn tier(self) -> Tier {
+        match self {
+            Self::SigningKey
+            | Self::AwsAccessKey
+            | Self::AwsSession
+            | Self::GatewayToken { .. }
+            | Self::PremiumKey
+            | Self::ChatgptAccount
+            | Self::XaiAccount => Tier::Held,
+        }
+    }
+
+    /// How quickly a leak of this credential would be noticed and acted on, which CRED-10 asks the
+    /// record to say for every credential at Held briefly.
+    ///
+    /// Owed at Held too, and for the stronger reason. The obligations ratchet downward, so a
+    /// credential that drops a tier keeps what it owed and picks up more, and detection is the
+    /// whole of what a permanent credential is owed: it outlives every decision made about it.
+    /// What the drop takes away is what the figure decides. At Held briefly it says whether the
+    /// window is short enough for what the credential reaches; at Held there is no window, and it
+    /// says how long a leak runs before anybody goes to the surface [`Held`] already names.
+    ///
+    /// So a credential [`Held::tier`] puts at [`Tier::HeldBriefly`] has to have one, and a
+    /// credential at Held may. Recorded rather than derived either way, so a credential added at
+    /// Held briefly and left unsized is a disagreement a test sees.
+    ///
+    /// It does not establish the tier and cannot move it. A rota that stopped watching would make
+    /// this number larger and leave the session credential exactly where the gate walk left it.
+    ///
+    /// **Where the fifteen minutes comes from.** It is a judgement about this deployment, which is
+    /// one person's machine, and not a property of the arrangement. Nothing here watches for a use
+    /// of a credential this program holds: the notice comes from the AWS account's own trail,
+    /// where a call made with the session appears rather than here, and ending the session before
+    /// its expiry is then one request at its issuer. Fifteen minutes is how long that takes
+    /// somebody who is reading the trail. Where nobody reads it, nothing notices at all, which is
+    /// the judgement this figure exists to let a person make.
+    pub fn noticed_within(self) -> Option<Duration> {
+        match self {
+            Self::AwsSession => Some(Duration::from_secs(15 * 60)),
+            Self::SigningKey
+            | Self::AwsAccessKey
+            | Self::GatewayToken { .. }
+            | Self::PremiumKey
+            | Self::ChatgptAccount
+            | Self::XaiAccount => None,
+        }
+    }
+
+    /// Whether revoking this credential at its issuer leaves something minted from it working.
+    ///
+    /// The one of the three facts that is a claim about what happens rather than an address, and
+    /// the one somebody acting on a leak gets wrong: deleting an access key is the obvious move,
+    /// and it does not reach the session credentials STS has already handed out under it, each of
+    /// which runs to its own expiry.
+    ///
+    /// False for a gateway token: the gateway that revokes it is the only place it is presented,
+    /// and nothing here mints anything from it. A copy of the same token in a file or a shell
+    /// profile is that credential rather than something derived from it, so revoking reaches it.
+    ///
+    /// False for the premium key on the same footing: the premium host that revokes it is the only
+    /// place it is presented, and nothing here mints anything from it.
+    ///
+    /// True for the ChatGPT sign-in, because the surfaces the record names for ending it are
+    /// signing out of the account and removing this program's access in the account's settings,
+    /// and neither has been observed to end an access token already minted from the refresh
+    /// token. The observation that exists is of another surface: a refresh token revoked at
+    /// OpenAI's revocation endpoint, which this program does not call, was followed within
+    /// seconds by a refusal with 401 of an access token minted from it before the revocation, in
+    /// one account's sign-in. That shows nothing of the two surfaces or of other accounts, so the
+    /// report says what was seen and that the rest has not been observed, and does not tell
+    /// somebody that nothing survives.
+    ///
+    /// True for the xAI sign-in as well, on one observation: an access token issued before the refresh
+    /// token was revoked at xAI's revocation endpoint, which this program does not call, was accepted
+    /// on a request made right after it, once with one account. That shows nothing of how long such a
+    /// token keeps working, so the report says what was seen and no more, and does not tell somebody
+    /// that nothing survives.
+    pub fn outlives_revocation(self) -> bool {
+        matches!(
+            self,
+            Self::AwsAccessKey | Self::ChatgptAccount | Self::XaiAccount
+        )
+    }
+
+    /// Whether this derived credential is bound to its presenter or a bearer secret, which CRED-26
+    /// asks the record to say.
+    ///
+    /// `None` for a credential that is not derived from another: the signing key, a long-lived
+    /// access key, a gateway's token and the premium key are each issued once and held as they
+    /// were issued, so there is no derivative for a bound form to be asked of. The three derived
+    /// credentials are all bearer secrets today.
+    ///
+    /// An AWS session is [`Attempt::Refused`]: STS issues session credentials that any holder of
+    /// the three values can sign with, and offers no form checked against the presenter. The
+    /// ChatGPT sign-in's access token is [`Attempt::NotAttempted`]: nothing asks OpenAI's
+    /// authorization server for a sender-constrained form, so it is a bearer secret nobody has
+    /// asked for more of.
+    ///
+    /// A claim about the arrangement, so it moves only when the arrangement does.
+    pub fn binding(self) -> Option<Binding> {
+        match self {
+            Self::AwsSession => Some(Binding::Bearer(Attempt::Refused)),
+            Self::ChatgptAccount | Self::XaiAccount => Some(Binding::Bearer(Attempt::NotAttempted)),
+            Self::SigningKey
+            | Self::AwsAccessKey
+            | Self::GatewayToken { .. }
+            | Self::PremiumKey => None,
+        }
+    }
+}
+
+/// What a person does about a credential a scan found.
+///
+/// CRED-20: a disposition moves a tier only by passing the gate it attempts. Only [`Enrol`]
+/// attempts a gate, gate 1, and it passes only where a performer exists for the operation. The
+/// other three attempt none, so none of them can change a tier. [`Disposition::apply`] is the one
+/// place a disposition yields a tier, and the tier it yields for a disposition that attempts no
+/// gate is [`Held::tier`], which is derived from the gate walk and is not an input here.
+///
+/// [`Enrol`]: Disposition::Enrol
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Delete the value from where it was found. Ends this run's custody and revokes nothing.
+    Remove,
+    /// Refuse the path to the tools that name a file. Keeps the value out of the context and is
+    /// not custody.
+    Deny,
+    /// Hand the credential to the authority, which performs the operation so the agent holds
+    /// nothing. The only disposition that attempts a gate.
+    Enrol,
+    /// Leave the credential where it is. Owes what the tier it stands at owes.
+    Accept,
+}
+
+/// Whether something outside the account exists that can carry out the operation a credential is
+/// used for, deciding each use and able to refuse it.
+///
+/// Gate 1 asks exactly this. It is a fact about the arrangement, supplied by whatever knows the
+/// performers that exist, and is never derived from a disposition or from a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Performer {
+    /// A performer exists for the operation.
+    Exists,
+    /// None exists, so enrolling leaves a bearer secret in a different place.
+    Absent,
+}
+
+/// Why a disposition did not move a tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotMoved {
+    /// Enrolling attempted gate 1 and no performer exists for the operation, so the credential
+    /// stays at the tier it stood at.
+    NoPerformer,
+}
+
+impl Disposition {
+    /// Every disposition, so a check over them cannot omit one.
+    pub const ALL: [Self; 4] = [Self::Remove, Self::Deny, Self::Enrol, Self::Accept];
+
+    /// The gate this disposition attempts, or `None` where it attempts none.
+    pub const fn attempts(self) -> Option<Gate> {
+        match self {
+            Self::Enrol => Some(Gate::One),
+            Self::Remove | Self::Deny | Self::Accept => None,
+        }
+    }
+
+    /// The tier `held` stands at once this disposition has been applied.
+    ///
+    /// A disposition that attempts no gate answers with the tier the credential already stands at.
+    /// Enrolling answers [`Tier::Delegated`] where a performer exists and refuses where none does,
+    /// and a refusal leaves the tier as it was.
+    pub fn apply(self, held: Held<'_>, performer: Performer) -> Result<Tier, NotMoved> {
+        match self.attempts() {
+            None => Ok(held.tier()),
+            Some(_) => match performer {
+                Performer::Exists => Ok(Tier::Delegated),
+                Performer::Absent => Err(NotMoved::NoPerformer),
+            },
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfigError {
+    Missing(&'static str),
+    Empty(&'static str),
+    InvalidEndpoint {
+        value: String,
+    },
+    /// The endpoint writes a `:` that no port a connection can use follows. `port` is the text
+    /// written there, not the endpoint, which may state credentials.
+    UnreadablePort {
+        port: String,
+    },
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing(name) => write!(
+                f,
+                "{name} is not set and was not built in; copy contrib/envrc.example to .envrc and run `direnv allow`"
+            ),
+            Self::Empty(name) => write!(f, "{name} is set but empty"),
+            Self::InvalidEndpoint { value } => write!(
+                f,
+                "endpoint must start with http:// or https://, got '{value}'"
+            ),
+            Self::UnreadablePort { port } => write!(
+                f,
+                "endpoint writes a port that is not a number up to 65535, got ':{port}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// How long a provider keeps a cached prompt prefix after the last request that read it.
+///
+/// The two lifetimes the providers accept. A person's choice, read from the settings and never
+/// derived from anything a conversation holds. The longer one is charged at a higher write rate, so
+/// nothing is sent until somebody chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTtl {
+    FiveMinutes,
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Every lifetime, for a test that has to cover each.
+    pub const ALL: [Self; 2] = [Self::FiveMinutes, Self::OneHour];
+
+    /// The word a cache breakpoint carries as its `ttl`, which is also how the setting spells it.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+
+    /// The lifetime `word` names, exactly as [`CacheTtl::wire`] spells it, or `None` for anything
+    /// else. A word that names neither is absence rather than a guess at the nearest lifetime.
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ttl| ttl.wire() == word.trim())
+    }
+}
+
+/// Which accounts a roster asks for its rows: a stored sign-in's token goes to the serving host of each
+/// that is asked
+/// ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9),
+/// [XAI-19](../../../docs/specs/xai-sign-in.md#XAI-19)).
+///
+/// One rule for the terminal's roster and the window's, so neither holds its own copy of which accounts
+/// are asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RosterAccounts {
+    pub chatgpt: bool,
+    pub xai: bool,
+}
+
+impl RosterAccounts {
+    /// What a picker asks: both accounts, whatever model is in force, since it lists every model a
+    /// person could choose.
+    pub fn for_a_picker() -> Self {
+        Self {
+            chatgpt: true,
+            xai: true,
+        }
+    }
+}
+
+/// Which gateways a roster asks over the network. A gateway whose block names its models is never
+/// asked, so this only decides among the ones that name none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gateways<'config> {
+    /// Every one of them.
+    All,
+    /// The one with this id, and no other.
+    Only(&'config str),
+    /// None of them.
+    Nothing,
+}
+
+/// Every service a roster asks over the network for its rows
+/// ([BACKEND-64](../../../docs/specs/backends.md#BACKEND-64)).
+///
+/// One rule for the terminal's roster and the window's, as [`RosterAccounts`] is for the accounts
+/// it holds, so neither keeps its own copy of which services a lookup waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RosterScope<'config> {
+    pub accounts: RosterAccounts,
+    pub gateways: Gateways<'config>,
+    /// Brave's own endpoint, which is also where an `automatic` row and every bare Brave name
+    /// come from.
+    pub brave: bool,
+}
+
+impl RosterScope<'_> {
+    /// What a picker asks: every service, whatever model is in force, since it lists every model a
+    /// person could choose.
+    pub fn for_a_picker() -> Self {
+        Self {
+            accounts: RosterAccounts::for_a_picker(),
+            gateways: Gateways::All,
+            brave: true,
+        }
+    }
+
+    /// Whether `provider`, a gateway whose block names no models, is asked.
+    pub fn asks_gateway(&self, provider: &provider::Provider) -> bool {
+        match self.gateways {
+            Gateways::All => true,
+            Gateways::Only(id) => provider.id == id,
+            Gateways::Nothing => false,
+        }
+    }
+}
+
+/// The service that answers a request naming a model ([BACKEND-3](../../../docs/specs/backends.md#BACKEND-3)).
+///
+/// `'config` is the configuration the service is found in, and `'name` the model's own spelling,
+/// from which the name a service knows it by is taken.
+#[derive(Debug, Clone, Copy)]
+pub enum Serves<'config, 'name> {
+    /// An AWS account, from the tier variables or from a `provider` block that names AWS.
+    Bedrock(&'config bedrock::Bedrock),
+    /// A gateway, and the name it knows the model by.
+    Gateway(&'config provider::Provider, &'name str),
+    /// The ChatGPT account, and the name it knows the model by.
+    Chatgpt(&'name str),
+    /// The xAI account, and the name it knows the model by.
+    Xai(&'name str),
+    /// Brave's endpoint, which answers any name nothing above claims.
+    Aichat,
+}
+
+/// Everything needed to talk to the backends this build can reach.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Bedrock configuration, when a settings file or the environment asked for it.
+    ///
+    /// Additive, and not a choice of backend: the tiers named here are offered alongside the aichat
+    /// roster and the model a person picks is what decides where a request goes. The aichat fields
+    /// below may still be blank, since somebody pointing the agent at their own AWS account is not
+    /// required to hold Brave service credentials as well.
+    pub bedrock: Option<bedrock::Bedrock>,
+    /// Gateways the settings file configured, in the order it listed them.
+    ///
+    /// Additive on the same terms as [`Config::bedrock`]: the models named here are offered beside
+    /// the other rosters, and the model a person picks is what decides where a request goes.
+    pub providers: Vec<provider::Provider>,
+    /// The models the ChatGPT account is offered as, where a `provider` entry named `chatgpt` states
+    /// no endpoint and names some ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+    ///
+    /// Not a gateway, which is why it is not in [`Config::providers`]: that list decides which
+    /// service answers a name, and an entry with no endpoint answers nothing. Empty where no entry
+    /// names models, which is the account's listing being asked instead, and where a machine-level
+    /// `provider` block replaces the person's, whether or not it holds the id.
+    pub chatgpt_models: Vec<provider::AccountModel>,
+    /// Which models the machine-level layer lets this machine request (BACKEND-48).
+    ///
+    /// Resolved onto the configuration rather than read where it is needed, because that layer is a
+    /// file read once at startup and every route to a model has to answer the same. Empty on a
+    /// machine with no such file, and an empty pair of lists refuses nothing.
+    pub models: managed::Models,
+    /// HMAC signing key. Never transmitted; used only to sign the request digest.
+    pub signing_key: Secret,
+    /// Key id sent in the Authorization header. The server derives its copy of the
+    /// signing key from a master seed plus this id, so the two are a matched pair.
+    pub key_id: String,
+    /// Base URL. The API path is appended by the client.
+    pub endpoint: String,
+    /// Base URL for the premium tier: the one compiled in for this build's environment, or the one
+    /// [`env_var::PREMIUM_ENDPOINT`] names in its place.
+    ///
+    /// `None` only for a build that cannot reach the Brave backend at all, which has no premium tier
+    /// to reach either. A value that is present but malformed is not used and the compiled-in host
+    /// stands, so the key never goes to an address a settings file spelled badly.
+    pub premium_endpoint: Option<String>,
+    /// The key `bravebot auth login brave` stored, sent as a bearer token to the premium host.
+    ///
+    /// `None` where none is stored, and where there is no premium host to send it to: the two go
+    /// together, so a key with nowhere to go is dropped rather than held. Whether the host is one
+    /// of Brave's is decided where the key is presented, not here
+    /// ([PREM-2](../../../docs/specs/premium-credentials.md#PREM-2)).
+    pub premium_key: Option<Secret>,
+    /// Model to request when the user has not picked one. The server may substitute a different
+    /// one regardless.
+    pub default_model: String,
+    /// The model the settings in force name as the planner's advisor, as the file spelled it.
+    ///
+    /// `None` offers no advisor. [`Config::advisor`] resolves a tier word in it.
+    pub advisor_model: Option<String>,
+    /// The size in tokens above which a server's tools are offered by name only, from the
+    /// `deferMcpToolsAbove` setting. `None` offers every tool in full (`mcp-servers.md`
+    /// SERVERS-16).
+    pub defer_mcp_tools_above: Option<u64>,
+    /// The most delegates one turn may have running at once, from the `maxRunningDelegates`
+    /// setting. `None` leaves the kernel's own bound in force (`delegation.md` DELEGATE-7).
+    pub max_running_delegates: Option<u32>,
+    /// The model the settings in force name for a turn to move to when its own keeps failing, as
+    /// the file spelled it.
+    ///
+    /// `None` names none. [`Config::fallback`] resolves a tier word in it and applies the
+    /// machine-level lists.
+    pub fallback_model: Option<String>,
+    /// The model the settings in force name for compaction summaries and goal checks, as the file
+    /// spelled it.
+    ///
+    /// `None` leaves both on the session's own model. [`Config::summary`] resolves a tier word in
+    /// it.
+    pub summary_model: Option<String>,
+    /// The model the settings in force name for a turn that begins in plan mode, as the file
+    /// spelled it.
+    ///
+    /// `None` leaves such a turn on the session's own model. [`Config::plan`] resolves a tier word
+    /// in it.
+    pub plan_model: Option<String>,
+    /// The model the settings in force, or `--processor-model` over them, name for processors to run
+    /// on, as the file or the flag spelled it.
+    ///
+    /// `None`, and `inherit`, leave a processor on the turn's own model. [`Config::processor`]
+    /// resolves a tier word in it.
+    pub processor_model: Option<String>,
+    /// The format `/commit-message` follows when no words are typed after the command, as the
+    /// person's own settings wrote it (CMD-23).
+    pub commit_message_instructions: Option<String>,
+    /// The cache lifetime the settings in force chose for requests to a gateway, if they chose one.
+    ///
+    /// `None` sends no lifetime, so every service keeps its own default. Bedrock accounts carry the
+    /// same choice ([`bedrock::Bedrock::cache_ttl`]), set beside this where the settings are read.
+    pub prompt_cache_ttl: Option<CacheTtl>,
+    /// How many prompt tokens one request may reach before the conversation is compacted.
+    ///
+    /// A guess, and it has to be one. The server reports what a request cost but never what it
+    /// had room for, the default model is `automatic` and resolves per request, and there is no
+    /// tokeniser here to count with. So this is a number chosen to be comfortably under the
+    /// smallest window worth using, and [`env_var::CONTEXT_BUDGET`] is the way out of it for
+    /// anyone whose model is smaller or much larger.
+    pub context_budget: u64,
+    /// Whether [`Config::context_budget`] was set by hand.
+    ///
+    /// A budget somebody typed outranks one the endpoint advertised: they may know something about
+    /// their model that the listing does not say, and silently replacing it would make the setting
+    /// look broken. Nothing reads this except [`Config::adopt_window`].
+    budget_was_chosen: bool,
+    /// Whether the context budget was adopted from an advertised window.
+    budget_was_advertised: bool,
+    /// What the gateway's roster lists one model as taking, in the roster's own words, beside the
+    /// name of that model.
+    ///
+    /// Empty until a listing is adopted, and empty where the listing said nothing about the model:
+    /// neither is a claim that the model takes only text. Read by the one thing that decides on it,
+    /// which is whether a picture the planner asks to see can be put to a model that looks at it.
+    listed_inputs: Option<(String, Vec<String>)>,
+    /// The Bedrock regions that were written and refused for what they hold, each with where it was
+    /// written, in the order of the layers that wrote them: the variable first, then the
+    /// `amazon-bedrock` entry under `provider`.
+    ///
+    /// Carried to `doctor` and nowhere else. Nothing reads it to decide anything: the account these
+    /// would have configured is simply absent ([BACKEND-33](../../../docs/specs/backends.md#BACKEND-33)).
+    /// Empty for a `Config` built from a bare lookup, which has no layers to name.
+    pub refused_regions: Vec<bedrock::RefusedRegion>,
+}
+
+/// The Bedrock regions refused in the layers in force, each with where it was written.
+///
+/// The variable is asked in the order [`lookup_in`] answers it, so the layer named is the one whose
+/// value was refused. An `amazon-bedrock` entry is named only where the person's own settings are
+/// the gateways in force: a machine-level block replaces them, and an entry it replaced is not
+/// refused, being never read.
+fn refused_regions(
+    settings: &Settings,
+    managed: &Managed,
+    exported: &impl Fn(&str) -> Option<String>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Vec<bedrock::RefusedRegion> {
+    let variable = bedrock::Bedrock::refused_region(lookup).map(|fault| {
+        let source = if managed.get(env_var::AWS_REGION).is_some() {
+            bedrock::RegionSource::Managed
+        } else if exported(env_var::AWS_REGION).is_some_and(|value| !value.trim().is_empty()) {
+            bedrock::RegionSource::Exported
+        } else {
+            bedrock::RegionSource::EnvBlock
+        };
+        // Asked of the settings only for the env block: the file is the one `Settings` kept as
+        // having stated the name, and the other sources are not a file.
+        let file = matches!(source, bedrock::RegionSource::EnvBlock)
+            .then(|| settings.network_source(env_var::AWS_REGION))
+            .flatten()
+            .map(std::path::Path::to_path_buf);
+        bedrock::RefusedRegion {
+            fault,
+            source,
+            file,
+        }
+    });
+    let entry = settings
+        .bedrock_region_refused()
+        .filter(|_| managed.gateways().is_none())
+        .map(|fault| bedrock::RefusedRegion {
+            fault: fault.clone(),
+            source: bedrock::RegionSource::ProviderEntry,
+            file: None,
+        });
+    variable.into_iter().chain(entry).collect()
+}
+
+/// A value captured when this binary was built, or `None` if the build had none.
+///
+/// The masking is undone here rather than at startup so a credential is materialised
+/// only for the variable actually being read.
+fn built_in(name: &str) -> Option<String> {
+    let (_, masked) = BAKED.iter().find(|(baked, _)| *baked == name)?;
+    String::from_utf8(obfuscate::mask(masked)).ok()
+}
+
+/// Where this build sends a crash report, or `None` for a build that was given nowhere to.
+///
+/// Read from what the build baked in and from nothing else, unlike every other name the build
+/// bakes: the environment and the settings files are the two places a checkout can write to, and
+/// where a report goes is not theirs to say (CRASH-3). Only `https`, since the token is in the path
+/// and a cleartext request would put it on the wire.
+pub fn crash_report_endpoint() -> Option<String> {
+    crash_report_endpoint_in(built_in)
+}
+
+/// [`crash_report_endpoint`] against a stated set of baked values, so the rule needs no build that
+/// had one.
+fn crash_report_endpoint_in(baked: impl Fn(&str) -> Option<String>) -> Option<String> {
+    baked(env_var::CRASH_REPORT_URL).filter(|url| url.starts_with("https://"))
+}
+
+/// Pick between what the environment says and what the build baked in.
+fn resolve(
+    name: &str,
+    from_env: Option<String>,
+    baked: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match from_env {
+        Some(value) if !value.trim().is_empty() => Some(value),
+        // A placeholder .envrc leaves a variable blank, which is not a request to
+        // override, so a built-in value still applies. With none, the blank is handed
+        // on so the error reports it as empty rather than missing.
+        blank => baked(name).or(blank),
+    }
+}
+
+/// Which model to request, from the three places that may name one.
+///
+/// Ranked differently from every other value, which is why it is written out rather than going
+/// through [`resolve`]. The settings file sits *above* the baked-in value here: every release bakes
+/// in a default model, so a `model` key ranked below it would lose on every binary anybody was
+/// given, leaving a key that parses, is reported by `doctor`, and changes nothing outside a source
+/// build.
+///
+/// It sits above an exported variable too, the one place a person's settings file outranks one. The
+/// variable names a default, which is what a `.envrc` that exports it for every checkout means by
+/// it, and a file that names a model is somebody choosing one. A variable ranked above the file
+/// would also rank above a saved `/model` pick, which answers as the person's own file does.
+/// `env.BRAVEBOT_DEFAULT_MODEL` is read last, below the baked-in value, because that block is
+/// variables and is ranked like them.
+fn resolve_model(
+    from_env: Option<String>,
+    settings: &Settings,
+    baked: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    settings
+        .model()
+        .map(str::to_string)
+        .or_else(|| from_env.filter(|value| !value.trim().is_empty()))
+        .or_else(|| baked(env_var::DEFAULT_MODEL))
+        .or_else(|| settings.get(env_var::DEFAULT_MODEL).map(str::to_string))
+}
+
+/// Where a value is looked up: what the managed layer pinned, else the environment and the build,
+/// else the settings file's `env` block.
+fn lookup_in<'a>(
+    settings: &'a Settings,
+    managed: &'a Managed,
+    exported: impl Fn(&str) -> Option<String> + 'a,
+    baked: impl Fn(&str) -> Option<String> + 'a,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |key: &str| match managed.get(key) {
+        Some(pinned) => Some(pinned.to_string()),
+        None => match key {
+            env_var::DEFAULT_MODEL => resolve_model(exported(key), settings, &baked),
+            _ => resolve(key, exported(key), &baked)
+                .or_else(|| settings.get(key).map(str::to_string)),
+        },
+    }
+}
+
+/// The gateways in force, before any stored key is attached.
+///
+/// A gateway is a destination too, so an approved endpoint pins nothing while anybody can
+/// add one beside it. The managed block replaces the person's rather than merging with
+/// it, empty included, which is the only way to say that there are to be none.
+fn gateways(
+    settings: &Settings,
+    managed: &Managed,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Vec<provider::Provider> {
+    match managed.gateways() {
+        Some(gateways) => gateways.to_vec(),
+        None => {
+            let mut providers = settings.providers().to_vec();
+            // The environment names a Vertex AI service only where no block does, so a file
+            // is never quietly completed by a variable it does not mention.
+            if !providers
+                .iter()
+                .any(|entry| entry.id == provider::GOOGLE_VERTEX_ID)
+            {
+                providers.extend(provider::Provider::from_environment(lookup));
+            }
+            providers
+        }
+    }
+}
+
+/// The variables the gateways in force read a bearer token from, as this machine is configured.
+///
+/// Names only: the providers they came from hold tokens, and are dropped here. Read from the
+/// process environment, the managed layer and the settings layers on each call, so the answer is
+/// the one [`Config::from_env_and_settings`] would act on.
+pub(crate) fn gateway_variables() -> Vec<String> {
+    gateway_variables_under(
+        &Settings::load(),
+        &Managed::load(),
+        |key| env::var(key).ok(),
+        built_in,
+    )
+}
+
+/// [`gateway_variables`], over sources it is handed, so a test needs no ambient ones.
+fn gateway_variables_under(
+    settings: &Settings,
+    managed: &Managed,
+    exported: impl Fn(&str) -> Option<String>,
+    baked: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let lookup = lookup_in(settings, managed, exported, baked);
+    gateway_variable_names(&gateways(settings, managed, &lookup))
+}
+
+/// Each variable name any of `providers` reads a token from, once.
+fn gateway_variable_names(providers: &[provider::Provider]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in providers.iter().flat_map(|provider| &provider.env) {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+impl Config {
+    /// Read configuration from the process environment, falling back to the values
+    /// built into this binary.
+    ///
+    /// The environment wins over both, so a developer can point a released binary at a local
+    /// backend without rebuilding it. What the machine-level file pinned wins over the environment
+    /// for every value, and a `model` key in a settings file wins over it for the model, since the
+    /// exported model is a default (`resolve_model` says why).
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_env_and_settings(&Settings::load(), &Managed::load())
+    }
+
+    /// Read configuration from the environment, with a settings file underneath it and the
+    /// machine-level layer above it.
+    ///
+    /// The environment wins over the settings file for the same reason it wins over a baked-in
+    /// value: a variable someone exported for one session is the most specific thing they said, and
+    /// a file that overrode it would make `AWS_PROFILE=other bravebot` do nothing.
+    ///
+    /// A name the managed layer pinned is the exception, and the inversion is the point of that
+    /// layer: everything else here is the individual's to change, so a pin an exported variable
+    /// outranked would pin nothing. It answers for the names it pinned and for no others, which is
+    /// [`Managed`]'s to decide.
+    ///
+    /// The `model` key is the other exception, and sits above the baked-in value rather than below
+    /// it. Every release bakes in a default model, so a `model` key ranked like the `env` block
+    /// would lose to it on every binary anybody was given: the key would parse, be reported by
+    /// `doctor`, and change nothing outside a source build. It outranks an exported variable too,
+    /// for the reason [`resolve_model`] gives.
+    ///
+    /// The keys `bravebot auth login gateway` stored are read here too, from the user's own
+    /// directory. A file of them that cannot be read is read as none, on the footing a half-typed
+    /// settings file is: it must not stop a session, and `doctor` says the file is unreadable.
+    pub fn from_env_and_settings(
+        settings: &Settings,
+        managed: &Managed,
+    ) -> Result<Self, ConfigError> {
+        let home = settings::home();
+        let stored = home
+            .as_deref()
+            .and_then(|home| keys::Keys::read(home).ok())
+            .unwrap_or_default();
+        // Read on the footing the gateway keys are: a file that cannot be read is no key, and
+        // `doctor` says it is unreadable.
+        let premium_key = home
+            .as_deref()
+            .and_then(|home| brave_key::read(home).ok())
+            .flatten();
+        Self::from_sources(
+            settings,
+            managed,
+            &stored,
+            premium_key,
+            |key| env::var(key).ok(),
+            built_in,
+        )
+    }
+
+    /// [`Config::from_env_and_settings`] over sources it is handed, so the ranking of the layers is
+    /// something a test can exercise without the process environment or the build's own values.
+    fn from_sources(
+        settings: &Settings,
+        managed: &Managed,
+        stored: &keys::Keys,
+        premium_key: Option<Secret>,
+        exported: impl Fn(&str) -> Option<String>,
+        baked: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let lookup = lookup_in(settings, managed, &exported, baked);
+        // Read before the lookup is handed on, so the layer that wrote the region can be asked
+        // for beside it ([BACKEND-33](../../../docs/specs/backends.md#BACKEND-33)).
+        let refused_regions = refused_regions(settings, managed, &exported, &lookup);
+        let providers = gateways(settings, managed, &lookup);
+        // A gateway the machine-level layer names is given a stored key too: that layer pins where
+        // a token goes and keeps none of its own, so a key its owner stored is the way it has.
+        let providers = providers
+            .into_iter()
+            .map(|mut entry| {
+                if entry.bedrock.is_none() {
+                    entry.stored_key = stored.get(&entry.id).cloned();
+                    entry.reconcile_stored_credential();
+                }
+                entry
+            })
+            .collect();
+        let mut config = Self::from_lookup_with_providers(lookup, providers)?;
+        config.refused_regions = refused_regions;
+        // Held only with a host to send it to, so a key stored on a machine whose build reaches no
+        // Brave backend is carried by nothing.
+        config.premium_key = premium_key.filter(|_| config.premium_endpoint.is_some());
+        // Carried rather than consulted here: the name to check against the lists arrives later, from
+        // any of the places that may name a model, and each is checked against the same pair
+        // (BACKEND-48).
+        config.models = managed.models().clone();
+        // The entry is part of the `provider` block, so a machine-level block replaces it with the
+        // gateways, as it replaces them. That is also what keeps the field empty where a gateway
+        // holds the id: a person's entry that names models states no endpoint, so only the
+        // machine-level block can hold the id beside it, and the account is not offered then.
+        if managed.gateways().is_none() {
+            config.chatgpt_models = settings.chatgpt_models().to_vec();
+        }
+        config.advisor_model = settings.advisor_model().map(str::to_string);
+        config.defer_mcp_tools_above = settings.defer_mcp_tools_above();
+        config.max_running_delegates = settings.max_running_delegates();
+        config.fallback_model = settings.fallback_model().map(str::to_string);
+        config.summary_model = settings.summary_model().map(str::to_string);
+        config.plan_model = settings.plan_model().map(str::to_string);
+        config.processor_model = settings.processor_model().map(str::to_string);
+        config.commit_message_instructions =
+            settings.commit_message_instructions().map(str::to_string);
+        let ttl = settings.prompt_cache_ttl();
+        config.prompt_cache_ttl = ttl;
+        config.bedrock = config.bedrock.map(|account| account.with_cache_ttl(ttl));
+        for entry in &mut config.providers {
+            entry.bedrock = entry
+                .bedrock
+                .take()
+                .map(|account| account.with_cache_ttl(ttl));
+        }
+        Ok(config)
+    }
+
+    /// Read configuration from an arbitrary lookup, so tests need not mutate global
+    /// process state.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        Self::from_lookup_with_providers(lookup, Vec::new())
+    }
+
+    /// Providers must be known before validating credentials for the other backends.
+    fn from_lookup_with_providers(
+        lookup: impl Fn(&str) -> Option<String>,
+        providers: Vec<provider::Provider>,
+    ) -> Result<Self, ConfigError> {
+        // Applied here rather than where either route to an account is read, because a `provider`
+        // block is parsed with no environment to consult and both routes have to answer the same.
+        // Nonsense falls back to what the models state, on the footing the context budget is read
+        // on: a mistyped figure should cost the setting, not the ceiling that lets a reply finish.
+        let output_budget = lookup(env_var::OUTPUT_BUDGET)
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|budget| *budget > 0);
+        let bedrock =
+            bedrock::Bedrock::from_lookup(&lookup).map(|it| it.with_output_budget(output_budget));
+        let providers: Vec<provider::Provider> = providers
+            .into_iter()
+            .map(|entry| {
+                let mut entry = entry.with_output_budget(output_budget);
+                entry.bedrock = entry
+                    .bedrock
+                    .map(|account| account.with_output_budget(output_budget));
+                entry
+            })
+            .collect();
+
+        // With Bedrock or a gateway configured these are not requirements. A user of another
+        // backend need not hold Brave service credentials as well. Released binaries have them
+        // baked in anyway, so the demand there would be satisfied by values nothing goes on to read.
+        //
+        // Blank rather than absent is what the rest of this reads to decide whether the Brave roster
+        // is offered at all. See [`Config::serves_aichat`].
+        let optional = bedrock.is_some() || !providers.is_empty();
+
+        let required = |name: &'static str| -> Result<String, ConfigError> {
+            match lookup(name) {
+                Some(v) if !v.trim().is_empty() => Ok(v),
+                _ if optional => Ok(String::new()),
+                None => Err(ConfigError::Missing(name)),
+                Some(_) => Err(ConfigError::Empty(name)),
+            }
+        };
+
+        let signing_key = Secret::new(required(env_var::SIGNING_KEY)?);
+        let key_id = required(env_var::KEY_ID)?;
+        let endpoint = required(env_var::ENDPOINT)?;
+
+        // A blank endpoint only reaches here when another backend is configured and no aichat URL
+        // is built. Checking the scheme of a value nothing will use would refuse a working
+        // configuration over a field it does not have.
+        let names_a_scheme = endpoint.starts_with("https://") || endpoint.starts_with("http://");
+        if !endpoint.is_empty() && !names_a_scheme {
+            return Err(ConfigError::InvalidEndpoint { value: endpoint });
+        }
+        if let Some(fault) = provider::unreadable_port(&endpoint) {
+            return Err(ConfigError::UnreadablePort { port: fault.port });
+        }
+
+        // [`DEFAULT_MODEL`] for everyone, Bedrock block or not: it is the Brave backend's own
+        // default for this product and a settings block adds a roster rather than changing what
+        // answers when nobody has picked. The exception is a build that cannot reach Brave at all,
+        // where that name reaches a backend with no credentials and the strongest configured tier
+        // is the only thing that can answer.
+        let reaches_brave = holds_brave_credentials(&endpoint, &key_id, signing_key.expose());
+        let account = tier_account(bedrock.as_ref(), &providers);
+        let default_model = resolved_model(
+            &lookup(env_var::DEFAULT_MODEL)
+                .filter(|m| !m.trim().is_empty())
+                .or_else(|| match account {
+                    Some(account) if !reaches_brave => account.default_model().map(str::to_string),
+                    _ => None,
+                })
+                .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            account,
+            reaches_brave,
+        );
+
+        // A premium host that is present but malformed is not used rather than rejected, and the one
+        // compiled in stands: failing every run over it would punish everyone else, and sending the
+        // key to an address that was spelled badly would send it somewhere nobody chose. A query or
+        // a fragment makes it malformed: a transport ends the host at the first `/`, `?` or `#`, so
+        // the text after either is not part of the host although a suffix test on the whole value
+        // reads it as one, and the request path is appended to a base that has either, which puts it
+        // inside the query or the fragment.
+        //
+        // None for a build that reaches no Brave backend, which has no free endpoint to say which
+        // environment's premium host it would be.
+        let premium_endpoint = lookup(env_var::PREMIUM_ENDPOINT)
+            .map(|value| value.trim().to_string())
+            .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+            .filter(|value| !value.contains(['?', '#']))
+            .map(|value| value.trim_end_matches('/').to_string())
+            .or_else(|| {
+                (!endpoint.is_empty()).then(|| compiled_in_premium_endpoint(&endpoint).to_string())
+            });
+
+        // Nonsense falls back to the default rather than disabling compaction, which is what a
+        // zero or an unparseable value would otherwise quietly do. A mistyped budget should cost
+        // someone the setting they wanted, not the thing that keeps their session alive.
+        let chosen_budget = lookup(env_var::CONTEXT_BUDGET)
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|budget| *budget > 0);
+
+        // No Bedrock window applied here, though the block may be present. Both rosters are offered
+        // at once now, so the window belongs to whichever model was picked rather than to the
+        // configuration, and `adopt_window` takes it from the entry that named it. Applying the
+        // Bedrock figure to a session that goes on to use a Brave model would set a budget for a
+        // window that is not the one in force.
+        let context_budget = chosen_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
+        let budget_was_chosen = chosen_budget.is_some();
+        let budget_was_advertised = false;
+
+        Ok(Self {
+            bedrock,
+            providers,
+            // Nothing said here either: [`Config::from_env_and_settings`] reads it from the settings.
+            chatgpt_models: Vec::new(),
+            // Nothing said here, there being no managed layer to read through a bare lookup.
+            // [`Config::from_env_and_settings`] is the one caller that has one.
+            models: managed::Models::default(),
+            signing_key,
+            key_id,
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            premium_endpoint,
+            premium_key: None,
+            default_model,
+            advisor_model: None,
+            defer_mcp_tools_above: None,
+            max_running_delegates: None,
+            fallback_model: None,
+            summary_model: None,
+            plan_model: None,
+            processor_model: None,
+            commit_message_instructions: None,
+            prompt_cache_ttl: None,
+            context_budget,
+            budget_was_chosen,
+            budget_was_advertised,
+            listed_inputs: None,
+            refused_regions: Vec::new(),
+        })
+    }
+
+    /// Take what the roster lists `model` as taking, replacing what was listed before.
+    ///
+    /// Taken wherever the window is, from the same entry, because both belong to the model and a
+    /// session that changed model and kept the old list would decide on a model no longer in force.
+    pub fn adopt_inputs(&mut self, model: &str, listed: &[String]) {
+        self.listed_inputs = Some((model.to_string(), listed.to_vec()));
+    }
+
+    /// What the roster lists `model` as taking. Empty where it said nothing, and for every model
+    /// but the one the list was taken for: a turn addressed to a definition runs on the model the
+    /// definition names, which the listing adopted for the session never described.
+    pub fn listed_inputs(&self, model: &str) -> &[String] {
+        match &self.listed_inputs {
+            Some((listed_for, inputs)) if listed_for == model => inputs,
+            _ => &[],
+        }
+    }
+
+    /// Whether the context budget is a guess rather than set by hand or advertised by the model.
+    pub fn budget_is_guessed(&self) -> bool {
+        !self.budget_was_chosen && !self.budget_was_advertised
+    }
+
+    /// Take the window the endpoint advertised for the model in use, or let the default stand in.
+    ///
+    /// Ignored when a budget was set by hand. Where the endpoint advertised nothing, or something
+    /// too small to work in, the default stands in: a figure adopted for an earlier model describes
+    /// a model that is no longer in force, so it is dropped rather than kept. The default sits below
+    /// the smallest useful window, so falling back to it cannot put the budget above a window.
+    /// Returns whether the budget changed, so a caller can say so once rather than every turn.
+    pub fn adopt_window(&mut self, advertised: Option<u64>) -> bool {
+        if self.budget_was_chosen {
+            return false;
+        }
+        let advertised = budget_for_window(advertised);
+        self.budget_was_advertised = advertised.is_some();
+        let budget = advertised.unwrap_or(DEFAULT_CONTEXT_BUDGET);
+        let changed = budget != self.context_budget;
+        self.context_budget = budget;
+        changed
+    }
+
+    /// Take the window of the model that answers a request: `model` where one is named, otherwise
+    /// the configured default, which is what a request naming none asks for. `advertised` is given
+    /// that model's name and reports the window its roster states, or `None` where the roster does
+    /// not describe it or could not be fetched, which leaves the default budget in place.
+    ///
+    /// The rule both clients apply, so the roster each one reads is the only part that differs
+    /// between them. Returns whether the budget changed, as [`Config::adopt_window`] does.
+    pub fn adopt_window_of_model_in_force(
+        &mut self,
+        model: Option<&str>,
+        advertised: impl FnOnce(&str) -> Option<u64>,
+    ) -> bool {
+        let in_force = model.unwrap_or(&self.default_model).to_string();
+        self.adopt_window(advertised(&in_force))
+    }
+
+    /// The gateway serving `model`, and the name to ask it for.
+    ///
+    /// The model names the service, so this is the whole of how a request reaches a gateway. Two
+    /// spellings reach one:
+    ///
+    /// - `openrouter/z-ai/glm-4.6`, the provider's own id and then the name that gateway knows the
+    ///   model by. Split at the first separator only, because the remainder is the gateway's to
+    ///   spell and most of them contain one.
+    /// - the gateway's bare name, where the block listed it. Kept because a name chosen before this
+    ///   crate qualified anything is still sitting in `~/.bravebot/model`.
+    ///
+    /// A qualified name is tried first. It is the one spelling that says which service is meant, so
+    /// a bare name that two blocks both list resolves to the first of them while a qualified one
+    /// cannot be ambiguous at all.
+    ///
+    /// A name that begins with the ChatGPT account's id is not matched against a gateway's bare
+    /// listing, since `chatgpt/<name>` is the account's
+    /// ([`Config::chatgpt_model`], [CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+    /// A gateway of another id that lists such a model is reached by the spelling its row has,
+    /// `<id>/chatgpt/<name>`, and a `provider` entry that has the account's id and states an endpoint
+    /// is a gateway like any other and takes the name through the qualified form above. The xAI
+    /// account's id is held apart in the same way ([`Config::xai_model`],
+    /// [XAI-13](../../../docs/specs/xai-sign-in.md#XAI-13)).
+    ///
+    /// The returned name is what goes on the wire. A gateway has never heard of the id this crate
+    /// files it under, so returning them together is what stops the qualified form reaching it.
+    pub fn provider_for<'name>(
+        &self,
+        model: &'name str,
+    ) -> Option<(&provider::Provider, &'name str)> {
+        if let Some((id, wire)) = model.split_once('/').filter(|(_, wire)| !wire.is_empty())
+            && let Some(provider) = self
+                .providers
+                .iter()
+                .find(|provider| provider.id == id && provider.bedrock.is_none())
+        {
+            return Some((provider, wire));
+        }
+        if self.chatgpt_model(model).is_some() || self.xai_model(model).is_some() {
+            return None;
+        }
+        self.providers
+            .iter()
+            .filter(|provider| provider.bedrock.is_none())
+            .find(|provider| provider.offers(model))
+            .map(|provider| (provider, model))
+    }
+
+    /// The name the ChatGPT account knows `model` by, where `model` is one of its models
+    /// ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+    ///
+    /// Only the qualified form is: `chatgpt/` and then the name. A bare name never selects the
+    /// account, so `gpt-5` keeps meaning the `openai` gateway's model or Brave's. A `provider`
+    /// entry with the id `chatgpt` keeps the name, since one name cannot select two services, and
+    /// then no model is the account's.
+    ///
+    /// The returned name is what the request carries, and it is read from the model's own name:
+    /// the account has never heard of the id this crate files its models under.
+    pub fn chatgpt_model<'name>(&self, model: &'name str) -> Option<&'name str> {
+        let (id, wire) = model.split_once('/')?;
+        (id == provider::CHATGPT_ID && !wire.is_empty() && self.offers_chatgpt_account())
+            .then_some(wire)
+    }
+
+    /// The name the xAI account knows `model` by, where `model` is one of its models
+    /// ([XAI-13](../../../docs/specs/xai-sign-in.md#XAI-13)).
+    ///
+    /// Only the qualified form is: `xai/` and then the name. A bare name never selects the account,
+    /// so `grok-4.5` keeps meaning a gateway's model or Brave's. A `provider` entry with the id
+    /// `xai` keeps the name, since one name cannot select two services, and then no model is the
+    /// account's.
+    ///
+    /// The returned name is what the request carries, and it is read from the model's own name:
+    /// the account has never heard of the id this crate files its models under.
+    pub fn xai_model<'name>(&self, model: &'name str) -> Option<&'name str> {
+        let (id, wire) = model.split_once('/')?;
+        (id == provider::XAI_ID && !wire.is_empty() && self.offers_xai_account()).then_some(wire)
+    }
+
+    /// Whether the model a turn runs on is one of the xAI account's: `model` where it names one,
+    /// and otherwise the configured default.
+    ///
+    /// What decides whether the account's listing is worth asking for outside a picker. A turn on
+    /// any other model needs nothing from it, and asking would send a stored sign-in's token to
+    /// the serving host for a session that never uses the account.
+    pub fn runs_on_xai_account(&self, model: Option<&str>) -> bool {
+        self.xai_model(model.unwrap_or(&self.default_model))
+            .is_some()
+    }
+
+    /// Whether the xAI account may be reached at all, which it may not where a `provider` entry has
+    /// its id ([XAI-13](../../../docs/specs/xai-sign-in.md#XAI-13)).
+    ///
+    /// One name cannot select two services, so the entry keeps it: its models go to its gateway,
+    /// and none is the account's, in a request or in a picker.
+    pub fn offers_xai_account(&self) -> bool {
+        !self
+            .providers
+            .iter()
+            .any(|provider| provider.id == provider::XAI_ID)
+    }
+
+    /// Whether the model a turn runs on is one of the ChatGPT account's: `model` where it names
+    /// one, and otherwise the configured default.
+    ///
+    /// What decides whether the account's listing is worth asking for outside a picker. A turn on
+    /// any other model needs nothing from it, and asking would send a stored sign-in's token to
+    /// the serving host for a session that never uses the account.
+    pub fn runs_on_chatgpt_account(&self, model: Option<&str>) -> bool {
+        self.chatgpt_model(model.unwrap_or(&self.default_model))
+            .is_some()
+    }
+
+    /// The accounts a roster asks for the sake of a turn on `model`, or on the configured default
+    /// where `model` is `None`: the account that model belongs to, and no other. The turn needs the
+    /// row of its own model, so a turn on a Brave or a gateway model sends no stored sign-in's token
+    /// to a serving host for a listing it has no use for.
+    pub fn roster_accounts_for_a_turn(&self, model: Option<&str>) -> RosterAccounts {
+        RosterAccounts {
+            chatgpt: self.runs_on_chatgpt_account(model),
+            xai: self.runs_on_xai_account(model),
+        }
+    }
+
+    /// The service that answers a request naming `model`.
+    ///
+    /// The four questions [`Config::bedrock_for`], [`Config::provider_for`],
+    /// [`Config::chatgpt_model`] and [`Config::xai_model`] answer one at a time, asked in the order
+    /// a request is routed in ([BACKEND-3](../../../docs/specs/backends.md#BACKEND-3)). The router
+    /// and a roster that asks for the sake of one model both take it from here, so a lookup cannot
+    /// leave out the service a turn on that model goes to.
+    pub fn serves<'config, 'name>(&'config self, model: &'name str) -> Serves<'config, 'name> {
+        if let Some(bedrock) = self.bedrock_for(model) {
+            return Serves::Bedrock(bedrock);
+        }
+        if let Some((provider, wire)) = self.provider_for(model) {
+            return Serves::Gateway(provider, wire);
+        }
+        if let Some(wire) = self.chatgpt_model(model) {
+            return Serves::Chatgpt(wire);
+        }
+        if let Some(wire) = self.xai_model(model) {
+            return Serves::Xai(wire);
+        }
+        Serves::Aichat
+    }
+
+    /// The services a roster asks for the sake of a turn on `model`, or on the configured default
+    /// where `model` is `None`: the one that answers it, and no other
+    /// ([BACKEND-64](../../../docs/specs/backends.md#BACKEND-64)).
+    ///
+    /// A turn needs the row of its own model, for its window and for what it takes. Asking the
+    /// others as well made a start wait on every gateway a person had configured, one after the
+    /// next, before it drew anything. An AWS account is asked nothing, since its rows come from the
+    /// configuration, so a turn on a model it serves waits on no one.
+    pub fn roster_scope_for_a_turn(&self, model: Option<&str>) -> RosterScope<'_> {
+        let nothing = RosterScope {
+            accounts: RosterAccounts {
+                chatgpt: false,
+                xai: false,
+            },
+            gateways: Gateways::Nothing,
+            brave: false,
+        };
+        match self.serves(model.unwrap_or(&self.default_model)) {
+            Serves::Bedrock(_) => nothing,
+            Serves::Gateway(provider, _) => RosterScope {
+                gateways: Gateways::Only(provider.id.as_str()),
+                ..nothing
+            },
+            Serves::Chatgpt(_) | Serves::Xai(_) => RosterScope {
+                accounts: self.roster_accounts_for_a_turn(model),
+                ..nothing
+            },
+            Serves::Aichat => RosterScope {
+                brave: true,
+                ..nothing
+            },
+        }
+    }
+
+    /// Whether the ChatGPT account may be reached at all, which it may not where a `provider`
+    /// entry has its id ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+    ///
+    /// One name cannot select two services, so the entry keeps it: its models go to its gateway,
+    /// and none is the account's, in a request or in a picker.
+    pub fn offers_chatgpt_account(&self) -> bool {
+        !self
+            .providers
+            .iter()
+            .any(|provider| provider.id == provider::CHATGPT_ID)
+    }
+
+    /// The AWS account that serves `model`, from the tier variables or from a `provider` block.
+    ///
+    /// The tier variables are asked first, being the older way to name a Bedrock model and the one
+    /// a tier word resolves against. A name neither offers belongs to some other service.
+    ///
+    /// A name that begins `chatgpt/` is never Bedrock's: it is the account's, or the gateway
+    /// entry's that has the account's id ([CHATGPT-9](../../../docs/specs/chatgpt-sign-in.md#CHATGPT-9)).
+    /// A name that begins `xai/` is held apart in the same way
+    /// ([XAI-13](../../../docs/specs/xai-sign-in.md#XAI-13)).
+    /// A Bedrock model is reached by the id as it stands, with no qualified spelling to be reached
+    /// by instead, so one listed under such a name is not asked about it.
+    pub fn bedrock_for(&self, model: &str) -> Option<&bedrock::Bedrock> {
+        if model.split_once('/').is_some_and(|(id, wire)| {
+            matches!(id, provider::CHATGPT_ID | provider::XAI_ID) && !wire.is_empty()
+        }) {
+            return None;
+        }
+        if let Some(bedrock) = self.bedrock.as_ref().filter(|it| it.offers(model)) {
+            return Some(bedrock);
+        }
+        self.providers
+            .iter()
+            .filter_map(|provider| provider.bedrock.as_ref())
+            .find(|bedrock| bedrock.offers(model))
+    }
+
+    /// Every Bedrock model any configured account offers: the tier variables' account first, then
+    /// each `provider` block's, in the order the file listed them.
+    pub fn bedrock_entries(&self) -> impl Iterator<Item = &bedrock::Entry> {
+        self.bedrock
+            .iter()
+            .chain(self.bedrock_providers().map(|(_, bedrock)| bedrock))
+            .flat_map(|bedrock| bedrock.models())
+    }
+
+    /// The Bedrock entry a request name refers to, where some configured account offers it.
+    ///
+    /// The one lookup from the name a session holds (an inference-profile ARN, for a tier) to the
+    /// name the configuration gave it, [`bedrock::Entry::display_name`], which the `/model` picker
+    /// draws for the same model.
+    pub fn bedrock_entry(&self, model: &str) -> Option<&bedrock::Entry> {
+        self.bedrock_entries().find(|entry| entry.id == model)
+    }
+
+    /// Every AWS account a `provider` block named, in the order the file listed them.
+    pub fn bedrock_providers(
+        &self,
+    ) -> impl Iterator<Item = (&provider::Provider, &bedrock::Bedrock)> {
+        self.providers
+            .iter()
+            .filter_map(|provider| provider.bedrock.as_ref().map(|bedrock| (provider, bedrock)))
+    }
+
+    /// Whether the Brave backend can be reached at all.
+    ///
+    /// Every ordinary build can: the credentials are baked in, and a missing one is refused at
+    /// startup. A build from source pointed at Bedrock or a gateway is the exception: credentials
+    /// may be blank, and offering that roster would list models whose requests fail unsigned.
+    pub fn serves_aichat(&self) -> bool {
+        holds_brave_credentials(&self.endpoint, &self.key_id, self.signing_key.expose())
+    }
+
+    /// The AWS account a tier word resolves against, which is [`tier_account`] over this build.
+    fn tier_account(&self) -> Option<&bedrock::Bedrock> {
+        tier_account(self.bedrock.as_ref(), &self.providers)
+    }
+
+    /// The credentials this build holds itself, each owing an account of what would end it.
+    ///
+    /// Both AWS arrangements wherever an account is configured, because which one a profile
+    /// resolves to is the AWS CLI's answer, and asking it would make this record of the
+    /// configuration differ between two runs of it. A resolved credential says which it is for
+    /// itself.
+    ///
+    /// A build that cannot reach the Brave backend holds no signing key to account for, which is
+    /// the build-from-source case [`Config::serves_aichat`] describes: the field is blank there,
+    /// and listing a credential this install does not have would send somebody to retire a key id
+    /// on the strength of a leak that cannot have come from here.
+    ///
+    /// Then one entry per gateway whose block says anywhere a token lives, which is custody this
+    /// configuration arranged however the value arrives. Whether the variable a block names is
+    /// set is a fact about an environment this reads none of, and asking would make the record
+    /// differ between two runs of the same configuration; the AWS pair above is listed on the
+    /// same footing, for the same reason. A block naming nowhere for a token has said none is
+    /// needed and is left out, as is one reaching Bedrock, whose credentials are the AWS pair and
+    /// would otherwise be counted twice.
+    ///
+    /// The premium key is listed where one is held, and a build that cannot reach the Brave
+    /// backend is left out of it whatever it holds, because the key buys the premium half of that
+    /// backend's roster and nothing else reads it, and CRED-2 gives a credential nothing reads no
+    /// tier.
+    ///
+    /// [`Held::ChatgptAccount`] and [`Held::XaiAccount`] are not in it, for the opposite reason: a
+    /// sign-in is held on every machine that made one, whatever backend this configuration reaches,
+    /// so a caller that reads the file adds it.
+    pub fn held(&self) -> Vec<Held<'_>> {
+        let mut held = Vec::new();
+        if self.serves_aichat() {
+            held.push(Held::SigningKey);
+        }
+        if self.bedrock.is_some() || self.bedrock_providers().next().is_some() {
+            held.push(Held::AwsAccessKey);
+            held.push(Held::AwsSession);
+        }
+        held.extend(
+            self.providers
+                .iter()
+                .filter(|provider| provider.bedrock.is_none() && provider.names_a_credential())
+                .map(|provider| Held::GatewayToken {
+                    host: provider.host(),
+                }),
+        );
+        if self.premium_key.is_some() && self.serves_aichat() {
+            held.push(Held::PremiumKey);
+        }
+        held
+    }
+
+    /// The model a name asks for, resolved the way the configured model is.
+    ///
+    /// For every other route to a model: a flag, a remembered choice, anything a person types. The
+    /// three tier words and the older spelling of the routing entry are configuration's business
+    /// rather than the settings key's, so a route that resolved names itself would accept a
+    /// different set of them, and one that resolved none would send a word the service has never
+    /// heard of and be answered by whatever it substitutes.
+    pub fn model_named(&self, name: &str) -> String {
+        resolved_model(name, self.tier_account(), self.serves_aichat())
+    }
+
+    /// The model the settings in force name as the planner's advisor, resolved like `--advisor`.
+    pub fn advisor(&self) -> Option<String> {
+        self.advisor_model
+            .as_deref()
+            .map(|name| self.model_named(name))
+    }
+
+    /// The model a turn moves to when its own keeps failing, resolved like `--model` (BACKEND-53).
+    ///
+    /// `None` where the settings name none, and where the machine-level layer refuses the one they
+    /// name: a model that layer excludes is requested by no route (BACKEND-48), and this is one.
+    pub fn fallback(&self) -> Option<String> {
+        let resolved = self.model_named(self.fallback_model.as_deref()?);
+        self.model_refused(&resolved).is_none().then_some(resolved)
+    }
+
+    /// The model compaction summaries and goal checks run on, resolved like `--model`.
+    ///
+    /// `None` where the settings name none, which leaves both on the session's own model.
+    ///
+    /// Unlike [`Config::fallback`], a model the machine-level layer refuses is still returned here,
+    /// because the two want different answers to it: a fallback that cannot be used leaves the turn
+    /// on the model it already had, while a summary model that cannot be used has to stop the
+    /// request rather than quietly spend the rate the person named this key to cap. So the refusal
+    /// is the caller's to make, and `agent::compact::side_request_model` makes it, next to the
+    /// sign-in question and for BACKEND-48's reason.
+    pub fn summary(&self) -> Option<String> {
+        self.summary_model
+            .as_deref()
+            .map(|name| self.model_named(name))
+    }
+
+    /// The model an isolated processor runs on, resolved like `--model`.
+    ///
+    /// `None` where neither the settings nor `--processor-model` name one, which leaves a processor
+    /// on the turn's own model.
+    ///
+    /// A model the machine-level layer refuses is still returned, as it is by [`Config::summary`]
+    /// and for the same reason: the setting is a cost boundary, so a name that cannot be used stops
+    /// the call and the refusal is the caller's to make (PROC-13).
+    pub fn processor(&self) -> Option<String> {
+        self.processor_model
+            .as_deref()
+            .map(|name| self.model_named(name))
+    }
+
+    /// The model a turn that begins in plan mode runs on, resolved like `--model` (BACKEND-56).
+    ///
+    /// `None` where the settings name none. Like [`Config::summary`], a model the machine-level
+    /// layer refuses is still returned: the caller asks `agent::backend::serving`, which answers
+    /// that first, and falls back to the session's own model saying so.
+    pub fn plan(&self) -> Option<String> {
+        self.plan_model
+            .as_deref()
+            .map(|name| self.model_named(name))
+    }
+
+    /// Why the machine-level layer refuses `name`, and the file that refuses it (BACKEND-48).
+    ///
+    /// `name` is resolved here before being compared, so a tier word is checked as the model it names:
+    /// `opus` is not a name any service knows, and a list matched before that resolution would let
+    /// `{"model": "opus"}` reach the pinned account whatever the lists said. Resolving a name that is
+    /// already a model leaves it as it is, so a caller holding a resolved one may ask with that.
+    ///
+    /// Asked of every route to a model rather than at the moment a request goes out, for the reason
+    /// [`Config::model_named`] is shared: a name means the same model wherever it was written down,
+    /// and an answer that differed per route would be an answer per route to get wrong.
+    pub fn model_refused(&self, name: &str) -> Option<(&std::path::Path, managed::ModelRefusal)> {
+        let name = self.model_named(name);
+        // A gateway model has two spellings, the qualified one and the one the gateway is sent, and
+        // an entry may name either whichever the model was asked for as.
+        let Some((provider, wire)) = self.provider_for(&name) else {
+            return self.models.refuses(&name);
+        };
+        let qualified = format!("{}/{wire}", provider.id);
+        self.models.refuses_any(&[&name, wire, &qualified])
+    }
+
+    /// What to write down for a chosen model: the tier word where a tier variable named it, so the
+    /// record follows the variable when an inference-profile ARN is replaced.
+    ///
+    /// [`Config::model_named`] reads the result back as `model`.
+    pub fn name_to_record<'a>(&self, model: &'a str) -> &'a str {
+        self.tier_account()
+            .and_then(|account| {
+                bedrock::Tier::ALL
+                    .into_iter()
+                    .find(|tier| account.model_for(*tier).is_some_and(|named| named == model))
+            })
+            .map_or(model, |tier| tier.alias())
+    }
+
+    /// Full URL for the OpenAI-compatible chat completions endpoint.
+    ///
+    /// This is the v2 API: the version is inferred from the path by the server, so
+    /// there is no `/v2/` route to construct.
+    pub fn chat_completions_url(&self) -> String {
+        format!("{}/v1/chat/completions", self.endpoint)
+    }
+
+    /// Full URL for the model listing.
+    ///
+    /// The free host, always: the listing reports which models are premium rather than differing
+    /// between the two, and asking the premium host would spend a subscription credential to learn
+    /// something the free one says for nothing. Callers send `Brave-Product: bravebot` so the
+    /// roster is the one curated for this agent rather than Leo's.
+    pub fn models_url(&self) -> String {
+        format!("{}/v1/models", self.endpoint)
+    }
+
+    /// The same endpoint on the premium host, when this build has one.
+    pub fn premium_chat_completions_url(&self) -> Option<String> {
+        self.premium_endpoint
+            .as_ref()
+            .map(|base| format!("{base}/v1/chat/completions"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REFUSED_REGION: &str = "us-east-1.attacker.example";
+
+    fn refused(source: bedrock::RegionSource) -> Vec<bedrock::RefusedRegion> {
+        vec![bedrock::RefusedRegion {
+            fault: bedrock::RegionFault {
+                region: REFUSED_REGION.to_string(),
+            },
+            source,
+            file: None,
+        }]
+    }
+
+    /// BACKEND-33: a region written in a settings file's `env` block and refused is recorded with
+    /// that block as its source, so `doctor` can say where to look.
+    #[test]
+    fn a_refused_region_in_the_env_block_is_recorded_as_the_env_block() {
+        let settings = Settings::parse(&format!(
+            r#"{{"env": {{"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "{REFUSED_REGION}"}}}}"#
+        ));
+        let config = resolved(&settings, |_| None, complete_env).expect("configured");
+        assert!(config.bedrock.is_none());
+        assert_eq!(
+            config.refused_regions,
+            refused(bedrock::RegionSource::EnvBlock)
+        );
+    }
+
+    /// The exported variable outranks the file, so a refused value that was exported is the one
+    /// reported, and it is named as exported rather than as the file that also holds a region.
+    #[test]
+    fn a_refused_region_that_was_exported_is_recorded_as_exported_over_the_file() {
+        let settings =
+            Settings::parse(r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "eu-west-1"}}"#);
+        let exported = |name: &str| (name == env_var::AWS_REGION).then(|| REFUSED_REGION.into());
+        let config = resolved(&settings, exported, complete_env).expect("configured");
+        assert!(config.bedrock.is_none());
+        assert_eq!(
+            config.refused_regions,
+            refused(bedrock::RegionSource::Exported)
+        );
+    }
+
+    /// A pin from the machine-level file outranks the exported variable, so it is the source named.
+    #[test]
+    fn a_refused_region_the_machine_pinned_is_recorded_as_managed() {
+        let managed = managed::scratch(
+            "resolve-refused-region-pin",
+            &format!(r#"{{"env": {{"AWS_REGION": "{REFUSED_REGION}"}}}}"#),
+        );
+        let settings = Settings::parse(r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1"}}"#);
+        let exported = |name: &str| (name == env_var::AWS_REGION).then(|| "eu-west-1".into());
+        let config =
+            resolved_under(&managed, &settings, exported, complete_env).expect("configured");
+        assert!(config.bedrock.is_none());
+        assert_eq!(
+            config.refused_regions,
+            refused(bedrock::RegionSource::Managed)
+        );
+    }
+
+    /// The `amazon-bedrock` entry under `provider` is the other place a region is written, and
+    /// it is named as the entry so the person looks at `provider` rather than `env`.
+    #[test]
+    fn a_refused_region_in_the_provider_entry_is_recorded_as_the_entry() {
+        let settings = Settings::parse(&format!(
+            r#"{{"provider": {{"amazon-bedrock": {{"options": {{"region": "{REFUSED_REGION}"}}}}}}}}"#
+        ));
+        let config = resolved(&settings, |_| None, complete_env).expect("configured");
+        assert_eq!(config.bedrock_providers().count(), 0);
+        assert_eq!(
+            config.refused_regions,
+            refused(bedrock::RegionSource::ProviderEntry)
+        );
+    }
+
+    /// The file that wrote a refused region is carried with it, so `doctor` can say which of the
+    /// settings files to edit. The home layer and the file `--settings` names are the two that may
+    /// set the name, and the record must name the one whose block the value is in.
+    #[test]
+    fn a_refused_region_in_the_env_block_is_recorded_with_the_file_that_wrote_it() {
+        let root = testutil::scratch_dir("refused-region-file");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let cwd = root.join("cwd");
+        std::fs::create_dir_all(&home).expect("scratch home");
+        std::fs::create_dir_all(&cwd).expect("scratch cwd");
+        let own = home.join("settings.json");
+        std::fs::write(
+            &own,
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "eu-west-1"}}"#,
+        )
+        .expect("home layer");
+        let named = root.join("named.json");
+        std::fs::write(
+            &named,
+            format!(r#"{{"env": {{"AWS_REGION": "{REFUSED_REGION}"}}}}"#),
+        )
+        .expect("named layer");
+
+        let settings = Settings::layered(Some(home), Some(&cwd), Some(&named));
+        let config = resolved(&settings, |_| None, complete_env).expect("configured");
+        assert_eq!(
+            config.refused_regions.len(),
+            1,
+            "{:?}",
+            config.refused_regions
+        );
+        assert_eq!(
+            config.refused_regions[0].file.as_deref(),
+            Some(named.as_path())
+        );
+        assert_ne!(
+            config.refused_regions[0].file.as_deref(),
+            Some(own.as_path())
+        );
+    }
+
+    /// Only an `env` block is a file: the exported variable, the machine pin and the provider entry
+    /// carry no settings file of the `env` block kind.
+    #[test]
+    fn a_refused_region_that_is_not_in_an_env_block_names_no_env_file() {
+        let settings =
+            Settings::parse(r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "eu-west-1"}}"#);
+        let exported = |name: &str| (name == env_var::AWS_REGION).then(|| REFUSED_REGION.into());
+        let config = resolved(&settings, exported, complete_env).expect("configured");
+        assert_eq!(config.refused_regions[0].file, None);
+    }
+
+    /// A machine-level `provider` block replaces the person's, so an entry it replaced is never
+    /// read and is not reported as refused.
+    #[test]
+    fn a_provider_entry_the_machine_replaced_is_not_reported_as_refused() {
+        let managed = managed::scratch("resolve-refused-region-replaced", r#"{"provider": {}}"#);
+        let settings = Settings::parse(&format!(
+            r#"{{"provider": {{"amazon-bedrock": {{"options": {{"region": "{REFUSED_REGION}"}}}}}}}}"#
+        ));
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+        assert!(
+            config.refused_regions.is_empty(),
+            "{:?}",
+            config.refused_regions
+        );
+    }
+
+    /// Nothing is refused where Bedrock was not asked for, and a region that is spelled as one is
+    /// not refused, so a report never blames a configuration that works.
+    #[test]
+    fn a_region_nothing_refused_is_not_reported() {
+        let switch_off = Settings::parse(&format!(
+            r#"{{"env": {{"AWS_REGION": "{REFUSED_REGION}"}}}}"#
+        ));
+        let config = resolved(&switch_off, |_| None, complete_env).expect("configured");
+        assert!(
+            config.refused_regions.is_empty(),
+            "{:?}",
+            config.refused_regions
+        );
+
+        let spelled = Settings::parse(
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "us-east-1"},
+                "provider": {"amazon-bedrock": {"options": {"region": "eu-west-1"}}}}"#,
+        );
+        let config = resolved(&spelled, |_| None, complete_env).expect("configured");
+        assert!(
+            config.refused_regions.is_empty(),
+            "{:?}",
+            config.refused_regions
+        );
+    }
+
+    fn complete_env(key: &str) -> Option<String> {
+        match key {
+            env_var::SIGNING_KEY => Some("test-signing-key".into()),
+            env_var::KEY_ID => Some("test-key-id".into()),
+            env_var::ENDPOINT => Some("https://example.invalid".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn reads_a_complete_environment() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(config.key_id, "test-key-id");
+        assert_eq!(config.signing_key.expose(), "test-signing-key");
+    }
+
+    #[test]
+    fn the_default_model_is_automatic() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    /// VET-4: the list decides whether a picture is refused before a check, so it may only speak
+    /// for the model it was listed for. Another model's turn is told nothing by it.
+    #[test]
+    fn listed_inputs_speak_only_for_the_model_they_were_listed_for() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.listed_inputs("text-only").is_empty());
+
+        config.adopt_inputs("text-only", &["text".to_string()]);
+        assert_eq!(config.listed_inputs("text-only"), ["text"]);
+        assert!(config.listed_inputs("looks").is_empty());
+
+        config.adopt_inputs("looks", &["text".to_string(), "image".to_string()]);
+        assert_eq!(config.listed_inputs("looks"), ["text", "image"]);
+        assert!(config.listed_inputs("text-only").is_empty());
+    }
+
+    #[test]
+    fn the_default_model_can_be_overridden() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::DEFAULT_MODEL => Some("some-pinned-model".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, "some-pinned-model");
+    }
+
+    #[test]
+    fn the_context_budget_has_a_default() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+    }
+
+    /// The point of the whole exercise: the endpoint says what the model's window is, so the
+    /// default stops standing in for it. Recorded sessions compacted at 24,000 against a model
+    /// advertising 102,400, which is four times the conversation it could have held.
+    #[test]
+    fn an_advertised_window_replaces_the_default() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.adopt_window(Some(102_400)));
+        assert_eq!(config.context_budget, 102_400);
+    }
+
+    /// The model in force is the one named, or the configured default where none is: the roster is
+    /// asked about that name. Asking about the pick alone, or about the first row, is the fault.
+    #[test]
+    fn the_window_taken_is_that_of_the_named_model_or_else_the_default() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        config.default_model = "the-default".into();
+        let mut asked = Vec::new();
+        assert!(config.adopt_window_of_model_in_force(Some("named"), |m| {
+            asked.push(m.to_string());
+            Some(102_400)
+        }));
+        config.adopt_window_of_model_in_force(None, |m| {
+            asked.push(m.to_string());
+            None
+        });
+        assert_eq!(asked, ["named", "the-default"]);
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+    }
+
+    /// A cramped window is taken at its word. Raising it to something more comfortable would put
+    /// the budget above the window, and a budget above the window does not delay compaction, it
+    /// removes it: the failure this whole figure exists to prevent.
+    #[test]
+    fn a_small_advertised_window_is_believed_rather_than_raised() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.adopt_window(Some(6_400)));
+        assert_eq!(config.context_budget, 6_400);
+    }
+
+    /// The placeholder the endpoint sends for a model whose window it does not know. A budget of one
+    /// token would compact before a turn could start, so it means "did not say".
+    #[test]
+    fn the_placeholder_window_is_not_adopted() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(!config.adopt_window(Some(1)));
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+    }
+
+    /// `automatic` resolves per request, so nothing was advertised and the default has to stand.
+    #[test]
+    fn nothing_advertised_leaves_the_default_alone() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(!config.adopt_window(None));
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+    }
+
+    /// A budget somebody typed outranks one the endpoint advertised: they may know something about
+    /// their model the listing does not say, and overriding it would make the setting look broken.
+    #[test]
+    fn a_budget_set_by_hand_is_not_replaced_by_an_advertised_one() {
+        let mut config = Config::from_lookup(|k| match k {
+            env_var::CONTEXT_BUDGET => Some("4096".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert!(!config.adopt_window(Some(102_400)));
+        assert_eq!(config.context_budget, 4096);
+    }
+
+    /// Adopting the budget already in force is not a change, so nothing is said about it twice.
+    #[test]
+    fn adopting_the_budget_already_in_use_reports_no_change() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(!config.adopt_window(Some(DEFAULT_CONTEXT_BUDGET)));
+    }
+
+    #[test]
+    fn a_default_budget_is_marked_as_guessed() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.budget_is_guessed());
+    }
+
+    #[test]
+    fn an_advertised_budget_is_not_marked_as_guessed() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.adopt_window(Some(102_400)));
+        assert!(!config.budget_is_guessed());
+    }
+
+    /// A window adopted for one model describes that model only. Once a model that advertises
+    /// nothing is in force, the default stands in, as it would for a session that started on it,
+    /// and the figure is marked as a guess.
+    #[test]
+    fn a_window_nobody_advertised_puts_the_default_back_in_place_of_an_adopted_budget() {
+        let mut config = Config::from_lookup(complete_env).unwrap();
+        assert!(config.adopt_window(Some(102_400)));
+        assert!(!config.budget_is_guessed());
+
+        assert!(config.adopt_window(None));
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+        assert!(config.budget_is_guessed());
+
+        // The placeholder is the same answer as nothing.
+        assert!(config.adopt_window(Some(6_400)));
+        assert!(config.adopt_window(Some(1)));
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+    }
+
+    /// A budget set by hand outranks the default standing in as well as an advertised window.
+    #[test]
+    fn a_window_nobody_advertised_leaves_a_budget_set_by_hand_alone() {
+        let mut config = Config::from_lookup(|k| match k {
+            env_var::CONTEXT_BUDGET => Some("4096".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert!(!config.adopt_window(None));
+        assert_eq!(config.context_budget, 4096);
+    }
+
+    #[test]
+    fn a_budget_set_by_hand_is_not_marked_as_guessed() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::CONTEXT_BUDGET => Some("4096".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert!(!config.budget_is_guessed());
+    }
+
+    /// The default is a guess at a window nobody reports, so someone running a model it is wrong
+    /// for needs a way to say so without rebuilding.
+    #[test]
+    fn the_context_budget_can_be_overridden() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::CONTEXT_BUDGET => Some(" 4096 ".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.context_budget, 4096);
+    }
+
+    /// A mistyped budget must cost someone the setting they wanted, never compaction itself: a
+    /// zero or a word would otherwise read as a conversation that may grow forever, which is the
+    /// failure the budget exists to prevent.
+    #[test]
+    fn a_budget_that_makes_no_sense_falls_back_rather_than_disabling_compaction() {
+        for value in ["0", "", "   ", "lots", "-1", "1e6", "100_000"] {
+            let config = Config::from_lookup(|k| match k {
+                env_var::CONTEXT_BUDGET => Some(value.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(
+                config.context_budget, DEFAULT_CONTEXT_BUDGET,
+                "{value:?} was read as a budget"
+            );
+        }
+    }
+
+    /// The variable is prefixed like every other one. A bare `MODEL` is a name anything in a
+    /// shared shell profile might already export, and reading it would take that as an
+    /// instruction about which model to send.
+    #[test]
+    fn a_bare_model_variable_is_not_read() {
+        let config = Config::from_lookup(|k| match k {
+            "MODEL" => Some("something-else-set-this".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    /// An empty value should fall back rather than sending "" and being silently
+    /// reset by the server.
+    #[test]
+    fn an_empty_default_model_falls_back() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::DEFAULT_MODEL => Some("   ".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    /// The point of the whole feature: a settings file naming an AWS account is enough to reach a
+    /// backend, without the Brave service credentials the other one needs.
+    #[test]
+    fn bedrock_configures_a_backend_without_any_aichat_credentials() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            _ => None,
+        })
+        .expect("bedrock alone is a working configuration");
+        let bedrock = config.bedrock.expect("bedrock configured");
+        assert_eq!(bedrock.default_model(), Some("opus-arn"));
+    }
+
+    /// CRED-25: what is reported as held is what this build actually holds. The signing key field
+    /// exists on every configuration and is blank on a build from source pointed elsewhere, so a
+    /// rule reading the field rather than whether it is usable would hand somebody the account of
+    /// a credential this install has none of, and send them to retire a key id over a leak that
+    /// cannot have come from here.
+    #[test]
+    fn a_build_that_cannot_sign_for_itself_holds_no_signing_key_to_account_for() {
+        let bedrock_only = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            _ => None,
+        })
+        .expect("bedrock alone is a working configuration");
+        assert!(!bedrock_only.serves_aichat());
+        assert_eq!(
+            bedrock_only.held(),
+            [Held::AwsAccessKey, Held::AwsSession],
+            "a build with a blank signing key holds no signing key"
+        );
+
+        let brave_only = Config::from_lookup(complete_env).expect("configured");
+        assert_eq!(
+            brave_only.held(),
+            [Held::SigningKey],
+            "a build with no AWS account has no AWS credential to account for"
+        );
+    }
+
+    /// CRED-9: gate 3 is decided by whether renewing a credential needs authority this agent
+    /// cannot supply, and for none of the credentials this program holds that reach it does it. An
+    /// AWS session credential is the one that reads as briefer than the rest, since it states an
+    /// expiry and an issuer that could end it minted it, so a record deciding the tier from the
+    /// value would put it a tier above the others. What the clause asks instead is who has to be
+    /// asked for the next one, and nothing here has to ask anybody: a record putting it at Held
+    /// briefly reports a permanent credential as a bounded one, and offers waiting out an expiry
+    /// as though it were a disposition.
+    ///
+    /// The session's drop at gate 3 is on the clause's own condition, since the other two are
+    /// ones it meets: STS mints it for the profile and AWS ends it. A drop recorded on either of
+    /// those would state a reason that is not the reason.
+    #[test]
+    fn no_credential_this_program_holds_stands_at_held_briefly() {
+        for held in Held::all("gateway.invalid") {
+            assert_ne!(
+                held.tier(),
+                Tier::HeldBriefly,
+                "{held:?} is recorded at Held briefly, and nothing establishes that renewing it needs a person"
+            );
+        }
+
+        let at_gate_three: Vec<Condition> = Held::AwsSession
+            .walk()
+            .iter()
+            .map(|drop| drop.condition)
+            .filter(|condition| condition.gate() == Gate::Three)
+            .collect();
+        assert_eq!(
+            at_gate_three,
+            [Condition::RenewableWithoutAuthority],
+            "the session credential drops at gate 3 on something other than being renewed unaided"
+        );
+    }
+
+    /// CRED-25: both AWS arrangements, because which one a profile resolves to is the AWS CLI's
+    /// answer and this is configuration rather than a resolved credential. They differ in what
+    /// would end them, so reporting one of the two would be wrong for half the machines that read
+    /// it, and a resolved credential says which it is for itself.
+    #[test]
+    fn an_aws_account_holds_both_arrangements_and_they_end_differently() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert_eq!(
+            config.held(),
+            [Held::SigningKey, Held::AwsAccessKey, Held::AwsSession]
+        );
+
+        // The one disposition somebody reaches for after a leak that leaves something behind.
+        assert!(Held::AwsAccessKey.outlives_revocation());
+        assert!(!Held::AwsSession.outlives_revocation());
+        assert!(!Held::SigningKey.outlives_revocation());
+    }
+
+    /// CRED-25: a gateway's bearer token is a credential this configuration holds, so it is in the
+    /// record with the host that would end it. Left out, the person whose gateway key appears in a
+    /// pasted log is given nothing to act on, which the clause's Why calls a notification.
+    ///
+    /// Four blocks rather than one, because the shapes that must not be recorded are what a rule
+    /// reading "every provider" would get wrong: a block naming nowhere for a token has said none
+    /// is needed, and a block reaching Bedrock holds the AWS pair above rather than a bearer token
+    /// of its own, so recording one for it would count the same credentials twice and send
+    /// somebody to revoke a token at an endpoint that issues none. The two that are recorded
+    /// differ in where the value sits, the file and a variable, since custody is the same either
+    /// way and a rule reading only `apiKey` would pass on the one the report is read from most.
+    #[test]
+    fn a_gateway_token_is_a_credential_this_configuration_holds() {
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "in-the-file": {
+                    "options": {"baseURL": "https://in-the-file.invalid/v1", "apiKey": "sk-live"}
+                },
+                "in-a-variable": {
+                    "env": ["A_GATEWAY_TOKEN"],
+                    "options": {"baseURL": "https://in-a-variable.invalid/v1"}
+                },
+                "needs-none": {"options": {"baseURL": "http://localhost:11434/v1"}},
+                "amazon-bedrock": {"options": {"region": "us-west-2"}, "models": {"an-arn": {}}}
+            }}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+
+        // The gateways in the order the blocks are read, which is by id.
+        assert_eq!(
+            config.held(),
+            [
+                Held::SigningKey,
+                Held::AwsAccessKey,
+                Held::AwsSession,
+                Held::GatewayToken {
+                    host: "in-a-variable.invalid"
+                },
+                Held::GatewayToken {
+                    host: "in-the-file.invalid"
+                },
+            ],
+            "the record is not the credentials this configuration holds"
+        );
+
+        // Nothing is minted from a bearer token here, so revoking it at the gateway reaches every
+        // copy of it. A line saying otherwise would send somebody chasing a session that does not
+        // exist.
+        assert!(
+            !Held::GatewayToken {
+                host: "in-the-file.invalid"
+            }
+            .outlives_revocation()
+        );
+    }
+
+    /// CRED-3: a credential's walk holds one drop per gate it failed, asked in order from the top,
+    /// and stops where its tier says it stopped. A walk that skipped a gate, repeated one or ran
+    /// past the tier would be a record of a different credential than the one standing there, and
+    /// the tier is the one thing about the walk anything else already reads.
+    ///
+    /// Each drop's gate comes from the condition it names, so a condition filed under the wrong
+    /// gate arrives here as a walk whose gates are out of order.
+    #[test]
+    fn a_credentials_walk_holds_one_drop_per_gate_it_failed_and_stops_at_its_tier() {
+        for held in Held::all("gateway.invalid") {
+            let gates: Vec<Gate> = held
+                .walk()
+                .iter()
+                .map(|drop| drop.condition.gate())
+                .collect();
+
+            assert_eq!(
+                gates,
+                [Gate::One, Gate::Two, Gate::Three][..gates.len()],
+                "{held:?} records a walk that skips a gate or asks them out of order"
+            );
+            assert_eq!(
+                held.walk().len(),
+                match held.tier() {
+                    Tier::Delegated => 0,
+                    Tier::Granted => 1,
+                    Tier::HeldBriefly => 2,
+                    Tier::Held => 3,
+                },
+                "{held:?} stands at one tier and records the walk of another"
+            );
+        }
+    }
+
+    /// CRED-6, CRED-7 and CRED-8: each question a gate asks is filed under the gate whose clause
+    /// asks it. A bound with no end under gate 2 is what makes narrow and permanent fail there
+    /// rather than pass and leave gate 3's work to be skipped, and a condition moved up or down a
+    /// gate would let an arrangement that fails it pass the gate the clause says it fails.
+    #[test]
+    fn each_gate_asks_the_conditions_its_clauses_name() {
+        let asked_at = |gate: Gate| -> Vec<Condition> {
+            Condition::all()
+                .into_iter()
+                .filter(|condition| condition.gate() == gate)
+                .collect()
+        };
+
+        assert_eq!(
+            asked_at(Gate::One),
+            [
+                Condition::NothingDecidesEachUse,
+                Condition::NothingCanRefuseAUse
+            ],
+            "gate 1 asks whether something the agent cannot impersonate decides each use (CRED-6)"
+        );
+        assert_eq!(
+            asked_at(Gate::Two),
+            [
+                Condition::NoBoundFixedBeforeIssue,
+                Condition::BoundEnforcedWithinReach,
+                Condition::BoundWithNoEnd
+            ],
+            "gate 2 asks for a bound fixed before issue (CRED-7), kept beyond the agent's reach \
+             (CRED-7) and with an end (CRED-8)"
+        );
+        assert_eq!(
+            asked_at(Gate::Three),
+            [
+                Condition::NotMintedForOneStep,
+                Condition::IssuerEndsNothing,
+                Condition::RenewableWithoutAuthority
+            ]
+        );
+    }
+
+    /// CRED-4: what a credential's walk and tier are read from is the arrangement, and a name a
+    /// person could rewrite is not part of one. A gateway's walk is the same whatever host the
+    /// block names, so a rewritten host moves no drop and so no tier.
+    #[test]
+    fn a_gateways_walk_is_the_same_whatever_host_it_names() {
+        let at = |host| Held::GatewayToken { host };
+        let (one, two) = (at("one.invalid"), at("two.invalid"));
+
+        assert_eq!(one.walk(), two.walk());
+        assert_eq!(one.tier(), two.tier());
+    }
+
+    /// CRED-3: a drop says whether the counterparty refused or nobody attempted it, and every drop
+    /// this configuration records is one nobody attempted. The two answers end at the same tier
+    /// and only the second is ours to revisit, so recording a refusal where the arrangement is
+    /// available files a decision made here as a fact about the world, and the credential stops
+    /// being worth looking at again.
+    ///
+    /// True of all six: AWS mints a bounded session and ends it, this project's own backend
+    /// issues the signing key, a gateway block names no issuer for anything to have asked, the
+    /// premium host has been asked for no narrower or shorter key, and OpenAI has been asked for no
+    /// narrower or bound form of the ChatGPT sign-in. None of those is a counterparty saying no.
+    #[test]
+    fn every_drop_this_configuration_records_is_one_nobody_attempted() {
+        for held in Held::all("gateway.invalid") {
+            for drop in held.walk() {
+                assert_eq!(
+                    drop.attempt,
+                    Attempt::NotAttempted,
+                    "{held:?} excuses gate {} as refused",
+                    drop.condition.gate().number()
+                );
+            }
+        }
+    }
+
+    /// CRED-2: every credential in the record stands at a tier the walk arrived at, and nothing
+    /// that handed material over is recorded at the top of the scale. The clause's Why is the
+    /// failure this catches: a record that answered every credential with one tier would let
+    /// silence claim the strongest, and the record would say nothing about any of them while
+    /// appearing to say something about all of them.
+    ///
+    /// Held against the whole of the record rather than against a variant, because the credential a
+    /// tier is missing from is the one nobody thought about, and against the distinct answers the
+    /// walks arrive at because a constant is what a record with no walk behind it looks like from
+    /// the outside.
+    #[test]
+    fn every_credential_in_the_record_stands_at_a_tier_the_walk_arrived_at() {
+        let every = Held::all("gateway.invalid");
+
+        for held in every {
+            assert_ne!(
+                held.tier(),
+                Tier::Delegated,
+                "{held:?} hands material over and is recorded as holding nothing"
+            );
+        }
+
+        let mut tiers: Vec<String> = every
+            .iter()
+            .map(|held| format!("{:?}", held.tier()))
+            .collect();
+        tiers.sort();
+        tiers.dedup();
+        assert_eq!(
+            tiers,
+            ["Held"],
+            "the record does not answer its credentials with the tiers their walks stopped at"
+        );
+
+        // Each answer is the gate the arrangement stops at, and the reasoning is on the variant.
+        assert_eq!(Held::SigningKey.tier(), Tier::Held);
+        assert_eq!(Held::AwsAccessKey.tier(), Tier::Held);
+        assert_eq!(Held::AwsSession.tier(), Tier::Held);
+        assert_eq!(Held::PremiumKey.tier(), Tier::Held);
+
+        // CRED-4: the tier is a claim about the arrangement, and a gateway's address is not part of
+        // one. Two hosts answered differently would be a tier that moved without the arrangement
+        // moving, which is the shape of a tier that can be argued.
+        assert_eq!(
+            Held::GatewayToken {
+                host: "one.invalid"
+            }
+            .tier(),
+            Held::GatewayToken {
+                host: "two.invalid"
+            }
+            .tier(),
+            "a gateway's tier is read off its address"
+        );
+    }
+
+    /// CRED-20: removing, denying or accepting attempts no gate, so each leaves every credential
+    /// at the tier its walk stopped at, whether or not a performer exists. A disposition that
+    /// moved a tier without a gate would make the tier something a person's answer sets, which is
+    /// the tier CRED-4 says can be argued.
+    #[test]
+    fn removing_denying_or_accepting_changes_no_tier() {
+        for disposition in [Disposition::Remove, Disposition::Deny, Disposition::Accept] {
+            assert_eq!(disposition.attempts(), None);
+            for held in Held::all("gateway.invalid") {
+                for performer in [Performer::Exists, Performer::Absent] {
+                    assert_eq!(
+                        disposition.apply(held, performer),
+                        Ok(held.tier()),
+                        "{disposition:?} moved {held:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CRED-20: enrolling attempts gate 1 and reaches Delegated only where a performer exists. With
+    /// none, the credential is refused and stays where it stood, since it would otherwise be a
+    /// Held credential recorded as holding nothing. Both directions, so an implementation that
+    /// always refused or always passed fails.
+    #[test]
+    fn enrolling_reaches_delegated_only_where_a_performer_exists() {
+        assert_eq!(Disposition::Enrol.attempts(), Some(Gate::One));
+        for held in Held::all("gateway.invalid") {
+            assert_eq!(
+                Disposition::Enrol.apply(held, Performer::Exists),
+                Ok(Tier::Delegated),
+                "{held:?} has a performer and was not enrolled"
+            );
+            assert_eq!(
+                Disposition::Enrol.apply(held, Performer::Absent),
+                Err(NotMoved::NoPerformer),
+                "{held:?} was enrolled with nothing to perform its operation"
+            );
+        }
+    }
+
+    /// CRED-20: Enrol is the only disposition that attempts a gate, so it is the only one whose
+    /// answer can differ from the credential's own tier.
+    #[test]
+    fn only_enrolling_attempts_a_gate() {
+        let attempting: Vec<Disposition> = Disposition::ALL
+            .into_iter()
+            .filter(|disposition| disposition.attempts().is_some())
+            .collect();
+        assert_eq!(attempting, [Disposition::Enrol]);
+    }
+
+    /// CRED-17: a scan result is not an input to a tier. The functions that produce a tier take the
+    /// arrangement and the performer, so passing them a finding means changing a signature, which
+    /// stops compiling here.
+    ///
+    /// Held to the whole signature rather than to the absence of a name, because the failure is a
+    /// parameter added later, and no test over today's callers sees that. A finding reaching a
+    /// tier by a new function, a static or the environment is not seen here.
+    #[test]
+    fn no_tier_is_computed_from_a_scan_result() {
+        let tier_of: fn(Held<'static>) -> Tier = Held::tier;
+        let walk_of: fn(Held<'static>) -> &'static [GateDrop] = Held::walk;
+        let after: for<'a> fn(Disposition, Held<'a>, Performer) -> Result<Tier, NotMoved> =
+            Disposition::apply;
+
+        assert_eq!(tier_of(Held::PremiumKey), Tier::Held);
+        assert_eq!(walk_of(Held::PremiumKey).len(), 3);
+        assert_eq!(
+            after(Disposition::Accept, Held::SigningKey, Performer::Absent),
+            Ok(Tier::Held)
+        );
+    }
+
+    /// A configuration over `lookup` with a premium key stored, as `bravebot auth login brave`
+    /// leaves one.
+    fn with_a_stored_premium_key(lookup: impl Fn(&str) -> Option<String>) -> Config {
+        Config::from_sources(
+            &Settings::default(),
+            &Managed::default(),
+            &keys::Keys::default(),
+            Some(Secret::new("a-premium-key")),
+            |_| None,
+            lookup,
+        )
+        .expect("configured")
+    }
+
+    /// CRED-2: the premium key is a credential this machine holds and presents with every premium
+    /// request, so it is in the record with a tier of its own. Left out, a bearer key stored under
+    /// the state directory has no recorded tier at all, which is the outcome the clause forbids.
+    ///
+    /// Both directions, because the record is what a report walks: a rule that pushed the entry
+    /// unconditionally would account for a key on every build that was given none, and send
+    /// somebody to revoke a key that does not exist. A Bedrock-only build is held to the absent case
+    /// with a key stored, since nothing there reads it and CRED-2 gives a credential nothing reads
+    /// no tier.
+    #[test]
+    fn a_premium_key_is_a_credential_this_configuration_holds() {
+        let brave = with_a_stored_premium_key(complete_env);
+        assert!(brave.serves_aichat());
+        assert_eq!(
+            brave.held(),
+            [Held::SigningKey, Held::PremiumKey],
+            "a premium key is not in the record"
+        );
+
+        let without = Config::from_lookup(complete_env).expect("configured");
+        assert_eq!(
+            without.held(),
+            [Held::SigningKey],
+            "a build with no premium key is accounted for one it does not hold"
+        );
+
+        let bedrock_only = with_a_stored_premium_key(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            _ => None,
+        });
+        assert!(!bedrock_only.serves_aichat());
+        assert_eq!(
+            bedrock_only.held(),
+            [Held::AwsAccessKey, Held::AwsSession],
+            "a build that cannot reach the Brave backend is accounted for a key nothing there presents"
+        );
+    }
+
+    /// CRED-10: a credential the record stands at Held briefly is owed a figure for how quickly a
+    /// leak of it would be noticed and acted on. The window is the whole of what bounds such a
+    /// credential, so a window nobody sized is a number somebody liked.
+    ///
+    /// One direction and not both. The obligations ratchet downward, so a credential that drops
+    /// to Held keeps the figure it owed and is owed detection besides, and a record that made the
+    /// figure exclusive to Held briefly would drop it on the way down, which is the direction
+    /// that needs it most.
+    ///
+    /// The tier and the figure are kept apart and pinned here so that a credential standing at
+    /// Held briefly and left unsized fails rather than passing quietly.
+    #[test]
+    fn a_credential_at_held_briefly_is_sized_against_detection() {
+        for held in Held::all("gateway.invalid") {
+            assert!(
+                held.tier() != Tier::HeldBriefly || held.noticed_within().is_some(),
+                "{held:?} stands at Held briefly with no figure for how quickly a leak is noticed"
+            );
+
+            let Some(window) = held.noticed_within() else {
+                continue;
+            };
+            assert!(
+                window >= Duration::from_secs(60),
+                "a figure under a minute is the unsized case wearing a number: {window:?}"
+            );
+            // Whole minutes, because minutes are what the report states: a figure of ninety
+            // seconds would reach a person as one minute, which is a smaller window than
+            // anybody recorded.
+            assert_eq!(
+                window.as_secs() % 60,
+                0,
+                "a figure that is not whole minutes is reported as a shorter one: {window:?}"
+            );
+        }
+    }
+
+    /// CRED-26: a derived credential records whether it is bound to its presenter or a bearer
+    /// secret, and the record keeps a refusal apart from a request nobody made. The AWS session and
+    /// the ChatGPT sign-in are the derived credentials and both are bearer secrets, for different
+    /// reasons: STS offers no bound form, and nobody has asked OpenAI.
+    /// A record that answered both alike, or answered neither, would leave a bound and an unbound
+    /// credential at one tier indistinguishable, which is what the clause is for.
+    ///
+    /// The credentials issued once and held as issued have no derivative to bind, so a record that
+    /// called them bearer would state a reason that is not the reason.
+    #[test]
+    fn a_derived_credential_records_whether_it_is_bound_to_its_presenter() {
+        assert_eq!(
+            Held::AwsSession.binding(),
+            Some(Binding::Bearer(Attempt::Refused))
+        );
+        assert_ne!(
+            Held::AwsSession.binding(),
+            Held::ChatgptAccount.binding(),
+            "an issuer that offers no bound form and one nobody asked are recorded alike"
+        );
+        assert_eq!(
+            Held::ChatgptAccount.binding(),
+            Some(Binding::Bearer(Attempt::NotAttempted)),
+            "the sign-in is not recorded as a bearer secret nobody asked a bound form of"
+        );
+
+        for held in [
+            Held::SigningKey,
+            Held::AwsAccessKey,
+            Held::PremiumKey,
+            Held::GatewayToken {
+                host: "gateway.invalid",
+            },
+        ] {
+            assert_eq!(
+                held.binding(),
+                None,
+                "{held:?} is not derived from another credential and has no bound form to ask for"
+            );
+        }
+    }
+
+    /// CRED-26: recording the binding moves no tier. The ChatGPT sign-in stays at Held whether or
+    /// not it is bound, and so does the session, so the walk and the binding are two facts about a
+    /// credential rather than one derived from the other.
+    #[test]
+    fn a_credentials_binding_does_not_move_its_tier() {
+        assert_eq!(Held::ChatgptAccount.tier(), Tier::Held);
+        assert_eq!(Held::AwsSession.tier(), Tier::Held);
+        assert_eq!(Held::ChatgptAccount.walk().len(), 3);
+        assert_eq!(Held::AwsSession.walk().len(), 3);
+    }
+
+    /// CRED-25 and CHATGPT-6: the ChatGPT sign-in is a permanent secret this program renews by
+    /// itself, so it stands at Held with the walk an AWS session has, and it is the one derived
+    /// credential whose revocation is recorded as possibly leaving something minted from it
+    /// working. Signing out and removing access in the account's settings are the surfaces the
+    /// record names, and neither has been observed to end an access token, so a record that said
+    /// nothing survives would send somebody who signed out at OpenAI away believing the access
+    /// token had stopped. Held to each of those, since a record that put it at Granted would call
+    /// a token the refresh token replaces unaided a bounded one.
+    ///
+    /// It is not in what a configuration holds: the file is a fact about the machine, so a
+    /// configuration that reaches the Brave backend and one that reaches only Bedrock hold the
+    /// same set, which is not the set with the sign-in in it.
+    #[test]
+    fn a_chatgpt_sign_in_is_held_renewed_unaided_and_possibly_outlives_revocation() {
+        assert_eq!(Held::ChatgptAccount.tier(), Tier::Held);
+        let conditions: Vec<Condition> = Held::ChatgptAccount
+            .walk()
+            .iter()
+            .map(|drop| drop.condition)
+            .collect();
+        assert_eq!(
+            conditions,
+            [
+                Condition::NothingDecidesEachUse,
+                Condition::NoBoundFixedBeforeIssue,
+                Condition::RenewableWithoutAuthority,
+            ]
+        );
+        assert!(Held::ChatgptAccount.outlives_revocation());
+        assert_eq!(Held::ChatgptAccount.noticed_within(), None);
+
+        let brave = Config::from_lookup(complete_env).expect("configured");
+        assert!(
+            !brave.held().contains(&Held::ChatgptAccount),
+            "a configuration is accounted for a sign-in only the machine can say it holds"
+        );
+    }
+
+    /// CRED-25 and XAI-12: the xAI sign-in is the ChatGPT sign-in's arrangement, a permanent secret
+    /// this program renews by itself, so it stands at Held on the same walk, is a bearer secret nobody
+    /// has asked a bound form of, and is recorded as possibly leaving an access token working after
+    /// the refresh token is revoked, since one was accepted on a request made right after a revocation.
+    /// Held to each, since a record that put it at Granted would call a token the refresh token
+    /// replaces unaided a bounded one, and one that said nothing survives would send somebody who
+    /// revoked it away believing the access token had stopped. It is not in what a configuration
+    /// holds, for the reason the ChatGPT sign-in is not.
+    #[test]
+    fn an_xai_sign_in_is_held_renewed_unaided_and_possibly_outlives_revocation() {
+        assert_eq!(Held::XaiAccount.tier(), Tier::Held);
+        assert_eq!(Held::XaiAccount.walk(), Held::ChatgptAccount.walk());
+        let conditions: Vec<Condition> = Held::XaiAccount
+            .walk()
+            .iter()
+            .map(|drop| drop.condition)
+            .collect();
+        assert_eq!(
+            conditions,
+            [
+                Condition::NothingDecidesEachUse,
+                Condition::NoBoundFixedBeforeIssue,
+                Condition::RenewableWithoutAuthority,
+            ]
+        );
+        assert!(Held::XaiAccount.outlives_revocation());
+        assert_eq!(Held::XaiAccount.noticed_within(), None);
+        assert_eq!(
+            Held::XaiAccount.binding(),
+            Some(Binding::Bearer(Attempt::NotAttempted))
+        );
+
+        let brave = Config::from_lookup(complete_env).expect("configured");
+        assert!(
+            !brave.held().contains(&Held::XaiAccount),
+            "a configuration is accounted for a sign-in only the machine can say it holds"
+        );
+        assert!(Held::all("gateway.invalid").contains(&Held::XaiAccount));
+    }
+
+    /// Without Bedrock the aichat credentials are still required. Relaxing them for everyone would
+    /// turn a missing key into a confusing runtime failure instead of a startup error.
+    #[test]
+    fn the_aichat_credentials_are_still_required_without_bedrock() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::SIGNING_KEY => None,
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Missing(env_var::SIGNING_KEY));
+    }
+
+    /// A released binary has the aichat values baked in, so a Bedrock user's config carries them
+    /// whether they wanted them or not. Their presence must not switch the backend back.
+    #[test]
+    fn bedrock_wins_over_baked_in_aichat_values() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert!(config.bedrock.is_some());
+    }
+
+    /// A Bedrock block adds a roster; it does not move the budget. Both backends are offered at once,
+    /// so a session configured for Bedrock may spend every turn on a Brave model, and a budget set
+    /// from the Bedrock window would sit above the window actually in force, which does not delay
+    /// compaction but removes it. The figure is adopted when a tier is picked instead.
+    #[test]
+    fn a_bedrock_block_does_not_move_the_budget_off_the_default() {
+        let mut config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+        assert!(config.adopt_window(Some(bedrock::CONTEXT_WINDOW)));
+        assert_eq!(config.context_budget, bedrock::CONTEXT_WINDOW);
+    }
+
+    /// A settings block adds to what a person may choose rather than changing what answers when they
+    /// have chosen nothing. A new user has Brave and a block must not silently take that away.
+    #[test]
+    fn a_bedrock_block_does_not_change_the_default_model() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    /// A gateway is additive on the same terms a Bedrock block is. Naming one adds to what a person
+    /// may choose and must not decide what answers when they have chosen nothing, nor set the budget
+    /// from a window belonging to a model the session may never use.
+    #[test]
+    fn a_provider_block_changes_neither_the_default_model_nor_the_budget() {
+        let settings = Settings::parse(
+            r#"{"provider": {"openrouter": {
+                "options": {"baseURL": "https://openrouter.example.invalid/api/v1"},
+                "models": {"z-ai/glm-4.6": {"limit": {"context": 1000000, "output": 64000}}}
+            }}}"#,
+        );
+        let mut config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+
+        assert!(config.serves_aichat());
+        assert_eq!(config.signing_key.expose(), "test-signing-key");
+        assert_eq!(config.key_id, "test-key-id");
+        assert_eq!(config.endpoint, "https://example.invalid");
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+        assert_eq!(config.context_budget, DEFAULT_CONTEXT_BUDGET);
+        // Taken only once that model is the one in force, which is what picking it does.
+        assert!(config.adopt_window(Some(1_000_000)));
+    }
+
+    #[test]
+    fn a_gateway_configures_without_brave_credentials_or_a_model_roster() {
+        let settings = Settings::parse(
+            r#"{
+            "model": "openrouter/z-ai/glm-4.6",
+            "provider": {"openrouter": {"options": {"apiKey": "test-token"}}}
+        }"#,
+        );
+        for blank in [false, true] {
+            let config = Config::from_lookup_with_providers(
+                |key| match key {
+                    env_var::DEFAULT_MODEL => resolve_model(None, &settings, |_| None),
+                    _ if blank => Some(String::new()),
+                    _ => None,
+                },
+                settings.providers().to_vec(),
+            )
+            .expect("the selected gateway needs no Brave credentials");
+            assert!(!config.serves_aichat());
+            assert_eq!(config.default_model, "openrouter/z-ai/glm-4.6");
+            let (provider, model) = config.provider_for(&config.default_model).expect("gateway");
+            assert_eq!(model, "z-ai/glm-4.6");
+            assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+            assert!(matches!(
+                provider.credential(|_| None),
+                provider::Credential::Token(token) if token.expose() == "test-token"
+            ));
+            assert!(provider.models.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_gateway_can_read_its_own_environment_token_without_brave_credentials() {
+        let settings = Settings::parse(
+            r#"{
+            "provider": {"openrouter": {"env": ["OPENROUTER_API_KEY"]}}
+        }"#,
+        );
+        let config = Config::from_lookup_with_providers(|_| None, settings.providers().to_vec())
+            .expect("gateway configured before its token is resolved");
+        let provider = &config.providers[0];
+        assert!(matches!(
+            provider.credential(|name| match name {
+                "OPENROUTER_API_KEY" => Some("environment-token".into()),
+                _ => None,
+            }),
+            provider::Credential::Token(token) if token.expose() == "environment-token"
+        ));
+        // Missing gateway tokens are reported by the gateway client, not as missing Brave keys.
+        assert!(matches!(
+            provider.credential(|_| None),
+            provider::Credential::Absent
+        ));
+        assert!(!config.serves_aichat());
+    }
+
+    #[test]
+    fn an_absent_or_invalid_gateway_does_not_relax_brave_validation() {
+        for text in [
+            "{}",
+            r#"{"provider": {}}"#,
+            r#"{"provider": {"unknown": {}}}"#,
+            r#"{"provider": {"unknown": {"options": {"baseURL": ""}}}}"#,
+        ] {
+            let settings = Settings::parse(text);
+            for blank in [false, true] {
+                let error = Config::from_lookup_with_providers(
+                    |_| blank.then(String::new),
+                    settings.providers().to_vec(),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    if blank {
+                        ConfigError::Empty(env_var::SIGNING_KEY)
+                    } else {
+                        ConfigError::Missing(env_var::SIGNING_KEY)
+                    }
+                );
+            }
+        }
+    }
+
+    /// The two blocks reach different services and a name has to go to the one that recognises it.
+    /// Routed as a gateway, an AWS model is sent OpenAI-compatible chat completions over a bearer
+    /// token that does not exist, which is the gap a `provider` block for Bedrock exists to close.
+    #[test]
+    fn a_model_an_aws_block_named_reaches_bedrock_rather_than_a_gateway() {
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "amazon-bedrock": {
+                    "options": {"region": "us-west-2", "profile": "sso"},
+                    "models": {"openai.gpt-5.6-sol": {}}
+                },
+                "openrouter": {
+                    "options": {"baseURL": "https://openrouter.ai/api/v1"},
+                    "models": {"z-ai/glm-4.6": {}}
+                }
+            }}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+
+        let bedrock = config
+            .bedrock_for("openai.gpt-5.6-sol")
+            .expect("the AWS account that serves it");
+        assert_eq!(bedrock.region, "us-west-2");
+        assert!(
+            config.provider_for("openai.gpt-5.6-sol").is_none(),
+            "an AWS model was offered to the gateway path"
+        );
+
+        // The gateway beside it is untouched by any of this.
+        assert!(config.provider_for("z-ai/glm-4.6").is_some());
+        assert!(config.bedrock_for("z-ai/glm-4.6").is_none());
+    }
+
+    /// A request name is an ARN or a bare id and nobody reads either, so the lookup has to reach the
+    /// entry whichever account offers it: the tier variables' or a `provider` block's.
+    #[test]
+    fn a_request_name_finds_its_entry_in_either_kind_of_account() {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"openai.gpt-5.6-sol": {"name": "GPT-5.6 Sol"}}
+            }}}"#,
+        );
+        let config = Config::from_lookup_with_providers(
+            |key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_SONNET_MODEL => {
+                    Some("arn:aws:bedrock:us-west-2:1:application-inference-profile/abc".into())
+                }
+                other => complete_env(other),
+            },
+            settings.providers().to_vec(),
+        )
+        .expect("configured");
+
+        let tier = config
+            .bedrock_entry("arn:aws:bedrock:us-west-2:1:application-inference-profile/abc")
+            .expect("the tier's entry");
+        assert_eq!(tier.display_name(), "Sonnet");
+        let named = config
+            .bedrock_entry("openai.gpt-5.6-sol")
+            .expect("the block's entry");
+        assert_eq!(named.display_name(), "GPT-5.6 Sol");
+        assert!(config.bedrock_entry("claude-3-sonnet").is_none());
+        assert!(config.bedrock_entry("abc").is_none());
+    }
+
+    /// A qualified name says which service is meant, and the AWS entry is not one a gateway request
+    /// can be built for, so naming it must not produce one.
+    #[test]
+    fn a_name_qualified_by_the_aws_id_is_not_a_gateway_either() {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"openai.gpt-5.6-sol": {}}
+            }}}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+        assert!(
+            config
+                .provider_for("amazon-bedrock/openai.gpt-5.6-sol")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_gateway_does_not_hide_an_invalid_brave_endpoint() {
+        let settings = Settings::parse(r#"{"provider": {"openrouter": {}}}"#);
+        let error = Config::from_lookup_with_providers(
+            |key| match key {
+                env_var::ENDPOINT => Some("invalid".into()),
+                other => complete_env(other),
+            },
+            settings.providers().to_vec(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ConfigError::InvalidEndpoint {
+                value: "invalid".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_gateway_keeps_bedrock_available_without_brave_credentials() {
+        let settings = Settings::parse(r#"{"provider": {"openrouter": {}}}"#);
+        let config = Config::from_lookup_with_providers(
+            |key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                _ => None,
+            },
+            settings.providers().to_vec(),
+        )
+        .expect("both backends configured");
+        assert!(!config.serves_aichat());
+        assert_eq!(config.default_model, "opus-arn");
+        assert!(config.bedrock.as_ref().unwrap().offers("opus-arn"));
+        assert!(config.provider_for("openrouter/z-ai/glm-4.6").is_some());
+    }
+
+    /// A gateway configured for the tests below, offering one model the block names.
+    fn with_a_gateway(models: &str) -> Config {
+        let settings = Settings::parse(&format!(
+            r#"{{"provider": {{"openrouter": {{
+                "options": {{"baseURL": "https://openrouter.example.invalid/api/v1"}},
+                "models": {models}
+            }}}}}}"#
+        ));
+        let mut config = Config::from_lookup(complete_env).expect("configured");
+        config.providers = settings.providers().to_vec();
+        config
+    }
+
+    /// The name says which service is meant, which is what lets a gateway offer a model it did not
+    /// have to be configured with. Only the part after the id reaches the gateway: the id is this
+    /// crate's own filing, and no service has heard of it.
+    #[test]
+    fn a_name_qualified_by_a_provider_id_names_the_gateway_and_the_model_separately() {
+        let config = with_a_gateway("{}");
+        let (provider, wire) = config
+            .provider_for("openrouter/z-ai/glm-4.6")
+            .expect("a gateway");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "z-ai/glm-4.6");
+    }
+
+    /// A name chosen before this crate qualified anything is still sitting in `~/.bravebot/model`, so
+    /// a bare name the block lists has to keep reaching the gateway that lists it.
+    #[test]
+    fn a_bare_name_the_block_lists_still_finds_its_gateway() {
+        let config = with_a_gateway(r#"{"z-ai/glm-4.6": {}}"#);
+        let (provider, wire) = config.provider_for("z-ai/glm-4.6").expect("a gateway");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "z-ai/glm-4.6");
+    }
+
+    /// The other two rosters share this name space. A Brave slug carries no separator and a Bedrock
+    /// ARN's leading segment is no provider's id, so neither is claimed by a gateway that was asked
+    /// about a name belonging to somebody else.
+    #[test]
+    fn a_name_no_gateway_was_configured_for_reaches_no_gateway() {
+        let config = with_a_gateway(r#"{"z-ai/glm-4.6": {}}"#);
+        for name in [
+            "claude-3-sonnet",
+            DEFAULT_MODEL,
+            "arn:aws:bedrock:us-west-2:1:application-inference-profile/abc",
+            "moonshot/kimi-k2",
+            "openrouter/",
+            "openrouter",
+        ] {
+            assert!(
+                config.provider_for(name).is_none(),
+                "{name:?} reached a gateway"
+            );
+        }
+    }
+
+    /// CHATGPT-9: a name selects the account only by carrying the account's id, since a bare
+    /// `gpt-5` already means the `openai` gateway's model or Brave's and a remembered choice would
+    /// otherwise change service silently. The account is asked for the part after the id.
+    #[test]
+    fn only_the_qualified_name_selects_the_chatgpt_account_and_only_the_rest_of_it_is_sent() {
+        let config = with_a_gateway("{}");
+        assert!(config.offers_chatgpt_account());
+        assert!(config.runs_on_chatgpt_account(Some("chatgpt/gpt-5")));
+        assert!(!config.runs_on_chatgpt_account(Some("gpt-5")));
+        assert!(
+            !config.runs_on_chatgpt_account(None),
+            "the default is Brave's"
+        );
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5"), Some("gpt-5"));
+        assert_eq!(config.chatgpt_model("chatgpt/org/model"), Some("org/model"));
+        for name in [
+            "gpt-5",
+            "chatgpt",
+            "chatgpt/",
+            "openai/gpt-5",
+            "Chatgpt/gpt-5",
+            "chatgpt-5/gpt-5",
+            "openrouter/z-ai/glm-4.6",
+            DEFAULT_MODEL,
+        ] {
+            assert_eq!(
+                config.chatgpt_model(name),
+                None,
+                "{name:?} selected the account"
+            );
+        }
+    }
+
+    /// CHATGPT-9: an entry that already has the id keeps it. Taking the id over would send a
+    /// working gateway's requests, and the person's subscription with them, to another service.
+    #[test]
+    fn a_provider_entry_named_chatgpt_keeps_the_name_and_no_model_is_the_accounts() {
+        let settings = Settings::parse(
+            r#"{"provider": {"chatgpt": {
+                "options": {"baseURL": "https://gateway.example.invalid/v1"},
+                "models": {"gpt-5": {}}
+            }}}"#,
+        );
+        let mut config = Config::from_lookup(complete_env).expect("configured");
+        config.providers = settings.providers().to_vec();
+
+        assert!(!config.offers_chatgpt_account());
+        assert!(!config.runs_on_chatgpt_account(Some("chatgpt/gpt-5")));
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5"), None);
+        let (provider, wire) = config.provider_for("chatgpt/gpt-5").expect("the gateway");
+        assert_eq!(provider.base_url, "https://gateway.example.invalid/v1");
+        assert_eq!(wire, "gpt-5");
+    }
+
+    /// CHATGPT-9: a gateway of another id that lists a model whose own name begins `chatgpt/` does
+    /// not take the name from the account. `chatgpt/<name>` is the account's, and the gateway's
+    /// model is reached as its row is keyed, `<id>/chatgpt/<name>`, which sends the gateway the name
+    /// it lists. The gateway's bare listing is still found for every other name. Where an entry has
+    /// the account's id and states an endpoint, that entry keeps the name over a gateway that lists
+    /// it. A lookup that matched the bare listing before the account would send a signed-in
+    /// person's turn, and the gateway's key, to the gateway they did not choose.
+    #[test]
+    fn a_gateway_listing_a_name_that_begins_with_chatgpt_is_reached_by_its_qualified_name_alone() {
+        let config = with_a_gateway(r#"{"chatgpt/gpt-5.5": {}, "z-ai/glm-4.6": {}}"#);
+        assert!(config.offers_chatgpt_account());
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5.5"), Some("gpt-5.5"));
+        assert!(
+            config.provider_for("chatgpt/gpt-5.5").is_none(),
+            "the gateway's bare listing took a name that begins with the account's id"
+        );
+
+        let (provider, wire) = config
+            .provider_for("openrouter/chatgpt/gpt-5.5")
+            .expect("the gateway, by the name its row has");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "chatgpt/gpt-5.5");
+        let (provider, wire) = config
+            .provider_for("z-ai/glm-4.6")
+            .expect("a bare name that does not begin with the account's id");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "z-ai/glm-4.6");
+
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "litellm": {
+                    "options": {"baseURL": "https://litellm.example.invalid/v1"},
+                    "models": {"chatgpt/gpt-5.5": {}}
+                },
+                "chatgpt": {
+                    "options": {"baseURL": "https://gateway.example.invalid/v1"},
+                    "models": {"gpt-5.5": {}}
+                }
+            }}"#,
+        );
+        let mut config = Config::from_lookup(complete_env).expect("configured");
+        config.providers = settings.providers().to_vec();
+        assert!(!config.offers_chatgpt_account());
+        let (provider, wire) = config
+            .provider_for("chatgpt/gpt-5.5")
+            .expect("the entry that holds the id");
+        assert_eq!(provider.id, "chatgpt");
+        assert_eq!(wire, "gpt-5.5");
+    }
+
+    /// CHATGPT-9: a Bedrock account that lists a model under a name beginning `chatgpt/`, in a block
+    /// or in a tier variable, does not take the name from the account, as a gateway does not. Bedrock
+    /// is asked about every other name it lists, and a name that begins `chatgpt/` is the account's,
+    /// or that of the entry which has its id, whatever the account lists.
+    #[test]
+    fn a_bedrock_account_listing_a_name_that_begins_with_chatgpt_does_not_take_it_from_the_account()
+    {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"chatgpt/gpt-5.5": {}, "openai.gpt-5.6-sol": {}}
+            }}}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+        assert!(config.bedrock_for("openai.gpt-5.6-sol").is_some());
+        assert!(
+            config.bedrock_for("chatgpt/gpt-5.5").is_none(),
+            "a Bedrock block took a name that begins with the account's id"
+        );
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5.5"), Some("gpt-5.5"));
+
+        let config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("chatgpt/gpt-5.5".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert!(
+            config
+                .bedrock
+                .as_ref()
+                .is_some_and(|it| it.offers("chatgpt/gpt-5.5")),
+            "the tier variable did not name the model, so this test holds nothing"
+        );
+        assert!(
+            config.bedrock_for("chatgpt/gpt-5.5").is_none(),
+            "a tier variable took a name that begins with the account's id"
+        );
+
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "amazon-bedrock": {
+                    "options": {"region": "us-west-2"},
+                    "models": {"chatgpt/gpt-5.5": {}}
+                },
+                "chatgpt": {
+                    "options": {"baseURL": "https://gateway.example.invalid/v1"},
+                    "models": {"gpt-5.5": {}}
+                }
+            }}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+        assert!(config.bedrock_for("chatgpt/gpt-5.5").is_none());
+        let (provider, _) = config
+            .provider_for("chatgpt/gpt-5.5")
+            .expect("the entry that holds the id");
+        assert_eq!(provider.id, "chatgpt");
+    }
+
+    /// XAI-13: a name selects the xAI account only by carrying the account's id, since a bare
+    /// `grok-4.5` already means a gateway's model or Brave's and a remembered choice would otherwise
+    /// change service silently. The account is asked for the part after the id. A name that carries
+    /// the id of ChatGPT's account is not xAI's, and one that carries xAI's is not ChatGPT's.
+    #[test]
+    fn only_the_qualified_name_selects_the_xai_account_and_only_the_rest_of_it_is_sent() {
+        let config = with_a_gateway("{}");
+        assert!(config.offers_xai_account());
+        assert!(config.runs_on_xai_account(Some("xai/grok-4.5")));
+        assert!(!config.runs_on_xai_account(Some("grok-4.5")));
+        assert!(!config.runs_on_xai_account(None), "the default is Brave's");
+        assert_eq!(config.xai_model("xai/grok-4.5"), Some("grok-4.5"));
+        assert_eq!(config.xai_model("xai/org/model"), Some("org/model"));
+        for name in [
+            "grok-4.5",
+            "xai",
+            "xai/",
+            "x-ai/grok-4.5",
+            "Xai/grok-4.5",
+            "xai-grok/grok-4.5",
+            "chatgpt/grok-4.5",
+            "openrouter/z-ai/glm-4.6",
+            DEFAULT_MODEL,
+        ] {
+            assert_eq!(
+                config.xai_model(name),
+                None,
+                "{name:?} selected the account"
+            );
+        }
+        assert_eq!(config.chatgpt_model("xai/grok-4.5"), None);
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5"), Some("gpt-5"));
+    }
+
+    /// CHATGPT-9, XAI-19: a roster asks the account a turn runs on and no other, and a picker asks both
+    /// whatever is in force. This is the one rule the terminal's roster and the window's both take, so
+    /// it is pinned here and not once in each. The regressions it rejects are a turn on a Brave or a
+    /// gateway model that asks an account, which sends a stored sign-in's token for a listing it does
+    /// not use, and a picker that leaves an account out.
+    #[test]
+    fn a_roster_asks_the_account_a_turn_runs_on_and_no_other_and_a_picker_asks_both() {
+        let config = with_a_gateway("{}");
+        let only = |chatgpt, xai| RosterAccounts { chatgpt, xai };
+
+        assert_eq!(
+            config.roster_accounts_for_a_turn(Some("chatgpt/gpt-5")),
+            only(true, false)
+        );
+        assert_eq!(
+            config.roster_accounts_for_a_turn(Some("xai/grok-4.5")),
+            only(false, true)
+        );
+        for model in [
+            Some("gpt-5"),
+            Some("grok-4.5"),
+            Some("openrouter/z-ai/glm-4.6"),
+        ] {
+            assert_eq!(
+                config.roster_accounts_for_a_turn(model),
+                only(false, false),
+                "{model:?}"
+            );
+        }
+        assert_eq!(
+            config.roster_accounts_for_a_turn(None),
+            only(false, false),
+            "the default is Brave's"
+        );
+        assert_eq!(RosterAccounts::for_a_picker(), only(true, true));
+
+        // Where the default is an account's model, a turn that names none is on that account.
+        let mut default_on_xai = with_a_gateway("{}");
+        default_on_xai.default_model = "xai/grok-4.5".to_string();
+        assert_eq!(
+            default_on_xai.roster_accounts_for_a_turn(None),
+            only(false, true)
+        );
+        assert_eq!(
+            default_on_xai.roster_accounts_for_a_turn(Some("chatgpt/gpt-5")),
+            only(true, false)
+        );
+    }
+
+    /// BACKEND-64: a roster asked for the sake of one model asks the service that answers it and no
+    /// other, and a picker asks them all. Each of the five services a request can go to is given a
+    /// model only it answers, with a second gateway and an AWS account configured beside it, so a
+    /// scope that leaves a service in or out shows.
+    ///
+    /// The regressions it rejects are a lookup that still waits on every gateway, which is what held a
+    /// start for the sum of their latencies; one that asks Brave for a model an AWS account serves;
+    /// and a scope that names the wrong gateway for a qualified name or for one a block lists.
+    #[test]
+    fn a_roster_for_a_model_asks_the_service_that_answers_it_and_no_other() {
+        let mut config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        config.providers = Settings::parse(
+            r#"{"provider": {
+                "one": {"options": {"baseURL": "https://one.example.invalid/v1"}},
+                "two": {"options": {"baseURL": "https://two.example.invalid/v1"}},
+                "three": {"options": {"baseURL": "https://three.example.invalid/v1"},
+                          "models": {"tiny": {}}}
+            }}"#,
+        )
+        .providers()
+        .to_vec();
+        assert_eq!(config.providers.len(), 3, "a block configured no gateway");
+        let scope = |gateways, chatgpt, xai, brave| RosterScope {
+            accounts: RosterAccounts { chatgpt, xai },
+            gateways,
+            brave,
+        };
+
+        let table = [
+            (
+                Some("one/llama3"),
+                scope(Gateways::Only("one"), false, false, false),
+            ),
+            (
+                Some("two/llama3"),
+                scope(Gateways::Only("two"), false, false, false),
+            ),
+            // A bare name a block lists finds that block's gateway.
+            (
+                Some("tiny"),
+                scope(Gateways::Only("three"), false, false, false),
+            ),
+            (
+                Some("opus-arn"),
+                scope(Gateways::Nothing, false, false, false),
+            ),
+            (
+                Some("chatgpt/gpt-5"),
+                scope(Gateways::Nothing, true, false, false),
+            ),
+            (
+                Some("xai/grok-4.5"),
+                scope(Gateways::Nothing, false, true, false),
+            ),
+            // What nothing above claims is Brave's, and so is the configured default.
+            (
+                Some("claude-sonnet"),
+                scope(Gateways::Nothing, false, false, true),
+            ),
+            (None, scope(Gateways::Nothing, false, false, true)),
+        ];
+        for (model, expected) in table {
+            assert_eq!(config.roster_scope_for_a_turn(model), expected, "{model:?}");
+        }
+        assert_eq!(
+            RosterScope::for_a_picker(),
+            scope(Gateways::All, true, true, true)
+        );
+
+        // The router and the scope take their answer from one function, and these are its answers.
+        assert!(matches!(config.serves("opus-arn"), Serves::Bedrock(_)));
+        assert!(matches!(
+            config.serves("one/llama3"),
+            Serves::Gateway(provider, "llama3") if provider.id == "one"
+        ));
+        assert!(matches!(
+            config.serves("chatgpt/gpt-5"),
+            Serves::Chatgpt("gpt-5")
+        ));
+        assert!(matches!(
+            config.serves("xai/grok-4.5"),
+            Serves::Xai("grok-4.5")
+        ));
+        assert!(matches!(config.serves("claude-sonnet"), Serves::Aichat));
+
+        // Which gateways a scope asks, among those that name no models.
+        let named = |id: &str| {
+            config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .expect(id)
+        };
+        let (one, two) = (named("one"), named("two"));
+        let asks = |gateways| {
+            let scope = scope(gateways, false, false, false);
+            (scope.asks_gateway(one), scope.asks_gateway(two))
+        };
+        assert_eq!(asks(Gateways::All), (true, true));
+        assert_eq!(asks(Gateways::Only("two")), (false, true));
+        assert_eq!(asks(Gateways::Nothing), (false, false));
+    }
+
+    /// XAI-13: an entry that already has the id keeps it. Taking the id over would send a working
+    /// gateway's requests, and the key that gateway holds, to another service.
+    #[test]
+    fn a_provider_entry_named_xai_keeps_the_name_and_no_model_is_the_accounts() {
+        let settings = Settings::parse(
+            r#"{"provider": {"xai": {
+                "options": {"baseURL": "https://gateway.example.invalid/v1"},
+                "models": {"grok-4.5": {}}
+            }}}"#,
+        );
+        let mut config = Config::from_lookup(complete_env).expect("configured");
+        config.providers = settings.providers().to_vec();
+
+        assert!(!config.offers_xai_account());
+        assert!(!config.runs_on_xai_account(Some("xai/grok-4.5")));
+        assert_eq!(config.xai_model("xai/grok-4.5"), None);
+        let (provider, wire) = config.provider_for("xai/grok-4.5").expect("the gateway");
+        assert_eq!(provider.base_url, "https://gateway.example.invalid/v1");
+        assert_eq!(wire, "grok-4.5");
+    }
+
+    /// XAI-13: an entry named `xai` that states no endpoint and is no known name is no gateway, so it
+    /// holds nothing: no provider is made of it, the account is offered, and the models the entry lists are
+    /// not read for the account, whose roster is its own listing. The regressions it rejects are a bare
+    /// entry that holds the name and refuses the sign-in, and one whose `models` stand in for the
+    /// account's listing, which would offer rows the account may not reach.
+    #[test]
+    fn an_entry_named_xai_that_states_no_endpoint_holds_nothing_and_its_models_are_not_read() {
+        let settings =
+            Settings::parse(r#"{"provider": {"xai": {"models": {"grok-bare-row": {}}}}}"#);
+        let mut config = Config::from_lookup(complete_env).expect("configured");
+        config.providers = settings.providers().to_vec();
+
+        assert!(
+            config.providers.is_empty(),
+            "an entry with no endpoint made a provider: {:?}",
+            config.providers
+        );
+        assert!(config.offers_xai_account());
+        assert_eq!(config.xai_model("xai/grok-4.5"), Some("grok-4.5"));
+        assert!(config.provider_for("xai/grok-bare-row").is_none());
+        assert_eq!(
+            config.xai_model("xai/grok-bare-row"),
+            Some("grok-bare-row"),
+            "a model the bare entry lists is named through the account like any other"
+        );
+    }
+
+    /// XAI-13: a gateway of another id that lists a model whose own name begins `xai/` does not take
+    /// the name from the account. `xai/<name>` is the account's, and the gateway's model is reached
+    /// as its row is keyed, `<id>/xai/<name>`, which sends the gateway the name it lists. The
+    /// gateway's bare listing is still found for every other name. A lookup that matched the bare
+    /// listing before the account would send a signed-in person's turn, and the gateway's key, to
+    /// the gateway they did not choose.
+    #[test]
+    fn a_gateway_listing_a_name_that_begins_with_xai_is_reached_by_its_qualified_name_alone() {
+        let config = with_a_gateway(r#"{"xai/grok-4.5": {}, "z-ai/glm-4.6": {}}"#);
+        assert!(config.offers_xai_account());
+        assert_eq!(config.xai_model("xai/grok-4.5"), Some("grok-4.5"));
+        assert!(
+            config.provider_for("xai/grok-4.5").is_none(),
+            "the gateway's bare listing took a name that begins with the account's id"
+        );
+
+        let (provider, wire) = config
+            .provider_for("openrouter/xai/grok-4.5")
+            .expect("the gateway, by the name its row has");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "xai/grok-4.5");
+        let (provider, wire) = config
+            .provider_for("z-ai/glm-4.6")
+            .expect("a bare name that does not begin with the account's id");
+        assert_eq!(provider.id, "openrouter");
+        assert_eq!(wire, "z-ai/glm-4.6");
+    }
+
+    /// XAI-13: a Bedrock account that lists a model under a name beginning `xai/`, in a block or in
+    /// a tier variable, does not take the name from the account, as a gateway does not. Bedrock is
+    /// asked about every other name it lists.
+    #[test]
+    fn a_bedrock_account_listing_a_name_that_begins_with_xai_does_not_take_it_from_the_account() {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"xai/grok-4.5": {}, "openai.gpt-5.6-sol": {}}
+            }}}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+        assert!(config.bedrock_for("openai.gpt-5.6-sol").is_some());
+        assert!(
+            config.bedrock_for("xai/grok-4.5").is_none(),
+            "a Bedrock block took a name that begins with the account's id"
+        );
+        assert_eq!(config.xai_model("xai/grok-4.5"), Some("grok-4.5"));
+
+        let config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("xai/grok-4.5".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert!(
+            config
+                .bedrock
+                .as_ref()
+                .is_some_and(|it| it.offers("xai/grok-4.5")),
+            "the tier variable did not name the model, so this test holds nothing"
+        );
+        assert!(
+            config.bedrock_for("xai/grok-4.5").is_none(),
+            "a tier variable took a name that begins with the account's id"
+        );
+    }
+
+    /// CHATGPT-9: the models an entry with the account's id names, where it states no endpoint,
+    /// reach the configuration with the window each states, and the entry is not a gateway. The
+    /// account stays reachable, a name qualified by the id still selects it, and no gateway answers
+    /// for a name that carries the id.
+    #[test]
+    fn the_models_a_chatgpt_entry_names_reach_the_configuration_and_the_account_stays_reachable() {
+        let settings = Settings::parse(
+            r#"{"provider": {"chatgpt": {"models": {
+                "gpt-5": {"limit": {"context": 400000, "output": 128000}},
+                "gpt-5-mini": {}
+            }}}}"#,
+        );
+        let config = resolved(&settings, |_| None, complete_env).expect("configured");
+
+        assert_eq!(
+            config.chatgpt_models,
+            [
+                provider::AccountModel {
+                    id: "gpt-5".to_string(),
+                    context_window: Some(400_000),
+                },
+                provider::AccountModel {
+                    id: "gpt-5-mini".to_string(),
+                    context_window: None,
+                },
+            ]
+        );
+        assert!(config.providers.is_empty(), "the entry became a gateway");
+        assert!(config.offers_chatgpt_account());
+        assert_eq!(config.chatgpt_model("chatgpt/gpt-5"), Some("gpt-5"));
+        assert!(config.provider_for("chatgpt/gpt-5").is_none());
+    }
+
+    /// CHATGPT-9: a gateway that holds the id leaves no model of the account to offer, so the models
+    /// the person's entry names are not carried. Only a machine-level layer can hold the id beside
+    /// them, and a reader of the field must not find a roster for an account that is not offered.
+    #[test]
+    fn the_models_a_chatgpt_entry_names_are_not_carried_where_a_gateway_holds_the_id() {
+        let settings = Settings::parse(r#"{"provider": {"chatgpt": {"models": {"gpt-5": {}}}}}"#);
+        let managed = managed::scratch(
+            "resolve-chatgpt-gateway-holds-the-id",
+            r#"{"provider": {"chatgpt": {
+                "options": {"baseURL": "https://gateway.example.invalid/v1"},
+                "models": {"gpt-5": {}}
+            }}}"#,
+        );
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+
+        assert!(!config.offers_chatgpt_account());
+        assert!(config.chatgpt_models.is_empty());
+        assert_eq!(
+            config.providers.len(),
+            1,
+            "the machine-level gateway stands"
+        );
+    }
+
+    /// CHATGPT-9: the entry is part of the `provider` block, which a machine-level block replaces
+    /// whole, an empty one included. The person's list is not read then, and the account is still
+    /// offered with the models its listing gives.
+    #[test]
+    fn a_machine_level_provider_block_replaces_the_models_a_chatgpt_entry_names() {
+        let settings = Settings::parse(r#"{"provider": {"chatgpt": {"models": {"gpt-5": {}}}}}"#);
+        let managed = managed::scratch("resolve-chatgpt-entry-replaced", r#"{"provider": {}}"#);
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+
+        assert!(config.offers_chatgpt_account());
+        assert!(config.chatgpt_models.is_empty());
+    }
+
+    /// The exception: with no Brave credentials, `automatic` names a backend that cannot be reached at
+    /// all, so the strongest configured tier is the only thing that could answer.
+    #[test]
+    fn without_brave_credentials_the_default_is_the_strongest_bedrock_tier() {
+        for (state, endpoint) in [
+            ("nothing configured for Brave", None),
+            (
+                "an endpoint and no credentials",
+                Some("https://example.invalid"),
+            ),
+        ] {
+            let config = Config::from_lookup(|k| match k {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_SONNET_MODEL => Some("sonnet-arn".into()),
+                env_var::ENDPOINT => endpoint.map(str::to_string),
+                _ => None,
+            })
+            .expect("configured");
+            assert!(!config.serves_aichat(), "{state}");
+            assert_eq!(config.default_model, "sonnet-arn", "{state}");
+        }
+
+        // The account a `provider` block named is the only reachable service here too.
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"openai.gpt-5.6-sol": {}}
+            }}}"#,
+        );
+        let config = Config::from_lookup_with_providers(|_| None, settings.providers().to_vec())
+            .expect("configured");
+        assert!(!config.serves_aichat());
+        assert_eq!(config.default_model, "openai.gpt-5.6-sol");
+    }
+
+    /// A budget somebody typed outranks an advertised one: they may know which model an opaque ARN
+    /// actually resolves to.
+    #[test]
+    fn a_budget_set_by_hand_outranks_the_assumed_bedrock_window() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::CONTEXT_BUDGET => Some("4096".into()),
+            other => complete_env(other),
+        })
+        .expect("configured");
+        assert_eq!(config.context_budget, 4096);
+    }
+
+    /// A variable exported for one session is the most specific thing the person said. A file that
+    /// overrode it would make `AWS_PROFILE=other bravebot` do nothing at all.
+    #[test]
+    fn the_environment_outranks_the_settings_file() {
+        let settings = Settings::parse(r#"{"env": {"AWS_REGION": "from-the-file"}}"#);
+        let chosen = resolve(env_var::AWS_REGION, Some("from-the-env".into()), |_| None)
+            .or_else(|| settings.get(env_var::AWS_REGION).map(str::to_string));
+        assert_eq!(chosen.as_deref(), Some("from-the-env"));
+    }
+
+    /// The file is consulted when the environment is silent, which is the case it exists for: a
+    /// session started from a shell that never exported anything.
+    #[test]
+    fn the_settings_file_applies_when_the_environment_is_silent() {
+        let settings = Settings::parse(r#"{"env": {"AWS_REGION": "from-the-file"}}"#);
+        let chosen = resolve(env_var::AWS_REGION, None, |_| None)
+            .or_else(|| settings.get(env_var::AWS_REGION).map(str::to_string));
+        assert_eq!(chosen.as_deref(), Some("from-the-file"));
+    }
+
+    /// The resolution [`Config::from_env_and_settings`] performs, gateways included, over sources a
+    /// test names rather than over the process environment, whatever this binary was built with, and
+    /// a file only root can write.
+    fn resolved(
+        settings: &Settings,
+        exported: impl Fn(&str) -> Option<String>,
+        baked: impl Fn(&str) -> Option<String>,
+    ) -> Result<Config, ConfigError> {
+        resolved_under(&Managed::default(), settings, exported, baked)
+    }
+
+    /// As [`resolved`], with a machine-level layer over it.
+    fn resolved_under(
+        managed: &Managed,
+        settings: &Settings,
+        exported: impl Fn(&str) -> Option<String>,
+        baked: impl Fn(&str) -> Option<String>,
+    ) -> Result<Config, ConfigError> {
+        Config::from_sources(
+            settings,
+            managed,
+            &keys::Keys::default(),
+            None,
+            exported,
+            baked,
+        )
+    }
+
+    /// The names a settings file may set are the names something reads, and this is all of them. A
+    /// configuration surface described but never named is one nobody can use without reading this
+    /// crate, which is how a whole backend reached people undocumented.
+    #[test]
+    fn every_name_a_settings_block_may_set_reaches_the_configuration() {
+        let settings = Settings::parse(
+            r#"{"env": {
+                "SERVICES_KEY_AICHAT": "signing-key-from-the-file",
+                "BRAVE_SERVICES_KEY_ID": "key-id-from-the-file",
+                "BRAVE_AI_CHAT_ENDPOINT": "https://endpoint.invalid",
+                "BRAVE_AI_CHAT_PREMIUM_ENDPOINT": "https://premium.invalid",
+                "BRAVEBOT_DEFAULT_MODEL": "model-from-the-file",
+                "BRAVEBOT_CONTEXT_BUDGET": "4096",
+                "BRAVEBOT_OUTPUT_BUDGET": "48000",
+                "BRAVEBOT_USE_BEDROCK": "1",
+                "AWS_REGION": "eu-west-1",
+                "AWS_PROFILE": "profile-from-the-file",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-arn",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-arn",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-arn",
+                "GOOGLE_API_KEY": "google-key-from-the-file",
+                "GOOGLE_CLOUD_PROJECT": "project-from-the-file",
+                "VERTEX_LOCATION": "us-east5"
+            }}"#,
+        );
+        let config = resolved(&settings, |_| None, |_| None).expect("configured");
+
+        let vertex = vertex_of(&config).expect("a google-vertex service");
+        assert_eq!(
+            vertex.base_url,
+            "https://us-east5-aiplatform.googleapis.com/v1/projects/project-from-the-file/locations/us-east5/endpoints/openapi"
+        );
+        assert_eq!(
+            token_of(&vertex.credential(|_| None)),
+            Some("google-key-from-the-file")
+        );
+        assert_eq!(config.signing_key.expose(), "signing-key-from-the-file");
+        assert_eq!(config.key_id, "key-id-from-the-file");
+        assert_eq!(config.endpoint, "https://endpoint.invalid");
+        assert_eq!(
+            config.premium_endpoint.as_deref(),
+            Some("https://premium.invalid")
+        );
+        assert_eq!(config.default_model, "model-from-the-file");
+        assert_eq!(config.context_budget, 4096);
+
+        let bedrock = config.bedrock.expect("an aws block");
+        assert_eq!(bedrock.region, "eu-west-1");
+        assert_eq!(bedrock.profile.as_deref(), Some("profile-from-the-file"));
+        assert_eq!(bedrock.output_limit("opus-arn"), 48_000);
+        for (tier, named) in [
+            (bedrock::Tier::Opus, "opus-arn"),
+            (bedrock::Tier::Sonnet, "sonnet-arn"),
+            (bedrock::Tier::Haiku, "haiku-arn"),
+        ] {
+            assert_eq!(bedrock.model_for(tier), Some(named));
+        }
+    }
+
+    /// DELEGATE-7: the bound a settings file names on the delegates a turn may have running is what
+    /// the configuration carries to the turn, and a file that names none leaves the kernel's own.
+    #[test]
+    fn the_bound_on_running_delegates_reaches_the_configuration() {
+        let named = Settings::parse(r#"{"maxRunningDelegates": 12}"#);
+        let config = resolved(&named, |_| None, complete_env).expect("configured");
+        assert_eq!(config.max_running_delegates, Some(12));
+
+        let silent = Settings::parse("{}");
+        let config = resolved(&silent, |_| None, complete_env).expect("configured");
+        assert_eq!(config.max_running_delegates, None);
+    }
+
+    /// A tier has no block to state a ceiling in, so the variable is the only thing that can raise
+    /// one for the three models most people reach this backend through. It has to reach both
+    /// routes to an AWS account and outrank a figure a file stated, which is the order
+    /// BACKEND-35 gives for everything else here.
+    #[test]
+    fn an_exported_reply_ceiling_outranks_every_stated_one() {
+        let settings = Settings::parse(
+            r#"{
+                "env": {
+                    "BRAVEBOT_USE_BEDROCK": "1",
+                    "AWS_REGION": "eu-west-1",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-arn"
+                },
+                "provider": {"amazon-bedrock": {
+                    "options": {"region": "us-west-2"},
+                    "models": {"anthropic.claude-sonnet-4-5": {
+                        "limit": {"context": 200000, "output": 64000}
+                    }}
+                }}
+            }"#,
+        );
+
+        // Without it, each route answers with what it knows: the block's figure for the model that
+        // stated one, the assumed figure for the tier that cannot.
+        let config = resolved(&settings, |_| None, |_| None).expect("configured");
+        let stated = config
+            .bedrock_for("anthropic.claude-sonnet-4-5")
+            .expect("the block's account");
+        assert_eq!(stated.output_limit("anthropic.claude-sonnet-4-5"), 64_000);
+        assert_eq!(
+            config
+                .bedrock
+                .as_ref()
+                .expect("the tier account")
+                .output_limit("opus-arn"),
+            bedrock::OUTPUT_LIMIT
+        );
+
+        // With it, both. 48,000 is neither of the two figures above, so a reading that kept either
+        // of them is distinguishable from one that took the variable.
+        let exported = |name: &str| (name == env_var::OUTPUT_BUDGET).then(|| "48000".to_string());
+        let config = resolved(&settings, exported, |_| None).expect("configured");
+        assert_eq!(
+            config
+                .bedrock_for("anthropic.claude-sonnet-4-5")
+                .expect("the block's account")
+                .output_limit("anthropic.claude-sonnet-4-5"),
+            48_000,
+            "a stated ceiling outranked the exported one"
+        );
+        assert_eq!(
+            config
+                .bedrock
+                .as_ref()
+                .expect("the tier account")
+                .output_limit("opus-arn"),
+            48_000,
+            "the variable did not reach a tier"
+        );
+    }
+
+    /// A mistyped budget costs the setting, not the ceiling. Read as zero it would cap every reply
+    /// at nothing, which is the failure the setting exists to prevent.
+    #[test]
+    fn a_reply_ceiling_that_is_not_a_figure_leaves_the_stated_one_standing() {
+        let settings = Settings::parse(
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "1", "AWS_REGION": "eu-west-1",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-arn"}}"#,
+        );
+        for typed in ["0", "lots", "", "-1", "64_000"] {
+            let exported = |name: &str| (name == env_var::OUTPUT_BUDGET).then(|| typed.to_string());
+            let config = resolved(&settings, exported, |_| None).expect("configured");
+            assert_eq!(
+                config
+                    .bedrock
+                    .as_ref()
+                    .expect("the tier account")
+                    .output_limit("opus-arn"),
+                bedrock::OUTPUT_LIMIT,
+                "{typed:?} was read as a ceiling"
+            );
+        }
+    }
+
+    /// The exported reply ceiling reaches every `provider` entry, an `anthropic` one among them,
+    /// ahead of the figure the entry's model states, and is read as a figure or not at all. The
+    /// Messages request states its `max_tokens` from this, so a reading that kept the model's own
+    /// figure sends 64,000 where 48,000 was exported, and one that read a mistyped value as zero
+    /// sends none.
+    #[test]
+    fn an_exported_reply_ceiling_reaches_an_anthropic_entry_ahead_of_its_models_own() {
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "anthropic": {
+                    "env": ["A_TOKEN_VARIABLE"],
+                    "models": {"claude-test": {"limit": {"context": 200000, "output": 64000}}}
+                },
+                "elsewhere": {
+                    "options": {"baseURL": "https://elsewhere.example.invalid/v1"},
+                    "models": {"a-model": {}}
+                }
+            }}"#,
+        );
+        let limit = |config: &Config, model: &str| {
+            let (provider, wire) = config.provider_for(model).expect("a configured entry");
+            provider.stated_output_limit(wire)
+        };
+
+        let config = resolved(&settings, |_| None, |_| None).expect("configured");
+        assert_eq!(limit(&config, "anthropic/claude-test"), Some(64_000));
+        assert_eq!(limit(&config, "anthropic/claude-other"), None);
+        assert_eq!(limit(&config, "elsewhere/a-model"), None);
+
+        let exported = |name: &str| (name == env_var::OUTPUT_BUDGET).then(|| "48000".to_string());
+        let config = resolved(&settings, exported, |_| None).expect("configured");
+        assert_eq!(limit(&config, "anthropic/claude-test"), Some(48_000));
+        assert_eq!(limit(&config, "anthropic/claude-other"), Some(48_000));
+        assert_eq!(limit(&config, "elsewhere/a-model"), Some(48_000));
+
+        for typed in ["0", "lots", "", "-1", "64_000"] {
+            let exported = |name: &str| (name == env_var::OUTPUT_BUDGET).then(|| typed.to_string());
+            let config = resolved(&settings, exported, |_| None).expect("configured");
+            assert_eq!(
+                limit(&config, "anthropic/claude-test"),
+                Some(64_000),
+                "{typed:?} was read as a ceiling"
+            );
+        }
+    }
+
+    /// The inversion the machine-level layer exists for. Everything else a person can set, the
+    /// environment included, so a pin an exported variable outranked would be a pin an organisation
+    /// could not rely on for anything.
+    #[test]
+    fn a_managed_pin_outranks_an_exported_variable() {
+        let managed = managed::scratch(
+            "resolve-pin-over-the-environment",
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://approved.example"}}"#,
+        );
+        let settings = Settings::parse(
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://from-the-file.invalid"}}"#,
+        );
+        let config = resolved_under(
+            &managed,
+            &settings,
+            |name| match name {
+                env_var::ENDPOINT => Some("https://exported.invalid".into()),
+                _ => None,
+            },
+            |name| match name {
+                env_var::ENDPOINT => Some("https://baked.invalid".into()),
+                other => complete_env(other),
+            },
+        )
+        .expect("configured");
+        assert_eq!(config.endpoint, "https://approved.example");
+    }
+
+    /// A name it did not pin is resolved exactly as it would be with no such file, so deploying one
+    /// to pin a host does not quietly take over the rest of somebody's configuration.
+    #[test]
+    fn a_name_the_managed_layer_did_not_pin_resolves_as_it_would_have() {
+        let managed = managed::scratch(
+            "resolve-pin-leaves-other-names",
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://approved.example"}}"#,
+        );
+        let settings = Settings::parse(r#"{"env": {"AWS_REGION": "from-the-file"}}"#);
+        let config = resolved_under(
+            &managed,
+            &settings,
+            |name| match name {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_PROFILE => Some("from-the-environment".into()),
+                _ => None,
+            },
+            complete_env,
+        )
+        .expect("configured");
+        let bedrock = config.bedrock.expect("an aws block");
+        assert_eq!(bedrock.region, "from-the-file");
+        assert_eq!(bedrock.profile.as_deref(), Some("from-the-environment"));
+    }
+
+    /// The switch is one of the pinned names, so the exported one stops deciding.
+    #[test]
+    fn a_pinned_switch_outranks_the_exported_one() {
+        let managed = managed::scratch(
+            "resolve-refuse-bedrock",
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "0"}}"#,
+        );
+        let config = resolved_under(
+            &managed,
+            &Settings::default(),
+            |name| match name {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                _ => None,
+            },
+            complete_env,
+        )
+        .expect("configured");
+        assert!(
+            config.bedrock.is_none(),
+            "the pinned switch decides, not the exported one"
+        );
+    }
+
+    /// "Our account or nothing" takes both halves. A gateway entry can name an AWS account as well,
+    /// so pinning the switch off while leaving the gateways alone refuses nothing.
+    #[test]
+    fn refusing_a_personal_cloud_account_takes_the_switch_and_the_gateways() {
+        let mine = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {"options": {"region": "us-west-2", "profile": "mine"}}}}"#,
+        );
+
+        let switch_alone = managed::scratch(
+            "resolve-switch-alone",
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "0"}}"#,
+        );
+        let config =
+            resolved_under(&switch_alone, &mine, |_| None, complete_env).expect("configured");
+        assert!(
+            config
+                .bedrock_providers()
+                .any(|(_, bedrock)| bedrock.profile.as_deref() == Some("mine")),
+            "the switch alone leaves a gateway naming an account reachable"
+        );
+
+        let both = managed::scratch(
+            "resolve-switch-and-gateways",
+            r#"{"env": {"BRAVEBOT_USE_BEDROCK": "0"}, "provider": {}}"#,
+        );
+        let config = resolved_under(&both, &mine, |_| None, complete_env).expect("configured");
+        assert!(config.bedrock.is_none());
+        assert_eq!(config.bedrock_providers().count(), 0);
+    }
+
+    /// An approved endpoint pins nothing while a gateway somebody configured is still reachable, so
+    /// the managed block replaces the person's rather than adding to it.
+    #[test]
+    fn a_managed_gateway_block_replaces_the_one_in_the_settings() {
+        let managed = managed::scratch(
+            "resolve-gateways-replaced",
+            r#"{"provider": {"approved": {"options": {"baseURL": "https://approved.example/v1"}}}}"#,
+        );
+        let settings = Settings::parse(
+            r#"{"provider": {"mine": {"options": {"baseURL": "https://mine.invalid/v1"}}}}"#,
+        );
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+        let ids: Vec<&str> = config.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["approved"]);
+    }
+
+    /// A gateway the machine-level layer approves is held to the retry count and the quiet gap that
+    /// layer states, and a person's own entry for the same id does not lend it more.
+    #[test]
+    fn a_managed_gateway_states_its_own_retry_count_and_idle_gap() {
+        let managed = managed::scratch(
+            "resolve-gateways-patience",
+            r#"{"provider": {"approved": {"options": {
+                "baseURL": "https://approved.example/v1",
+                "maxRetries": 1, "idleTimeoutMs": 30000}}}}"#,
+        );
+        let settings = Settings::parse(
+            r#"{"provider": {"approved": {"options": {
+                "baseURL": "https://approved.example/v1",
+                "maxRetries": 7, "idleTimeoutMs": 600000}}}}"#,
+        );
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+        let patience = config.providers[0].patience;
+        assert_eq!(patience.max_retries, Some(1));
+        assert_eq!(patience.idle_timeout, Some(Duration::from_secs(30)));
+    }
+
+    /// The token each gateway resolves to, by id, from the sources named.
+    fn tokens_with_stored(
+        managed: &Managed,
+        settings: &Settings,
+        stored: &keys::Keys,
+    ) -> Vec<(String, Option<String>)> {
+        Config::from_sources(settings, managed, stored, None, |_| None, complete_env)
+            .expect("configured")
+            .providers
+            .iter()
+            .map(|provider| {
+                let token = match provider.credential(|_| None) {
+                    provider::Credential::Token(token) => Some(token.expose().to_string()),
+                    provider::Credential::Absent | provider::Credential::NotNeeded => None,
+                };
+                (provider.id.clone(), token)
+            })
+            .collect()
+    }
+
+    /// BACKEND-16: a key stored for an id reaches the gateway of that id and no other, including one
+    /// the machine-level layer names, which keeps no token of its own and leaves its owner to give
+    /// it one.
+    #[test]
+    fn a_stored_key_reaches_the_gateway_its_id_names() {
+        let mut stored = keys::Keys::default();
+        stored.insert("mine", Secret::new("placeholder-stored-key"));
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "mine": {"options": {"baseURL": "https://mine.invalid/v1"}},
+                "other": {"env": ["ABSENT_ONE"], "options": {"baseURL": "https://other.invalid/v1"}}
+            }}"#,
+        );
+        assert_eq!(
+            tokens_with_stored(&Managed::default(), &settings, &stored),
+            [
+                (
+                    "mine".to_string(),
+                    Some("placeholder-stored-key".to_string())
+                ),
+                ("other".to_string(), None)
+            ]
+        );
+
+        let managed = managed::scratch(
+            "resolve-gateways-stored-key",
+            r#"{"provider": {"mine": {"options": {"baseURL": "https://approved.example/v1"}}}}"#,
+        );
+        assert_eq!(
+            tokens_with_stored(&managed, &Settings::default(), &stored),
+            [(
+                "mine".to_string(),
+                Some("placeholder-stored-key".to_string())
+            )]
+        );
+    }
+
+    /// BACKEND-16 and BACKEND-17: an entry that holds no field under a known id, which is what the
+    /// sign-in records, reaches the host compiled in for the id and is sent the key stored for it,
+    /// and a key stored for a known id that no entry names configures nothing. The variable the id's
+    /// own service reads is not consulted, since the entry names none, so an exported one does not
+    /// stand in for the key.
+    #[test]
+    fn an_entry_that_names_nothing_under_a_known_id_is_sent_the_stored_key_and_no_variable() {
+        let mut stored = keys::Keys::default();
+        stored.insert("openai", Secret::new("placeholder-stored-key"));
+        let exported =
+            |name: &str| (name == "OPENAI_API_KEY").then(|| "placeholder-exported".to_string());
+
+        let recorded = Settings::parse(r#"{"provider": {"openai": {}}}"#);
+        let config = Config::from_sources(
+            &recorded,
+            &Managed::default(),
+            &stored,
+            None,
+            exported,
+            complete_env,
+        )
+        .expect("configured");
+        let [openai] = config.providers.as_slice() else {
+            panic!("expected one provider: {:?}", config.providers);
+        };
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(openai.host(), "api.openai.com");
+        let (credential, source) = openai.credential_and_source(exported);
+        match credential {
+            provider::Credential::Token(token) => {
+                assert_eq!(token.expose(), "placeholder-stored-key");
+            }
+            provider::Credential::Absent | provider::Credential::NotNeeded => {
+                panic!("the stored key was not the credential")
+            }
+        }
+        assert_eq!(source, Some(provider::Source::Stored));
+
+        // No entry names the id: nothing is configured, and the stored key goes nowhere.
+        let unnamed = Settings::parse("{}");
+        let config = Config::from_sources(
+            &unnamed,
+            &Managed::default(),
+            &stored,
+            None,
+            exported,
+            complete_env,
+        )
+        .expect("configured");
+        assert!(config.providers.is_empty(), "{:?}", config.providers);
+    }
+
+    /// BACKEND-16 and BACKEND-17: the key stored for a known id reaches the host compiled in for it
+    /// in the header its protocol uses, which is a bearer for the services that speak chat
+    /// completions and `x-api-key` for Anthropic's Messages API, and the credential found is the
+    /// stored one for each.
+    #[test]
+    fn a_known_id_recorded_as_an_empty_entry_is_sent_its_key_in_the_header_its_protocol_uses() {
+        let headers = [
+            (
+                "openrouter",
+                "authorization",
+                "Bearer placeholder-stored-key",
+            ),
+            ("openai", "authorization", "Bearer placeholder-stored-key"),
+            ("anthropic", "x-api-key", "placeholder-stored-key"),
+        ];
+        let ids: Vec<&str> = provider::known_ids().collect();
+        assert_eq!(
+            ids,
+            headers.map(|(id, _, _)| id),
+            "a known id has no row here, or one here is not known"
+        );
+        let mut stored = keys::Keys::default();
+        let mut entries = Vec::new();
+        for (id, _, _) in headers {
+            stored.insert(id, Secret::new("placeholder-stored-key"));
+            entries.push(format!(r#""{id}": {{}}"#));
+        }
+        let settings = Settings::parse(&format!(r#"{{"provider": {{{}}}}}"#, entries.join(", ")));
+        let config = Config::from_sources(
+            &settings,
+            &Managed::default(),
+            &stored,
+            None,
+            |_| None,
+            complete_env,
+        )
+        .expect("configured");
+
+        for (id, header, value) in headers {
+            let found = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .unwrap_or_else(|| panic!("{id} is not configured"));
+            assert_eq!(
+                Some(found.base_url.as_str()),
+                provider::known_endpoint(id),
+                "{id}"
+            );
+            let (credential, source) = found.credential_and_source(|_| None);
+            let token = match credential {
+                provider::Credential::Token(token) => token,
+                _ => panic!("{id}: the stored key is not the credential"),
+            };
+            assert_eq!(source, Some(provider::Source::Stored), "{id}");
+            assert_eq!(
+                found.credential_header(token.expose()),
+                (header, value.to_string()),
+                "{id}"
+            );
+        }
+    }
+
+    /// BACKEND-54: a block naming no `env` and no `apiKey` still names a credential once a key is
+    /// stored for its id, and the header that credential goes in is refused the same way it would
+    /// be had the block named a variable. `Provider::one` cannot know this on its own, since
+    /// `stored_key` only reaches the block through this path, so this goes through
+    /// `Config::from_sources` rather than calling `reconcile_stored_credential` directly: a test
+    /// that set `stored_key` and called it by hand would stay green if the call in
+    /// `Config::from_sources` were deleted.
+    #[test]
+    fn a_stored_key_reaches_through_from_sources_refuses_the_authorization_it_names() {
+        let mut stored = keys::Keys::default();
+        stored.insert("mine", Secret::new("placeholder-stored-key"));
+        let settings = Settings::parse(
+            r#"{"provider": {"mine": {"options": {
+                "baseURL": "https://mine.invalid/v1",
+                "headers": {"authorization": "Bearer written-in-the-file"}
+            }}}}"#,
+        );
+
+        let config = Config::from_sources(
+            &settings,
+            &Managed::default(),
+            &stored,
+            None,
+            |_| None,
+            complete_env,
+        )
+        .expect("configured");
+        let provider = config
+            .providers
+            .iter()
+            .find(|provider| provider.id == "mine")
+            .expect("the gateway is configured");
+
+        assert_eq!(
+            provider.headers_refused,
+            [("authorization".to_string(), provider::HeaderFault::Reserved)],
+            "a header naming the credential was not refused once the stored key made this a \
+             block that names one: {:?}",
+            provider.headers_refused
+        );
+        assert!(
+            provider.request_headers(|_| None).is_empty(),
+            "a written authorization reached the request beside the stored key"
+        );
+        let (credential, source) = provider.credential_and_source(|_| None);
+        match credential {
+            provider::Credential::Token(token) => {
+                assert_eq!(token.expose(), "placeholder-stored-key");
+            }
+            provider::Credential::Absent => panic!("the stored key was read as absent"),
+            provider::Credential::NotNeeded => panic!("the stored key was read as not needed"),
+        }
+        assert_eq!(source, Some(provider::Source::Stored));
+    }
+
+    /// The only way to say there are to be no gateways at all, which is half of what pinning a
+    /// destination means.
+    #[test]
+    fn an_empty_managed_gateway_block_leaves_no_gateways() {
+        let managed = managed::scratch("resolve-gateways-none", r#"{"provider": {}}"#);
+        let settings = Settings::parse(
+            r#"{"provider": {"mine": {"options": {"baseURL": "https://mine.invalid/v1"}}}}"#,
+        );
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+        assert!(config.providers.is_empty());
+    }
+
+    /// BACKEND-48: a gateway model is asked for as `openrouter/z-ai/glm-4.6` and sent as
+    /// `z-ai/glm-4.6`, and a list entry written either way answers for the one model.
+    ///
+    /// Each list in each spelling, and a model of the same gateway that no entry names, because a
+    /// build that matched only the asked-for name lets the denied model through and one that
+    /// matched only the wire name refuses what an allow entry in the qualified form permits.
+    #[test]
+    fn a_gateway_model_is_matched_by_either_of_its_spellings() {
+        let settings = Settings::parse(
+            r#"{"model": "openrouter/z-ai/glm-4.6",
+                "provider": {"openrouter": {"options": {"apiKey": "test-token"},
+                    "models": {"z-ai/glm-4.6": {}, "z-ai/other": {}}}}}"#,
+        );
+        let resolved = |name: &str, list: &str| {
+            let managed = managed::scratch(name, &format!(r#"{{"models": {{{list}}}}}"#));
+            let config =
+                resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+            (config, managed)
+        };
+        for entry in ["z-ai/glm-4.6", "openrouter/z-ai/glm-4.6"] {
+            let (config, _) = resolved("gateway-spelling-deny", &format!(r#""deny": ["{entry}"]"#));
+            for asked in ["z-ai/glm-4.6", "openrouter/z-ai/glm-4.6"] {
+                assert_eq!(
+                    config.model_refused(asked).map(|(_, why)| why),
+                    Some(ModelRefusal::Denied),
+                    "deny {entry}, asked {asked}"
+                );
+            }
+            let (config, _) = resolved(
+                "gateway-spelling-allow",
+                &format!(r#""allow": ["{entry}"]"#),
+            );
+            for asked in ["z-ai/glm-4.6", "openrouter/z-ai/glm-4.6"] {
+                assert_eq!(
+                    config.model_refused(asked),
+                    None,
+                    "allow {entry}, asked {asked}"
+                );
+            }
+            assert_eq!(
+                config
+                    .model_refused("openrouter/z-ai/other")
+                    .map(|(_, why)| why),
+                Some(ModelRefusal::NotAllowed),
+                "allow {entry}"
+            );
+        }
+    }
+
+    /// BACKEND-48, and the whole reason the check is placed after tier resolution: `opus` is not a
+    /// name any service knows, so a list matched against what a settings file wrote would let
+    /// `{"model": "opus"}` reach the pinned account whatever either list said.
+    ///
+    /// Both lists, because the two mistakes point in opposite directions: an allow list matched
+    /// against the written word refuses a tier it was meant to allow, and a deny list matched that
+    /// way allows a tier it was meant to refuse. Only the second is dangerous and only a deny entry
+    /// shows it.
+    /// BACKEND-53: a model the managed layer refuses is requested by no route, and the fallback is one.
+    #[test]
+    fn a_fallback_the_managed_layer_refuses_is_not_used() {
+        let managed = managed::scratch(
+            "fallback-refused",
+            r#"{"models": {"deny": ["refused-fallback"]}}"#,
+        );
+        for (named, used) in [
+            ("refused-fallback", None),
+            ("allowed-fallback", Some("allowed-fallback")),
+        ] {
+            let settings = Settings::parse(&format!(r#"{{"fallbackModel": "{named}"}}"#));
+            let config =
+                resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+            assert_eq!(config.fallback().as_deref(), used, "{named}");
+        }
+        let nothing = resolved_under(&managed, &Settings::parse("{}"), |_| None, complete_env)
+            .expect("configured");
+        assert_eq!(nothing.fallback(), None);
+    }
+
+    #[test]
+    fn a_tier_word_is_checked_as_the_model_it_names() {
+        let managed = managed::scratch(
+            "resolve-models-tier-word",
+            r#"{"models": {"allow": ["sonnet-arn", "haiku-arn"], "deny": ["haiku-arn"]}}"#,
+        );
+        let settings = Settings::parse(r#"{"model": "opus"}"#);
+        let config = resolved_under(
+            &managed,
+            &settings,
+            |name| match name {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                env_var::BEDROCK_SONNET_MODEL => Some("sonnet-arn".into()),
+                env_var::BEDROCK_HAIKU_MODEL => Some("haiku-arn".into()),
+                _ => None,
+            },
+            complete_env,
+        )
+        .expect("configured");
+        // The key is resolved at construction, so the configured model is already the ARN. The word
+        // still reaches the check from a recorded pick, which BACKEND-47 writes down as a tier word,
+        // and from `--model opus`.
+        assert_eq!(config.default_model, "opus-arn");
+        for named in ["opus", "opus-arn"] {
+            assert_eq!(
+                config.model_refused(named).map(|(_, why)| why),
+                Some(ModelRefusal::NotAllowed),
+                "{named}"
+            );
+        }
+        // And the tier the deny list names is refused by the word, which is the direction that
+        // matters: a build matching the written word would send this request.
+        for named in ["haiku", "haiku-arn"] {
+            assert_eq!(
+                config.model_refused(named).map(|(_, why)| why),
+                Some(ModelRefusal::Denied),
+                "{named}"
+            );
+        }
+        // The tier the allow list names and the deny list does not is requestable by the word and by
+        // the ARN alike, a name that is already a model resolving to itself.
+        assert_eq!(config.model_refused("sonnet"), None);
+        assert_eq!(config.model_refused("sonnet-arn"), None);
+        // And the file that refused is named, since nobody at the machine can edit it.
+        assert_eq!(
+            config.model_refused("opus").map(|(path, _)| path),
+            managed.path()
+        );
+
+        // A deny list on its own, which is the file where matching the written word lets a request
+        // through rather than merely refusing one: with no allow list above it there is nothing else
+        // to refuse the word.
+        let denying = managed::scratch(
+            "resolve-models-tier-word-deny-only",
+            r#"{"models": {"deny": ["haiku-arn"]}}"#,
+        );
+        let config = resolved_under(
+            &denying,
+            &Settings::default(),
+            |name| match name {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_HAIKU_MODEL => Some("haiku-arn".into()),
+                _ => None,
+            },
+            complete_env,
+        )
+        .expect("configured");
+        assert_eq!(
+            config.model_refused("haiku").map(|(_, why)| why),
+            Some(ModelRefusal::Denied)
+        );
+        assert_eq!(config.model_refused("some-other-model"), None);
+    }
+
+    /// A machine with no such file requests whatever it is asked for, so deploying one to pin a host
+    /// does not quietly bound the roster as well.
+    #[test]
+    fn a_managed_layer_silent_on_models_refuses_none() {
+        let managed = managed::scratch(
+            "resolve-models-silent",
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://approved.example"}}"#,
+        );
+        let config = resolved_under(&managed, &Settings::default(), |_| None, complete_env)
+            .expect("configured");
+        assert!(config.models.is_empty());
+        assert_eq!(config.model_refused("anything-at-all"), None);
+        assert_eq!(config.model_refused(&config.default_model), None);
+    }
+
+    /// A file that says nothing about gateways must leave them alone, or every managed layer would
+    /// silently take away a gateway it never mentioned.
+    #[test]
+    fn a_managed_layer_silent_on_gateways_keeps_the_configured_ones() {
+        let managed = managed::scratch(
+            "resolve-gateways-untouched",
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://approved.example"}}"#,
+        );
+        let settings = Settings::parse(
+            r#"{"provider": {"mine": {"options": {"baseURL": "https://mine.invalid/v1"}}}}"#,
+        );
+        let config =
+            resolved_under(&managed, &settings, |_| None, complete_env).expect("configured");
+        let ids: Vec<&str> = config.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["mine"]);
+    }
+
+    const PLACEHOLDER_KEY: &str = "placeholder-google-key";
+    const PLACEHOLDER_PROJECT: &str = "example-project-1";
+
+    fn google_env(key: &str) -> Option<String> {
+        match key {
+            env_var::GOOGLE_API_KEY => Some(PLACEHOLDER_KEY.into()),
+            env_var::GOOGLE_CLOUD_PROJECT => Some(PLACEHOLDER_PROJECT.into()),
+            _ => None,
+        }
+    }
+
+    fn vertex_of(config: &Config) -> Option<&provider::Provider> {
+        config
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider::GOOGLE_VERTEX_ID)
+    }
+
+    /// BACKEND-18: the id in front picks the service, and the rest, slashes included, is what
+    /// Google is asked for, since its own model names carry one.
+    #[test]
+    fn a_name_qualified_by_the_google_vertex_id_names_that_service_and_the_rest_is_sent() {
+        let config = resolved(&Settings::default(), google_env, |_| None).expect("configured");
+        let (provider, wire) = config
+            .provider_for("google-vertex/google/gemini-2.5-flash")
+            .expect("the service");
+        assert_eq!(provider.id, provider::GOOGLE_VERTEX_ID);
+        assert_eq!(wire, "google/gemini-2.5-flash");
+        assert!(config.provider_for("google/gemini-2.5-flash").is_none());
+    }
+
+    /// BACKEND-50: the environment names no models, so the service is offered the list BACKEND-49
+    /// compiles in. Each is reached named qualified, which is how a pick off a picker is recorded,
+    /// and none by its bare name, since the list is not a roster anything is routed by.
+    #[test]
+    fn a_google_vertex_service_from_the_environment_is_offered_the_compiled_models() {
+        let config = resolved(&Settings::default(), google_env, |_| None).expect("configured");
+        let vertex = vertex_of(&config).expect("a google-vertex service");
+        assert!(vertex.models.is_empty(), "{:?}", vertex.models);
+        let compiled = vertex.compiled_roster().expect("a compiled list");
+        assert!(!compiled.is_empty());
+        for id in compiled {
+            let qualified = format!("google-vertex/{id}");
+            let (provider, wire) = config.provider_for(&qualified).expect("the service");
+            assert_eq!(provider.id, provider::GOOGLE_VERTEX_ID);
+            assert_eq!(wire, *id);
+            assert!(config.provider_for(id).is_none(), "{id} was routed bare");
+        }
+    }
+
+    #[test]
+    fn the_environment_names_a_google_vertex_service_when_no_block_does() {
+        let config = resolved(&Settings::default(), google_env, |_| None).expect("configured");
+        let vertex = vertex_of(&config).expect("a google-vertex service");
+        assert_eq!(
+            vertex.base_url,
+            "https://aiplatform.googleapis.com/v1/projects/example-project-1/locations/global/endpoints/openapi"
+        );
+        assert_eq!(
+            token_of(&vertex.credential(google_env)),
+            Some(PLACEHOLDER_KEY)
+        );
+
+        let regional = resolved(
+            &Settings::default(),
+            |key| match key {
+                env_var::VERTEX_LOCATION => Some("europe-west4".into()),
+                other => google_env(other),
+            },
+            |_| None,
+        )
+        .expect("configured");
+        assert_eq!(
+            vertex_of(&regional).expect("a service").host(),
+            "europe-west4-aiplatform.googleapis.com"
+        );
+    }
+
+    fn token_of(credential: &provider::Credential) -> Option<&str> {
+        match credential {
+            provider::Credential::Token(token) => Some(token.expose()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_key_alone_names_the_express_service_and_a_blank_project_is_no_project() {
+        type Lookup = fn(&str) -> Option<String>;
+        let key_alone: [(&str, Lookup); 2] = [
+            ("a key alone", |k| {
+                (k == env_var::GOOGLE_API_KEY).then(|| PLACEHOLDER_KEY.to_string())
+            }),
+            ("a blank project", |k| match k {
+                env_var::GOOGLE_API_KEY => Some(PLACEHOLDER_KEY.into()),
+                env_var::GOOGLE_CLOUD_PROJECT => Some("".into()),
+                _ => None,
+            }),
+        ];
+        for (state, lookup) in key_alone {
+            let config = resolved(&Settings::default(), lookup, complete_env).expect("configured");
+            let vertex = vertex_of(&config).unwrap_or_else(|| panic!("{state} named no service"));
+            assert_eq!(
+                vertex.protocol(),
+                provider::Protocol::GenerateContent,
+                "{state}"
+            );
+            assert_eq!(vertex.host(), "aiplatform.googleapis.com", "{state}");
+            assert_eq!(
+                token_of(&vertex.credential(lookup)),
+                Some(PLACEHOLDER_KEY),
+                "{state}"
+            );
+        }
+        let with_project = resolved(&Settings::default(), google_env, complete_env).expect("ok");
+        assert_eq!(
+            vertex_of(&with_project).expect("a service").protocol(),
+            provider::Protocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn the_environment_route_needs_a_key_and_a_project_the_host_can_be_built_from() {
+        for (state, lookup) in [
+            (
+                "a blank key and no project",
+                (|k: &str| (k == env_var::GOOGLE_API_KEY).then(|| "  ".to_string()))
+                    as fn(&str) -> Option<String>,
+            ),
+            ("a project that would move the request", |k: &str| match k {
+                env_var::GOOGLE_API_KEY => Some(PLACEHOLDER_KEY.into()),
+                env_var::GOOGLE_CLOUD_PROJECT => Some("p@evil.invalid".into()),
+                _ => None,
+            }),
+            (
+                "a location that would move the request",
+                |k: &str| match k {
+                    env_var::VERTEX_LOCATION => Some("evil.invalid/".into()),
+                    other => google_env(other),
+                },
+            ),
+        ] {
+            let config = resolved(&Settings::default(), lookup, complete_env).expect("configured");
+            assert!(vertex_of(&config).is_none(), "{state} configured a service");
+        }
+    }
+
+    /// BACKEND-65: a project with no key, or a blank one, configures the project's service, which
+    /// the Google Cloud CLI signs in, and its credential is absent rather than a token.
+    #[test]
+    fn a_project_alone_names_the_service_the_google_cloud_cli_signs_in() {
+        type Lookup = fn(&str) -> Option<String>;
+        let alone: [(&str, Lookup); 2] = [
+            ("a project alone", |k| {
+                (k == env_var::GOOGLE_CLOUD_PROJECT).then(|| PLACEHOLDER_PROJECT.to_string())
+            }),
+            ("a blank key", |k| match k {
+                env_var::GOOGLE_API_KEY => Some("  ".into()),
+                env_var::GOOGLE_CLOUD_PROJECT => Some(PLACEHOLDER_PROJECT.into()),
+                _ => None,
+            }),
+        ];
+        for (state, lookup) in alone {
+            let config = resolved(&Settings::default(), lookup, complete_env).expect("configured");
+            let vertex = vertex_of(&config).unwrap_or_else(|| panic!("{state} named no service"));
+            assert_eq!(
+                vertex.protocol(),
+                provider::Protocol::ChatCompletions,
+                "{state}"
+            );
+            assert!(vertex.takes_google_cloud_token(), "{state}");
+            assert!(
+                matches!(vertex.credential(lookup), provider::Credential::Absent),
+                "{state}"
+            );
+            assert!(vertex.needs_google_cloud_token(lookup), "{state}");
+        }
+        let with_a_key = resolved(&Settings::default(), google_env, complete_env).expect("ok");
+        let vertex = vertex_of(&with_a_key).expect("a service");
+        assert!(!vertex.needs_google_cloud_token(google_env));
+    }
+
+    #[test]
+    fn a_key_set_only_in_the_env_block_reaches_the_google_vertex_service() {
+        let settings = Settings::parse(&format!(
+            r#"{{"env": {{"GOOGLE_API_KEY": "{PLACEHOLDER_KEY}", "GOOGLE_CLOUD_PROJECT": "{PLACEHOLDER_PROJECT}"}}}}"#
+        ));
+        let config = resolved(&settings, |_| None, |_| None).expect("configured");
+        let vertex = vertex_of(&config).expect("a google-vertex service");
+        assert_eq!(
+            token_of(&vertex.credential(|_| None)),
+            Some(PLACEHOLDER_KEY)
+        );
+    }
+
+    #[test]
+    fn an_exported_key_outranks_the_one_in_the_env_block() {
+        let settings = Settings::parse(&format!(
+            r#"{{"env": {{"GOOGLE_API_KEY": "key-from-the-file", "GOOGLE_CLOUD_PROJECT": "{PLACEHOLDER_PROJECT}"}}}}"#
+        ));
+        let exported = |key: &str| (key == env_var::GOOGLE_API_KEY).then(|| "key-exported".into());
+        let config = resolved(&settings, exported, |_| None).expect("configured");
+        let vertex = vertex_of(&config).expect("a service");
+        // What the configuration holds, with nothing exported when a request is made.
+        assert_eq!(token_of(&vertex.credential(|_| None)), Some("key-exported"));
+        // What a request reads once the variable is exported, as a key set later is.
+        assert_eq!(token_of(&vertex.credential(exported)), Some("key-exported"));
+    }
+
+    #[test]
+    fn a_google_vertex_block_replaces_the_environment_route() {
+        let settings = Settings::parse(
+            r#"{"provider": {"google-vertex": {"options": {"project": "project-from-the-block", "location": "us-east5"}}}}"#,
+        );
+        let config = resolved(&settings, google_env, complete_env).expect("configured");
+        let all: Vec<_> = config
+            .providers
+            .iter()
+            .filter(|provider| provider.id == provider::GOOGLE_VERTEX_ID)
+            .collect();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].base_url,
+            "https://us-east5-aiplatform.googleapis.com/v1/projects/project-from-the-block/locations/us-east5/endpoints/openapi"
+        );
+
+        // An entry that configures nothing is dropped like any other, so it leaves the route open.
+        let unusable =
+            Settings::parse(r#"{"provider": {"google-vertex": {"options": {"project": "p@x"}}}}"#);
+        let config = resolved(&unusable, google_env, complete_env).expect("configured");
+        assert!(vertex_of(&config).is_some());
+    }
+
+    /// RUN-12: the variables a program is not handed include the ones the gateways in force read a
+    /// token from, whatever the person called them.
+    #[test]
+    fn a_gateway_blocks_token_variables_are_the_ones_it_reads() {
+        let settings = Settings::parse(
+            r#"{"provider": {
+                "mine": {"options": {"baseURL": "https://mine.invalid/v1"},
+                         "env": ["MINE_FIRST_TOKEN", "MINE_SECOND_TOKEN"]},
+                "keyless": {"options": {"baseURL": "https://keyless.invalid/v1"}}
+            }}"#,
+        );
+        let variables =
+            gateway_variables_under(&settings, &Managed::default(), |_| None, complete_env);
+        assert_eq!(variables, vec!["MINE_FIRST_TOKEN", "MINE_SECOND_TOKEN"]);
+    }
+
+    /// The gateways in force are the managed layer's where it states any, so a variable only the
+    /// replaced block named is no gateway's token any more.
+    #[test]
+    fn a_managed_gateway_block_decides_which_variables_are_gateway_tokens() {
+        let managed = managed::scratch(
+            "gateway-variables-managed",
+            r#"{"provider": {"approved": {"options": {"baseURL": "https://approved.example/v1"},
+                                          "env": ["APPROVED_TOKEN"]}}}"#,
+        );
+        let settings = Settings::parse(
+            r#"{"provider": {"mine": {"options": {"baseURL": "https://mine.invalid/v1"},
+                                      "env": ["MINE_TOKEN"]}}}"#,
+        );
+        let variables = gateway_variables_under(&settings, &managed, |_| None, complete_env);
+        assert_eq!(variables, vec!["APPROVED_TOKEN"]);
+    }
+
+    /// A Vertex AI service the environment names reads `GOOGLE_API_KEY`, so that variable is a
+    /// gateway token only while the service exists, which a key alone is enough for.
+    #[test]
+    fn google_api_key_is_a_gateway_token_only_while_vertex_is_configured() {
+        let configured = gateway_variables_under(
+            &Settings::default(),
+            &Managed::default(),
+            google_env,
+            complete_env,
+        );
+        assert_eq!(configured, vec![env_var::GOOGLE_API_KEY]);
+
+        let key_alone =
+            |k: &str| (k == env_var::GOOGLE_API_KEY).then(|| PLACEHOLDER_KEY.to_string());
+        let alone = gateway_variables_under(
+            &Settings::default(),
+            &Managed::default(),
+            key_alone,
+            complete_env,
+        );
+        assert_eq!(alone, vec![env_var::GOOGLE_API_KEY]);
+
+        let no_key = gateway_variables_under(
+            &Settings::default(),
+            &Managed::default(),
+            |_| None,
+            complete_env,
+        );
+        assert!(no_key.is_empty(), "no key withheld {no_key:?}");
+
+        let none = managed::scratch("gateway-variables-no-vertex", r#"{"provider": {}}"#);
+        let replaced =
+            gateway_variables_under(&Settings::default(), &none, google_env, complete_env);
+        assert!(
+            replaced.is_empty(),
+            "a managed layer with no gateway left {replaced:?}"
+        );
+    }
+
+    #[test]
+    fn a_managed_gateway_list_takes_no_google_vertex_from_the_environment() {
+        let managed = managed::scratch(
+            "resolve-gateways-no-vertex",
+            r#"{"provider": {"approved": {"options": {"baseURL": "https://approved.example/v1"}}}}"#,
+        );
+        let config = resolved_under(&managed, &Settings::default(), google_env, complete_env)
+            .expect("configured");
+        let ids: Vec<&str> = config.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["approved"]);
+
+        let none = managed::scratch("resolve-gateways-no-vertex-empty", r#"{"provider": {}}"#);
+        let config = resolved_under(&none, &Settings::default(), google_env, complete_env)
+            .expect("configured");
+        assert!(config.providers.is_empty());
+    }
+
+    /// BACKEND-13: a service nobody chose is not the one that is asked, so the two variables a
+    /// shell exports for another tool change neither the model in force nor who serves it.
+    #[test]
+    fn a_google_vertex_service_from_the_environment_leaves_the_model_in_force_alone() {
+        let without = resolved(&Settings::default(), |_| None, complete_env).expect("configured");
+        let with = resolved(&Settings::default(), google_env, complete_env).expect("configured");
+        assert_eq!(with.default_model, without.default_model);
+        assert_eq!(with.serves_aichat(), without.serves_aichat());
+        assert_eq!(with.model_named("haiku"), without.model_named("haiku"));
+        assert_eq!(
+            with.model_named("automatic"),
+            without.model_named("automatic")
+        );
+    }
+
+    /// CRED-2: the key is a credential this machine holds and spends, so the record names it by
+    /// the host it would be revoked at, and only when the service is there.
+    #[test]
+    fn a_google_vertex_service_holds_a_credential_the_record_names_by_host() {
+        let config = resolved(&Settings::default(), google_env, complete_env).expect("configured");
+        assert!(config.held().iter().any(|held| matches!(
+            held,
+            Held::GatewayToken { host } if *host == "aiplatform.googleapis.com"
+        )));
+        let config = resolved(&Settings::default(), |_| None, complete_env).expect("configured");
+        assert!(
+            !config
+                .held()
+                .iter()
+                .any(|held| matches!(held, Held::GatewayToken { .. }))
+        );
+    }
+
+    /// Every name but the top-level `model` key ranks below what the build baked in, so a released
+    /// binary reaches the host it was built for rather than one a file in a checkout named.
+    #[test]
+    fn a_baked_in_value_outranks_the_settings_file() {
+        let settings = Settings::parse(
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://from-the-file.invalid"}}"#,
+        );
+        let config = resolved(
+            &settings,
+            |_| None,
+            |name| match name {
+                env_var::ENDPOINT => Some("https://baked.invalid".into()),
+                other => complete_env(other),
+            },
+        )
+        .expect("configured");
+        assert_eq!(config.endpoint, "https://baked.invalid");
+    }
+
+    /// BACKEND-35 through the composition [`Config::from_env_and_settings`] performs, not a copy of
+    /// it: all three layers name the endpoint and each loses to the one above it. A composition that
+    /// put the file or the build first would answer one of the three steps wrongly, which a test
+    /// that rebuilds the chain from its parts cannot see.
+    #[test]
+    fn an_exported_value_outranks_the_build_which_outranks_the_file() {
+        let settings = Settings::parse(
+            r#"{"env": {"BRAVE_AI_CHAT_ENDPOINT": "https://from-the-file.invalid"}}"#,
+        );
+        let endpoint = |exported: Option<&'static str>, baked: Option<&'static str>| {
+            resolved(
+                &settings,
+                |name| match name {
+                    env_var::ENDPOINT => exported.map(str::to_string),
+                    _ => None,
+                },
+                |name| match name {
+                    env_var::ENDPOINT => baked.map(str::to_string),
+                    other => complete_env(other),
+                },
+            )
+            .expect("configured")
+            .endpoint
+        };
+        assert_eq!(
+            endpoint(
+                Some("https://exported.invalid"),
+                Some("https://baked.invalid")
+            ),
+            "https://exported.invalid"
+        );
+        assert_eq!(
+            endpoint(None, Some("https://baked.invalid")),
+            "https://baked.invalid"
+        );
+        assert_eq!(endpoint(None, None), "https://from-the-file.invalid");
+    }
+
+    /// BACKEND-35: where the build carries nothing, a name exported blank is what the configuration
+    /// holds, so the file under it is hidden and the credential is reported empty rather than
+    /// answered from a file the person did not export. A composition that treated blank as absent
+    /// would quietly sign with the checkout's key; one that let blank beat the build would fail
+    /// the second half.
+    #[test]
+    fn a_blank_export_hides_the_file_but_not_the_build() {
+        let settings = Settings::parse(
+            r#"{"env": {"SERVICES_KEY_AICHAT": "key-from-the-file", "BRAVE_AI_CHAT_ENDPOINT": "https://from-the-file.invalid"}}"#,
+        );
+        let blank = |name: &str| match name {
+            env_var::SIGNING_KEY => Some(String::new()),
+            _ => None,
+        };
+        let err = resolved(&settings, blank, |name| match name {
+            env_var::SIGNING_KEY => None,
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Empty(env_var::SIGNING_KEY));
+
+        let config = resolved(&settings, blank, complete_env).expect("configured");
+        assert_eq!(config.signing_key.expose(), "test-signing-key");
+    }
+
+    /// A name nothing reads is kept so that a file written for another tool, or for a later
+    /// version, does not stop a session. Kept is the whole of it: the switch that hands this
+    /// agent's credentials back to a subprocess is read from the environment alone, and a file
+    /// spelling it changes nothing. Compared whole, so a field added later is covered too.
+    #[test]
+    fn a_name_nothing_consults_changes_nothing() {
+        let named = Settings::parse(
+            r#"{"env": {"BRAVEBOT_SUBPROCESS_ENV_SCRUB": "0", "SOMETHING_ELSE": "a value"}}"#,
+        );
+        assert_eq!(named.get(env_var::SUBPROCESS_ENV_SCRUB), Some("0"));
+
+        let with_the_names = resolved(&named, |_| None, complete_env).expect("configured");
+        let without = resolved(&Settings::default(), |_| None, complete_env).expect("configured");
+        assert_eq!(
+            with_the_names.signing_key.expose(),
+            without.signing_key.expose()
+        );
+        assert_eq!(format!("{with_the_names:?}"), format!("{without:?}"));
+    }
+
+    /// The point of reading the key: a file naming a model is what decides, without the variable
+    /// being exported anywhere.
+    #[test]
+    fn a_model_in_the_settings_file_becomes_the_default() {
+        let settings = Settings::parse(r#"{"model": "llama-3-8b-instruct"}"#);
+        let config = Config::from_lookup(|key| match key {
+            env_var::DEFAULT_MODEL => resolve_model(None, &settings, |_| None),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, "llama-3-8b-instruct");
+    }
+
+    /// The whole reason this value is ranked differently. Every release bakes a default model in, so
+    /// a `model` key ranked below it would lose on every binary anybody was given: the key would
+    /// parse, `doctor` would report it, and nothing outside a source build would change.
+    #[test]
+    fn a_model_in_the_settings_file_outranks_the_baked_in_one() {
+        let settings = Settings::parse(r#"{"model": "opus"}"#);
+        let chosen = resolve_model(None, &settings, |_| Some("automatic".into()));
+        assert_eq!(chosen.as_deref(), Some("opus"));
+    }
+
+    /// The variable names a default, and a `.envrc` exports it for every checkout. Ranked above the
+    /// file it would outrank every `model` key and every saved `/model` pick on any machine that
+    /// sources one. Where no file names a model, the variable still decides over the build.
+    #[test]
+    fn a_model_in_the_settings_file_outranks_an_exported_one() {
+        let settings = Settings::parse(r#"{"model": "opus"}"#);
+        let chosen = resolve_model(Some("from-the-env".into()), &settings, |_| None);
+        assert_eq!(chosen.as_deref(), Some("opus"));
+
+        let chosen = resolve_model(Some("from-the-env".into()), &Settings::default(), |_| {
+            Some("baked".into())
+        });
+        assert_eq!(chosen.as_deref(), Some("from-the-env"));
+    }
+
+    /// A blank variable is a placeholder rather than an instruction to discard what the build said.
+    #[test]
+    fn a_blank_exported_model_does_not_shadow_the_baked_in_one() {
+        let chosen = resolve_model(Some("   ".into()), &Settings::default(), |_| {
+            Some("baked".into())
+        });
+        assert_eq!(chosen.as_deref(), Some("baked"));
+    }
+
+    /// The `env` block is variables, and is ranked like them: below what the build baked in. Only
+    /// the top-level key is promoted above it.
+    #[test]
+    fn the_env_block_spelling_stays_below_the_baked_in_value() {
+        let settings =
+            Settings::parse(r#"{"env": {"BRAVEBOT_DEFAULT_MODEL": "from-the-env-block"}}"#);
+        let chosen = resolve_model(None, &settings, |_| Some("baked".into()));
+        assert_eq!(chosen.as_deref(), Some("baked"));
+
+        // And is still read where the build baked nothing in, so the spelling keeps working.
+        let chosen = resolve_model(None, &settings, |_| None);
+        assert_eq!(chosen.as_deref(), Some("from-the-env-block"));
+    }
+
+    /// With nothing said anywhere the default stands, which is what a fresh machine has.
+    #[test]
+    fn no_model_named_anywhere_leaves_the_default() {
+        let chosen = resolve_model(None, &Settings::default(), |_| None);
+        assert_eq!(chosen, None);
+    }
+
+    /// Where those three words come from they name a tier, and the tier's model is what the same
+    /// file already said. Left as the word, the request reaches a backend that has never heard of
+    /// it: Bedrock refuses an unknown model rather than substituting one.
+    #[test]
+    fn a_tier_alias_resolves_to_the_model_that_tier_names() {
+        for (alias, expected) in [
+            ("opus", "opus-arn"),
+            ("sonnet", "sonnet-arn"),
+            ("haiku", "haiku-arn"),
+            // A hand-written file says `Opus` as readily as `opus`.
+            ("Opus", "opus-arn"),
+        ] {
+            let config = Config::from_lookup(|key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                env_var::BEDROCK_SONNET_MODEL => Some("sonnet-arn".into()),
+                env_var::BEDROCK_HAIKU_MODEL => Some("haiku-arn".into()),
+                env_var::DEFAULT_MODEL => Some(alias.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(config.default_model, expected, "{alias} did not resolve");
+        }
+    }
+
+    /// The advisor setting is a model name like any other, so a tier word in it means the model the
+    /// same word means for the main model, and a setting that is not there offers no advisor.
+    #[test]
+    fn the_advisor_setting_resolves_a_tier_word_and_is_absent_when_unset() {
+        let bedrock = |key: &str| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        };
+        let unset = resolved(&Settings::default(), bedrock, complete_env).expect("configured");
+        assert_eq!(unset.advisor(), None);
+
+        for (written, expected) in [("opus", "opus-arn"), ("some-model", "some-model")] {
+            let settings = Settings::parse(&format!(r#"{{"advisorModel": "{written}"}}"#));
+            let config = resolved(&settings, bedrock, complete_env).expect("configured");
+            assert_eq!(config.advisor().as_deref(), Some(expected), "{written}");
+        }
+    }
+
+    /// The summary setting is a model name like any other, so a tier word in it means the model the
+    /// same word means for the main model, and a setting that is not there leaves both side requests
+    /// on the session's own model.
+    #[test]
+    fn the_summary_setting_resolves_a_tier_word_and_is_absent_when_unset() {
+        let bedrock = |key: &str| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_HAIKU_MODEL => Some("haiku-arn".into()),
+            other => complete_env(other),
+        };
+        let unset = resolved(&Settings::default(), bedrock, complete_env).expect("configured");
+        assert_eq!(unset.summary(), None);
+
+        for (written, expected) in [("haiku", "haiku-arn"), ("some-model", "some-model")] {
+            let settings = Settings::parse(&format!(r#"{{"summaryModel": "{written}"}}"#));
+            let config = resolved(&settings, bedrock, complete_env).expect("configured");
+            assert_eq!(config.summary().as_deref(), Some(expected), "{written}");
+        }
+    }
+
+    /// PROC-13: `processorModel` is resolved as `model` is, so a tier word means that tier's
+    /// configured model and nothing named leaves a processor on the turn's own model.
+    #[test]
+    fn the_processor_model_is_resolved_like_a_model_name() {
+        let bedrock = |key: &str| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_HAIKU_MODEL => Some("haiku-arn".into()),
+            other => complete_env(other),
+        };
+        let unset = resolved(&Settings::default(), bedrock, complete_env).expect("configured");
+        assert_eq!(unset.processor(), None);
+
+        for (written, expected) in [("haiku", "haiku-arn"), ("some-model", "some-model")] {
+            let settings = Settings::parse(&format!(r#"{{"processorModel": "{written}"}}"#));
+            let config = resolved(&settings, bedrock, complete_env).expect("configured");
+            assert_eq!(config.processor().as_deref(), Some(expected), "{written}");
+        }
+    }
+
+    /// BACKEND-56: the plan setting is a model name like any other, so a tier word in it means the
+    /// model the same word means for the main model, and a setting that is not there leaves a plan
+    /// turn on the session's own model.
+    #[test]
+    fn the_plan_setting_resolves_a_tier_word_and_is_absent_when_unset() {
+        let bedrock = |key: &str| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        };
+        let unset = resolved(&Settings::default(), bedrock, complete_env).expect("configured");
+        assert_eq!(unset.plan(), None);
+
+        for (written, expected) in [("opus", "opus-arn"), ("some-model", "some-model")] {
+            let settings = Settings::parse(&format!(r#"{{"planModel": "{written}"}}"#));
+            let config = resolved(&settings, bedrock, complete_env).expect("configured");
+            assert_eq!(config.plan().as_deref(), Some(expected), "{written}");
+        }
+    }
+
+    /// Everything that is not one of the three words is used as written, which is what carries an
+    /// inference-profile ARN and a name from the Brave roster alike.
+    #[test]
+    fn a_model_that_is_not_a_tier_alias_is_used_as_written() {
+        for name in [
+            "arn:aws:bedrock:us-west-2:1:application-inference-profile/abc",
+            "claude-opus-4-8",
+            "llama-3-8b-instruct",
+        ] {
+            let config = Config::from_lookup(|key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                env_var::DEFAULT_MODEL => Some(name.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(config.default_model, name);
+        }
+    }
+
+    /// Every route to a model resolves a name the same way, so a flag, a remembered choice and the
+    /// settings key cannot accept different spellings of the same model.
+    #[test]
+    fn a_name_from_anywhere_resolves_as_the_settings_key_does() {
+        let config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+
+        assert_eq!(config.model_named("opus"), "opus-arn");
+        assert_eq!(
+            config.model_named("sonnet"),
+            bedrock::Tier::Sonnet.brave_model()
+        );
+        assert_eq!(config.model_named("automatic"), DEFAULT_MODEL);
+        assert_eq!(
+            config.model_named("llama-3-8b-instruct"),
+            "llama-3-8b-instruct"
+        );
+    }
+
+    /// BACKEND-47: a model a tier variable named is written down as the tier word, which reads back
+    /// as whatever that variable names at the next start. Anything else is written as it is.
+    #[test]
+    fn a_tier_model_is_recorded_as_its_word_and_read_back_through_the_variable() {
+        let with_sonnet = |arn: &'static str| {
+            Config::from_lookup(move |key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                env_var::BEDROCK_SONNET_MODEL => Some(arn.into()),
+                other => complete_env(other),
+            })
+            .unwrap()
+        };
+        let before = with_sonnet("sonnet-arn-1");
+
+        assert_eq!(before.name_to_record("opus-arn"), "opus");
+        let recorded = before.name_to_record("sonnet-arn-1");
+        assert_eq!(recorded, "sonnet");
+        assert_eq!(before.model_named(recorded), "sonnet-arn-1");
+        assert_eq!(
+            with_sonnet("sonnet-arn-2").model_named(recorded),
+            "sonnet-arn-2"
+        );
+
+        for other in [
+            bedrock::Tier::Haiku.brave_model(),
+            "llama-3-8b-instruct",
+            DEFAULT_MODEL,
+        ] {
+            assert_eq!(before.name_to_record(other), other);
+        }
+    }
+
+    /// Leo's automatic routing name is rewritten to bravebot's own entry.
+    #[test]
+    fn the_legacy_automatic_name_becomes_the_brave_bot_default() {
+        let config = Config::from_lookup(|key| match key {
+            env_var::DEFAULT_MODEL => Some("automatic".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    /// An ARN cannot be derived from a word, so a tier the AWS account left unset falls through to
+    /// the roster every build can reach rather than being guessed at.
+    #[test]
+    fn an_alias_for_an_unconfigured_tier_falls_through_to_brave() {
+        let config = Config::from_lookup(|key| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            env_var::DEFAULT_MODEL => Some("haiku".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.default_model, bedrock::Tier::Haiku.brave_model());
+    }
+
+    /// The case a settings file written for another tool actually lands in: no AWS account, so the
+    /// word has to name something on the roster every build can reach. Left as the bare word it
+    /// reaches an endpoint that has never heard of it and is silently reset, which is the key
+    /// appearing to work and doing nothing.
+    #[test]
+    fn a_tier_alias_without_bedrock_resolves_against_the_brave_roster() {
+        for (alias, tier) in [
+            ("opus", bedrock::Tier::Opus),
+            ("sonnet", bedrock::Tier::Sonnet),
+            ("haiku", bedrock::Tier::Haiku),
+        ] {
+            let config = Config::from_lookup(|key| match key {
+                env_var::DEFAULT_MODEL => Some(alias.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(config.default_model, tier.brave_model());
+            // Never left as the bare word, which is the thing that silently did nothing.
+            assert_ne!(config.default_model, alias);
+        }
+    }
+
+    /// With no Brave credentials a Brave name reaches a service this build cannot sign for, so an
+    /// unset tier resolves to the strongest one the AWS account did name instead.
+    ///
+    /// An endpoint is not a credential, and a Bedrock block makes each of the three fields optional
+    /// on its own, so a source build can hold a URL and no key to sign with. Deciding this from the
+    /// endpoint alone sends the word to the Brave roster on exactly the build that cannot sign for
+    /// it.
+    #[test]
+    fn without_brave_credentials_an_unconfigured_tier_stays_on_aws() {
+        for (state, endpoint) in [
+            ("nothing configured for Brave", None),
+            (
+                "an endpoint and no credentials",
+                Some("https://example.invalid"),
+            ),
+        ] {
+            let config = Config::from_lookup(|key| match key {
+                env_var::USE_BEDROCK => Some("1".into()),
+                env_var::AWS_REGION => Some("us-west-2".into()),
+                env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+                env_var::DEFAULT_MODEL => Some("haiku".into()),
+                env_var::ENDPOINT => endpoint.map(str::to_string),
+                _ => None,
+            })
+            .unwrap();
+            assert!(!config.serves_aichat(), "{state}");
+            assert_eq!(config.default_model, "opus-arn", "{state}");
+            assert_eq!(config.model_named("haiku"), "opus-arn", "{state}");
+        }
+    }
+
+    /// The AWS account a `provider` block named answers a tier word as readily as the one the tier
+    /// variables named. Consulting only the tier variables resolves the word to a Brave name on a
+    /// build whose only reachable service is that account.
+    #[test]
+    fn a_tier_word_resolves_against_an_aws_account_a_provider_block_named() {
+        const ARN: &str = "arn:aws:bedrock:us-west-2:1:application-inference-profile/abc";
+        let settings = Settings::parse(&format!(
+            r#"{{"model": "opus", "provider": {{"amazon-bedrock": {{
+                "options": {{"region": "us-west-2"}},
+                "models": {{"{ARN}": {{"name": "Sonnet (Bedrock)"}}}}
+            }}}}}}"#
+        ));
+        let config = Config::from_lookup_with_providers(
+            |key| match key {
+                env_var::DEFAULT_MODEL => settings.model().map(str::to_string),
+                _ => None,
+            },
+            settings.providers().to_vec(),
+        )
+        .expect("configured");
+
+        assert!(!config.serves_aichat());
+        assert_eq!(config.default_model, ARN);
+        assert_ne!(config.default_model, bedrock::Tier::Opus.brave_model());
+        // Every other route to a model resolves the word the same way.
+        assert_eq!(config.model_named("sonnet"), ARN);
+    }
+
+    /// What a block with several models guarantees is that the word resolves to one of them, since
+    /// entries a block named are model ids with no tier to rank them by. Naming a model the account
+    /// does not offer is a request Bedrock refuses on the name.
+    #[test]
+    fn a_tier_word_resolves_to_a_model_the_block_actually_offers() {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"zzz-opus": {}, "aaa-haiku": {}}
+            }}}"#,
+        );
+        let config = Config::from_lookup_with_providers(|_| None, settings.providers().to_vec())
+            .expect("configured");
+
+        assert!(!config.serves_aichat());
+        for word in ["opus", "sonnet", "haiku"] {
+            let resolved = config.model_named(word);
+            assert!(
+                config.bedrock_for(&resolved).is_some(),
+                "{word} resolved to {resolved}, which no configured account offers"
+            );
+        }
+    }
+
+    /// A tier the AWS account left unset still falls through to Brave where this build can sign for
+    /// it, so asking the account first does not take the roster every credentialled build has.
+    #[test]
+    fn with_brave_credentials_a_tier_word_still_falls_through_to_brave() {
+        let settings = Settings::parse(
+            r#"{"provider": {"amazon-bedrock": {
+                "options": {"region": "us-west-2"},
+                "models": {"openai.gpt-5.6-sol": {}}
+            }}}"#,
+        );
+        let config =
+            Config::from_lookup_with_providers(complete_env, settings.providers().to_vec())
+                .expect("configured");
+
+        assert!(config.serves_aichat());
+        assert_eq!(
+            config.model_named("haiku"),
+            bedrock::Tier::Haiku.brave_model()
+        );
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn a_missing_signing_key_is_an_error() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::SIGNING_KEY => None,
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Missing(env_var::SIGNING_KEY));
+    }
+
+    /// A placeholder .envrc leaves variables present but blank, which must not be
+    /// mistaken for a real credential.
+    #[test]
+    fn an_empty_signing_key_is_an_error() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::SIGNING_KEY => Some(String::new()),
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Empty(env_var::SIGNING_KEY));
+    }
+
+    #[test]
+    fn a_missing_key_id_is_an_error() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::KEY_ID => None,
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Missing(env_var::KEY_ID));
+    }
+
+    #[test]
+    fn an_endpoint_without_a_scheme_is_rejected() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::ENDPOINT => Some("ai-chat.example.invalid".into()),
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidEndpoint { .. }));
+    }
+
+    /// BACKEND-62: an endpoint whose `:` is followed by no port a connection can use is refused,
+    /// and the refusal names the text written there and nothing else of the url.
+    #[test]
+    fn an_endpoint_whose_port_cannot_be_read_is_rejected_naming_the_port() {
+        for (endpoint, port) in [
+            ("https://gw.example.com:", ""),
+            ("https://gw.example.com:/v1", ""),
+            ("https://gw.example.com:abc/v1", "abc"),
+            ("https://gw.example.com:99999/v1", "99999"),
+            ("https://gw.example.com:65536", "65536"),
+            ("https://user:secret@gw.example.com:x/v1", "x"),
+            ("http://[::1]:", ""),
+        ] {
+            let err = Config::from_lookup(|k| match k {
+                env_var::ENDPOINT => Some(endpoint.into()),
+                other => complete_env(other),
+            })
+            .unwrap_err();
+            assert_eq!(
+                err,
+                ConfigError::UnreadablePort { port: port.into() },
+                "{endpoint}"
+            );
+            let said = err.to_string();
+            assert!(said.contains("port"), "{said}");
+            assert!(!said.contains("secret"), "{said}");
+        }
+        for endpoint in [
+            "https://gw.example.com/v1",
+            "https://gw.example.com:8080/v1",
+            "https://gw.example.com:65535",
+            "http://[::1]:8080/v1",
+            "https://user:secret@gw.example.com:8080/v1",
+        ] {
+            assert!(
+                Config::from_lookup(|k| match k {
+                    env_var::ENDPOINT => Some(endpoint.into()),
+                    other => complete_env(other),
+                })
+                .is_ok(),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_double_up_in_the_url() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::ENDPOINT => Some("https://example.invalid/".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            config.chat_completions_url(),
+            "https://example.invalid/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn builds_the_openai_compatible_url() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(
+            config.chat_completions_url(),
+            "https://example.invalid/v1/chat/completions"
+        );
+    }
+
+    /// A local development endpoint over plain http is allowed.
+    #[test]
+    fn http_endpoints_are_allowed_for_local_development() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::ENDPOINT => Some("http://127.0.0.1:8000".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            config.chat_completions_url(),
+            "http://127.0.0.1:8000/v1/chat/completions"
+        );
+    }
+
+    /// The premium tier is a separate deployment, so its URL must come from its own variable
+    /// rather than being derived from the free host.
+    #[test]
+    fn the_premium_endpoint_builds_its_own_url() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::PREMIUM_ENDPOINT => Some("https://premium.invalid".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            config.premium_chat_completions_url().as_deref(),
+            Some("https://premium.invalid/v1/chat/completions")
+        );
+    }
+
+    /// The listing lives on the free host and reports which of its entries are premium, so asking
+    /// the premium host would spend a subscription credential for the same answer.
+    #[test]
+    fn the_model_listing_url_is_on_the_free_host() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::PREMIUM_ENDPOINT => Some("https://premium.invalid".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(config.models_url(), "https://example.invalid/v1/models");
+    }
+
+    /// The premium host is compiled in, so a build that names none still has one, and it is the
+    /// host of the environment the free endpoint is in. A key typed with `bravebot auth login brave`
+    /// goes to it with no variable or settings file having a say.
+    #[test]
+    fn a_build_that_names_no_premium_host_has_the_one_compiled_in() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(
+            config.premium_endpoint.as_deref(),
+            Some(PROD_PREMIUM_ENDPOINT)
+        );
+        assert_eq!(
+            config.premium_chat_completions_url().as_deref(),
+            Some(format!("{PROD_PREMIUM_ENDPOINT}/v1/chat/completions").as_str())
+        );
+
+        let development = Config::from_lookup(|k| match k {
+            env_var::ENDPOINT => Some("https://ai-chat.bsg.brave.software".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            development.premium_endpoint.as_deref(),
+            Some(DEV_PREMIUM_ENDPOINT)
+        );
+    }
+
+    /// PREM-11: the compiled-in host is the one that accepts a premium key. `ai-chat-premium` answers
+    /// a request carrying one with a 401, so a constant moved back to it would leave every key
+    /// refused while the assertions above, which compare against the constants, still held.
+    #[test]
+    fn the_compiled_in_premium_host_is_the_one_that_accepts_a_key() {
+        let gateway = "https://ai-gateway-api.bsg.brave.software/v1/chat/completions";
+        let production = Config::from_lookup(complete_env).unwrap();
+        assert_eq!(
+            production.premium_chat_completions_url().as_deref(),
+            Some(gateway)
+        );
+
+        let development = Config::from_lookup(|k| match k {
+            env_var::ENDPOINT => Some("https://ai-chat.bsg.brave.software".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            development.premium_chat_completions_url().as_deref(),
+            Some(gateway)
+        );
+    }
+
+    /// A build that reaches no Brave backend has no premium host either, since there is no free
+    /// endpoint to say whose environment it would be.
+    #[test]
+    fn a_build_that_reaches_no_brave_backend_has_no_premium_host() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.premium_endpoint, None);
+        assert_eq!(config.premium_chat_completions_url(), None);
+    }
+
+    /// A blank or schemeless premium host is not used, and the one compiled in stands, rather than
+    /// the key being sent to a host with no scheme.
+    #[test]
+    fn a_malformed_premium_endpoint_is_not_used() {
+        for value in ["", "   ", "premium.invalid"] {
+            let config = Config::from_lookup(|k| match k {
+                env_var::PREMIUM_ENDPOINT => Some(value.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(
+                config.premium_endpoint.as_deref(),
+                Some(PROD_PREMIUM_ENDPOINT),
+                "accepted '{value}'"
+            );
+        }
+    }
+
+    /// PREM-11: a premium endpoint is a base the request path is appended to, so a query or a
+    /// fragment is never part of a base. A transport ends the host at the first `/`, `?` or `#`, so
+    /// `https://attacker.example#.brave.com` names `attacker.example` while its text ends with a
+    /// Brave suffix. The value is not used here, as a schemeless one is not, so the URL requests are
+    /// sent to and the host the credential is judged by are read from a string that cannot be split
+    /// two ways.
+    #[test]
+    fn a_premium_endpoint_with_a_query_or_a_fragment_is_discarded() {
+        for value in [
+            "https://attacker.example#.brave.com",
+            "https://attacker.example?.brave.com",
+            "https://attacker.example:8443#.brave.com",
+            "https://ai-chat-premium.bsg.brave.com?x=1",
+            "https://ai-chat-premium.bsg.brave.com/v1#x",
+        ] {
+            let config = Config::from_lookup(|k| match k {
+                env_var::PREMIUM_ENDPOINT => Some(value.into()),
+                other => complete_env(other),
+            })
+            .unwrap();
+            assert_eq!(
+                config.premium_endpoint.as_deref(),
+                Some(PROD_PREMIUM_ENDPOINT),
+                "accepted '{value}'"
+            );
+        }
+    }
+
+    /// The drop above is for the two shapes that split a host two ways. A port and a path in a
+    /// base are ordinary, and a premium host behind a gateway path still has to work.
+    #[test]
+    fn a_premium_endpoint_with_a_port_and_a_path_is_kept() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::PREMIUM_ENDPOINT => Some("https://premium.invalid:8443/gateway/".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            config.premium_chat_completions_url().as_deref(),
+            Some("https://premium.invalid:8443/gateway/v1/chat/completions")
+        );
+    }
+
+    /// PREM-11: the key a person stored is held, and goes with the compiled-in host. A build with
+    /// no key stored holds none, so every request it makes is the free endpoint's.
+    #[test]
+    fn a_stored_premium_key_is_held_with_the_host_compiled_in() {
+        let config = with_a_stored_premium_key(complete_env);
+        assert_eq!(
+            config.premium_key.as_ref().map(Secret::expose),
+            Some("a-premium-key")
+        );
+        assert_eq!(
+            config.premium_endpoint.as_deref(),
+            Some(PROD_PREMIUM_ENDPOINT)
+        );
+
+        let none = Config::from_lookup(complete_env).unwrap();
+        assert!(none.premium_key.is_none());
+    }
+
+    /// PREM-11: the key and the premium host travel together. A key stored on a machine whose build
+    /// reaches no Brave backend has no host to go to, so it is dropped and nothing downstream holds
+    /// a credential with nowhere to go.
+    #[test]
+    fn a_stored_premium_key_is_dropped_where_there_is_no_brave_backend() {
+        let config = with_a_stored_premium_key(|k| match k {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            _ => None,
+        });
+        assert!(config.premium_key.is_none());
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_premium_endpoint_does_not_double_up() {
+        let config = Config::from_lookup(|k| match k {
+            env_var::PREMIUM_ENDPOINT => Some("https://premium.invalid/".into()),
+            other => complete_env(other),
+        })
+        .unwrap();
+        assert_eq!(
+            config.premium_chat_completions_url().as_deref(),
+            Some("https://premium.invalid/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn secrets_are_redacted_in_debug_and_display() {
+        let secret = Secret::new("live-credential");
+        assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
+        assert_eq!(format!("{secret}"), "<redacted>");
+        assert!(!format!("{secret:?}").contains("live-credential"));
+    }
+
+    /// A credential is handed over in a `String` the caller made, and copying it into locked pages
+    /// protects nothing while that string goes back to the allocator holding it. The value held
+    /// has to read back as what was handed over, so that a hold which cleared the string first is
+    /// not taken for one that cleared it after.
+    #[test]
+    fn the_string_a_secret_is_made_from_is_overwritten_once_it_is_held() {
+        let mut value = String::from("sk-live-0123456789abcdef");
+        let length = value.len();
+
+        let held = hold(&mut value);
+
+        assert_eq!(held.as_str(), "sk-live-0123456789abcdef");
+        assert_eq!(
+            value.as_bytes(),
+            vec![0u8; length],
+            "the string the credential arrived in still holds it"
+        );
+    }
+
+    /// The credential has to be gone from the allocation, not just from the length.
+    ///
+    /// Both halves matter and neither alone says it. A buffer of zeros at a fresh address leaves
+    /// the original bytes where the allocator can hand them on, and an unmoved buffer still
+    /// holding the value is what `String::clear` produces: the length reads zero and every byte
+    /// is still there.
+    #[test]
+    fn scrubbing_overwrites_the_bytes_where_they_lie() {
+        let mut value = String::from("sk-live-0123456789abcdef");
+        let length = value.len();
+        let address = value.as_ptr();
+
+        scrub(&mut value);
+
+        assert_eq!(
+            value.as_ptr(),
+            address,
+            "the buffer moved, so the credential is still in the one that was left behind"
+        );
+        assert_eq!(
+            value.as_bytes(),
+            vec![0u8; length],
+            "the buffer the credential was in still holds bytes of it"
+        );
+    }
+
+    /// A token is where whoever wrote the settings file put it, which is inside two blocks rather
+    /// than at the root of the document.
+    ///
+    /// The value has to stay a string of the same length for the bytes to have been written over:
+    /// a name set to null, or to a shorter string, is a name whose buffer was dropped instead, and
+    /// dropping it is what leaves the token for the allocator.
+    #[test]
+    fn scrubbing_a_document_reaches_a_token_inside_the_blocks_it_was_written_in() {
+        let token = "sk-live-0123456789abcdef";
+        let mut root = match serde_json::from_str(
+            &serde_json::json!({
+                "provider": {"gw": {"options": {"apiKey": token}, "models": [token]}}
+            })
+            .to_string(),
+        ) {
+            Ok(serde_json::Value::Object(root)) => root,
+            _ => panic!("the fixture is not a document"),
+        };
+
+        scrub_document(&mut root);
+
+        let gateway = &root["provider"]["gw"];
+        assert_eq!(
+            gateway["options"]["apiKey"].as_str().expect("a string"),
+            "\0".repeat(token.len()),
+            "the token is still in the buffer the parse put it in"
+        );
+        assert_eq!(
+            gateway["models"][0].as_str().expect("a string"),
+            "\0".repeat(token.len()),
+            "a value inside a list was not reached, and a list is one of the shapes a file states"
+        );
+    }
+
+    /// Bytes rather than characters, because a value that is not ASCII has more of the first
+    /// than the second and the tail of it is what a count of characters would leave behind.
+    ///
+    /// A passphrase is where this arrives: nothing stops one holding a character that takes
+    /// three bytes, and a scrub measured in characters would write one zero for it and leave
+    /// the other two readable.
+    #[test]
+    fn scrubbing_counts_the_bytes_rather_than_the_characters() {
+        let mut value = String::from("pass-phrase-\u{4e16}\u{754c}");
+        let length = value.len();
+        assert!(length > value.chars().count(), "the fixture is not ASCII");
+
+        scrub(&mut value);
+
+        assert_eq!(
+            value.len(),
+            length,
+            "the buffer is as long as the value was"
+        );
+        assert!(
+            value.bytes().all(|byte| byte == 0),
+            "a byte of the value survived the scrub"
+        );
+    }
+
+    /// An explicit variable must win, so a released binary can be pointed at a local
+    /// backend without rebuilding it.
+    #[test]
+    fn the_environment_overrides_a_built_in_value() {
+        let chosen = resolve(
+            env_var::ENDPOINT,
+            Some("http://127.0.0.1:8000".into()),
+            |_| Some("https://baked.invalid".into()),
+        );
+        assert_eq!(chosen.as_deref(), Some("http://127.0.0.1:8000"));
+    }
+
+    /// The point of baking values in: a binary started outside the source tree has no
+    /// direnv and must still be configured.
+    #[test]
+    fn a_built_in_value_applies_when_the_environment_is_silent() {
+        let chosen = resolve(env_var::ENDPOINT, None, |_| {
+            Some("https://baked.invalid".into())
+        });
+        assert_eq!(chosen.as_deref(), Some("https://baked.invalid"));
+    }
+
+    /// A blank variable is a placeholder, not an instruction to discard the built-in
+    /// value, so it must not shadow one.
+    #[test]
+    fn a_blank_variable_does_not_shadow_a_built_in_value() {
+        let chosen = resolve(env_var::ENDPOINT, Some("   ".into()), |_| {
+            Some("https://baked.invalid".into())
+        });
+        assert_eq!(chosen.as_deref(), Some("https://baked.invalid"));
+    }
+
+    /// With nothing baked in, a blank must still be reported as empty rather than
+    /// missing, since the two suggest different fixes.
+    #[test]
+    fn a_blank_variable_survives_when_nothing_was_built_in() {
+        let err = Config::from_lookup(|k| match k {
+            env_var::SIGNING_KEY => resolve(k, Some(String::new()), |_| None),
+            other => complete_env(other),
+        })
+        .unwrap_err();
+        assert_eq!(err, ConfigError::Empty(env_var::SIGNING_KEY));
+    }
+
+    /// The token is in the path of the address, so an address that is not `https` would put it on
+    /// the wire. A build given one is a build with nowhere to send reports, not one that sends them
+    /// in the clear.
+    #[test]
+    fn a_baked_crash_report_address_is_used_only_when_it_is_https() {
+        let baked = |value: &'static str| {
+            crash_report_endpoint_in(move |name| {
+                (name == env_var::CRASH_REPORT_URL).then(|| value.to_string())
+            })
+        };
+        assert_eq!(
+            baked("https://submit.backtrace.invalid/brave/token/json"),
+            Some("https://submit.backtrace.invalid/brave/token/json".to_string())
+        );
+        assert_eq!(
+            baked("http://submit.backtrace.invalid/brave/token/json"),
+            None
+        );
+        assert_eq!(baked("submit.backtrace.invalid/brave/token/json"), None);
+        assert_eq!(baked(""), None);
+        assert_eq!(crash_report_endpoint_in(|_| None), None);
+    }
+
+    /// The address is asked for under its own name and no other, so a build that baked the signing
+    /// key or an endpoint and no crash address reports nowhere.
+    #[test]
+    fn another_baked_value_is_not_a_crash_report_address() {
+        let endpoint = crash_report_endpoint_in(|name| {
+            (name != env_var::CRASH_REPORT_URL).then(|| "https://a.invalid/b".to_string())
+        });
+        assert_eq!(endpoint, None);
+    }
+
+    /// Masking is what keeps a baked credential out of `strings` output, and it is
+    /// only usable at all if it round-trips.
+    #[test]
+    fn masking_round_trips_and_does_not_leave_the_value_readable() {
+        let secret = "live-credential-abc123";
+        let masked = obfuscate::mask(secret.as_bytes());
+        assert_ne!(masked, secret.as_bytes());
+        assert_eq!(obfuscate::mask(&masked), secret.as_bytes());
+    }
+
+    /// Two values sharing a prefix must not produce a shared masked prefix, or the
+    /// masking would advertise the relationship.
+    #[test]
+    fn values_with_a_shared_prefix_do_not_share_a_masked_prefix() {
+        let one = obfuscate::mask(b"prefix-aaaa");
+        let two = obfuscate::mask(b"prefix-bbbbbb");
+        assert_ne!(one[0], two[0]);
+    }
+
+    /// Debug-printing the whole config is the obvious debugging reflex, so it must
+    /// not leak the key.
+    #[test]
+    fn debugging_the_config_does_not_leak_the_key() {
+        let config = Config::from_lookup(complete_env).unwrap();
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("test-signing-key"), "leaked: {shown}");
+        assert!(shown.contains("redacted"));
+    }
+
+    /// The lifetime the settings chose reaches every place a request is built from: the gateway
+    /// client's configuration, the account the environment names, and one a provider block names. A
+    /// settings file that chose none leaves all three at the provider's default.
+    #[test]
+    fn the_cache_lifetime_setting_reaches_every_account() {
+        let exported = |key: &str| match key {
+            env_var::USE_BEDROCK => Some("1".into()),
+            env_var::AWS_REGION => Some("us-west-2".into()),
+            env_var::BEDROCK_OPUS_MODEL => Some("opus-arn".into()),
+            other => complete_env(other),
+        };
+        let block = r#""provider": {"amazon-bedrock": {"options": {"region": "us-west-2"},
+            "models": {"anthropic.claude-sonnet-4-5": {}}}}"#;
+        let ttls = |config: &Config| {
+            (
+                config.prompt_cache_ttl,
+                config
+                    .bedrock
+                    .as_ref()
+                    .and_then(|account| account.cache_ttl()),
+                config
+                    .providers
+                    .iter()
+                    .filter_map(|entry| entry.bedrock.as_ref())
+                    .map(|account| account.cache_ttl())
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let chosen = Settings::parse(&format!(r#"{{"promptCacheTtl": "1h", {block}}}"#));
+        let config = resolved(&chosen, exported, complete_env).expect("configured");
+        assert_eq!(
+            ttls(&config),
+            (
+                Some(CacheTtl::OneHour),
+                Some(CacheTtl::OneHour),
+                vec![Some(CacheTtl::OneHour)]
+            )
+        );
+
+        let unchosen = Settings::parse(&format!("{{{block}}}"));
+        let config = resolved(&unchosen, exported, complete_env).expect("configured");
+        assert_eq!(ttls(&config), (None, None, vec![None]));
+    }
+}

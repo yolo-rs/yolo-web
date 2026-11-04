@@ -1,0 +1,244 @@
+//! A one-shot run's session record, and continuing one (CLI-25).
+
+use bravebot_agent::Workspace;
+use bravebot_agent::conversation::Conversation;
+use bravebot_agent::rewind::CoverageGap;
+use bravebot_agent::turn::Outcome;
+use bravebot_core::trust::TrustStore;
+use bravebot_i18n::t;
+use bravebot_session::rewind::RewindStack;
+use bravebot_session::sessions::{
+    Continuation, Front, Handle, Record, Split, Standing, TurnSnapshot,
+};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// Which earlier session a one-shot run was asked to carry on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resume {
+    /// The session with this id, as `--resume <id>` names it.
+    Id(String),
+    /// The most recent session in this directory, as `--continue` does.
+    Latest,
+}
+
+/// A record a run continues, held for as long as the run takes, so that no other process writes it
+/// meanwhile (SESSION-38).
+///
+/// Reads as the record, and is what [`keep`] writes the turn back through.
+pub struct Continuing {
+    record: Record,
+    handle: Handle,
+}
+
+impl std::ops::Deref for Continuing {
+    type Target = Record;
+
+    fn deref(&self) -> &Record {
+        &self.record
+    }
+}
+
+/// The record a run was asked to continue, held, or why nothing can be.
+///
+/// Refused rather than answered by starting a fresh conversation: a script that asked to carry on
+/// and was given an empty context would answer the follow-up as though nothing had come before it.
+/// A manifest run has no conversation to carry on from, and a session another process is running is
+/// written by that process, so neither is read (SESSION-10, BG-9, SESSION-38).
+pub fn find(directory: &Path, asked: &Resume) -> Result<Continuing, String> {
+    let id = match asked {
+        Resume::Id(id) => id.clone(),
+        Resume::Latest => bravebot_session::sessions::most_recent(directory)
+            .map(|session| session.id)
+            .ok_or_else(|| t!(cli_nothing_to_continue).to_string())?,
+    };
+    let record = bravebot_session::sessions::load(directory, &id)
+        .ok_or_else(|| t!(cli_no_such_session, id = id.as_str()))?;
+    if record.manifest.is_some() {
+        return Err(bravebot_tui::resume::manifest_note().to_string());
+    }
+    if crate::background::is_running(&record.id) {
+        return Err(crate::background::held_by_a_background_session(&record.id));
+    }
+    // Held from here to the end of the run, which is before anything is sent: a process that
+    // writes the record while the turn runs would have it replaced by the turn's copy.
+    let handle = Handle::resuming(directory, &record, Front::Terminal, bravebot_stamp::BUILD)
+        .map_err(|held| held.refusal())?;
+    Ok(Continuing { record, handle })
+}
+
+/// What a turn of an incognito run reading lines hands the next one, in place of the record an
+/// incognito run does not write (CLI-36, INCOG-3).
+///
+/// Held in memory for the life of the process and never written. It carries what a record carries
+/// into a continued turn that the process does not already hold: the conversation as a record
+/// restores it, the trust map and the facts already put before the planner.
+#[derive(Clone)]
+pub struct Carried {
+    pub conversation: bravebot_agent::conversation::Snapshot,
+    pub trust: TrustStore,
+    pub injected_facts: std::collections::BTreeSet<String>,
+}
+
+/// The points the continued turn can be rewound to: the record's own, and one opened for this turn
+/// from the record as it stood before it (SESSION-19).
+///
+/// Opened before the turn and bound to `workspace`, so a program the turn runs is recorded as a
+/// coverage gap on every point a rewind could reach. `conversation` and `trust` are what the turn
+/// is about to be handed, so a `--trust-workspace` grant is in the point as the trust answer given
+/// before a session's turn is in that turn's point.
+pub fn rewind_points(
+    record: &Record,
+    workspace: &Workspace,
+    conversation: &Conversation,
+    trust: &TrustStore,
+    prompt: &str,
+) -> RewindStack {
+    // The workspace is new to this run, so a language server an earlier turn started is not on
+    // it. The record remembers one, and the warning goes on the workspace before the points bind.
+    if record.server_children_may_run() {
+        workspace.mark_rewind_gap(CoverageGap::LanguageServer);
+    }
+    let mut points = RewindStack::of(record.rewind_points(workspace.root()));
+    points.open(
+        TurnSnapshot {
+            conversation: conversation.snapshot(),
+            turns: record.turns,
+            tokens: record.tokens,
+            split: record.split,
+            spend: record.spend.clone(),
+            timing: record.timing.clone(),
+            cached: None,
+            cached_prompt_tokens: None,
+            // With the record's rules, so a yes this turn gives to a recorded memory does not
+            // outlive rewinding past it.
+            trust: bravebot_agent::memory::with_recorded(
+                trust,
+                workspace,
+                bravebot_agent::home::directory().as_deref(),
+            ),
+            programs: record.trusted_programs(workspace.root()),
+            // Not stored; a terminal resuming the record places each point again.
+            transcript_len: 0,
+            title: record.title.clone(),
+            was_wrote: true,
+        },
+        prompt.to_string(),
+    );
+    points.bind_coverage(workspace);
+    points
+}
+
+/// What a finished turn leaves to be written down.
+pub struct Finished<'a> {
+    pub prompt: &'a str,
+    pub conversation: &'a Conversation,
+    pub outcome: &'a Outcome,
+    pub trust: &'a TrustStore,
+    /// The kept facts injected on the session so far (RECALL-9).
+    pub injected_facts: &'a std::collections::BTreeSet<String>,
+    /// The length of the recounted conversation before the turn, and where the prompt entered it.
+    pub begins: usize,
+    pub prompt_at: Option<usize>,
+    /// The definition this run was addressed to, which is what the record is to say the session
+    /// works under from here (CLI-17).
+    pub agent: Option<&'a str>,
+    /// When the run began, in seconds since the epoch: the session's start, since the record is
+    /// only written once the turn is over.
+    pub started: u64,
+    /// What the turn's gates decided, which goes into the session's trail beside the record, as a
+    /// terminal or desktop session's does (SESSION-1, TRACE-5).
+    pub events: &'a [bravebot_session::audit::Stamped],
+    /// What the run's file tools reached, which the record carries so a run that continues it has
+    /// the nested instructions and path-scoped rules they loaded (INSTR-14, INSTR-16).
+    pub touched: bravebot_agent::workspace::TouchedRecord,
+    /// Whether the run was in bypass, so the record can say the map may be the mode's (MODE-4).
+    pub answered_by_mode: bool,
+}
+
+/// Write the turn down, as a new session or as one more turn of the one it continued.
+///
+/// `previous` is the record continued, with the points [`rewind_points`] opened for it and the
+/// turn's backups kept against the newest.
+///
+/// The id of the record that was written, and `None` where nothing was: an incognito run writes
+/// none, and a record that cannot be saved does not fail a run that has already answered, as with
+/// every other writer under the state directory.
+pub fn keep(
+    root: &Path,
+    previous: Option<(Continuing, RewindStack)>,
+    turn: Finished<'_>,
+) -> Option<String> {
+    let snapshot = turn.conversation.snapshot();
+    let ends = turn.conversation.recounted().len();
+    match previous {
+        Some((Continuing { record, mut handle }, rewind)) => {
+            let turn_number = record.turns + 1;
+            handle.set_agent(turn.agent.map(str::to_string));
+            handle.set_injected_facts(turn.injected_facts.clone());
+            handle.set_touched(turn.touched.clone());
+            let written = handle.save_continuation(
+                record,
+                Continuation {
+                    conversation: &snapshot,
+                    prompt: turn.prompt,
+                    tokens: turn.outcome.tokens,
+                    split: Split::of(turn.outcome.tokens, turn.outcome.output_tokens),
+                    model: &turn.outcome.model,
+                    trust: turn.trust,
+                    begins: turn.begins,
+                    ends,
+                    prompt_at: turn.prompt_at,
+                    rewind: rewind.points(),
+                    timing: turn.outcome.timing,
+                    answered_by_mode: turn.answered_by_mode,
+                },
+            );
+            if written {
+                handle.append_audit(turn_number, turn.events);
+            }
+            written.then(|| handle.id().to_string())
+        }
+        None => {
+            let mut handle =
+                Handle::begin(root, Front::Terminal, bravebot_stamp::BUILD).began_at(turn.started);
+            handle.set_agent(turn.agent.map(str::to_string));
+            handle.set_injected_facts(turn.injected_facts.clone());
+            let history = [bravebot_session::sessions::StoredTurn::completed(
+                1,
+                turn.prompt,
+                0,
+                ends,
+                turn.prompt_at,
+            )];
+            handle.save(
+                turn.prompt,
+                Standing {
+                    conversation: &snapshot,
+                    history: Some(&history),
+                    turns: 1,
+                    tokens: turn.outcome.tokens,
+                    split: Split::of(turn.outcome.tokens, turn.outcome.output_tokens),
+                    spend: &BTreeMap::from([(1, turn.outcome.tokens)]),
+                    timing: &BTreeMap::from([(1, turn.outcome.timing)]),
+                    model: Some(&turn.outcome.model),
+                    todos: &BTreeMap::new(),
+                    asides: &[],
+                    trust: turn.trust,
+                    programs: &bravebot_core::programs::TrustedPrograms::new(),
+                    directories: &[],
+                    manifest: None,
+                    rewind: &[],
+                    checkouts: &[],
+                    touched: Some(&turn.touched),
+                    answered_by_mode: turn.answered_by_mode,
+                },
+            );
+            let id = handle.resumable().map(str::to_string);
+            if id.is_some() {
+                handle.append_audit(1, turn.events);
+            }
+            id
+        }
+    }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "bravebot-bedrock"
+description = "Client for models on AWS Bedrock, SigV4-signed"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+bravebot-aichat = { path = "../aichat" }
+bravebot-config = { path = "../config" }
+bravebot-core = { path = "../core" }
+bravebot-diag = { path = "../diag" }
+bravebot-net = { path = "../net" }
+bravebot-sandbox = { path = "../sandbox" }
+bravebot-signing = { path = "../signing" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# kill(2) on the process group a cancellable sign-in leads, so a CLI that forked its own worker
+# goes with it. rustix rather than libc so this crate keeps forbidding unsafe code.
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

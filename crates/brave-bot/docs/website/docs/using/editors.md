@@ -1,0 +1,86 @@
+---
+sidebar_position: 8
+title: Using Brave Bot in an editor
+description: Run a session from an editor that speaks the Agent Client Protocol, and what it is asked to approve there.
+---
+
+# Using Brave Bot in an editor
+
+`bravebot acp` runs a session for an editor that speaks the
+[Agent Client Protocol](https://agentclientprotocol.com), such as Zed. The editor starts the
+program, draws the conversation, and shows each question as an approval.
+
+In Zed, declare it as a custom agent in your settings:
+
+```json
+{
+  "agent_servers": {
+    "Brave Bot": {
+      "type": "custom",
+      "command": "bravebot",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+This works with any installed copy of `bravebot`. The command reads the protocol on its standard
+input and writes it on its standard output, so it prints nothing else there. It takes `--settings
+<file>` and refuses `--dangerously-skip-permissions` and `--dangerously-bypass-approvals-and-sandbox`,
+because an editor is always asked.
+
+A build of the workspace also makes `bravebot-acp`, which runs the same server and takes the same
+`--settings` option. Use `"command": "bravebot-acp"` with `"args": []` to start it instead.
+
+## What the editor can send
+
+Text you type is a prompt, exactly as in the terminal, and a `/` word in it is text for the model,
+not a command. A picture you attach arrives as a pasted picture and a file you link arrives as a
+dropped file. An embedded selection or other resource is refused, because it could only be carried
+by putting its text in your words. MCP servers an editor lists are not started.
+
+## Several workspace roots
+
+Where the editor has more than one workspace root, it sends one as the session's directory and
+the rest in `session/new`'s `additionalDirectories`. Each of those is opened the same way
+`--add-dir` opens one on the command line: reachable for the session, but nothing in it is
+vouched for, so a write there is still asked about as any write outside the session's directory
+is. An entry that is not an absolute path to a directory that exists refuses the whole session
+before it starts.
+
+## Approvals
+
+The first prompt in a directory asks whether to trust it, as the terminal does, and nothing runs
+before you answer. After that, each write, command or fetch that the terminal would ask about is a
+permission request in the editor with the same details. Only choosing an allow option approves.
+Closing the request, an error, or no answer refuses it, and stopping the prompt refuses what is
+waiting. A planner's own question is not shown as an approval and is declined.
+
+The editor offers a standing allow only for a question that has something to record. A yes to the
+trust question is kept: the option reads **Trust and remember** and the question names the file it is
+written to, so later sessions started in that directory are not asked. Where a yes cannot be kept, the
+option reads **Trust for this session** and the question says the answer cannot be kept here. A
+refusal is never kept. See [Remembering the answer](../security/trust.md#remembering-the-answer).
+
+Where the editor offers **Allow and remember** beside a command or an MCP tool call, the question
+says what it grants. For a command, it trusts that exact command with those exact arguments in this
+directory: it runs again without asking, side effects included, now and in later sessions, and what
+it prints is trusted so the model reads it. For a tool call, every later call to that tool in this
+project is allowed without asking again, with any arguments.
+
+A host that a sandboxed `run` line reaches and that [`sandbox.network`](../security/sandbox.md#sandboxnetwork)
+does not list is also asked about in the editor. An allow there is labelled as lasting the session and
+writes no rule.
+
+Text the model or a command produced and nobody vouched for is shown behind a bar down the left
+side, as it is in the terminal. A question the editor integration has no lines for is refused
+without being shown. A picture, an HTML tag with an attribute, and a `<script>` or `<style>` tag even with none, in a message is cut by a space, so the editor shows its
+address and does not load it.
+
+## Settings that approve for you
+
+Whether you are asked is partly the editor's setting. If you configure the editor to allow every
+permission request, or requests of one kind, it answers for you, including the trust question and
+each later one, and Brave Bot cannot tell that from you choosing. The mode `acceptEdits` also
+answers writes inside the directory before they reach the editor. Leave both off in a directory you
+have not read.

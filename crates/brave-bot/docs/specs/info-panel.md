@@ -1,0 +1,507 @@
+---
+id: PANEL
+title: Telling sessions apart
+status: normative
+governs:
+  - crates/tui/src/title.rs
+  - crates/tui/src/panel.rs
+  - crates/tui/src/pointer.rs
+documented-by: docs/website/docs/using/sessions.md
+---
+
+## Scope
+
+What lets somebody running many sessions at once tell which terminal holds which: the terminal's
+title, and the info panel beside the transcript, which holds the session's name, its goal, the
+issue and pull request it is for, the model and effort it runs on, its context and cache, its token
+total, the language servers and MCP servers it has started, and its plan. A session gets its links
+from `/issue` and `/pr`, from `--issue` and `--pr`, and from the planner's
+[`set_link`](tools/set-link.md) for an address the person typed. A session does not get its links from
+what `gh pr create` prints. That needs a reader that branches on untrusted run output
+([RUN-4](tools/run.md#RUN-4)), which is an exception no maintainer has accepted, so it is
+not built ([brave/bravebot#1267](https://github.com/brave/bravebot/issues/1267)). How a session
+gets its name is [sessions.md](sessions.md), and the keys a settings file can move are
+[INPUT-32](terminal-input.md#INPUT-32). Listing the sessions that keep running after their terminal
+is closed is proposed in [background-sessions.md](background-sessions.md) and not built.
+
+## Clauses
+
+<a id="PANEL-1"></a>
+### PANEL-1: the terminal's title names the session
+
+Once a session has a name, the terminal's title is `bravebot · {name}`. It follows the name: it is
+written when the name is first known (after the first turn, or at once on a resume or a `/rename`),
+written again whenever the name changes, and set to the bare `bravebot` when the session loses its
+name, as a `/clear` does, rather than left naming the session before it. Nothing is written before a
+session has a name unless [PANEL-15](#PANEL-15) has a state to show, and nothing is written again
+while the name and the state stay the same.
+
+`verified-by: bravebot_tui::title::a_rename_rewrites_the_title_and_an_unchanged_name_does_not`
+`verified-by: bravebot_tui::title::no_title_is_written_before_a_name_and_a_lost_name_leaves_the_prefix`
+
+<a id="PANEL-2"></a>
+### PANEL-2: a name cannot act on the terminal
+
+Control characters in the name are replaced by visible characters, as they are wherever the
+interface draws text, so a name cannot end the escape sequence the title travels in and act on the
+terminal. The title is cut to 60 columns, with an ellipsis where it was cut.
+
+`verified-by: bravebot_tui::title::control_characters_in_a_name_cannot_reach_the_terminal`
+`verified-by: bravebot_tui::title::a_long_name_is_cut_to_sixty_columns`
+
+<a id="PANEL-3"></a>
+### PANEL-3: the shell's title comes back
+
+The title the terminal had is pushed before the first one is written and popped each time the
+terminal is handed back, at exit and while an external editor holds it (xterm's `CSI 22;0t` and
+`CSI 23;0t`); taking the terminal back writes the title again. The title is emptied just before each
+pop, so a terminal that ignores the push and the pop is left with no title rather than one naming a
+session that has ended.
+
+`verified-by: bravebot_tui::title::the_old_title_is_pushed_once_before_the_first_title`
+`verified-by: bravebot_tui::title::handing_back_pops_once_and_taking_over_writes_the_title_again`
+
+<a id="PANEL-4"></a>
+### PANEL-4: when no title is written
+
+A `terminalTitle` setting of `false` turns all of it off, the push included, and any other value,
+or none, leaves it on. An incognito session writes no title whatever the setting says: its name is
+the first line of a prompt, and a terminal with no title stack, or one that saves its windows
+between launches, would keep that line after the session ended.
+
+`verified-by: bravebot_tui::title::nothing_is_written_when_the_title_is_turned_off`
+`verified-by: bravebot_tui::title::only_false_turns_the_run_title_off`
+`verified-by: bravebot_tui::title::an_incognito_session_writes_no_title`
+`verified-by: bravebot_config::settings::only_a_boolean_turns_the_terminal_title_off`
+`verified-by: bravebot_config::settings::the_terminal_title_switch_is_among_the_names_reported`
+
+<a id="PANEL-5"></a>
+### PANEL-5: a key shows and hides the panel, and the choice is kept
+
+The `panel` action shows and hides the info panel. It is on `ctrl-x` unless a `keybindings` block
+moves it ([INPUT-32](terminal-input.md#INPUT-32)), and a moved panel leaves `ctrl-x` doing nothing.
+`/panel` does the same, and runs at once while a turn is working. Each press writes whether the
+panel is open to `~/.bravebot/panel`, and the next start reads it, as the theme is
+([SESSION-9](sessions.md#SESSION-9)). No file, or a file that says neither `open` nor `closed`,
+leaves the panel closed. The choice is not in the session record, so a resume opens with the panel
+as the last press left it. The width the panel was last dragged to ([PANEL-6](#PANEL-6)) is kept
+the same way in `~/.bravebot/panel-width`, a single whole number of columns; no file, or one that
+holds anything else, leaves the panel at 36.
+
+**Why `ctrl-x`.** Ctrl-I is Tab to a terminal, Ctrl-H, Ctrl-M and Ctrl-[ are Backspace, Enter and
+Escape, Ctrl-Z suspends, Ctrl-Q is flow control, and the box answers the other Ctrl letters. A
+settings file that already gave `ctrl-x` to another action now names a chord the panel stands on,
+and since two actions never share one ([terminal-input.md](terminal-input.md#INPUT-32)), that action
+is back on its default until the file moves the panel too.
+
+`verified-by: bravebot_tui::keybindings::the_panel_chord_is_ctrl_x_and_can_be_moved`
+`verified-by: bravebot_tui::app::the_panel_key_and_the_panel_command_both_toggle_it`
+`verified-by: bravebot_tui::app::only_the_commands_that_touch_nothing_the_turn_holds_skip_the_queue`
+`verified-by: bravebot_tui::persist::whether_the_panel_was_left_open_is_read_back_next_session`
+`verified-by: bravebot_tui::persist::a_press_opens_the_next_session_too_and_a_corrupt_choice_leaves_it_closed`
+`verified-by: bravebot_session::store::only_the_two_panel_words_are_a_choice`
+`verified-by: bravebot_session::store::only_a_positive_whole_number_is_a_panel_width`
+`verified-by: bravebot_tui::persist::the_dragged_width_is_read_back_next_session_and_a_corrupt_one_leaves_36`
+`verified-by: bravebot_tui::persist::a_press_that_closes_the_panel_is_read_back_next_session`
+
+<a id="PANEL-6"></a>
+### PANEL-6: the panel takes its columns from the transcript, and only where the rest still fits
+
+The panel is 36 columns on the right of the screen unless it has been dragged to another width, its left edge a border, and runs from the top
+row to the row above the hint line, which keeps the full width. The transcript and the input box
+take the columns to its left and wrap to them. It is drawn only on a terminal at least 100 columns
+wide, which leaves the transcript 64. A press to open it on a narrower terminal changes nothing and
+leaves a note saying how wide the terminal has to be. A terminal narrowed below 100 columns while
+the panel is open stops drawing it and draws it again when widened, with no press. A press to close
+it closes it on a terminal of any width, so a panel closed while narrowed out of sight stays closed
+when the terminal is widened. Whether the panel is drawn and whether it is open are separate facts,
+and the clauses below are about the first.
+
+Dragging the border moves it: a left-button press on the border column starts a drag, the drag sets
+the panel to the columns right of the pointer, and the release ends it and keeps the width
+([PANEL-5](#PANEL-5)). The width is held between 24 columns and what leaves the transcript 64, so
+the 100-column threshold holds at the default width. A terminal resized while the panel is open
+draws it at the stored width clamped to the new size, and the stored width is left as it was. A
+press on the border starts no selection in either pane ([MOUSE-2](mouse.md#MOUSE-2)), and the
+release of a drag that began there copies nothing. A drag that the button does not end, because the
+window lost focus, the terminal was resized or another press landed, ends as the release ends it,
+and keeps the width ([MOUSE-49](mouse.md#MOUSE-49)). The drag has no key: the width is a choice about
+where the room goes and nothing else changes with it, and a person for whom the panel does not fit
+hides it with the chord ([PANEL-5](#PANEL-5)).
+
+In a terminal that draws a pointer shape on request, the pointer is the resize one while it is over
+the border column, from the panel's first row to its last, and while a drag of the border is held.
+It is asked for with OSC 22 when the shape changes and not for each report of the pointer, and it is
+given back when the pointer leaves the border, when the panel closes, and before the terminal is
+handed back. Kitty, Ghostty and foot are asked, with the name `ew-resize`. Any other terminal is
+written nothing and keeps its own pointer. Every terminal is told of motion with no button held
+([INPUT-33](terminal-input.md#INPUT-33)), which is how the pointer is found over the border.
+
+`verified-by: bravebot_tui::panel::the_panel_is_drawn_from_a_hundred_columns_and_not_below`
+`verified-by: bravebot_tui::panel::a_press_on_a_narrow_terminal_does_not_open_the_panel_and_does_close_it`
+`verified-by: bravebot_tui::panel::the_transcript_and_the_input_wrap_to_the_columns_the_panel_leaves`
+`verified-by: bravebot_tui::panel::a_drag_on_the_border_moves_it_and_the_transcript_rewraps`
+`verified-by: bravebot_tui::panel::the_width_is_clamped_at_both_ends`
+`verified-by: bravebot_tui::panel::a_narrowed_terminal_reclamps_without_forgetting_the_choice`
+`verified-by: bravebot_tui::panel::a_drag_from_the_border_never_selects_or_copies`
+`verified-by: bravebot_tui::app::tests::scrollbar::a_drag_of_the_panels_border_ends_when_focus_is_lost_the_terminal_resizes_or_another_press_lands`
+`verified-by: bravebot_tui::panel::the_hint_line_runs_under_the_panel_to_the_right_edge`
+`verified-by: bravebot_tui::panel::the_resize_pointer_is_over_the_border_column_and_nowhere_else`
+`verified-by: bravebot_tui::panel::a_drag_holds_the_resize_pointer_and_its_end_follows_the_border`
+`verified-by: bravebot_tui::panel::a_panel_closed_under_the_pointer_gives_the_resize_pointer_back`
+`verified-by: bravebot_tui::pointer::a_shape_is_written_when_it_changes_and_not_while_it_stays`
+`verified-by: bravebot_tui::pointer::a_terminal_with_no_known_name_is_written_nothing`
+`verified-by: bravebot_tui::pointer::only_terminals_documented_to_take_css_names_are_asked`
+
+<a id="PANEL-7"></a>
+### PANEL-7: the panel ends with the key that hides it
+
+The panel's last row is `{chord} hide panel`, naming the chord in force, and in the files state the
+keys of that state instead ([FILES-4](files-mode.md#FILES-4)). While the panel is closed
+on a terminal wide enough for it, the hint line has a `{chord} info` part, and that part is the
+first the line drops when the row is short ([INPUT-13](terminal-input.md#INPUT-13)). With the panel
+open, or on a terminal too narrow for it, the line has no such part.
+
+`verified-by: bravebot_tui::panel::the_last_row_names_the_chord_in_force`
+`verified-by: bravebot_tui::files_mode::the_last_row_of_the_panel_names_the_keys_of_the_state`
+`verified-by: bravebot_tui::panel::the_hint_line_offers_the_panel_only_while_it_is_closed_and_would_fit`
+`verified-by: bravebot_tui::panel::the_info_part_is_the_first_the_hint_line_gives_up`
+
+<a id="PANEL-8"></a>
+### PANEL-8: the context and cache figures move into the panel while it is drawn
+
+While the panel is drawn it holds the context reading, in whichever of the three states of
+[INPUT-22](terminal-input.md#INPUT-22) it is in, and the cache hit rate
+([BACKEND-31](backends.md#BACKEND-31)), and the hint line drops both. Below them the panel gives the
+cache figures as two rows, what was read and what was written, never summed. A turn in flight
+gives its running totals once one of its rounds has reported a completed request, and the last
+turn's figures until then, so a first turn shows them after its first round rather than at its
+end. The hit rate reads the same figures, on the hint line as well. Neither row is drawn before
+any turn or round has reported one. When the panel is not drawn, or the terminal is too
+short for the panel to show its Context section whole, the hint line has the reading and the hit
+rate. The loop, the job count, the mode and the keys stay on the hint line in every case, because a
+loop and a job spend while nobody is watching, and the panel can be closed or the terminal too
+narrow for it.
+
+`verified-by: bravebot_tui::panel::the_context_reading_moves_into_the_panel_in_each_state`
+`verified-by: bravebot_tui::panel::the_cache_read_and_written_are_two_figures`
+`verified-by: bravebot_tui::app::a_first_turn_in_flight_draws_the_cache_figures_after_its_first_round`
+`verified-by: bravebot_tui::app::each_round_of_a_turn_replaces_the_cache_figures_with_the_turns_running_totals`
+`verified-by: bravebot_tui::app::a_report_with_no_completed_request_leaves_the_cache_figures_where_they_were`
+`verified-by: bravebot_tui::panel::the_loop_stays_on_the_hint_line_while_the_panel_is_drawn`
+`verified-by: bravebot_tui::panel::the_context_reading_stays_on_the_hint_line_where_the_panel_is_too_short_for_it`
+
+<a id="PANEL-9"></a>
+### PANEL-9: the sections, in order, each left out when it has nothing
+
+1. **Session.** The session's name, wrapped to at most three rows, the third cut with an ellipsis
+   where more was left. A word of the name that is a whole GitHub pull request or issue address,
+   `https://github.com/{owner}/{repo}/pull/{n}` or `.../issues/{n}`, with only the characters
+   GitHub allows in the owner and repository and only digits in the number, is drawn as
+   `{owner}/{repo}#{n}`. Its cells are a terminal link (OSC 8) to the address, and a selection
+   over them copies the shorthand. An address of any other shape is drawn as written. Below it the
+   directory, written from `~` as `/status` writes it, and the
+   branch, as the resume list shows it: read when the session starts, resumes or moves to another
+   directory, so a checkout made during a turn shows from the next of those. Each is one row, cut
+   from the left with an ellipsis where it is longer, since the end is what tells two apart. Last
+   comes the session's id, the one `--resume`, `--fork` and `/resume` take, drawn whole over two
+   rows split after its last hyphen, since a lookup reads the whole id and a fragment finds
+   nothing. It is there once the session has a record on disk, as the line printed when the
+   session ends is ([SESSION-8](sessions.md#SESSION-8)), and follows a resume, `/branch` and
+   `/clear`. A new
+   name reaches an open panel on the next frame, not at the next key. A click on a row of the name
+   puts `/rename` and the name in the box ([MOUSE-30](mouse.md#MOUSE-30)).
+2. **Model.** The model the person chose, one row cut from the left with an ellipsis where it is
+   longer, and the effort level in force below it, as `effort high`. A model the configuration
+   names is drawn by the name the `/model` picker gives its row, with the service after a tier's
+   name, as `Sonnet (Bedrock)`, and not by the request name, which for a tier is an inference-profile
+   ARN. `/status` draws it the same way and keeps the request name on the line beneath, since an
+   error from the service quotes that. A model the configuration does not name is drawn by its
+   request name. The model is the person's
+   choice, never the name an endpoint replied with, so a reply
+   that names another model changes nothing here. The effort row is left out where the model reads
+   none. Both come from the session's settings, so the section is left out while the person has
+   chosen no model and no effort level is in force.
+3. **Goal.** The condition, while a goal stands ([GOAL-1](goal.md#GOAL-1)).
+4. **Links.** PANEL-12.
+5. **Context.** PANEL-8. It always has a reading, so it is always there. Under the reading it
+   has the session's token total, as `/cost` opens with it, in tokens and not money, counting what
+   the turn in flight has spent so far, the requests its delegates have completed included as
+   they complete, and left out until a token has been spent.
+6. **Language servers.** PANEL-13.
+7. **MCP servers.** PANEL-14.
+8. **Files.** A `{n} files` row with the lines added and removed over every file the session wrote.
+   A click on that row opens the files state ([MOUSE-20](mouse.md#MOUSE-20)), as `/diff` does
+   ([FILES-3](files-mode.md#FILES-3)). It is left out until a file has been written. The Plan takes
+   the rows it leaves, as PANEL-13 says of the server sections.
+9. **Plan.** PANEL-10.
+
+A section with nothing to show has no heading. Control characters in any row are drawn as visible
+characters, as they are wherever the interface draws text, since a directory or a branch is called
+whatever whoever made it chose.
+
+`verified-by: bravebot_tui::panel::the_sections_come_in_order_and_an_empty_one_leaves_no_heading`
+`verified-by: bravebot_tui::panel::a_long_name_takes_three_rows_and_ends_in_an_ellipsis`
+`verified-by: bravebot_tui::panel::a_github_address_in_the_name_is_drawn_as_its_shorthand`
+`verified-by: bravebot_tui::panel::an_address_of_any_other_shape_is_drawn_as_written`
+`verified-by: bravebot_tui::panel::the_shorthand_links_to_the_address_and_nothing_else_does`
+`verified-by: bravebot_tui::select::a_link_is_copied_as_the_text_it_shows`
+`verified-by: bravebot_tui::panel::control_characters_in_the_session_section_are_drawn_as_pictures`
+`verified-by: bravebot_tui::panel::a_long_directory_and_branch_keep_their_ends`
+`verified-by: bravebot_tui::panel::the_session_id_is_drawn_whole_over_two_rows`
+`verified-by: bravebot_tui::panel::the_id_row_follows_whether_the_session_has_a_record`
+`verified-by: bravebot_tui::panel::the_id_rows_count_toward_where_the_context_section_fits`
+`verified-by: bravebot_tui::panel::the_model_section_shows_the_choice_and_the_effort_in_force_and_ignores_a_reply`
+`verified-by: bravebot_tui::panel::the_model_section_names_a_tier_rather_than_the_tail_of_its_arn`
+`verified-by: bravebot_tui::status::the_model_line_names_a_tier_and_keeps_its_arn_beneath`
+`verified-by: bravebot_tui::status::a_name_a_provider_block_chose_is_shown_without_a_service_added`
+`verified-by: bravebot_config::lib::a_request_name_finds_its_entry_in_either_kind_of_account`
+`verified-by: bravebot_tui::panel::the_token_total_is_a_context_row_that_sums_the_session`
+`verified-by: bravebot_agent::turn::the_token_total_moves_while_a_delegate_works_and_counts_it_once`
+`verified-by: bravebot_tui::panel::a_new_name_redraws_an_open_panel_and_nothing_else_does`
+`verified-by: bravebot_tui::panel::the_files_section_has_the_totals_and_leaves_the_plan_its_rows`
+
+<a id="PANEL-10"></a>
+### PANEL-10: the plan stays after the turn that wrote it
+
+The plan is the session's last `todo_write` list ([TODO-1](tools/todo-write.md#TODO-1)), each row
+with a mark for its status, and a finished row struck through. It
+stays after the turn that wrote it ends, is replaced by the next report that has rows, and is
+emptied by `/clear`. A report with no rows leaves it as it was, since the session record does not
+tell a turn that emptied its list from one that kept none. It is the last section and has the rows
+the others leave, the language servers and MCP servers included.
+
+A plan longer than that shows the rows that fit less the row after them that says what was left out,
+and less the key row where that is drawn. The rows shown are chosen from each row's status and from
+nothing else, and a status that is not recognised reads as outstanding
+([TODO-2](tools/todo-write.md#TODO-2)). The task in progress comes first, then the pending rows,
+each in the plan's order, and then, where room is left, the finished rows (completed or cancelled)
+nearest the first row still outstanding, or nearest the end of a plan with none. The rows shown are
+drawn in the plan's order. The row after them counts each kind of row left out in words of its own,
+the rows still to do first and a kind with none left out not named (`+6 done`,
+`+3 to do, +40 done, +2 cancelled`), so a count of finished work is not read as work still to come
+and a cancelled row is not counted as done. Where the panel is too narrow for every count the row
+is cut with an ellipsis, and the count of the rows still to do is the last to be cut.
+
+A finished row whose words a click opened ([MOUSE-32](mouse.md#MOUSE-32)) takes the rows its words
+take, and counts as that many rows of the room. It is chosen after the rows still to do and before
+the other finished rows, so what a person asked to read stays drawn, and where the room is less than
+its rows it is given what is left. The model writes a plan of any length, so the work of laying the
+rows out grows with the number of tasks and not with its square, with every task open or not.
+
+The row that counts keeps its place however little room there is, and a row still to do gives up
+its place to it. A plan of ten rows with two still to do, in a section of two rows, draws the first
+of the two and counts the other (`+1 to do, +8 done`), and in a section of one row draws the count
+alone (`+2 to do, +8 done`). Drawing both of the two and counting the eight finished rows takes
+three rows.
+
+**Why.** What somebody glancing at the panel looks for is what is still to do. A window that starts
+at the top of a long plan fills with finished rows and leaves the unfinished ones behind a count
+that does not say they are there. Dropping the count to draw one more row still to do would leave
+the finished rows out without saying so, and the count is the one row that says rows still to do
+are not drawn.
+
+The section's last row names the key that prints the whole plan, the chord in force
+([INPUT-32](terminal-input.md#INPUT-32)), as the panel's last row names the key that hides it. It
+reads `alt-a whole plan` by default and is cut with an ellipsis to the width of the panel, so a plan
+the panel cannot draw whole, or draws with its text cut, can be read in full. The row is drawn where
+the section has three rows of room or more, the plan does not fill them exactly, and every row still
+to do is drawn beside it: the plan is shorter than the room, or the room less the key row and the
+row that counts what was left out holds every row still to do. So the row takes the place of no row
+still to do and of no task of a plan that fits the room, and only of finished rows in a plan too
+long for it. The `?` list names the key whatever the plan holds.
+
+A row that is neither completed nor cancelled is drawn as work being done only while a turn is
+running. While none is, as after the turn that wrote the list has ended and in a resumed session,
+such a row is left open: its mark is hollow (`□`) where work being done has the filled one, so the
+two differ under `NO_COLOR`, and its text is dim. A compaction or another working state that is
+not a turn leaves it open too. Rows that are completed or cancelled are drawn as they are in any
+other plan.
+
+A click on a task moves the view to the turn that wrote it, as the keys that move the view to a
+prompt do ([MOUSE-31](mouse.md#MOUSE-31), [SCROLL-3](scroller.md#SCROLL-3)), and one on the mark of a
+finished task opens the whole of its words, which the transcript holds whole
+([MOUSE-32](mouse.md#MOUSE-32)).
+
+**Why.** Nothing is working on a row once the turn has ended. A filled mark beside an answer that
+says the work is finished reads as work still going.
+
+`verified-by: bravebot_tui::panel::the_plan_stays_after_the_turn_and_clear_empties_it`
+`verified-by: bravebot_tui::panel::an_empty_report_after_one_with_rows_keeps_that_plan`
+`verified-by: bravebot_tui::state::a_failed_or_stopped_turn_after_an_empty_report_keeps_its_plan`
+`verified-by: bravebot_tui::state::a_rewind_or_an_unsent_prompt_leaves_no_plan_after_an_empty_report`
+`verified-by: bravebot_tui::panel::a_long_plan_shows_the_rows_still_to_do_before_the_finished_ones`
+`verified-by: bravebot_tui::panel::the_rows_shown_keep_the_order_of_the_plan`
+`verified-by: bravebot_tui::panel::the_task_in_progress_is_kept_when_there_are_more_rows_still_to_do_than_room`
+`verified-by: bravebot_tui::panel::room_left_over_goes_to_the_finished_rows_nearest_the_first_one_still_to_do`
+`verified-by: bravebot_tui::panel::the_row_that_counts_what_was_left_out_names_each_kind_in_words_of_its_own`
+`verified-by: bravebot_tui::panel::the_panel_draws_a_plan_of_none_one_twelve_and_fifty_rows_and_at_the_least_height`
+`verified-by: bravebot_tui::panel::the_rows_drawn_and_counted_follow_the_status_and_never_the_text`
+`verified-by: bravebot_tui::panel::the_last_row_of_the_plan_names_the_key_that_prints_it_whole`
+`verified-by: bravebot_tui::panel::the_key_row_never_takes_the_place_of_a_row_still_to_do`
+`verified-by: bravebot_tui::panel::the_row_naming_the_key_is_cut_to_the_width_of_a_narrow_panel`
+`verified-by: bravebot_tui::panel::the_whole_plan_is_printed_with_every_task_its_status_and_none_of_its_text_cut`
+`verified-by: bravebot_tui::panel::the_key_and_the_command_print_the_same_whole_plan_and_cut_none_of_it`
+`verified-by: bravebot_tui::panel::the_work_of_laying_out_a_long_plan_grows_with_its_length`
+`verified-by: bravebot_tui::panel::a_row_a_turn_left_open_is_drawn_apart_from_work_being_done`
+`verified-by: bravebot_tui::panel::a_working_session_that_is_not_in_a_turn_draws_open_rows_as_left_open`
+`verified-by: bravebot_tui::sessions::a_resumed_session_draws_the_plan_it_was_left_with_as_left_open`
+
+<a id="PANEL-11"></a>
+### PANEL-11: the panel draws only on what the person and the driver said
+
+Every row the panel draws comes from text the person typed (the session's name, which comes from a
+prompt or a `/rename` ([SESSION-4](sessions.md#SESSION-4)), a goal's condition, and the links given
+with `/issue` and `/pr`, or `--issue` and `--pr`, or recorded by `set_link` for an address the person
+typed ([SETLINK-1](tools/set-link.md#SETLINK-1))), the planner's own `todo_write` rows, the driver's own counters (the context
+reading, the cache figures and the token total), the chord in force, the directory and branch the
+session runs in, the session's id (made by the driver from the operating system's random source, so
+no reply, tool result or file supplies it), the programs of the language servers it started (PANEL-13), the aliases of its MCP
+servers (PANEL-14), the model the person chose and the effort level in force, or the paths of the files
+the session wrote with the counts the kernel made ([FILES-2](files-mode.md#FILES-2)). No row comes from a
+reply, a tool result, a file's contents, a language server's reply, an issue or
+pull request body, or anything a job printed.
+
+The files state, and no other state of the panel, also draws the changes of a write, under
+[FILES-6](files-mode.md#FILES-6) and [FILES-7](files-mode.md#FILES-7). Those rows are in a region of
+their own, under a header, with a gutter and sign that no section of the panel has, and the ordinary
+sections are not drawn beside them, so the reason for the rule still holds.
+
+**Why.** The panel is the interface speaking in its own voice, like the scroller's footer
+([SCROLL-5](scroller.md#SCROLL-5)). Text from any of those drawn in it would read as the interface's
+own sentence, and it would be in front of the person on every frame.
+
+No click on the panel changes this ([MOUSE-33](mouse.md#MOUSE-33)).
+
+`verified-by: bravebot_tui::panel::nothing_a_turn_returned_reaches_the_panel`
+`verified-by: bravebot_tui::app::a_click_on_any_target_of_the_panel_never_draws_what_a_tool_returned`
+
+<a id="PANEL-12"></a>
+### PANEL-12: the person says which issue and pull request the session is for
+
+`/issue <url>` and `/pr <url>` give the session its issue and its pull request. A value is one
+`http` or `https` URL with a host, in printable ASCII. One with anything else in it (whitespace, a
+newline, an escape, a direction override or a zero-width character), with no host, or with any
+other scheme, is refused with a note that does not repeat it, and sets nothing. The bare word says what is set, and `clear` removes that link and
+not the other. Each change is written to the session record at once, as a rename is
+([SESSION-3](sessions.md#SESSION-3)), and gives up no rewind point, since no point holds a link.
+Typed while a turn runs, they are carried out as `/rename` is ([CMD-8](commands.md#CMD-8)).
+
+`--issue <url>` and `--pr <url>` give the session a command line opens the same links, under the
+same check, and so does only that session: not one `/resume` switches to. They are taken out of the
+line wherever they stand, each of a kind may be given twice and the last is used, and a value that
+fails the check, or none, stops the line before the session opens with [the status for an argument](cli.md),
+in a sentence that does not repeat it. A link the flag gives replaces the one a resumed
+record held and is written to the record as `/issue` is; a link it does not give is left as it was.
+A line that opens no interactive session (a one-shot run, `--plain`, `--bg`, or a command that
+starts none) is refused with them rather than dropping them.
+
+The planner's [`set_link`](tools/set-link.md) gives the session a link under the same check, and
+only for an address that is a whole word of a line the person typed ([SETLINK-1](tools/set-link.md#SETLINK-1)). It
+replaces the link of that kind and is written to the record as `/issue` is.
+
+`verified-by: bravebot_agent::turn::an_address_the_person_typed_reaches_set_link_and_leaves_the_turn`
+
+The Links section has a `Pull request` row and then an `Issue` row, each only while that link is
+set: the word, then the link, cut from the left with an ellipsis where it is longer than the row,
+since the number at its end is what tells two apart. A link that is a GitHub pull request or issue
+address of the shape [PANEL-9](#PANEL-9) gives is drawn as `{owner}/{repo}#{n}` instead, cut from
+the left in the same way. The cells drawn are a terminal link (OSC 8) to the address, and a
+selection over them copies the shorthand. An address of any other shape is drawn as written and is
+not a link. A new link reaches an open panel on the next frame. A click on either row opens the
+address that was set in the person's browser, as `/open` followed by that address does
+([MOUSE-41](mouse.md#MOUSE-41), [CMD-30](commands.md#CMD-30)).
+
+`verified-by: bravebot_tui::app::the_issue_and_pr_commands_show_set_and_clear_their_own_link`
+`verified-by: bravebot_tui::app::a_link_with_a_newline_an_escape_or_another_scheme_sets_nothing`
+`verified-by: bravebot_tui::app::a_link_set_mid_turn_is_set_as_it_is_typed`
+`verified-by: bravebot_session::sessions::setting_a_link_neither_makes_nor_gives_up_a_rewind_point`
+`verified-by: bravebot_tui::app::links_from_the_command_line_replace_what_it_names_and_leave_the_other`
+`verified-by: bravebot_tui::app::the_command_line_links_and_prompt_reach_the_session_once_its_record_is_open`
+`verified-by: bravebot_cli::main::issue_and_pr_flags_are_taken_out_and_set_their_own_link`
+`verified-by: bravebot_cli::main::a_value_that_is_not_one_web_address_is_refused_and_not_repeated`
+`verified-by: bravebot_cli::main::only_a_line_that_opens_a_session_takes_links`
+`verified-by: bravebot_session::sessions::only_one_web_address_on_one_line_is_a_link`
+`verified-by: bravebot_tui::panel::the_links_section_has_a_row_for_each_link_that_is_set`
+`verified-by: bravebot_tui::panel::a_long_link_keeps_its_end`
+`verified-by: bravebot_tui::panel::a_github_address_in_a_link_row_is_drawn_as_its_shorthand`
+`verified-by: bravebot_tui::panel::a_link_row_of_any_other_shape_is_drawn_as_written_and_not_linked`
+`verified-by: bravebot_tui::panel::a_link_row_shorthand_links_to_its_own_address_and_nothing_else_does`
+`verified-by: bravebot_tui::panel::a_long_shorthand_keeps_its_end_and_is_linked_as_drawn`
+`verified-by: bravebot_tui::panel::a_link_row_below_the_panels_height_is_not_linked`
+`verified-by: bravebot_tui::panel::a_new_name_redraws_an_open_panel_and_nothing_else_does`
+
+<a id="PANEL-13"></a>
+### PANEL-13: the language servers the session started
+
+The Language servers section has one row for each language server the session has started
+([LSP-8](tools/lsp.md#LSP-8)), in name order, and is left out until one has. A row is the program
+the person approved ([LSP-5](tools/lsp.md#LSP-5)), from the fixed table of programs and never from
+the server's own reply, so a server cannot put its own words into the interface. The rows stay
+while a question waits on an approval or a server's answer, since the panel reads a list kept
+beside the set rather than the set, and the section empties when the set is dropped, as `/cd` and
+`/clear` drop it.
+
+A click on a row says which language servers the session has started, as `/lsp` does
+([MOUSE-22](mouse.md#MOUSE-22), [CMD-29](commands.md#CMD-29)).
+
+`verified-by: bravebot_tui::panel::each_started_language_server_has_a_row_and_none_leaves_no_heading`
+`verified-by: bravebot_tui::panel::the_plan_gets_the_rows_the_server_sections_leave`
+`verified-by: bravebot_agent::lsp::the_roster_names_the_program_a_turn_started_until_the_set_is_dropped`
+
+<a id="PANEL-14"></a>
+### PANEL-14: the MCP servers the session started
+
+The MCP servers section has one row for each server that started and completed its handshake
+([SERVERS-14](mcp-servers.md#SERVERS-14)), by the alias the person's settings gave it, in the order
+they were started, and is left out where none did. Control characters in an alias are drawn as
+visible characters, and an alias longer than a row is cut from the left, since the end of an alias
+is what tells two apart.
+
+A server whose tool list the person answered no to ([SERVERS-8](mcp-servers.md#SERVERS-8)) is not
+listed, because the model is offered nothing from it for the rest of the session, and the section
+goes with the last of them. A server whose list nobody has been asked about yet is listed, since the
+list is put to the person before the next turn plans. `/status` and `/mcp` still name a server that
+was declined, with how its tools stand ([SERVERS-14](mcp-servers.md#SERVERS-14),
+[SERVERS-19](mcp-servers.md#SERVERS-19)).
+
+`verified-by: bravebot_tui::panel::an_mcp_alias_is_drawn_pictured_and_cut_from_the_left`
+`verified-by: bravebot_tui::panel::a_server_whose_tools_were_declined_is_not_listed_and_the_section_goes_with_the_last`
+`verified-by: bravebot_tui::state::only_the_servers_whose_tools_were_declined_are_left_out_of_the_offered_ones`
+`verified-by: bravebot_tui::panel::the_sections_come_in_order_and_an_empty_one_leaves_no_heading`
+
+<a id="PANEL-15"></a>
+### PANEL-15: the title says what the session is doing
+
+A marker stands in front of the title, so a tab bar that cuts the title still shows it, and counts
+toward the 60 columns of [PANEL-2](#PANEL-2). While a turn or a command is running the marker is
+`✦`. While an approval, a question or a confirmation is open and the run is waiting for the person
+it is `[!]`. With neither, as at the box, there is no marker and the title is as PANEL-1 gives it.
+The marker is written before the session has a name, since the first turn is when a tab most needs
+to say it is waiting. It is written on a change of state and not again while the state stays the
+same, with no animation, so the title is not rewritten every frame. Which marker applies is the
+driver's own state, a turn running or a prompt open, and not anything read from what the turn
+produced ([PANEL-11](#PANEL-11)). [PANEL-4](#PANEL-4) holds: no marker is written where no title is.
+
+`verified-by: bravebot_tui::title::a_change_of_state_rewrites_the_title_and_a_repeated_state_does_not`
+`verified-by: bravebot_tui::title::a_state_is_written_before_the_session_has_a_name`
+`verified-by: bravebot_tui::title::the_marker_leads_the_title_and_counts_toward_sixty_columns`
+`verified-by: bravebot_tui::title::no_state_is_written_when_the_title_is_turned_off`
+`verified-by: bravebot_tui::app::a_question_turns_the_title_to_waiting_and_other_messages_do_not`
+`verified-by: bravebot_tui::app::every_approval_a_manifest_step_draws_turns_the_title_to_waiting`
+`verified-by: bravebot_tui::app::a_manifest_step_marks_the_title_waiting_while_it_asks_and_working_after`
+
+## Known costs
+
+- **A terminal that is not asked shows no resize pointer.** Over the border it draws its own pointer,
+  so a person there finds that the border drags by trying it. iTerm2 and xterm read the sequence
+  ([PANEL-6](#PANEL-6)) but take other names for the shape, a subset of X11's that iTerm2 does not
+  list and X11's own for xterm, and each is asked once the name it takes for this shape is confirmed
+  in that terminal. VTE-based terminals and Alacritty do not read the sequence. A terminal not asked
+  still sends the position of the pointer with no button held ([INPUT-33](terminal-input.md#INPUT-33)),
+  which is read as the last of a burst ([INPUT-49](terminal-input.md#INPUT-49)) and draws a frame only
+  when the target under the pointer changes.
+
+- **A prompt or a picker opened under the pointer leaves the resize pointer in place.** The prompts
+  and pickers read their own events and none of them reads the pointer, so a pointer on the border
+  when one opens keeps its shape until the prompt closes and the pointer next moves.

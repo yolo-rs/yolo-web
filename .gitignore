@@ -1,0 +1,12 @@
+/target/
+node_modules/
+build.log
+*.pdb
+*.ilk
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+dist/
+out/

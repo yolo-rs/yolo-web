@@ -1,0 +1,1008 @@
+---
+id: PROMPT
+title: Asking a person
+status: normative
+governs:
+  - crates/tui/src/confirm.rs
+  - crates/tui/src/confirm/chrome.rs
+  - crates/tui/src/confirm/grants.rs
+  - crates/tui/src/confirm/mcp.rs
+  - crates/tui/src/confirm/note.rs
+  - crates/tui/src/confirm/pinned.rs
+  - crates/tui/src/confirm/run.rs
+  - crates/tui/src/confirm/vet.rs
+  - crates/tui/src/confirm/write.rs
+  - crates/tui/src/trust_prompt.rs
+  - crates/tui/src/remote_confirm.rs
+  - crates/core/src/invisible.rs
+  - ui/src/renderer/shown.ts
+  - ui/src/renderer/components/Transcript.tsx
+  - ui/src/renderer/components/Approval.tsx
+  - ui/src/renderer/components/TrustPrompt.tsx
+  - ui/src/renderer/components/Diff.tsx
+documented-by:
+  - docs/website/docs/security/permissions.md
+  - docs/website/docs/security/permission-modes.md
+  - docs/website/docs/security/permission-rules.md
+kept_in:
+  - Confirmer::confirm_write: one effect; credential writes agreed to for the session; credential writes remembered past the session
+  - Confirmer::confirm_run: one effect; programs vouched for; lines remembered past the session; run prompts drawn; reach kept from a run
+  - Confirmer::confirm_read_output: one effect; auto-vetting
+  - Confirmer::confirm_vetted_read: one effect; auto-vetting
+  - Confirmer::confirm_fetch: one effect
+  - Confirmer::confirm_server: language servers started
+  - Confirmer::confirm_server_noting_the_mode: language servers started
+  - Confirmer::confirm_manifest: one effect
+  - Confirmer::confirm_vouch: the trust map
+  - Confirmer::confirm_exposing_read: files sent despite a credential
+  - Confirmer::confirm_exposing_read_noting_the_mode: files sent despite a credential
+  - Confirmer::confirm_tool_list: MCP tool lists approved
+  - Confirmer::confirm_mcp_call: one effect; standing answers to an MCP tool
+  - Confirmer::confirm_move: MCP server moves
+  - Confirmer::confirm_path: paths reached
+  - Confirmer::confirm_host: hosts answered
+  - Confirmer::confirm_message: one effect; messages covered for the turn
+  - Confirmer::ask_user: answers to the planner's questions
+  - Confirmer::interjection: nothing
+  - Confirmer::arrival: nothing
+  - Confirmer::alert_when_asking: nothing
+  - Confirmer::asks_a_person: nothing
+  - Asker::anybody_there: nothing
+  - Asker::ask_to_start: MCP servers approved; MCP projects answered for
+  - Asker::ask_to_move: MCP server moves
+  - Asker::records: nothing
+  - Answers::trust: the trust map
+  - Answers::programs: programs vouched for
+  - Answers::servers: language servers started
+  - Answers::asked_about: run prompts drawn
+  - Answers::exposed: files sent despite a credential; credential writes agreed to for the session
+  - Answers::rules: granted rules
+  - trust_prompt::ask: the trust map; a kept answer to the startup question
+  - trust_prompt::ask_named: the trust map
+  - trust_prompt::ask_granted: granted rules
+---
+
+## Scope
+
+Every moment the system stops and puts something to a human: what the prompt must show, what an
+answer grants, and what one answer must never be taken for. `ask_user`, where the **planner** asks
+a question, is [tools/ask-user.md](tools/ask-user.md) and is a different thing: these prompts are the system asking
+permission.
+
+Which prompts there are, and where the answer to each is kept, is the register in
+[PROMPT-11](#PROMPT-11).
+
+Sending a message to another background session is one of them ([session-messages.md](session-messages.md#MSG-3)).
+Only a background session puts it, in lines, to whoever attaches, and no mode answers it.
+
+The plan a manifest run is about to walk is the only prompt about a whole run rather than about one
+thing at the moment it is due. It can be, because that mode fixes every step while the task string is
+still the only input ([manifest.md](manifest.md#MANIFEST-10)). Everything below applies to it as it
+does to the rest.
+
+## What every prompt owes the reader
+
+<a id="PROMPT-1"></a>
+### PROMPT-1: a prompt shows what is actually at stake, not a summary of it
+
+A write prompt shows the path and the body; an overwrite shows what it replaces; a run prompt
+shows the argv, the resolved binary and the directory; an output prompt shows the bytes and the
+command that printed them; a vetting prompt shows the bytes, where they came from, and what the
+check said about them rather than the word alone; the prompt about a directory a settings file
+asked for shows the path it would open. A person cannot endorse a routing field they were not shown.
+
+A vetting prompt about a picture ([VET-4](tools/vet-content.md#VET-4)) names a path for the person
+to open the picture at, because the desktop window draws no picture and a terminal draws one only
+if it speaks a graphics protocol, and a drawing is scaled down. What is at
+stake is still shown rather than summarised: the file at that path is a copy of the slot's bytes,
+one step away, and [VET-4](tools/vet-content.md#VET-4) says why it is not the path they were read
+from.
+
+These prompts draw the path they ask about through one function, `shown_name`, which every front end
+uses: the write, overwrite and edit prompts, the credential-read prompt, the prompt about a path
+programs may reach, the questions about a directory, the names a checkout's removal would delete,
+the vouch prompt, and the files a run would write and the directories it is confined to. The run
+prompt also draws the directory the line runs in, in its header, on the summary line and beside each
+command `a` would vouch for, and the file each step runs (the path that starts it and the file it
+leads to, each spelled on its own), the same way, and so do the rows that say which file a yes is
+recorded in: the remembered-lines record, the settings file a pattern would go in, the record of a
+kept reach and the record and the key files of a chosen key. The terminal's trust questions draw the
+file a yes is kept in and the file each proposed rule came from the same way, and so does the
+question in lines for the file a yes is kept in. The question about the rules a checkout proposed
+draws the text of each rule the same way, except that a space in it is never marked, since a rule is not a name. The startup trust question the bridge puts to an editor or
+to the mobile app carries the directory and the file a yes is kept in spelled for a person, and both
+draw those. The desktop window's startup question does the same with the spelled directory and file
+that the responses opening a session carry, and the list of rules a checkout proposed draws each
+rule's text and file as the bridge spelled them. The notice above a transcript and the permissions
+list that say a yes was kept draw the file it is kept in, and the directory it is about, as spelled.
+The mobile app's write, run and trust cards, and the line its transcript keeps for a
+waiting write, draw the spelled paths the bridge sends and never the paths as held. The line the
+transcript draws for a call about a file, such as `Write(note.md )`, draws the name spelled in the
+terminal, in lines, in the editor, in the desktop window (`shownTarget`) and in the mobile app, and so
+does the list of files a turn wrote in the terminal and the lists of files read and written in the
+desktop window's Context panel, which draw the name the bridge sent for the file (`shownFile`). A call about anything else, such as a search for a pattern, is drawn
+as written, and the target a call carries to a program or is matched on is the name as held. The
+notes said before the first prompt about an allow rule a checkout proposed, whether it was granted
+before or is not granted, draw the rule as a rule is drawn and the settings file and the record a yes
+is kept in as paths. The desktop window's lists of the rules in force, of the entries that are not
+rules, of the directories a settings file named, of the `sandbox.filesystem` paths and of the files
+that wrote them draw the spelled fields the bridge sends beside each (`shownDeny`, `shownAsk`,
+`shownAllow`, `shownRule`, `shownDirectories`, `shownPath`, `shownFile`) and never the value as
+held, and the sentence about an entry that is not a rule quotes the entry spelled. A name that is
+empty, is only whitespace, has a space at either end of it or of a directory in it, or holds a character
+that draws as nothing (a zero-width character, a bidirectional control, a tag character, a variation
+selector, a no-break space) or as a blank cell (the blank braille pattern) is drawn quoted with each
+such character spelled, so it cannot read as another name. The terminal and the desktop window also
+spell a byte of a path that is not part of a UTF-8 character as `\xNN`, so two paths that differ
+only in such bytes are not drawn alike. Any other name is drawn as it is. The one-line description a
+front end draws in place of the prompt, such as the question in lines and an editor's title, names
+the path the same way. Under the vouch prompt's name the prompt draws the rule a yes writes, the
+full path the trust map will hold it under ([TRUST-8](trust-map.md#TRUST-8)), so a rule wider than
+the name reads as wider. The rule is shown and nothing branches on it.
+
+Every prompt a check was run for shows what it said, and the three are drawn out of one row builder
+rather than three, so a prompt cannot carry a verdict and forget to say what it was. Which prompts
+those are is [CHECK-10](vetting.md#CHECK-10).
+
+The plan prompt shows the task in the person's own words and then every step, in order, each naming
+its tier, what it would do, and every routing field the step fixes rather than the headline one
+alone. Every step, never a count and never the first few: one answer covers all of them, and the
+step below the fold is as binding as the first. A run prompt's arguments are the same: the last of
+them runs as surely as the first, so no key that runs the line is taken until every row of its plan
+has been on the screen ([PROMPT-4](#PROMPT-4)).
+
+A run prompt's arguments, its environment values and the paths it redirects to are drawn through
+`command::quoted`, which wraps an argument in single quotes where it is empty or holds a space, a
+quote, a backslash or a `>`, and also where it holds a control character, white space other than a
+space, a character that draws as nothing or the blank braille pattern. Inside the quotes each such
+character is written as `\u{..}`, its code point in hex, and a literal backslash is written `\\`.
+Two argument lists that differ only in such a character therefore draw apart, an argument made only
+of them is still drawn as an argument, and the text `\u{200b}` does not draw as the character it
+spells. The mapping reads no meaning from the argument and decides no effect. The approval stays
+bound to the arguments as held.
+
+`verified-by: bravebot_core::command::an_argument_holding_an_invisible_character_is_spelled`
+`verified-by: bravebot_core::command::two_argument_lists_that_differ_in_an_invisible_character_draw_apart`
+`verified-by: bravebot_core::command::an_argument_of_invisible_characters_alone_is_still_drawn_as_an_argument`
+`verified-by: bravebot_core::command::the_text_of_a_spelling_draws_apart_from_the_character_it_spells`
+`verified-by: bravebot_core::command::an_invisible_character_in_an_environment_value_or_a_redirect_is_spelled`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_draws_names_that_differ_in_an_invisible_character_apart`
+
+`verified-by: bravebot_tui::confirm::write::a_new_file_prompt_shows_the_path_and_body`
+`verified-by: bravebot_tui::confirm::write::an_overwrite_prompt_shows_what_it_replaces`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_shows_the_argv_the_binary_and_the_directory`
+`verified-by: bravebot_tui::confirm::run::no_key_runs_a_long_plan_until_every_row_of_it_has_been_on_the_screen`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_shows_the_bytes_and_the_command`
+`verified-by: bravebot_tui::confirm::vet::the_vet_prompt_shows_the_bytes_and_where_they_came_from`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_says_what_a_check_found`
+`verified-by: bravebot_tui::confirm::vet::the_vouch_prompt_says_what_a_check_found`
+`verified-by: bravebot_tui::confirm::vet::the_vouch_prompt_marks_an_unreadable_name_and_says_the_rule`
+`verified-by: bravebot_tui::confirm::write::the_write_prompt_marks_an_unreadable_name`
+`verified-by: bravebot_tui::confirm::grants::the_exposure_prompt_marks_an_unreadable_name`
+`verified-by: bravebot_tui::confirm::grants::the_path_prompt_marks_an_unreadable_name`
+`verified-by: bravebot_tui::trust_prompt::the_directory_questions_mark_a_name_that_would_draw_as_another`
+`verified-by: bravebot_tui::confirm::grants::the_remove_checkout_question_marks_a_name_that_would_draw_as_another`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_marks_an_unreadable_written_file_and_directory`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_marks_an_unreadable_directory_and_binary`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_marks_an_unreadable_record_path`
+`verified-by: bravebot_tui::trust_prompt::the_trust_rows_name_a_file_with_a_name_that_would_draw_as_another`
+`verified-by: bravebot_tui::trust_prompt::a_proposed_rule_holding_an_invisible_character_is_drawn_spelled`
+`verified-by: bravebot_agent::confirm::a_space_in_the_text_of_a_rule_is_not_marked_as_the_edge_of_a_name`
+`verified-by: bravebot_approval::lib::a_run_spells_a_written_file_and_a_directory_that_would_draw_as_another`
+`verified-by: bravebot_cli::plain::a_run_question_spells_a_written_file_and_a_directory_that_would_draw_as_another`
+`verified-by: bravebot_cli::plain::a_run_question_spells_the_directory_and_the_binary_that_would_draw_as_another`
+`verified-by: bravebot_cli::plain::the_question_in_lines_spells_the_file_a_yes_is_kept_in`
+`verified-by: bravebot_ui_bridge::acp::a_run_question_spells_a_written_file_and_a_directory_that_would_draw_as_another`
+`verified-by: bravebot_ui_bridge::acp::the_editor_is_read_the_directory_and_the_binary_spelled`
+`verified-by: bravebot_ui_bridge::wire::a_run_request_carries_the_written_files_and_directories_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::wire::a_run_request_carries_the_directory_and_the_binary_spelled_for_a_person`
+`verified-by: bravebot_agent::confirm::a_description_of_a_write_or_a_credential_read_spells_the_name`
+`verified-by: bravebot_cli::plain::a_question_in_lines_spells_a_name_that_would_draw_as_another`
+`verified-by: bravebot_ui_bridge::acp::the_title_of_a_question_about_a_file_spells_a_name_that_would_draw_as_another`
+`verified-by: bravebot_ui_bridge::wire::a_write_and_a_credential_read_carry_the_name_spelled_for_a_person`
+`verified-by: by-construction (the desktop window is not a crate this workspace compiles; ui/scripts/shown-name.test.mjs renders the write, credential-read, vouch and run cards, the startup question, the notice and the list of what is kept, the list of proposed rules, a tool line and the Context lists of files read and written through react-dom and asserts each draws the name the agent spelled and not the name as written, ui/scripts/drive-remembered-trust.mjs asks the startup question in the real window about a directory whose name ends in a space and about a long directory in a 900x560 window, and make check-ui runs them)`
+`verified-by: bravebot_agent::confirm::a_name_that_draws_as_nothing_is_shown_as_what_it_is`
+`verified-by: bravebot_agent::confirm::a_directory_in_a_path_that_starts_or_ends_in_a_space_is_shown_as_what_it_is`
+`verified-by: bravebot_agent::confirm::a_byte_that_is_not_text_is_shown_as_the_byte_and_not_as_another_name`
+`verified-by: bravebot_core::invisible::only_the_blank_braille_pattern_is_a_cell_with_no_mark`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_draws_a_path_that_is_not_text_as_the_bytes_it_holds`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_draws_a_directory_binary_and_record_that_are_not_text_as_their_bytes`
+`verified-by: bravebot_tui::confirm::run::the_run_prompt_spells_the_link_and_the_file_a_step_starts_through`
+`verified-by: bravebot_ui_bridge::wire::a_run_request_carries_a_directory_that_is_not_text_spelled_as_the_bytes_it_holds`
+`verified-by: bravebot_ui_bridge::wire::a_vouch_request_carries_the_name_and_the_rule_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::control_tests::the_startup_question_carries_the_directory_and_the_record_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::control_tests::the_startup_question_spells_a_directory_that_holds_invisible_characters`
+`verified-by: bravebot_agent::report::a_line_spells_the_name_of_a_file_and_nothing_else`
+`verified-by: bravebot_agent::report::a_list_of_files_names_a_file_without_its_slot_and_spelled`
+`verified-by: bravebot_agent::tools::a_file_calls_line_spells_a_name_a_person_could_not_otherwise_tell_apart`
+`verified-by: bravebot_agent::tools::a_stored_call_spells_the_name_of_its_file`
+`verified-by: bravebot_ui_bridge::reporting::a_calls_file_crosses_as_held_and_as_spelled`
+`verified-by: bravebot_ui_bridge::acp::a_call_is_titled_with_the_file_as_spelled`
+`verified-by: bravebot_tui::render::a_call_about_a_file_draws_a_name_that_ends_in_a_space_spelled`
+`verified-by: bravebot_tui::app::the_notes_about_a_checkouts_allow_rule_spell_the_rule_and_the_files`
+`verified-by: bravebot_ui_bridge::acp::the_trust_question_spells_a_directory_that_would_draw_as_another`
+`verified-by: bravebot_ui_bridge::acp::the_trust_question_names_the_record_as_the_bridge_spelled_it`
+`verified-by: bravebot_ui_bridge::acp::the_trust_question_names_a_directory_that_ends_in_a_space_as_the_terminal_does`
+`verified-by: bravebot_ui_bridge::opening_tests::the_response_opening_a_session_carries_the_directory_and_the_record_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::opening_tests::a_kept_answer_carries_its_file_and_its_root_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::rules::a_proposed_rule_and_its_file_are_reported_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::rules::every_list_the_window_shows_is_sent_spelled_for_a_person`
+`verified-by: bravebot_ui_bridge::rules::the_sentence_about_an_unreadable_rule_quotes_it_spelled`
+`verified-by: by-construction (the desktop window is not a crate this workspace compiles; ui/scripts/settings-rules.test.mjs renders the rules in force, the filesystem lists, the rules banner and the manifest card's list of rules through react-dom/server and asserts each draws the spelled field and not the value as held, and make check-ui runs it)`
+`verified-by: by-construction (the mobile app is not a crate this workspace compiles; mobile/src/__tests__/approvals.test.tsx and transcript.test.tsx render the write, run and trust cards, the waiting-write line and a call's line through react-test-renderer and assert each draws the path the bridge spelled and not the path as held, mobile/src/__tests__/calls.test.ts asserts the list of calls does the same, mobile/src/__tests__/payloads.test.ts asserts a request without the spelled fields is not offered, and make check-mobile runs them)`
+`verified-by: bravebot_agent::turn::approval_prompts_carry_the_labels_the_gates_released_their_bytes_under`
+`verified-by: bravebot_tui::trust_prompt::the_named_prompt_shows_the_directory_it_would_open`
+`verified-by: bravebot_tui::confirm::grants::the_plan_prompt_shows_the_task_and_every_step`
+`verified-by: bravebot_core::manifest::a_described_step_names_every_routing_field_it_fixes`
+
+<a id="PROMPT-2"></a>
+### PROMPT-2: a prompt says what approving does, and what it does not
+
+The run prompt says what the programs are held to: where the turn confines them
+([SANDBOX-17](#SANDBOX-17)), the directories they are confined to and the toolchain lists and
+credential scopes each stage brings beyond them ([SANDBOX-18](#SANDBOX-18)), and where it does not,
+that they are not sandboxed. Which of the two it says is decided by the confinement the executor
+starts the stages under, so it cannot disagree with what runs. On Linux and Windows, where no
+`.git` is held back, the heading over those directories also says, for a line with a stage whose
+program is not git and whose profile writes more than the temporary directory, that a program in
+the line other than git can write a repository's hooks and configuration, which git runs later
+with no sandbox ([SANDBOX-18](sandboxing.md#SANDBOX-18)); whether a stage's program is git is the
+decision its profile is built with. It asks for the side effects and the
+output together, and names the exact command it would vouch for. Where a front end offers a
+standing answer beside the run question or the call question, the lines say what picking it does:
+for a run, that the exact command, with its exact arguments, runs unasked and its output is
+trusted in this directory from then on, in later sessions and not only this one; for a call, that
+the tool is allowed without asking again in the project. A front end with no such answer to offer
+sends neither sentence. The output prompt says
+what approving does. The vetting prompt says what approving does and, because nothing else on the
+screen would, what it does not: no path is vouched for, so the same thing read again asks again. The trust prompt explains the consequence and names both answers, and says that a command the
+sandbox confines then runs in the directory without asking ([RUN-5](tools/run.md#RUN-5)), above the lines
+that scroll so that it is on the screen whenever a yes can be taken. The desktop interface's question says it too, in the words the bridge hands it, and its yes
+tells the bridge that it did, since a yes that does not say so grants nothing of the kind
+([TRUST-7](trust-map.md#TRUST-7)). The prompt
+about a directory a settings file asked for says that opening it grants reach and trust, and that a
+file asked for it. The plan prompt says that nothing the run reads can add a step, drop one, or send
+anything anywhere the plan does not already name; that approving the plan is not approving its
+writes, which are each still put to the person as they come up; and that nothing has happened yet, so
+declining leaves everything as it is.
+
+**Why.** The second half of a run grant, that what the command prints becomes trusted, is the one
+nothing else would tell the user. A hook or a configuration that a program other than git writes
+into a `.git` where the platform cannot refuse the write runs with the person's whole access after
+the line has ended, and nothing else tells them that either. A directory nobody typed is the same problem in the other
+direction: without the question saying where the name came from, the box is unexplained. A plan is
+the same problem at its largest, since a reader has no way to tell from a step list how much of the
+run one keypress settles.
+
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_says_it_is_not_sandboxed_where_the_turn_does_not_confine`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_says_what_a_confined_run_is_held_to`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_says_a_program_other_than_git_can_write_a_repositorys_hooks`
+`verified-by: bravebot_cli::plain::a_run_is_asked_about_as_confined_only_where_the_turn_confines`
+`verified-by: bravebot_agent::confine::what_a_prompt_says_a_stage_carries_is_what_its_profile_grants`
+`verified-by: bravebot_agent::confine::a_prompt_says_a_program_other_than_git_can_write_a_git_directory_where_none_is_held_back`
+`verified-by: bravebot_agent::confirm::a_line_that_can_write_a_repositorys_hooks_says_so_in_its_heading`
+`verified-by: bravebot_agent::turn::a_run_prompt_describes_the_confinement_only_where_the_turn_confines`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_asks_for_the_side_effects_and_the_output_together`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_names_the_exact_command_it_would_vouch_for`
+`verified-by: bravebot_approval::lib::a_run_explains_what_allow_and_remember_grants_only_where_it_is_offered`
+`verified-by: bravebot_approval::lib::a_call_explains_what_allow_and_remember_grants_only_where_it_is_offered`
+`verified-by: bravebot_ui_bridge::acp::a_remembered_run_and_a_standing_call_show_the_sentence_only_then`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_says_what_approving_does`
+`verified-by: bravebot_tui::confirm::vet::the_vet_prompt_says_what_approving_does_and_does_not_do`
+`verified-by: bravebot_tui::trust_prompt::the_prompt_explains_the_consequence`
+`verified-by: bravebot_tui::trust_prompt::the_prompt_names_the_directory_and_both_answers`
+`verified-by: bravebot_tui::trust_prompt::the_prompt_says_confined_lines_run_without_asking_wherever_a_yes_can_be_taken`
+`verified-by: bravebot_tui::trust_prompt::only_a_yes_that_said_so_allows_confined_lines`
+`verified-by: bravebot_tui::trust_prompt::the_named_prompt_explains_what_opening_does`
+`verified-by: bravebot_tui::confirm::grants::the_plan_prompt_says_what_approving_it_does_and_does_not_do`
+
+<a id="PROMPT-3"></a>
+### PROMPT-3: what a prompt shows is drawn inside a margin it cannot forge
+
+Content in a prompt is untrusted like any other. An untrusted body is marked as such,
+and command output is drawn inside the margin. So is the content a vetting prompt shows, and so is
+the sentence the check wrote about it, on whichever of the three prompts it was written for: that
+sentence is free text about bytes an attacker may own, and it is the one line on such a screen a
+reader might otherwise take for the program's. The verdict word is the driver's and sits outside the
+margin; the sentence is not, and sits inside it. A processor's remark
+([PROC-12](processors.md#PROC-12)) is drawn in the transcript's own quarantine block against the
+prompt's margin, rather than against the transcript's: one screen with two margin columns on it is a
+screen where the column stops meaning anything.
+
+A manifest plan's steps are the one body here drawn without a bar, and the reason for the rule is
+what says so: they are the driver's own rendering of a plan that came from a context holding the task
+string and the driver's own words, and nothing a step read exists yet. A bar down them would mark as
+untrusted the one thing on the screen that is not, which is the opposite of why they can be shown.
+
+The margin is on every **drawn row**, not every line of the content. A command's output is
+untrimmed and a hunk of a body has no width cap, so a line wider than the prompt box is ordinary
+rather than exotic: it is broken to the box's width by the same step that draws the margin, and
+each row it breaks into carries a bar of its own. A continuation row that started at column 0 would
+be untrusted content outside the margin, placed where the content's own padding chose, near enough
+to paint a bar of its own in the margin column. What does not fit vertically is scrolled to rather
+than dropped, as it is for any long body.
+
+`verified-by: bravebot_tui::confirm::write::an_untrusted_body_is_marked_in_the_prompt`
+`verified-by: bravebot_tui::confirm::vet::output_is_drawn_inside_the_margin_it_cannot_forge`
+`verified-by: bravebot_tui::confirm::vet::vetted_content_is_drawn_inside_the_margin_it_cannot_forge`
+`verified-by: bravebot_tui::confirm::vet::what_the_check_said_is_drawn_inside_the_margin_too`
+`verified-by: bravebot_tui::confirm::vet::a_wrapped_output_line_is_marked_on_every_row_it_reaches`
+`verified-by: bravebot_tui::confirm::write::a_wrapped_untrusted_hunk_is_marked_on_every_row_it_reaches`
+`verified-by: bravebot_tui::confirm::vet::a_wrapped_vouch_preview_is_marked_on_every_row_it_reaches`
+`verified-by: bravebot_tui::confirm::vet::a_wrapped_vetted_line_is_marked_on_every_row_it_reaches`
+`verified-by: bravebot_tui::confirm::write::a_remark_cannot_paint_a_margin_in_the_box_it_is_drawn_in`
+`verified-by: bravebot_tui::confirm::write::a_control_character_in_a_remark_is_replaced`
+
+<a id="PROMPT-4"></a>
+### PROMPT-4: a review stays legible, or says it could not
+
+A long body keeps the question on screen and offers the rest, which can be scrolled to. A small
+edit in a large file shows only the change. An empty output says so, and so does a slot with nothing in it
+and a file with nothing to preview. A diff that cannot be computed says so rather than showing nothing. A plan longer
+than the box is scrolled to rather than cut short, and the question stays on screen while it is.
+The questions a session opens with keep their question and their keys on screen the same way, with
+what lies between scrolled by the keys the write and run prompts use (Up, Down, `k`, `j`, PageUp, PageDown, Home and
+End, as [SCROLL-3](scroller.md#SCROLL-3) sets out), a page moving one row fewer
+than the box shows, and none of them takes a yes at a draw that cuts either off.
+A run prompt keeps its question and its keys on screen the same way and pages the same way. While a
+row of its plan, down to the access the line spends, has not been on the screen during this
+question, the row above the keys says how many have not, and `y`, `a` and `r` are not taken: each
+runs the line. Reaching the bottom is not reading what was passed over, and a row read at one width
+is not a row of the plan wrapped to another. What `a` and `r` grant besides is said below the plan,
+and each of them also waits until the rows saying what it grants have been on the screen.
+In the full-screen interface, the write, output, vetting, vouch, exposure, server, tool list, call
+and plan prompts take no key that approves until every row that decides the question has been drawn
+whole at the box's width, in one draw or over several as the body scrolls. What decides it is what
+the prompt says about the content it shows and that content's first row; for a call it is the tool
+and every argument, and for the exposure, server, tool list and plan prompts and a vetted picture it
+is all of it, the picture's rows counting only at a draw that paints it whole. Until
+then the row under the body says how many of those rows are left, and a draw at another width
+starts the count again. A page moves one row fewer than the body shows, a box with no row for the
+body beside keys drawn whole takes no yes, and a refusal and the key that stops the turn are taken
+at every draw.
+A processor's remark is bounded in **drawn rows**, so on a terminal of 80x24 or more a claim cannot
+push the bytes it is a claim about below the fold, and the block says how many lines it is not
+showing. On a smaller one the yes waits until those bytes have been drawn.
+
+In the desktop window, a card that asks for an approval takes none until each row that decides it
+has been on screen whole, at one moment or over several as the card is scrolled: inside every box
+that clips it, in a window that is showing, with nothing drawn over it, an overlay the pointer
+passes through included. The rows are the ones the terminal waits on for the same question. For a
+write, reading output, a vetting card and a vouch they are the head and every row above the content,
+and the content's first row; for a vetted picture they are all of it, down to the path to open. For
+a run they are the head and every row of the plan, down to the access the line spends and each
+warning, and a remembered approval also waits on the row saying what it covers. For a call they are
+the tool and every argument, and not the server's description of the tool. For a language server,
+an MCP server, a tool list, an exposure and a plan they are all of the card. For the window's trust
+question about the working directory ([TRUST-23](trust-map.md#TRUST-23)) they are the directory, every row
+saying what an answer does, the sentence that confined lines run without asking when the question
+carries it, and the row naming the file a yes is kept in. The directory is drawn in a box that
+scrolls inside itself, so a long path cannot push those rows out of the dialog, and the box
+is one of the boxes that clip a row. Its yes, labelled "Trust and remember" where a yes is kept and
+"Trust for this session" where it is not, takes no press until those rows have been on screen, and
+its no is taken at every draw. A yes cannot be pressed before the sentence has been on screen, so a
+yes that tells the bridge the sentence was shown (`confinedLines`) followed a draw that had it on
+screen. The terminal keeps the
+host of a fetch and of a moved server pinned, which a card that scrolls with the transcript cannot,
+so the card waits on them instead: for a fetch, the first row of the address, the host and the
+access it spends; for a moved server, where it was declared, the first row of where its reply
+points, the host it reaches and the warning. A first row is the whole first line an element draws,
+whatever it is made of. What a card folds under Details, and the fixed sentence the window closes a
+card with, are not counted. The planner's own questions approve nothing and wait on nothing. Until
+the rows have been on screen the row of answers says how many are left and an approval refuses a
+press, and a refusal is taken at once. Nothing counts before the card is first measured, a press is
+measured again when it lands, and a change in the card's width, or in how many rows an element
+draws, starts the count again.
+
+**Why.** Reviewing a whole file body on a terminal is not review, which is why `edit_file` exists
+on a passage rather than a whole body. A prompt that scrolled the question away would be collecting a keypress, not a decision. A card
+in a window is the same question asked with a mouse, so it owes the same.
+
+`verified-by: bravebot_tui::confirm::write::a_long_body_keeps_the_question_on_screen_and_offers_the_rest`
+`verified-by: bravebot_tui::confirm::write::the_rest_of_a_long_body_can_be_scrolled_to`
+`verified-by: bravebot_tui::confirm::write::a_small_edit_in_a_large_file_shows_only_the_change`
+`verified-by: bravebot_tui::confirm::vet::output_that_is_empty_says_so`
+`verified-by: bravebot_tui::confirm::vet::vetted_content_that_is_empty_says_so`
+`verified-by: bravebot_tui::confirm::vet::a_preview_with_nothing_in_it_says_so`
+`verified-by: bravebot_tui::confirm::write::an_uncomputable_diff_says_so`
+`verified-by: bravebot_tui::confirm::grants::a_long_plan_keeps_the_question_on_screen_and_offers_the_rest`
+`verified-by: bravebot_tui::confirm::write::a_long_remark_does_not_push_the_diff_off_the_screen`
+`verified-by: bravebot_tui::confirm::run::a_plan_longer_than_the_box_keeps_the_run_keys_and_says_how_many_rows_are_unread`
+`verified-by: bravebot_tui::confirm::run::no_key_runs_a_long_plan_until_every_row_of_it_has_been_on_the_screen`
+`verified-by: bravebot_tui::confirm::run::a_and_r_each_wait_for_the_rows_saying_what_they_grant_besides_running_the_line`
+`verified-by: bravebot_tui::confirm::run::jumping_to_the_end_of_a_long_plan_leaves_the_rows_passed_over_unread`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_too_small_for_its_question_takes_no_key_that_runs_the_line`
+`verified-by: bravebot_tui::confirm::run::a_plan_read_at_one_width_is_unread_again_at_another`
+`verified-by: bravebot_tui::confirm::run::paging_through_a_long_plan_in_a_short_box_puts_every_row_on_the_screen`
+`verified-by: bravebot_tui::confirm::no_question_takes_a_yes_before_every_row_deciding_it_has_been_drawn`
+`verified-by: bravebot_tui::confirm::a_box_with_no_room_for_the_body_beside_the_keys_takes_no_yes`
+`verified-by: bravebot_tui::confirm::a_question_read_at_one_width_takes_no_yes_at_another`
+`verified-by: bravebot_tui::confirm::a_question_says_how_many_rows_are_left_to_read_before_a_yes`
+`verified-by: bravebot_tui::confirm::vet::a_picture_the_box_cannot_paint_takes_no_yes`
+`verified-by: bravebot_tui::confirm::write::a_tiny_terminal_draws_the_write_keys_and_takes_no_yes`
+`verified-by: bravebot_tui::trust_prompt::a_list_longer_than_the_box_keeps_the_question_and_the_keys_and_says_how_many_rules_are_below`
+`verified-by: bravebot_tui::trust_prompt::the_rest_of_a_long_list_can_be_scrolled_to`
+`verified-by: bravebot_tui::trust_prompt::a_directory_question_longer_than_the_box_keeps_its_keys_and_scrolls_to_the_rest`
+`verified-by: bravebot_tui::trust_prompt::the_arrows_scroll_the_question_and_answer_nothing`
+`verified-by: bravebot_tui::trust_prompt::a_scroll_moves_from_where_the_box_was_drawn`
+`verified-by: bravebot_tui::trust_prompt::paging_through_a_list_on_a_short_terminal_reads_every_rule`
+`verified-by: bravebot_tui::trust_prompt::a_question_a_small_terminal_cuts_off_takes_no_answer`
+`verified-by: bravebot_tui::trust_prompt::a_question_that_fits_its_box_says_nothing_of_scrolling`
+`verified-by: by-construction (the desktop window is not a crate this workspace compiles; ui/scripts/shown.test.mjs pins that every row an approval rests on is marked as deciding for each kind of card and that the count opens, resets and stays shut as described, and make check-ui runs it; ui/scripts/drive-shown.mjs draws each card too tall for a 900x560 window and checks, independently of the card's own count, that no approval opens or is taken before those rows have been on screen, and that rows swept through under the overlay drawn while a file is dragged over the transcript, which takes no pointer, count for nothing until the drag ends; ui/scripts/shown-name.test.mjs renders the window's startup question and asserts that the directory, the rows saying what an answer does and the row naming the file are marked as deciding and that its yes is held shut under both labels and its no is not, and ui/scripts/drive-shown.mjs asks that question in the real window with a directory too long for it and checks that its yes is refused until those rows have been on screen, and that it opens once they have, although the composer's fade lies under the window's dialog and not over it)`
+
+## What an answer means
+
+<a id="PROMPT-5"></a>
+### PROMPT-5: one answer is never taken for another
+
+An approved write does not approve a run, and does not approve the plan a write is in. A write
+approval is not an answer to a question, and an answer to a question is not consent to a write. An
+approval to read what a program printed does not promote a slot, which covers more. Each
+endorsement is single-use and bound to the exact value it was given for.
+
+Bound to it means the value tells two plans apart wherever they would do different things, so it
+spells the tree a plan runs in, the binary each step resolved to and each destination a step's output
+is sent to, every one of them by that path's own bytes. A rendering maps every byte it cannot read
+onto one replacement character ([tools/run.md](tools/run.md#RUN-8)), and an endorsement keyed on a
+rendering is redeemable by a binary, a tree or a destination the person was never shown.
+
+**Why.** These are separate grants that happen to use the same keyboard. The plan is the widest of
+them, so it is the one where taking another answer for it would run the most that nobody was shown.
+
+`verified-by: bravebot_tui::remote_confirm::an_approved_write_does_not_approve_a_run`
+`verified-by: bravebot_tui::remote_confirm::an_approved_write_does_not_approve_a_plan`
+`verified-by: bravebot_tui::remote_confirm::a_write_approval_is_not_taken_as_an_answer_to_a_question`
+`verified-by: bravebot_tui::remote_confirm::an_answer_to_a_question_is_not_taken_as_consent_to_a_write`
+`verified-by: bravebot_tui::remote_confirm::an_approved_output_read_does_not_approve_a_vetted_read`
+`verified-by: bravebot_core::policy::an_endorsement_is_not_redeemable_by_a_binary_that_only_renders_the_same_way`
+`verified-by: bravebot_core::command::a_plan_is_keyed_on_the_bytes_of_the_file_a_name_resolved_to`
+`verified-by: bravebot_core::command::the_directory_a_plan_runs_in_is_keyed_on_its_bytes`
+`verified-by: bravebot_core::command::where_a_plan_writes_is_keyed_on_its_bytes`
+
+<a id="PROMPT-6"></a>
+### PROMPT-6: standing permission needs its own key, and is never the default
+
+The run prompt separates running once from running always, Enter does not approve a run, and a run
+releasing private data offers no standing permission at all. A call to an MCP server's tool asked
+because its arguments are private offers none either ([SERVERS-7](mcp-servers.md#SERVERS-7)).
+Declining, and Ctrl-C, vouch
+for nothing.
+
+A third answer, whose grant outlives the session, is [tools/run.md](tools/run.md)'s. Everything
+above holds of it: it has a key of its own, Enter does not reach it, a run
+releasing private data does not offer it, and declining or Ctrl-C records nothing. Its row is where the
+two standing lifetimes are told apart, since a key saying only `always` is the one that could be read
+as either.
+
+The plan prompt offers no standing form at all, and Enter does not approve a plan either. A plan is
+written afresh for each run, so remembering an answer to one would be approving steps nobody has
+seen.
+
+The standing key at a vetting prompt is not an answer to the question it asks. What the question asks
+about is one slot's bytes, so there is nothing a standing answer to *that* could be about: a
+promotion covers those bytes once and writes no rule. The key turns on auto-vetting
+([vetting.md](vetting.md#CHECK-11)), which is a decision about which of two questions later slots
+raise, and everything above holds of it: it has a key of its own, Enter does not reach it, and
+declining or Ctrl-C turns nothing on.
+
+Both prompts that promote one slot's bytes offer it, and offer it identically: the one over content
+the planner asked to be shown, and the one over what a program printed. They ask the same question
+about the same kind of grant, so a key present at one and missing at the other would tell a person
+only which tool the planner happened to call. The vouch offer does not carry it, because what a yes
+there writes is a rule about a path rather than a promotion, and the mode it would turn on does not
+reach that question.
+
+**It is offered only where the check completed and found nothing.** A prompt carrying a warning, or
+saying the check could not be made, is the worst moment to grant it, which is the reasoning behind
+the rule that a run releasing private data offers no standing permission at all. The key is unbound
+where it is not drawn, since a key granting something the same screen does not offer is worse than
+an unbound one, and this key's grant outlives the session that could have corrected it. What that
+costs is on [labels.md](labels.md)'s list: an attacker who can force a safe verdict can put the key
+on the screen, and a person still has to press it with the bytes in front of them. At a prompt
+about a picture ([VET-4](tools/vet-content.md#VET-4)), the bytes are a path away instead.
+
+`verified-by: bravebot_tui::confirm::run::the_run_keys_separate_running_once_from_running_always`
+`verified-by: bravebot_tui::confirm::run::the_run_keys_separate_this_session_from_every_session`
+`verified-by: bravebot_tui::confirm::run::the_row_says_which_lifetime_the_always_key_grants`
+`verified-by: bravebot_tui::confirm::run::enter_does_not_approve_a_run`
+`verified-by: bravebot_tui::confirm::run::enter_does_not_record_a_run_past_the_session`
+`verified-by: bravebot_tui::confirm::run::refusing_a_run_records_nothing_past_the_session`
+`verified-by: bravebot_tui::confirm::run::a_prompt_that_offers_no_record_binds_no_key_to_one`
+`verified-by: bravebot_tui::confirm::grants::enter_does_not_approve_a_plan`
+`verified-by: bravebot_tui::confirm::vet::enter_does_not_approve_a_vetted_read`
+`verified-by: bravebot_tui::confirm::vet::a_safe_verdict_does_not_change_which_keys_the_vet_prompt_offers`
+`verified-by: bravebot_tui::confirm::vet::only_a_safe_verdict_offers_to_stop_asking`
+`verified-by: bravebot_tui::confirm::vet::pressing_always_at_a_not_safe_vet_prompt_grants_nothing`
+`verified-by: bravebot_tui::confirm::vet::refusing_a_vetted_read_turns_nothing_on`
+`verified-by: bravebot_tui::confirm::vet::only_a_safe_verdict_offers_to_stop_asking_about_output`
+`verified-by: bravebot_tui::confirm::vet::the_standing_key_is_bound_at_the_output_prompt_only_where_it_is_drawn`
+`verified-by: bravebot_tui::confirm::vet::every_verdict_still_offers_both_answers_about_output`
+`verified-by: bravebot_tui::confirm::run::a_run_that_releases_private_data_offers_no_standing_permission`
+`verified-by: bravebot_tui::confirm::run::pressing_always_at_a_private_input_prompt_grants_nothing`
+`verified-by: bravebot_tui::confirm::run::a_private_input_run_can_still_be_approved_once_or_refused`
+`verified-by: bravebot_tui::confirm::run::saying_no_to_a_run_vouches_for_nothing`
+`verified-by: bravebot_tui::confirm::run::ctrl_c_refuses_the_run_and_vouches_for_nothing`
+`verified-by: bravebot_tui::trust_prompt::declining_trusts_nothing`
+
+<a id="PROMPT-7"></a>
+### PROMPT-7: declining is not cancelling
+
+Saying no to a write does not stop the turn; Ctrl-C refuses it and does. **A question a session opens
+with is answered by a key that arrived on its own, and by no other.** A terminal cannot say who wrote a
+byte, but it can say what was waiting together ([INPUT-34](terminal-input.md#INPUT-34)), and a person
+cannot fill the buffer between one read and the next: one event waiting is a keystroke and several are
+a write. The line an editor types to activate a virtualenv spells an `n` on its way past, and the
+question used to take it. What the question refuses is not dropped: the characters are carried to the
+box, so somebody who finds a question still waiting and their virtualenv activated can read what did
+it, rather than being left to join the two up themselves.
+
+Leaving at such a question ends the session and opens nothing, and only Ctrl-C leaves. **It takes two
+presses there**, and neither from a key that arrived with others: leaving before a session begins is the one
+outcome nothing undoes, and an interrupt is a single byte another program can write into the terminal,
+which an editor activating a virtualenv does ahead of the line it types
+([INPUT-4](terminal-input.md#INPUT-4) keeps the same rule for the same reason). **The offer is
+withdrawn by anything that is not that key**, a resize and words another program typed among them: the
+interrupt an editor writes does arrive on its own and so arms it, and an offer left standing through
+whatever happened next would let the next such byte take it, which is two presses turned back into
+one. **Letting go of a key is not that**, since a release is the tail of the press being answered and
+the way out of the first screen of a session cannot depend on the order somebody releases two keys.
+
+**Why.** A refusal the agent can carry on past is how a person steers without starting over.
+
+`verified-by: bravebot_tui::confirm::saying_no_does_not_stop_the_turn`
+`verified-by: bravebot_tui::confirm::ctrl_c_refuses_the_write_and_stops_the_turn`
+`verified-by: bravebot_tui::confirm::run::only_the_interrupt_stops_the_turn_at_a_run_prompt`
+`verified-by: bravebot_tui::trust_prompt::ctrl_c_leaves_on_the_second_press`
+`verified-by: bravebot_tui::trust_prompt::a_line_another_program_typed_answers_nothing`
+`verified-by: bravebot_tui::trust_prompt::a_press_of_its_own_still_answers`
+`verified-by: bravebot_tui::trust_prompt::what_the_question_refuses_is_carried_for_the_box`
+`verified-by: bravebot_tui::trust_prompt::one_interrupt_another_program_wrote_closes_nothing`
+`verified-by: bravebot_tui::trust_prompt::two_interrupts_that_arrived_together_close_nothing`
+`verified-by: bravebot_tui::trust_prompt::anything_but_the_key_that_leaves_withdraws_the_offer`
+`verified-by: bravebot_tui::trust_prompt::a_key_release_does_not_withdraw_the_offer`
+`verified-by: bravebot_tui::trust_prompt::only_ctrl_c_leaves`
+`verified-by: bravebot_tui::trust_prompt::leaving_starts_no_session`
+`verified-by: bravebot_tui::trust_prompt::leaving_at_one_of_the_questions_opens_nothing`
+`verified-by: bravebot_tui::trust_prompt::the_loop_leaves_on_two_lone_interrupts_and_not_across_a_resize`
+`verified-by: bravebot_tui::trust_prompt::the_loop_carries_words_that_arrived_together_and_answers_a_key_of_its_own`
+`verified-by: bravebot_tui::trust_prompt::the_loop_takes_no_interrupt_that_arrived_with_others`
+`verified-by: bravebot_tui::trust_prompt::the_loop_answers_presses_only_and_keeps_the_offer_through_a_release`
+
+<a id="PROMPT-8"></a>
+### PROMPT-8: a resume restores standing permissions, and nothing else
+
+Three of these grants are standing. Two, the trust map
+and the list of commands a person said to stop asking about, are written into the session record and
+come back with `--resume`, because the person resuming is the person who gave them; a fresh session
+in the same directory restores neither and asks again. The third is not restored by a resume at all:
+the record of command lines somebody asked to be remembered past the session, which
+[tools/run.md](tools/run.md) governs, is read by every session begun in that directory, resumed or
+fresh. It reaches a fresh session because the key that made it said how long its answer lasts, and
+because what it carries is the asking rather than any trust.
+
+Errors and cancellation within a live session retain exact standing command approvals and live
+advice. They do not turn one-use consent or per-policy refusals into standing permission. Saving
+keeps standing approvals; resuming starts with no live advice or exposure answers.
+
+`verified-by: bravebot_agent::turn::retention::ordinary_endings_retain_exact_programs_and_live_advice`
+`verified-by: bravebot_cli::plain_retention_tests::failed_plain_turn_keeps_exact_approvals_advice_and_exposure`
+`verified-by: bravebot_tui::undo_tests::ordinary_tui_endings_keep_exact_approvals_advice_and_exposure`
+`verified-by: bravebot_ui_bridge::retention::worker::bridge_ordinary_endings_keep_decisions_live_and_resumed`
+
+Nothing else survives. A single-use endorsement is created by one approval, is bound to one value,
+and is never written down, so a resumed turn cannot replay a write or a run that an earlier turn
+was allowed. Answers to the planner's own questions are remembered only in the live session, so a
+resumed session puts them again.
+
+Auto-vetting ([vetting.md](vetting.md#CHECK-11)) is not one of the three and is not in the session
+record either. It is not a grant about any particular thing: it says which of two questions a
+session asks, in the way `editorMode` says which keys move the caret, and the routes that turn it on
+are a flag for one run and two files read at startup. A resumed session reads those the way a fresh
+one does, so the record would be a fourth answer for the same question to disagree with.
+
+**Why.** A standing permission is a decision about the future that its owner made deliberately. An
+endorsement is a decision about one act that has already happened, and reviving one would be
+approving something nobody looked at.
+
+`verified-by: bravebot_core::policy::a_turn_inherits_what_the_session_vouched_for`
+`verified-by: bravebot_core::policy::an_endorsement_does_not_outlive_the_destination_it_authorised`
+`verified-by: bravebot_agent::turn::a_line_remembered_past_the_session_runs_without_asking`
+`verified-by: bravebot_tui::sessions::sessions_are_written_read_back_and_kept_per_directory`
+
+<a id="PROMPT-11"></a>
+### PROMPT-11: every place an answer is kept is in the register, with what it is kept under
+
+An answer is kept under a key, and a later effect whose key matches is let through without asking.
+Every place that keeps one is a row of the table below. A row says which question fills it, what
+that question showed, what the answer is kept under, and how long it lasts, and it cites the tests
+that pin what it says. Every question the system asks lands in at least one row, and a question or a
+place to keep answers that is new has its row before it lands.
+
+**Kept under** is what a later effect has to match to go unasked. Anything **Shown** that the key does
+not hold is something one answer covers in every version of it, so where a key holds less than its
+prompt showed the row says what it leaves out.
+
+The sets a session keeps past a prompt are the fields of `bravebot_agent::answers::Answers`, which
+the terminal, the desktop bridge and a session in lines all hold. `/cd`, `/clear`, `/branch`, `/undo`
+and `/rewind` in the terminal, a fork and an undo in the desktop bridge, and the end of a turn in the
+bridge and in a session in lines each take it apart with no `..`, so a set added there does not
+build until each of them says whether its answer is kept, forgotten or replaced. The terminal's turn
+hands the sets back as the fields of `Continued`, which is checked against what a turn decides. An
+answer a transition forgets is asked about again.
+
+The paths programs were let reach and the hosts answered are held by the workspace, which `/clear`,
+`/branch` and `/resume` empty of them. The planner's remembered answers are held by each front end's
+own session, outside `Answers`. `/clear` and `/branch` empty the terminal's, and a session the
+desktop bridge opens, resumes or forks starts with none. An undo leaves them
+([#2944](https://github.com/brave/bravebot/issues/2944)).
+
+| Answer kept | Asked by | Shown | Kept under | Lasts | Evidence |
+|---|---|---|---|---|---|
+| one effect | a write or an edit, a run, reading what a program printed, being shown one quarantined slot, a fetch, the plan, a proposed rule, a call to a server's tool, removing a checkout something was done in, and a message to another background session | what each prompt shows ([PROMPT-1](#PROMPT-1)) | the exact value the approval was given for, by its own bytes ([PROMPT-5](#PROMPT-5)) | the one effect; it is never written down | `verified-by: bravebot_core::policy::an_endorsement_does_not_outlive_the_destination_it_authorised` `verified-by: bravebot_core::policy::an_approval_for_one_url_does_not_fetch_another` `verified-by: bravebot_core::policy::an_approval_to_read_output_cannot_be_replayed` `verified-by: bravebot_core::policy::an_approval_to_vet_cannot_be_replayed` |
+| the trust map | `y` at the startup question, at the question about a directory a settings file asked for, and at the offer to vouch for a quarantined file; `/add-dir` | the directory, or the file with a preview and what the check said | the path as text, made absolute, and not its bytes; a rule covers that path and every path below it, a whole segment at a time | the session; it is in the session record and comes back with `--resume` | `verified-by: bravebot_core::trust::a_rule_matches_whole_segments_only` `verified-by: bravebot_core::trust::one_added_directory_does_not_cover_a_sibling` `verified-by: bravebot_core::trust::a_yes_for_one_project_does_not_follow_a_move_to_another` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` |
+| a kept answer to the startup question | `y` at the startup question, where the question names the file it is written in | the directory, what a yes keeps, how far it reaches and the file | the directory's path and the identity the filesystem gives the directory there, so one made again at the same path is asked about | every later session started in that directory or below the root of its git worktree, until it is withdrawn | `verified-by: bravebot_agent::trusted::an_answer_kept_about_one_directory_answers_for_no_other` `verified-by: bravebot_agent::trusted::another_directory_at_the_same_path_is_asked_about` |
+| granted rules | `y` at the question naming every allow rule a checkout's settings propose | each rule's text and the settings file it is in | the rule's text, the settings file's path and the root of the workspace it was granted in | a file every later session of the terminal reads in that workspace | `verified-by: bravebot_agent::granted::a_rule_edited_since_it_was_granted_is_not_granted` `verified-by: bravebot_agent::granted::a_grant_for_one_file_is_not_a_grant_for_another` `verified-by: bravebot_agent::granted::a_rule_granted_in_one_workspace_is_not_granted_in_another` |
+| programs vouched for | `a` at the run prompt | each step's arguments, the binary it resolved to, and the directory | each step's resolved binary by its path's bytes, the name that started it, its exact arguments, and the directory, matched exactly. A line that sets a variable, writes through a redirection, feeds input from a reference, releases private data, asks for a credential scope or runs unconfined is not offered the key | the session; it is in the session record and comes back with `--resume` | `verified-by: bravebot_core::programs::vouching_in_one_tree_says_nothing_about_the_same_command_in_another` `verified-by: bravebot_core::programs::two_binaries_differing_only_in_unrenderable_bytes_are_different_programs` `verified-by: bravebot_core::policy::vouching_for_one_command_does_not_cover_another_of_the_same_program` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` |
+| lines remembered past the session | `r` and `s` at the run prompt | as for `a`, and the file the answer is recorded in | each step's name, resolved binary, the name that started it, every argument, its environment and where its streams go, how the steps are joined, and the directory. With `s`, the lines of a scope a table in the source lists are kept as one entry, each with its one number left free | a file every session of the terminal started in that directory reads, fresh or resumed | `verified-by: bravebot_core::remembered::no_entry_reaches_a_second_argument_list` `verified-by: bravebot_core::remembered::an_answer_does_not_follow_a_name_onto_a_different_binary` `verified-by: bravebot_core::remembered::an_environment_assignment_makes_a_different_line` `verified-by: bravebot_agent::remembered::a_line_answered_in_one_directory_does_not_answer_in_another` |
+| run prompts drawn | every run prompt | the line | the line as it was asked about. It grants nothing: a later prompt for the same binary under other arguments reads it only to say that a settings file is what ends the asking | the session; it is written nowhere | `verified-by: bravebot_core::programs::asking_about_a_line_vouches_for_nothing` `verified-by: bravebot_core::policy::a_line_asked_about_is_not_thereby_vouched_for_or_remembered` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` |
+| reach kept from a run | `m` and `e` at the run prompt for a line that asked for a credential scope | the programs, the scopes, how long each lasts, and the file the record is written to | each program and operation word among the line's stages, with each scope, read only, bound to the checkout unless the scope table gives that program the scope. It vouches for no program, and the line is still asked about | `m`, the session; `e`, a file every later session in the checkout reads | `verified-by: bravebot_agent::reach::a_kept_request_binds_to_a_checkout_unless_the_table_gives_the_program_the_scope` `verified-by: bravebot_agent::turn::keeping_a_request_for_the_session_remembers_the_scope_for_that_session_only` |
+| credential writes agreed to for the session | the standing key at a write prompt whose scan found a credential | the path, the body, and what the scan found | the file the write resolved to. It answers the scan's question only; the write is still asked about | the session; it is written nowhere | `verified-by: bravebot_agent::turn::always_for_a_credential_write_covers_that_file_and_no_other` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` |
+| credential writes remembered past the session | the recording key at the same prompt | as above | the file the write resolved to, in the record of the directory | a file every later session started in that directory reads | `verified-by: bravebot_agent::turn::remembering_a_credential_write_covers_later_sessions_in_that_directory_only` |
+| files sent despite a credential | `y` at the question about a vouched file the scan found a credential in | the file's name, and each finding with its kind, where it is, and a masked value | the file's name from the root, or from an added directory's full path, as text. Not its bytes | the session; it is written nowhere and does not come back with `--resume` ([credential-protection.md](credential-protection.md#known-costs)) | `verified-by: bravebot_tui::app::an_answer_to_show_a_file_does_not_cover_the_file_by_that_name_after_moving` `verified-by: bravebot_agent::turn::agreeing_to_one_files_key_in_history_is_not_agreeing_to_anothers` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` `verified-by: bravebot_ui_bridge::bridge::undoing_a_turn_stops_the_servers_and_keeps_the_files_agreed_to` `verified-by: bravebot_ui_bridge::bridge::a_desktop_fork_asks_again_about_what_only_the_parent_was_asked` |
+| language servers started | `y` at the question about starting a language server | the program it resolved to, its arguments, and the tree it would index | the language, or a digest of a declared server's name, command, arguments, extensions, environment and options, for the root it was started in | the session, as a running process; a no is not kept | `verified-by: bravebot_agent::lsp::a_server_approved_in_one_turn_answers_the_next` `verified-by: bravebot_lsp::server::a_changed_declaration_is_asked_about_again` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` `verified-by: bravebot_ui_bridge::bridge::undoing_a_turn_stops_the_servers_and_keeps_the_files_agreed_to` `verified-by: bravebot_ui_bridge::bridge::a_desktop_fork_asks_again_about_what_only_the_parent_was_asked` |
+| MCP servers approved | answer 1 at the question about starting an MCP server | the alias, the settings file that requested it, the declaration with its program, arguments, directory, variable names, stored values and files it may read, where a local program resolved to, and a warning where the alias was approved as something else | the digest of the declaration, with the alias it was approved as. Not the path the program resolved to, not the checkout that requested it, and not the value of `PATH` or of any variable read from the environment | a file every later session reads, until the declaration changes; the session alone where the session writes nothing | `verified-by: bravebot_agent::servers::answer_one_approves_the_digest_answer_two_the_project_and_three_nothing` `verified-by: bravebot_agent::servers::the_question_names_the_checkout_that_requested_it_and_where_the_program_resolved` `verified-by: bravebot_agent::servers::an_asker_that_records_nothing_keeps_neither_a_yes_to_a_server_nor_to_a_move` |
+| MCP projects answered for | answer 2 at the same question | as above | the project's path with its links followed, compared exactly. Not the server, so it answers for every later server a checkout of that path requests, unless its declaration was approved as something else since; not the directory's identity, so a directory removed and made again at that path is the same key; not a list or a call, which it leaves to [SERVERS-8](mcp-servers.md#SERVERS-8) and [SERVERS-7](mcp-servers.md#SERVERS-7) | a file every later session reads, until `mcp forget` | `verified-by: bravebot_agent::servers::answer_one_approves_the_digest_answer_two_the_project_and_three_nothing` `verified-by: bravebot_agent::servers::an_approved_digest_starts_unasked_and_a_recorded_project_answers_only_an_unchanged_one` `verified-by: bravebot_config::mcp::forgetting_a_project_drops_it_and_no_other` |
+| MCP tool lists approved | the question about the tools a server offers | every tool, with its description | the server, for the session. A later session asks again, since nothing here may decide from the list's bytes that it is one already seen | the terminal's MCP session, for a yes and for a no, and so for the process: `/clear`, `/branch` and `/resume` keep it, and a new process asks again; it is written nowhere | `verified-by: bravebot_agent::mcp::a_list_is_asked_about_every_session_and_a_yes_records_nothing` `verified-by: bravebot_agent::mcp::a_declined_list_offers_nothing_and_is_not_asked_again` `verified-by: bravebot_tui::app::clearing_keeps_the_answer_to_an_mcp_servers_list_for_the_process` `verified-by: bravebot_tui::app::a_branch_keeps_the_answer_to_an_mcp_servers_list_for_the_process` `verified-by: bravebot_tui::app::resuming_carries_the_answer_to_an_mcp_servers_list_for_the_process` |
+| standing answers to an MCP tool | answer 2 at a call to a server's tool. A call to a server declared to ask every call ([SERVERS-21](mcp-servers.md#SERVERS-21)), and a call asked because its arguments are private ([SERVERS-7](mcp-servers.md#SERVERS-7)), is not offered it, and an answer 2 that arrives for one is a yes to that call and is not recorded | the tool and every argument | the server's alias, the tool, and the project. Not the arguments, which the answer leaves free, and not what the alias is declared as. Not read for a server declared to ask every call | a file every later session reads, until it is forgotten | `verified-by: bravebot_config::mcp::a_standing_answer_reaches_one_tool_of_one_server_in_one_project` `verified-by: bravebot_agent::mcp::an_answer_that_would_stand_is_not_recorded_for_a_server_asked_every_call` `verified-by: bravebot_tui::confirm::mcp::a_call_asked_every_time_is_drawn_with_its_own_reason_for_offering_no_lasting_answer` `verified-by: bravebot_agent::mcp::answer_two_is_not_offered_or_recorded_for_a_call_asked_for_private_arguments` |
+| MCP server moves | `y` at the question about a remote server whose request was redirected | where the server was declared, where the reply points, the host it reaches, and the warning | the server's declaration, rewritten to the new destination only while it is still the declaration that was asked about | the settings file, for every later session; the session alone where the session writes nothing | `verified-by: bravebot_agent::mcp::a_move_is_recorded_over_the_declaration_asked_about_and_nothing_else` `verified-by: bravebot_agent::mcp::a_move_in_a_session_that_writes_nothing_lasts_for_the_session` |
+| paths reached | `y` at the question about letting programs reach one more path | the path | the path it resolved to. A later request for a path already held is asked about like the first | the session; it is written nowhere | `verified-by: bravebot_agent::workspace::path_reach_is_numbered_shared_upgraded_and_ended` |
+| hosts answered | the question about hosts programs asked for and were refused | the hosts | each host's name, for a yes and for a no | the session; it is written nowhere | `verified-by: bravebot_agent::tools::hosts_put_to_the_person_are_asked_once_and_the_answer_is_kept` `verified-by: bravebot_agent::workspace::host_answers_are_shared_remembered_and_lifted_by_a_yes` |
+| messages covered for the turn | `t` at the question about a message the planner wants to send to another background session | the session's name, state and working directory as the roster holds them, the whole text, and the label it is sent under | the target session's id. Not the text, which the answer leaves free, and not the name, which two sessions can share | the turn; it is written nowhere, and the next turn asks again | `verified-by: bravebot_agent::tools::a_standing_answer_covers_the_later_messages_to_that_session_and_no_other` `verified-by: bravebot_agent::turn::a_standing_answer_ends_with_the_turn_that_gave_it` |
+| answers to the planner's questions | a series of questions the planner asks | each question and its choices | every field of the question, each with its length, its tag and its choices included | the live session; it is written nowhere, and a resumed session asks again | `verified-by: bravebot_core::ask::no_question_can_spell_the_key_of_another` `verified-by: bravebot_core::ask::a_series_answered_entirely_from_memory_asks_nothing` |
+| a proposed rule | the question `propose_rule` puts: "Keep this rule", "Don't keep it", or the person's own wording typed | the rule, the file it is appended to and the reason | nothing: the answer is kept only as the line it writes, and each question is asked afresh so no earlier yes answers it ([RECALL-3](recall.md#RECALL-3)) | the file the line is appended to, until the person edits it or `/undo` takes it back; the answer is written nowhere else | `verified-by: bravebot_agent::tools::a_rule_answer_is_never_reused` `verified-by: bravebot_agent::tools::a_refused_rule_writes_nothing` `verified-by: bravebot_agent::tools::an_approved_rule_is_appended_with_date_and_why` |
+| auto-vetting | the standing key at a vetting or output prompt whose check completed and found nothing | the bytes, where they came from, and what the check said | nothing about any one slot. It turns on the mode in which a later slot whose check finds nothing reaches the planner unasked | a file every later session reads, fresh or resumed, until it is turned off | `verified-by: bravebot_tui::state::pressing_the_standing_key_turns_vetting_on_for_the_session` `verified-by: bravebot_tui::persist::a_recorded_answer_about_vetting_outlives_the_session_that_gave_it` |
+| the permission mode | no question: the mode key, `/plan`, `--auto` on a one-shot run, or starting a session that bypasses every check | the mode's name | nothing about any one effect. It answers in advance every prompt the mode reaches ([permission-modes.md](permission-modes.md)). In auto it answers a run and a first fetch on a classifier's word, which is kept nowhere ([AUTO-6](auto-mode.md#AUTO-6)) | the sitting it was chosen in; it is not in the session record | `verified-by: bravebot_session::sessions::a_record_does_not_keep_a_permission_mode` `verified-by: bravebot_tui::state::cycling_the_mode_changes_nothing_a_resume_would_read` |
+| the sandbox mode | no question: `/sandbox` naming a mode, `off` included | the mode's name, and under `off` that programs `run` starts have no profile, so nothing confines what they read, write or reach | nothing about any one run. Every program started after it, in a turn already running or a later one, runs under the mode, with no profile under `off` | the process; `/resume` hands it to the session it starts | `verified-by: bravebot_tui::sandbox_command::a_move_to_off_is_made_when_typed_and_asks_nothing` `verified-by: bravebot_tui::sandbox_command::a_session_started_from_the_held_choice_keeps_the_commands_mode` |
+
+The register above says what each answer is kept under. This table says what seven changes to the
+world do to each answer, for every row of the register. A cell is one or more statements joined by
+`;`, and a statement opens with what happens and says why:
+
+- **asked again**: the same effect after the change is put to the person or refused, and a test shows
+  it.
+- **not reached**: the answer's key has no dimension the change touches, or the answer is not kept
+  anywhere the change can carry it.
+- **by design**: the answer holds, and the register or the clause cited says it does.
+- **accepted**: the answer holds and a Known cost in the spec linked admits it.
+
+**Moved** is `/cd` into a second checkout laid out like the first. **New session** is `/clear`,
+`/branch`, a fork and `--resume`. **Subject replaced** is the file's bytes replaced, a link on the path
+retargeted, a binary replaced in place or the branch switched. **Other directory** is the same name
+under a sibling, a parent or a child. **Invocation changed** is an argument, the environment or a
+redirection. **Declaration changed** is a server's alias, command or options. **More than shown** is
+an answer covering more than the prompt displayed.
+
+The seven columns are the changes a person makes or a build detects inside one process. Four other
+transitions are not columns, and each is decided by something else:
+
+- **`/add-dir`** adds a directory to the workspace, which holds it. No answer in `Answers` is keyed
+  by it: the header of `crates/agent/src/answers.rs` says the directories `/add-dir` opened belong
+  to the workspace, so no pattern of `Answers` reaches them. A directory is judged when it is opened
+  and again when it is used ([SANDBOX-23](sandboxing.md#SANDBOX-23)).
+- **A delegate's return** is taken by `Policy::adopt_from_delegate` in `crates/core/src/policy.rs`,
+  which adds to the parent the exact command approvals the delegate's list holds beyond the list it
+  was seeded with ([DELEGATE-11](delegation.md#DELEGATE-11)). A person's answer about a file is
+  already shared with the parent, so it is not merged from the delegate's copy
+  `verified-by: bravebot_core::policy::what_a_person_vouched_for_inside_a_delegate_is_kept`
+  `verified-by: bravebot_core::policy::what_a_person_vouched_for_running_inside_a_delegate_is_kept`.
+- **Recovery after a panic** is not tested against these answers. A delegate whose thread died holds
+  no record to hand back ([DELEGATE-11](delegation.md#DELEGATE-11)), and what a panic leaves in a
+  session or a checkpoint is open as [#919](https://github.com/brave/bravebot/issues/919).
+- **The surfaces** (the terminal, the desktop window, a one-shot run and a session in lines) hold the
+  answers of the process they run in, and a surface that cannot ask refuses
+  ([PROMPT-9](#PROMPT-9)). The desktop's undo is tested only for what
+  `bravebot_ui_bridge::bridge::undoing_a_turn_stops_the_servers_and_keeps_the_files_agreed_to`
+  asserts: the servers are stopped and the files agreed to are kept. Other transitions a surface
+  makes that no column names, and the other answers an undo affects, have no test and are open as
+  [#919](https://github.com/brave/bravebot/issues/919).
+
+A cell citing `bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` is applied by
+a case of that test's table, which `make check-security` holds to the cells citing it and the cells to
+the cases.
+
+| Answer kept | Moved | New session | Subject replaced | Other directory | Invocation changed | Declaration changed | More than shown |
+|---|---|---|---|---|---|---|---|
+| one effect | not reached: the endorsement is spent by the call it was given for, so no move falls between | not reached: it is never written down ([PROMPT-8](#PROMPT-8)) | asked again: an edit over a file that changed after the prompt, by hand or by a branch switch, is refused as stale, and a link repointed after the approval is refused before a step starts `verified-by: bravebot_agent::turn::a_stale_edit_is_refused` `verified-by: bravebot_agent::exec::a_link_pointed_elsewhere_after_approval_is_refused` | asked again: a plan's key opens with the directory it runs in `verified-by: bravebot_core::command::the_directory_a_plan_runs_in_is_keyed_on_its_bytes` `verified-by: bravebot_core::policy::an_endorsement_does_not_authorise_a_different_line` | asked again: the key holds every argument, the environment, where each stream goes and how the steps are joined `verified-by: bravebot_core::command::an_argument_cannot_forge_a_plans_encoding_boundary` `verified-by: bravebot_core::command::where_a_plan_writes_is_part_of_what_it_encodes` `verified-by: bravebot_core::command::an_environment_assignment_makes_a_different_plan` | not reached: a server's call is endorsed by its alias and tool for that one call | asked again: a key runs a long plan only once every row of it has been on the screen `verified-by: bravebot_tui::confirm::run::no_key_runs_a_long_plan_until_every_row_of_it_has_been_on_the_screen` |
+| the trust map | asked again: a rule is a path made absolute, so a yes for one checkout does not reach the same names in another `verified-by: bravebot_core::trust::a_yes_for_one_project_does_not_follow_a_move_to_another` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`; by design: the move vouches for the directory moved to, because the person typed it ([TRUST-13](trust-map.md#TRUST-13)) | asked again: `/clear` asks the startup question afresh `verified-by: bravebot_tui::app::a_fresh_session_is_asked_rather_than_inheriting_a_map`; by design: `/branch`, a fork and `--resume` carry the map the record holds ([PROMPT-8](#PROMPT-8)) `verified-by: bravebot_tui::app::a_branch_keeps_what_the_record_holds_and_forgets_the_rest` | accepted: [trust-map.md](trust-map.md#known-costs); by design: a branch switch changes the bytes under the vouched path and the vouch is for the path, so it holds ([TRUST-23](trust-map.md#TRUST-23)) | asked again: a rule covers whole path segments, so a sibling or a parent is not reached `verified-by: bravebot_core::trust::a_rule_matches_whole_segments_only` `verified-by: bravebot_core::trust::one_added_directory_does_not_cover_a_sibling` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`; by design: a directory covers every path beneath it ([TRUST-2](trust-map.md#TRUST-2)) | not reached: the map holds paths and no command | not reached: the map names no server | by design: a rule covers its path and everything beneath it, and a vouch is offered for a file only ([TRUST-2](trust-map.md#TRUST-2)) `verified-by: bravebot_agent::turn::a_path_that_names_no_file_is_not_offered_for_vouching` |
+| a kept answer to the startup question | not reached: `/cd` never reads the kept record, and the key is the directory's own path and identity ([TRUST-23](trust-map.md#TRUST-23)) `verified-by: bravebot_agent::trusted::an_answer_kept_about_one_directory_answers_for_no_other` | by design: a yes at the question is kept for every later session started there ([TRUST-23](trust-map.md#TRUST-23)) `verified-by: bravebot_agent::trusted::a_kept_answer_is_read_back_by_the_next_session_there` | asked again: a directory removed and made again has another identity `verified-by: bravebot_agent::trusted::another_directory_at_the_same_path_is_asked_about` `verified-by: bravebot_agent::trusted::a_directory_removed_and_made_again_has_another_identity`; by design: what is replaced inside the directory arrives with it, a branch switch included, and the directory keeps its identity ([TRUST-23](trust-map.md#TRUST-23)) | asked again: only the directory answered about, or the worktree root above it, is settled by it `verified-by: bravebot_agent::trusted::a_nested_repository_is_asked_about` `verified-by: bravebot_agent::trusted::only_a_worktree_root_answers_for_what_is_below_it` | not reached: the answer is about a directory and no command | not reached: the answer is about a directory and no server | asked again: `y` is taken only after the lines saying what it keeps and how far it reaches have been on the screen `verified-by: bravebot_tui::trust_prompt::y_trusts_nothing_until_the_record_it_keeps_has_been_on_the_screen` `verified-by: bravebot_tui::trust_prompt::the_prompt_that_keeps_a_yes_names_the_record_it_writes` |
+| granted rules | asked again: an entry names the settings file's path and the workspace it was granted in `verified-by: bravebot_agent::granted::a_rule_granted_in_one_workspace_is_not_granted_in_another` `verified-by: bravebot_tui::app::a_rule_granted_in_one_checkout_is_not_in_force_after_moving_to_another` | by design: a grant outlives the session that gave it, in that workspace ([PERM-15](permissions.md#PERM-15)) `verified-by: bravebot_agent::granted::a_rule_granted_by_one_session_is_read_back_by_another` | asked again: a rule whose text was edited since it was granted is not granted `verified-by: bravebot_agent::granted::a_rule_edited_since_it_was_granted_is_not_granted` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`, and so is a rule in a settings file that a branch switch rewrites; accepted: [permissions.md](permissions.md#known-costs) | asked again: a sibling, a parent and a child are other workspaces, each with its own record `verified-by: bravebot_agent::granted::a_workspace_sharing_a_key_with_another_is_not_answered_by_its_lines` `verified-by: bravebot_agent::granted::a_grant_for_one_file_is_not_a_grant_for_another` | asked again: an assignment, a write redirection or private input asks whatever a rule allows `verified-by: bravebot_core::policy::an_environment_assignment_asks_even_for_a_line_a_rule_allows` `verified-by: bravebot_core::policy::private_input_asks_even_for_a_line_a_rule_allows` `verified-by: bravebot_core::policy::a_write_redirection_asks_even_for_a_line_a_rule_allows`; by design: the rule's pattern says which arguments it covers `verified-by: bravebot_core::permissions::a_command_pattern_matches_where_the_documented_table_says` | by design: a rule for a server's tool names its alias and tool, and the server's approval is a digest of its declaration ([SERVERS-5](mcp-servers.md#SERVERS-5)) | asked again: `y` grants nothing until every rule has been on the screen whole, with its file `verified-by: bravebot_tui::trust_prompt::y_grants_nothing_while_a_rule_has_not_been_on_the_screen` `verified-by: bravebot_tui::trust_prompt::a_rule_that_wraps_past_the_box_is_never_granted` |
+| programs vouched for | asked again: an entry names the tree it was vouched in, compared by equality `verified-by: bravebot_core::programs::vouching_in_one_tree_says_nothing_about_the_same_command_in_another` `verified-by: bravebot_tui::app::moving_keeps_the_programs_vouched_for_and_the_prompts_already_drawn` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` | asked again: `/clear` vouches for nothing `verified-by: bravebot_tui::app::clearing_forgets_every_answer_the_session_it_ends_gave`; by design: `/branch`, a fork and `--resume` carry the list the record holds ([RUN-9](tools/run.md#RUN-9)) `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` | asked again: a name that resolves to another binary, or a link repointed after the approval, is another entry `verified-by: bravebot_core::policy::vouching_does_not_follow_a_name_onto_a_different_binary` `verified-by: bravebot_agent::exec::a_link_pointed_elsewhere_after_approval_is_refused`; by design: a binary or a script replaced in place at the same path is covered, a branch switch that rewrites it included, as it is in the record that outlasts the session ([RUN-19](tools/run.md#RUN-19)) | asked again: the tree is compared by equality, so a directory below or above is another grant `verified-by: bravebot_core::programs::an_entry_does_not_cover_a_directory_below_the_one_it_names` `verified-by: bravebot_core::programs::the_same_name_at_a_different_path_is_a_different_program` | asked again: the arguments must match exactly, and an assignment, a write redirection or private input asks first `verified-by: bravebot_core::programs::the_arguments_must_match_exactly` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` `verified-by: bravebot_core::policy::a_vouched_line_carrying_an_environment_assignment_is_asked_about` `verified-by: bravebot_core::policy::a_line_that_writes_is_asked_about_even_when_its_steps_are_vouched_for`; by design: a step's merged streams are not in the key, and the session bounds that ([RUN-19](tools/run.md#RUN-19)) | not reached: the key is a program line and names no server | by design: a line runs unasked when every step in it was vouched for, however the steps are joined ([RUN-8](tools/run.md#RUN-8)); asked again: `a` is taken only after the rows saying what it grants have been shown `verified-by: bravebot_tui::confirm::run::a_and_r_each_wait_for_the_rows_saying_what_they_grant_besides_running_the_line` |
+| lines remembered past the session | asked again: the record is read for the directory the session is in, and an entry names its directory `verified-by: bravebot_agent::remembered::a_line_answered_in_one_directory_does_not_answer_in_another` `verified-by: bravebot_core::policy::a_remembered_line_run_outside_the_root_is_asked_about_anyway` | by design: the record is a file every session started in that directory reads, fresh or resumed ([RUN-19](tools/run.md#RUN-19)) `verified-by: bravebot_agent::remembered::a_line_written_by_one_session_is_read_back_by_another` | asked again: another binary behind the name, or another path it is started by, is another line `verified-by: bravebot_core::remembered::an_answer_does_not_follow_a_name_onto_a_different_binary`; by design: a binary replaced in place, a file the line takes its work from, a branch switch that rewrites either and a directory removed and made again at the same path are covered, which is what an answer that lasts costs ([RUN-19](tools/run.md#RUN-19)) | asked again: an entry names its directory, and a line run outside the root is asked about anyway `verified-by: bravebot_agent::remembered::a_directory_sharing_a_key_with_another_is_not_answered_by_its_lines` `verified-by: bravebot_core::policy::a_remembered_line_run_outside_the_root_is_asked_about_anyway` | asked again: every argument, the environment, where the streams go and how the steps are joined are in the key `verified-by: bravebot_core::remembered::no_entry_reaches_a_second_argument_list` `verified-by: bravebot_core::remembered::an_environment_assignment_makes_a_different_line` `verified-by: bravebot_core::remembered::sending_the_streams_somewhere_else_makes_a_different_line` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`; by design: `s` leaves one whole number free in each line of a scope, in the shapes a table in the source lists ([RUN-20](tools/run.md#RUN-20)) | not reached: the key is a program line and names no server | by design: `s` frees one whole number in each line of a scope and the prompt names the scope in words ([RUN-20](tools/run.md#RUN-20)) `verified-by: bravebot_core::policy::a_scope_remembered_past_the_session_is_not_asked_about_for_another_number` |
+| run prompts drawn | not reached: it grants nothing, and a move leaves what it only advises with | asked again: `/clear`, `/branch` and a fork forget it, and a resume builds it empty `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` | not reached: it grants nothing, so a replaced binary or a branch switch is only the same call | not reached: it grants nothing, and the directory is ignored on purpose when it advises | not reached: it grants nothing, and a run prompt is drawn for every line whatever its arguments | not reached: it grants nothing and names no server | not reached: it grants nothing |
+| reach kept from a run | asked again: a grant is bound to the checkout's root and identity unless the scope table names the program `verified-by: bravebot_agent::reach::a_kept_request_binds_to_a_checkout_unless_the_table_gives_the_program_the_scope` `verified-by: bravebot_agent::reach::a_directory_row_is_in_force_only_in_the_checkout_it_was_typed_in`; by design: a program the scope table names has the scope in every checkout, and the prompt says so ([SANDBOX-23](sandboxing.md#SANDBOX-23)) `verified-by: bravebot_agent::reach::a_scope_for_a_program_the_table_names_is_in_force_in_every_checkout` | asked again: `m` is kept for the session's id, which `/clear`, `/branch` and a fork replace `verified-by: bravebot_agent::turn::keeping_a_request_for_the_session_remembers_the_scope_for_that_session_only`; by design: `e` is a file every later session in the checkout reads `verified-by: bravebot_agent::turn::keeping_a_request_for_every_session_is_read_by_another_session` | by design: the key is the program's path, the checkout is the unit of the grant, and a branch switch stays in the checkout ([SANDBOX-23](sandboxing.md#SANDBOX-23)) | asked again: another path for the binary is another key `verified-by: bravebot_agent::reach::a_grant_covers_the_file_and_the_operation_it_was_made_for` | asked again: an option before the operation or an assignment removes the grant `verified-by: bravebot_agent::reach::an_assignment_in_front_of_a_step_removes_every_grant` `verified-by: bravebot_agent::reach::a_command_that_starts_with_an_option_carries_no_grant`; by design: the arguments after the operation word are free ([SANDBOX-23](sandboxing.md#SANDBOX-23)) | not reached: the key is a program and an operation and names no server | by design: the prompt names the shapes and how long each lasts, and the key is the shape ([SANDBOX-23](sandboxing.md#SANDBOX-23)) |
+| credential writes agreed to for the session | asked again: `/cd` drops the set, and the key is an absolute path `verified-by: bravebot_tui::credential_mode_tests::always_for_a_credential_does_not_follow_the_session_through_cd` | asked again: `/clear`, `/branch` and a fork forget it `verified-by: bravebot_tui::credential_mode_tests::always_for_a_credential_does_not_outlive_clear` `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` | asked again: a link retargeted on the path, by hand or by a branch switch, resolves to another file `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`; accepted: [credential-protection.md](credential-protection.md#known-costs) | asked again: the key is the resolved path, compared exactly `verified-by: bravebot_agent::turn::always_for_a_credential_write_covers_that_file_and_no_other` | not reached: a write names a path and carries no command, argument or redirection | not reached: the key is a path and names no server | by design: the answer covers the file whatever the next body holds, and the write is still asked about ([CRED-15](credential-protection.md#CRED-15)) `verified-by: bravebot_agent::turn::always_for_an_edit_that_leaves_a_credential_covers_the_next_edit_to_that_file` |
+| credential writes remembered past the session | asked again: an entry names the directory and the file, and the record is read for the directory the session is in `verified-by: bravebot_agent::turn::remembering_a_credential_write_covers_later_sessions_in_that_directory_only` `verified-by: bravebot_agent::remembered::a_file_written_by_one_session_is_read_back_by_another_in_that_directory_only` | by design: the record is read by every session started in that directory ([CRED-13](credential-protection.md#CRED-13)) | asked again: a link retargeted on the path, by hand or by a branch switch, resolves to another file `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again`; accepted: [credential-protection.md](credential-protection.md#known-costs) | asked again: an entry covers one file of one directory `verified-by: bravebot_core::remembered::a_file_entry_covers_that_file_only` `verified-by: bravebot_agent::remembered::a_file_outside_the_directory_is_neither_written_nor_read` | not reached: a write names a path and carries no command, argument or redirection | not reached: the key is a path and names no server | by design: the entry stays until its line is deleted ([CRED-13](credential-protection.md#CRED-13)) |
+| files sent despite a credential | asked again: `/cd` drops the set, since the key is a name from the root `verified-by: bravebot_tui::app::an_answer_to_show_a_file_does_not_cover_the_file_by_that_name_after_moving` | asked again: `/clear`, `/branch` and a fork forget it, and `--resume` starts without it `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` `verified-by: bravebot_ui_bridge::bridge::a_desktop_fork_asks_again_about_what_only_the_parent_was_asked` | accepted: [credential-protection.md](credential-protection.md#known-costs); by design: the key is the name from the root as text and not the bytes, so a branch switch that puts other bytes under the same name is covered ([credential-protection.md](credential-protection.md#known-costs)) | asked again: the key carries the path from the root, so `sub/.env` is not `.env` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` | by design: the answer covers the file whichever lines are read, an edit shows included ([CRED-15](credential-protection.md#CRED-15)) `verified-by: bravebot_agent::turn::an_agreement_to_show_a_file_covers_the_lines_an_edit_shows` | not reached: the key is a name and names no server | by design: the scan covers the window read and the answer covers the whole file ([CRED-15](credential-protection.md#CRED-15)) `verified-by: bravebot_agent::turn::a_file_agreed_to_once_is_not_asked_about_again_this_session` |
+| language servers started | asked again: `/cd` stops the servers started in the old directory `verified-by: bravebot_tui::app::changing_directory_stops_the_servers_started_in_the_old_one` | asked again: `/clear`, `/branch` and a fork forget the servers `verified-by: bravebot_agent::answers::every_transition_decides_every_answer_and_a_forgotten_one_is_asked_again` `verified-by: bravebot_ui_bridge::bridge::undoing_a_turn_stops_the_servers_and_keeps_the_files_agreed_to` | not reached: the approval is a running process, and a program replaced afterwards, by a branch switch or otherwise, is not started by it | not reached: a server runs for the root it was started in, and `/cd` leaves it ([LSP-5](tools/lsp.md#LSP-5)) | not reached: the program and arguments come from a fixed table or from the declaration | asked again: the digest covers the name, command, arguments, extensions, environment and options `verified-by: bravebot_lsp::server::a_changed_declaration_is_asked_about_again` `verified-by: bravebot_agent::declared_lsp::a_changed_declaration_is_asked_about_again` | by design: the language covers every file and operation, and the prompt says the server reads the tree and may run build tooling ([LSP-8](tools/lsp.md#LSP-8)) `verified-by: bravebot_lsp::server::the_prompt_says_which_servers_run_build_tooling`; not reached: the answer is kept for a language and a root and says nothing about which file a later query names, and the `path` of a query is resolved through the workspace before a server is asked, so a later query that names a file the workspace does not reach is refused at that check ([LSP-4](tools/lsp.md#LSP-4), which also states what the check does not cover) `verified-by: bravebot_agent::lsp::a_path_that_lands_outside_the_workspace_is_refused_before_a_server_is_asked` |
+| MCP servers approved | not reached: the digest names a declaration and no checkout, and a declaration is the person's own ([SERVERS-1](mcp-servers.md#SERVERS-1)) | by design: a yes is a file every later session reads, until the declaration changes ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_agent::servers::an_approved_digest_starts_unasked_and_a_recorded_project_answers_only_an_unchanged_one` | by design: the digest holds the declared program and not the path it resolved to, so a program replaced in place, or another found first on `PATH`, is covered ([SERVERS-5](mcp-servers.md#SERVERS-5)); by design: a branch switch that leaves the declaration as it was is the same digest and one that changes it is another ([SERVERS-5](mcp-servers.md#SERVERS-5)) | by design: the key is the declaration, which holds its own directory, and not the checkout that requested it, which the question names ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_agent::servers::the_question_names_the_checkout_that_requested_it_and_where_the_program_resolved` | asked again: the digest covers the program, every argument and the directory `verified-by: bravebot_config::mcp::a_digest_covers_the_program_every_argument_the_names_and_the_directory`; by design: the value of a variable read from the environment, `PATH` included, is not in the declaration ([SERVERS-5](mcp-servers.md#SERVERS-5)) | asked again: a changed declaration has a digest nothing approved `verified-by: bravebot_config::mcp::a_declaration_changed_since_its_approval_is_recorded_as_changed_and_approves_nothing`; by design: an alias is a label and approves nothing, so renaming one keeps the vouch ([SERVERS-5](mcp-servers.md#SERVERS-5)) `verified-by: bravebot_config::mcp::a_digest_is_the_same_whatever_the_alias_or_the_order_of_the_names` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` | by design: the digest covers what the question drew of the declaration, and not the resolved program or the requesting checkout, which it also drew ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_agent::servers::the_question_names_the_checkout_that_requested_it_and_where_the_program_resolved` |
+| MCP projects answered for | not reached: the key is the path of the checkout, and a second checkout has another one | by design: a yes is a file every later session reads, until `mcp forget` ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_config::mcp::forgetting_a_project_drops_it_and_no_other` | accepted: [mcp-servers.md](mcp-servers.md#known-costs); by design: the key is the project's path, so a branch switch inside it is the same key and the servers the new branch declares are the ones this answer already covers | not reached: the key is the whole path compared exactly, so a sibling, a parent or a child is another key | not reached: the key is a path and holds no invocation | asked again: a server whose declaration was approved as something else is put to the person whatever the project says `verified-by: bravebot_agent::servers::an_approved_digest_starts_unasked_and_a_recorded_project_answers_only_an_unchanged_one` | by design: the option says every future MCP server in this project, and it pre-answers this question and no other ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_agent::servers::answer_one_approves_the_digest_answer_two_the_project_and_three_nothing` |
+| MCP tool lists approved | not reached: the digest names a declaration and no checkout | by design: a yes and a no are both kept by the terminal's MCP session for the process, which `/clear`, `/branch` and `/resume` do not end and a new process does, with nothing written to a file ([SERVERS-8](mcp-servers.md#SERVERS-8)) `verified-by: bravebot_agent::mcp::a_declined_list_offers_nothing_and_is_not_asked_again` `verified-by: bravebot_tui::app::clearing_keeps_the_answer_to_an_mcp_servers_list_for_the_process` `verified-by: bravebot_tui::app::a_branch_keeps_the_answer_to_an_mcp_servers_list_for_the_process` `verified-by: bravebot_tui::app::resuming_carries_the_answer_to_an_mcp_servers_list_for_the_process` | asked again: every session puts the list to the person, and a recorded line answers for no list, a changed one included `verified-by: bravebot_agent::mcp::a_list_is_asked_about_every_session_and_a_yes_records_nothing`; by design: a program replaced in place that draws the same list is covered, which is all a digest can cover ([SERVERS-5](mcp-servers.md#SERVERS-5)); by design: a branch switch is not a new session, so the process keeps the answer as `/branch` does for this row | asked again: the digest covers the program, every argument and the directory `verified-by: bravebot_config::mcp::a_digest_covers_the_program_every_argument_the_names_and_the_directory` | asked again: the digest covers every stored value and every file the server may read `verified-by: bravebot_config::mcp::a_digest_covers_every_stored_value_and_every_file_it_may_read`; by design: the value of a variable read from the environment is not in the declaration ([SERVERS-5](mcp-servers.md#SERVERS-5)) | asked again: a changed declaration has a digest nothing approved `verified-by: bravebot_config::mcp::a_declaration_changed_since_its_approval_is_recorded_as_changed_and_approves_nothing`; by design: an alias is a label and approves nothing, so renaming one keeps the vouch ([SERVERS-5](mcp-servers.md#SERVERS-5)) `verified-by: bravebot_config::mcp::a_digest_is_the_same_whatever_the_alias_or_the_order_of_the_names` | asked again: the key is a digest of the list as drawn, and the prompt takes no yes until every row is on the screen `verified-by: bravebot_tui::confirm::no_question_takes_a_yes_before_every_row_deciding_it_has_been_drawn` `verified-by: bravebot_tui::confirm::mcp::a_tool_list_draws_every_description_row_behind_the_margin` |
+| standing answers to an MCP tool | asked again: the project is part of the key and follows the session `verified-by: bravebot_agent::mcp::answer_two_follows_the_session_to_another_project` `verified-by: bravebot_config::mcp::a_standing_answer_reaches_one_tool_of_one_server_in_one_project` | by design: the answer is a file read on every call, until it is forgotten ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_cli::mcp::forget_drops_a_projects_standing_answers_and_nobody_elses` | accepted: [mcp-servers.md](mcp-servers.md#known-costs); by design: the key is the alias, the tool and the project and holds no bytes, so a branch switch inside the project is the same key | asked again: the key is the alias, the tool and the project, each compared exactly `verified-by: bravebot_agent::mcp::answer_two_stops_asking_for_the_one_tool_in_the_one_project` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` | by design: the arguments are free, and a call carrying the person's private data asks whatever stands ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_core::policy::private_arguments_ask_even_for_a_tool_a_rule_allows` | accepted: [mcp-servers.md](mcp-servers.md#known-costs) | by design: the prompt shows one call and the answer covers the tool's later calls in the project, whatever their arguments ([SERVERS-4](mcp-servers.md#SERVERS-4)) `verified-by: bravebot_tui::confirm::mcp::a_call_prompt_draws_the_tool_its_arguments_and_three_answers` |
+| MCP server moves | not reached: a declaration is global, and the move rewrites it | by design: the rewritten declaration is read by every session, and in a session that writes nothing it lasts for the process ([SERVERS-11](mcp-servers.md#SERVERS-11)) `verified-by: bravebot_agent::mcp::a_move_in_a_session_that_writes_nothing_lasts_for_the_session` | asked again: the declaration is rewritten only while its digest is still the one asked about `verified-by: bravebot_agent::mcp::a_move_is_recorded_over_the_declaration_asked_about_and_nothing_else`; by design: a branch switch that rewrites the declaration changes its digest, and the rewrite is refused over a declaration that is not the one asked about | not reached: the hop gate compares a host and a port and no path | by design: after a yes every later request goes to the new destination, whatever the tool or arguments ([SERVERS-11](mcp-servers.md#SERVERS-11)) `verified-by: bravebot_agent::mcp::a_hop_the_person_says_is_a_move_is_declared_and_the_call_reaches_it` | asked again: a declaration edited since the question is left as it is `verified-by: bravebot_agent::mcp::a_move_is_recorded_over_the_declaration_asked_about_and_nothing_else` | by design: the yes re-declares the server for every project and session, and the prompt says so ([SERVERS-11](mcp-servers.md#SERVERS-11)) |
+| paths reached | by design: the path is absolute and the grant is the session's, so a move keeps it ([SANDBOX-28](sandboxing.md#SANDBOX-28)) | asked again: `/clear`, `/branch` and `/resume` end it, and a new process starts without it `verified-by: bravebot_agent::workspace::a_session_ending_in_this_process_takes_its_reach_and_host_answers_with_it` `verified-by: bravebot_agent::workspace::a_new_workspace_holds_no_path_reach` `verified-by: bravebot_tui::app::a_branch_keeps_what_the_record_holds_and_forgets_the_rest` | by design: the grant is the path as it resolved when the person answered, and bytes replaced at it are covered ([SANDBOX-28](sandboxing.md#SANDBOX-28)); by design: a branch switch changes what is at the path and the grant is the path, so it holds; by design: a path later replaced by a link is not judged again, and what a backend does with a row at a link is the backend's, and whether the grant then widens to the link's target is untested and tracked as [#2914](https://github.com/brave/bravebot/issues/2914) ([SANDBOX-28](sandboxing.md#SANDBOX-28)) | asked again: a parent, a sibling and a directory sharing the granted name's prefix get no row `verified-by: bravebot_agent::confine::a_path_let_reach_does_not_reach_its_parent_or_a_sibling`; by design: a directory covers what is beneath it ([SANDBOX-28](sandboxing.md#SANDBOX-28)) | by design: the grant is for every later `run`, whichever program it starts ([SANDBOX-28](sandboxing.md#SANDBOX-28)) `verified-by: bravebot_agent::turn::a_yes_to_a_path_lets_a_program_write_it_and_a_read_only_yes_does_not` | not reached: the key is a path and names no server | by design: a yes to a directory is a yes to what is beneath it, and the question shows the path as it resolves ([SANDBOX-28](sandboxing.md#SANDBOX-28)) `verified-by: bravebot_tui::confirm::grants::a_path_longer_than_the_box_takes_no_yes_until_the_end_of_it_has_been_drawn` |
+| hosts answered | by design: a host is a name, and the answer is the session's ([SANDBOX-24](sandboxing.md#SANDBOX-24)) | asked again: `/clear`, `/branch` and `/resume` end it, and a new process starts without it `verified-by: bravebot_agent::workspace::a_session_ending_in_this_process_takes_its_reach_and_host_answers_with_it` `verified-by: bravebot_agent::workspace::a_new_workspace_holds_no_host_answers` `verified-by: bravebot_tui::app::a_branch_keeps_what_the_record_holds_and_forgets_the_rest` | by design: the proxy decides on the name, and a granted name is held to the addresses it resolves to ([SANDBOX-24](sandboxing.md#SANDBOX-24)) `verified-by: bravebot_agent::confine::a_granted_host_changes_the_list_the_next_line_is_held_to`; not reached: the key is a name and holds no bytes of the checkout, so a branch switch has nothing to replace | asked again: the answer is the exact name, so a subdomain is another host `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` `verified-by: bravebot_sandbox::hosts::an_exact_entry_covers_that_name_and_no_other` | by design: a yes adds the host to the allowed set of every stage from the next line ([SANDBOX-24](sandboxing.md#SANDBOX-24)) `verified-by: bravebot_agent::tools::hosts_put_to_the_person_are_asked_once_and_the_answer_is_kept` | not reached: a host answer names no server, and a denied entry still wins ([SANDBOX-24](sandboxing.md#SANDBOX-24)) | asked again: the question names up to eight hosts, and a yes grants only those named `verified-by: bravebot_agent::tools::hosts_put_to_the_person_are_asked_once_and_the_answer_is_kept` `verified-by: bravebot_agent::kept_answers::changing_the_world_under_a_yes_asks_again` |
+| messages covered for the turn | not reached: the key is a session's id and names no directory, and the answer ends with the turn | asked again: the answer ends with the turn that gave it, so a later turn of the same session, and any session `/clear`, `/branch` or a fork starts, puts the question again `verified-by: bravebot_agent::turn::a_standing_answer_ends_with_the_turn_that_gave_it` | by design: the answer covers a session by its id for the turn, and a process that starts again under the id is the same session ([MSG-4](session-messages.md#MSG-4)); not reached: the key is a session's id and holds no bytes of the checkout, so a branch switch has nothing to replace | not reached: the key is a session's id and names no directory | not reached: a message is not a command, carries no argument, environment or redirection, and its text is free | not reached: the key names no server | by design: the prompt shows one message and the answer covers the later ones to that session this turn, whatever their text, and each is drawn in the sender's transcript as it goes ([MSG-4](session-messages.md#MSG-4)) `verified-by: bravebot_agent::tools::a_standing_answer_covers_the_later_messages_to_that_session_and_no_other` `verified-by: bravebot_cli::progress::a_message_that_was_sent_is_drawn_under_its_receiver_with_the_words_quoted` |
+| answers to the planner's questions | by design: the conversation goes on across `/cd`, so a repeated question is the same exchange ([ASK-8](tools/ask-user.md#ASK-8)) | asked again: `/clear` and `/branch` forget them, an undo (`/undo`, `/rewind`, `session.rewind`) forgets all of them, and a resumed session starts without them, as does a session the desktop opens or forks `verified-by: bravebot_tui::state::clearing_the_conversation_forgets_the_answers_to_the_planners_questions` `verified-by: bravebot_tui::app::a_branch_keeps_what_the_record_holds_and_forgets_the_rest` `verified-by: bravebot_tui::app::undoing_a_turn_forgets_the_answers_to_the_planners_questions` `verified-by: bravebot_ui_bridge::remembered_answers::another_session_is_not_answered_from_the_first_ones_memory` `verified-by: bravebot_ui_bridge::remembered_answers::a_question_answered_in_an_undone_turn_is_put_again` | not reached: the key is the text of the question, and the answer is the person's reply, which grants nothing; not reached: the key is the text of the question and holds no bytes of the checkout, so a branch switch has nothing to replace | not reached: the key is the text of the question and names no directory | asked again: the key holds every field of the question, its tag and its choices `verified-by: bravebot_core::ask::the_key_distinguishes_questions_that_differ_anywhere` | not reached: the key is the text of the question and names no server | asked again: the key holds more than the screen draws, the tag, the length and the choices `verified-by: bravebot_core::ask::the_key_distinguishes_questions_that_differ_in_their_tag` `verified-by: bravebot_core::ask::no_question_can_spell_the_key_of_another` |
+| a proposed rule | not reached: the answer is spent by the line it wrote, and the file is the state directory's, not the checkout's | not reached: nothing is kept but the line, which every session reads as a rule ([RECALL-2](recall.md#RECALL-2)), and `/clear` and `/branch` keep no answer to forget | not reached: the key is never matched, since each question is asked afresh `verified-by: bravebot_agent::tools::a_rule_answer_is_never_reused`; not reached: no earlier answer is kept to match, so a branch switch has nothing to replace | not reached: the file is chosen by the scope and the project's identity ([RECALL-1](recall.md#RECALL-1)), and a rule written for one is not an answer for another | not reached: the answer grants no run line | not reached: the answer names no server | by design: the question shows the rule, the file and the reason, and a yes writes exactly the line shown or the words the person typed ([RECALL-3](recall.md#RECALL-3)) `verified-by: bravebot_agent::tools::the_question_shows_the_text_the_file_and_the_reason` `verified-by: bravebot_agent::tools::an_edited_rule_keeps_the_persons_words` |
+| auto-vetting | by design: it is a mode of the session, set by the home layer alone, and names no checkout ([CHECK-11](vetting.md#CHECK-11)) | by design: it is a file every later session reads, fresh or resumed `verified-by: bravebot_tui::persist::a_recorded_answer_about_vetting_outlives_the_session_that_gave_it`; asked again: an incognito session does not read it `verified-by: bravebot_tui::incognito::the_standing_answer_about_vetting_is_not_read` | asked again: only a check that completed and found nothing answers for a slot `verified-by: bravebot_agent::turn::with_auto_vetting_an_unsafe_verdict_still_asks` `verified-by: bravebot_agent::turn::with_auto_vetting_a_check_that_could_not_be_made_still_asks`; not reached: it holds no key, so a branch switch has nothing to replace | not reached: it holds no key and names no directory | not reached: it holds no key and names no command | asked again: it never answers the vouch offer or a server's tool list `verified-by: bravebot_agent::turn::auto_vetting_does_not_answer_the_vouch_offer` | by design: the prompt shows one slot and the answer covers every later slot whose check finds nothing ([CHECK-11](vetting.md#CHECK-11)) `verified-by: bravebot_tui::confirm::vet::only_a_safe_verdict_offers_to_stop_asking` |
+| the permission mode | by design: the mode is the sitting's, and a checkout that forbids bypassing takes it away ([MODE-10](permission-modes.md#MODE-10)) `verified-by: bravebot_tui::app::reading_the_rules_of_a_checkout_that_forbids_bypassing_takes_bypass_away` | asked again: `--resume`, `/resume` and a desktop open or fork start asking `verified-by: bravebot_session::sessions::a_record_does_not_keep_a_permission_mode` `verified-by: bravebot_ui_bridge::permission_mode::every_way_of_opening_a_session_opens_asking`; by design: `/clear` and `/branch` go on in the same sitting ([MODE-10](permission-modes.md#MODE-10)) | not reached: the mode holds no key, so a branch switch has nothing to replace | not reached: the mode holds no key | not reached: the mode holds no key | not reached: the mode holds no key | by design: it answers in advance every prompt the mode reaches ([MODE-10](permission-modes.md#MODE-10)) `verified-by: bravebot_tui::state::cycling_the_mode_changes_nothing_a_resume_would_read` |
+| the sandbox mode | by design: the mode lasts the process, and `/cd` does not read it again ([SANDBOX-22](sandboxing.md#SANDBOX-22)) | by design: `/clear`, `/resume` and `/branch` keep it, and a new process chooses at its start ([SANDBOX-22](sandboxing.md#SANDBOX-22)) `verified-by: bravebot_tui::sandbox_command::a_session_started_from_the_held_choice_keeps_the_commands_mode` | not reached: the mode holds no key, so a branch switch has nothing to replace | not reached: the mode holds no key | not reached: the mode holds no key | not reached: the mode holds no key | by design: the mode applies to every program a later turn starts, and under `off` that is no profile ([SANDBOX-22](sandboxing.md#SANDBOX-22)) `verified-by: bravebot_tui::sandbox_command::a_move_to_off_is_made_when_typed_and_asks_nothing` |
+
+**Why.** A yes about one thing comes to cover another when the key it is kept under holds less than
+the prompt showed, or is relative to something that later moves. With no row written before a
+question lands, nothing makes a prompt state what its answer is kept under, and a key that holds
+less than the prompt showed lets one yes cover another effect. Writing the row first decides what
+the key holds where a reviewer reads it, and the audit can hold the code to it.
+
+<a id="PROMPT-9"></a>
+### PROMPT-9: where nobody can be asked, the answer is no
+
+A one-shot run refuses effects rather than applying them unseen, and declines every question
+rather than inventing an answer. The exception is a run given `--input-format lines` and
+`--approve-input-lines` by the person, which puts each write, run and fetch to the program sending
+its lines and applies the one call that program approves ([cli.md](cli.md#CLI-36)). It puts that
+program no other permission. A closed channel refuses a run and answers no
+question, and it refuses to promote a slot however the check that read it answered: a word from a
+model is not a person having read something. A plan is refused too, so a manifest run with nobody to ask stops before its first step
+rather than walking a program nobody read.
+
+A person may answer these prompts in advance, for a session or for a run, by choosing a mode:
+[permission-modes.md](permission-modes.md) is what each mode answers and what asking for one costs.
+That is somebody's own standing answer rather than a default, and no mode answers a question the
+planner posed, since that asks for information rather than consent.
+
+`--vet` ([vetting.md](vetting.md#CHECK-11)) is such an answer in advance, and to one of them
+only: with it, a check that completes and finds nothing promotes the one slot the planner asked to
+be shown, and nothing else about a run nobody is watching changes. Without it a check on that path
+is a model call whose word ends in the refusal above. The closed channel keeps refusing either way:
+a channel that cannot carry a question is a session whose person went away mid-turn, not somebody
+saying anything in advance.
+
+`--auto` ([auto-mode.md](auto-mode.md)) is another, to two of them: a classifier that is given only
+the lines the person typed and the action answers a run the sandbox confines and the first question
+about a URL, and its allow word is the whole of what it can say. Anything else, a failure included,
+is the refusal above, so it removes a question and never refuses one. It reads no byte of a slot, so
+it is not the check this paragraph's first sentence rules out.
+
+`verified-by: bravebot_tui::remote_confirm::a_closed_channel_refuses_a_run`
+`verified-by: bravebot_tui::remote_confirm::a_closed_channel_refuses_a_vetted_read`
+`verified-by: bravebot_tui::remote_confirm::a_closed_channel_answers_no_question`
+`verified-by: bravebot_tui::remote_confirm::a_dropped_answer_channel_answers_no_question`
+`verified-by: bravebot_tui::remote_confirm::a_refusal_travels_back_too`
+`verified-by: bravebot_agent::turn::an_unattended_run_declines_every_question_in_the_series`
+`verified-by: bravebot_agent::turn::with_auto_vetting_a_safe_verdict_reaches_the_planner_unasked`
+`verified-by: bravebot_cli::running::a_program_approves_a_write_it_was_shown_and_declines_another`
+`verified-by: bravebot_agent::manifest::a_plan_nobody_approved_runs_nothing`
+`verified-by: bravebot_cli::running::an_auto_run_runs_a_command_the_classifier_allows_and_refuses_one_it_does_not`
+
+<a id="PROMPT-10"></a>
+### PROMPT-10: a prompt's own chrome is wholly the theme's
+
+Every cell a prompt's border encloses carries the theme's background and its text colour, whatever
+is drawn over them. A prompt that painted only its border is a hole in the palette, since clearing
+the cells under a panel empties them without colouring them.
+
+**Why.** The boundary between what the system is asking and what somebody else's bytes say is what
+a person reads when they answer, and a frame half in the theme and half in the terminal's own
+colours is a weaker one. Text that sets no colour of its own is otherwise the terminal's default,
+which under a light theme in a dark terminal is the path to unreadable.
+
+`verified-by: bravebot_tui::confirm::every_prompt_paints_the_themes_background_inside_its_border`
+`verified-by: bravebot_tui::trust_prompt::the_prompt_paints_the_themes_background_inside_its_border`
+`verified-by: bravebot_tui::trust_prompt::the_named_prompt_paints_the_themes_background_inside_its_border`
+
+<a id="PROMPT-12"></a>
+### PROMPT-12: an answer to a write, a run or a call may carry a note
+
+At the write prompt (a whole-file write, an edit and a download), the run prompt and the prompt for a call to a
+server's tool, **Tab opens a one-line field** and **Enter sends the answer with what was typed**.
+Esc closes the field and answers nothing, so the question is still there. The field sends the
+plain no until the person switches it with Tab to the plain yes, so it approves nothing by default
+and an empty field sends the answer alone. It offers the yes only where the question's own `y` is
+taken from the same draw ([PROMPT-1](#PROMPT-1), [PROMPT-4](#PROMPT-4)): a plan whose rows have not
+all been on the screen is not run from the field either.
+
+The note is the person's own words, on the same footing as a prompt they typed. The planner is told
+them in a sentence the driver writes from the answer alone, `The user declined this and wrote: …` or
+`The user approved this and wrote: …`, and nothing in the driver reads them: no branch is taken on
+what they say. They are one line, cut at a fixed length with line breaks, control characters and
+the Unicode line and paragraph separators turned into spaces, so a note cannot start a line of its own that reads as the driver's. A refusal
+carrying a note ends on it, where a refusal without one ends on the question what the person would
+prefer. A note after an approval follows the result, and follows it whether the result reached the
+planner or was held back as a reference. The trail records the note as the person's.
+
+**A note belongs to the one answer it was typed at.** It is handed on once, with the result of the
+call that asked, and the next call's result carries none. A call that asks about several files,
+as `apply_checkout` does, tells each file's note beside that file's line. No standing key takes one
+([PROMPT-6](#PROMPT-6)): `a`, `r`, `s`, `m`, `e`, a numbered key and the answer that stands for a
+tool open no field, and a note that arrives on any of those answers is dropped by the agent, whatever
+front end sent it. Enter at the question still answers nothing; in the field it sends the answer
+the field shows, which starts as no.
+
+**Opening, switching and sending come from keys that arrived on their own**
+([INPUT-34](terminal-input.md#INPUT-34), [PROMPT-7](#PROMPT-7)). A Tab, or an Enter, that arrived with
+others does nothing, so text another program writes into the terminal can neither open a field nor
+send one. Typing into an open field is taken however it arrived, since filling it decides nothing
+and the person reads it before sending.
+
+The prompts that offer no field give a refusal that ends on the question what the person would prefer: the trust question, the
+other questions a session opens with, and every other prompt here; the desktop window; a
+session in lines; and a one-shot run, which declines every question ([PROMPT-9](#PROMPT-9)). A step of a
+manifest run is put with the same write prompt and draws the field, but no planner is in that run's
+control path to be told ([manifest.md](manifest.md#MANIFEST-10)), so a note typed there is dropped.
+
+**Why.** In Claude Code and Codex the person can say why they refused, or what to do instead, as
+they refuse. Without a note, a refusal can only tell the planner to ask the person again, which
+costs a model round and a second interruption, and steering takes declining and then typing a
+message that arrives as a separate turn.
+
+`verified-by: bravebot_tui::confirm::note::a_note_typed_at_a_write_is_sent_with_the_no`
+`verified-by: bravebot_tui::confirm::note::a_note_can_be_sent_with_a_yes_where_the_question_takes_one`
+`verified-by: bravebot_tui::confirm::note::an_empty_note_is_no_note`
+`verified-by: bravebot_tui::confirm::note::escape_closes_the_note_and_leaves_the_question_open`
+`verified-by: bravebot_tui::confirm::note::a_tab_that_arrived_with_others_opens_no_note`
+`verified-by: bravebot_tui::confirm::note::a_note_is_sent_and_switched_only_by_keys_that_arrived_alone`
+`verified-by: bravebot_tui::confirm::note::no_standing_key_takes_a_note`
+`verified-by: bravebot_tui::remote_confirm::a_note_travels_back_to_the_worker_with_its_answer`
+`verified-by: bravebot_agent::turn::a_note_beside_a_refused_write_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_refused_write_without_a_note_still_ends_on_the_question`
+`verified-by: bravebot_agent::turn::a_note_beside_an_approved_write_follows_its_result`
+`verified-by: bravebot_agent::turn::a_note_is_told_only_beside_the_answer_it_was_typed_at`
+`verified-by: bravebot_agent::turn::a_note_on_a_standing_answer_is_not_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_beside_an_edit_answer_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_beside_a_run_answer_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_beside_a_refused_download_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_follows_a_result_held_back_as_a_reference`
+`verified-by: bravebot_agent::turn::a_note_typed_at_one_file_of_an_apply_is_told_beside_that_file`
+`verified-by: bravebot_agent::mcp::a_note_beside_a_call_answer_is_told_to_the_planner`
+`verified-by: bravebot_agent::manifest::a_note_typed_at_a_planned_write_is_dropped`
+`verified-by: bravebot_tui::confirm::note::a_note_cannot_say_yes_where_the_question_takes_no_yes`
+`verified-by: bravebot_tui::confirm::note::a_note_cannot_run_a_plan_that_was_not_all_on_the_screen`
+`verified-by: bravebot_tui::confirm::note::ctrl_c_in_a_note_interrupts_and_sends_no_words`
+`verified-by: bravebot_tui::confirm::note::a_run_and_a_call_take_a_note_with_the_plain_answers_only`
+`verified-by: bravebot_agent::confirm::a_note_is_one_bounded_line`
+`verified-by: bravebot_agent::confirm::a_standing_answer_gives_no_note`
+`verified-by: bravebot_core::policy::a_note_is_the_persons_own_and_is_handed_on_once`
+`verified-by: bravebot_agent::turn::a_note_beside_a_refused_write_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_refused_write_without_a_note_still_ends_on_the_question`
+`verified-by: bravebot_agent::turn::a_note_beside_an_approved_write_follows_its_result`
+`verified-by: bravebot_agent::turn::a_note_is_told_only_beside_the_answer_it_was_typed_at`
+`verified-by: bravebot_agent::turn::a_note_on_a_standing_answer_is_not_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_beside_an_edit_answer_is_told_to_the_planner`
+`verified-by: bravebot_agent::turn::a_note_beside_a_run_answer_is_told_to_the_planner`
+`verified-by: bravebot_agent::mcp::a_note_beside_a_call_answer_is_told_to_the_planner`
+
+<a id="PROMPT-13"></a>
+### PROMPT-13: text that draws as nothing is written out where a person decides about it
+
+Some characters have no glyph in a terminal or a window: the tag block, which writes ASCII in
+characters a model reads as the letters they stand for, zero-width characters, bidirectional
+controls and variation selectors. Text holding them draws the same with or without them, so a yes
+could cover an instruction the person could not see.
+
+The output prompt and the vetting prompt for text write out each such character in the text they
+show, as `‹U+XXXX›` with the character's code point in hex. A tag character that stands for a
+printable ASCII character also names it, as in `‹U+E0041 A›`. A sentence above the text says how
+many characters were written out. It is one of the rows the answer waits on, with the rest of what
+the prompt says about the content ([PROMPT-4](#PROMPT-4)), and a text with none has no such
+sentence. The terminal, a session in lines, the editor bridge and the desktop window draw the same
+text and the same sentence.
+
+The write prompt does the same for the lines a write adds or removes, and every row of its change
+is written out, kept lines included. The sentence over them counts the characters in the added and
+removed lines, says the file is written with them as they are, and is one of the rows the answer
+waits on. A write's body is the planner's own words or a processor's, so the sentence does not say
+the model reads them. The terminal, a session in lines, the editor bridge and the desktop window
+draw the same rows and the same sentence, and the file keeps the bytes it was given.
+
+The planner receives the bytes the slot holds, without the spelling. The spelling and the count are
+made where the text is released for the screen, in the reshape that counts its lines
+([labels.md](labels.md)), so the driver reads the text for neither and no front end has to.
+
+The question about a call to a server's tool does the same for a string argument that holds a line
+feed, another control character or such a character, which it draws one numbered row to a line with a
+sentence over the rows that counts the characters written out ([SERVERS-7](mcp-servers.md#SERVERS-7)).
+The text is the planner's own words, so the sentence does not say the model reads them. In code a
+program reads, a space that is not the plain one, a format character, the blank braille pattern and a
+private use character change what it does while they read as a blank or as nothing, so that drawing
+writes those out too, and each combining mark past the third on a character or with no character
+before it. That is the list of the confirmation window of the browser extension
+([ROUTE-11](routing.md#ROUTE-11)). A `‹` in the text is written out as `‹U+2039›` and is not counted,
+so each `‹` on a row opens a character that was written out and a typed `‹U+200B›` cannot pass for one.
+The object replacement character U+FFFC is left as it is in text and in code, since it draws as a
+visible box. `crates/core/tests/draws-as-nothing.json` lists it as left unmarked.
+
+One list names the characters. An MCP server's tool descriptions, a vouch prompt's file name and
+pasted text use it too, and the drawing of a call's argument adds what is said above. A paste removes fewer of them than a prompt writes out, because scripts and
+emoji sequences are written with some of them. A file name is also written out for the blank braille
+pattern, which draws as an empty cell, and a text is not, since braille drawings are written with it.
+
+**Why.** A person who answers yes agrees to the text the planner reads, and a character they cannot
+see is part of that text. Writing it out puts it among the rows the answer waits on.
+
+**Known cost.** Text that uses these characters on purpose, such as an emoji sequence joined with a
+zero-width joiner, is written out and counted too, which makes it harder to read, and a file name
+holding one, such as an emoji with its variation selector, is quoted in a vouch prompt. Text that
+holds the written-out form itself draws like a character that was written out, and the count says
+how many were, except in the question about a call, which writes out the `‹`. A vouch prompt's preview is not written out: it is the head of a file and a yes
+covers everything beneath the path, so a character in the preview hides nothing that text after the
+cut does not already hide.
+
+`verified-by: bravebot_core::invisible::each_character_that_draws_as_nothing_is_written_out`
+`verified-by: bravebot_core::invisible::a_message_written_in_tag_characters_is_spelled_letter_by_letter`
+`verified-by: bravebot_core::invisible::text_with_no_hidden_character_is_left_as_it_is`
+`verified-by: bravebot_core::invisible::spelling_keeps_the_lines_the_text_had`
+`verified-by: bravebot_core::invisible::the_list_holds_every_block_that_draws_as_nothing_and_no_ordinary_character`
+`verified-by: bravebot_tui::invisible::every_character_removed_from_a_paste_is_one_that_draws_as_nothing`
+`verified-by: bravebot_agent::turn::an_output_prompt_writes_out_what_draws_as_nothing_and_the_planner_gets_the_bytes`
+`verified-by: bravebot_agent::turn::a_vetting_prompt_writes_out_what_draws_as_nothing_and_the_planner_gets_the_bytes`
+`verified-by: bravebot_agent::turn::a_reference_write_spells_what_draws_as_nothing_and_the_file_keeps_the_bytes`
+`verified-by: bravebot_agent::diff::a_spelled_diff_counts_what_the_lines_changed_hold_and_tells_a_hidden_difference_apart`
+`verified-by: bravebot_approval::lib::a_write_says_how_many_characters_draw_as_nothing_above_the_rows`
+`verified-by: bravebot_tui::confirm::write::the_write_prompt_says_how_many_characters_draw_as_nothing_above_the_rows`
+`verified-by: bravebot_tui::confirm::vet::the_output_prompt_says_how_many_characters_draw_as_nothing_and_shows_each`
+`verified-by: bravebot_agent::confirm::a_string_argument_writes_out_what_cannot_be_seen_and_counts_it`
+`verified-by: bravebot_approval::lib::a_call_draws_the_code_it_carries_line_by_line_and_other_arguments_on_one_row`
+`verified-by: bravebot_agent::confirm::a_string_argument_marks_what_the_confirmation_window_marks`
+`verified-by: bravebot_agent::confirm::a_written_out_form_typed_in_a_string_argument_is_not_taken_for_one_the_question_wrote`
+`verified-by: bravebot_core::invisible::code_has_every_character_it_cannot_be_read_by_written_out`
+`verified-by: bravebot_core::invisible::code_spells_what_text_spells_the_same_way`
+`verified-by: bravebot_core::invisible::marks_past_the_third_on_a_letter_and_marks_on_nothing_are_written_out`
+`verified-by: bravebot_core::invisible::a_written_out_form_in_the_text_cannot_pass_for_a_character_that_was_written_out`
+`verified-by: bravebot_core::invisible::the_table_of_marks_is_the_nonspacing_and_enclosing_marks`
+`verified-by: bravebot_core::invisible::the_extra_lists_hold_their_categories_and_no_neighbour`
+`verified-by: bravebot_tui::confirm::vet::the_vet_prompt_says_how_many_characters_draw_as_nothing_and_shows_each`
+`verified-by: bravebot_tui::confirm::no_question_takes_a_yes_before_every_row_deciding_it_has_been_drawn`
+`verified-by: bravebot_cli::plain::the_plain_prompts_say_how_many_characters_of_the_text_draw_as_nothing`
+`verified-by: bravebot_ui_bridge::acp::an_editor_is_told_how_many_characters_of_a_text_draw_as_nothing`
+`verified-by: bravebot_ui_bridge::wire::an_output_and_a_vet_request_carry_how_many_characters_drew_as_nothing`
+`verified-by: bravebot_ui_bridge::wire::a_write_request_carries_how_many_characters_drew_as_nothing`
+`verified-by: by-construction (the desktop window is not a crate this workspace compiles; ui/scripts/shown.test.mjs draws the write, output and vetting cards from requests carrying the spelled text and the agent's sentence, holds the spelled characters and the sentence to the rows each card marks as deciding, holds a request with no sentence to drawing none and a sentence to being drawn as sent, and make check-ui runs it)`
+
+<a id="PROMPT-14"></a>
+### PROMPT-14: the write prompt may hand the body to an editor, and what comes back is not an answer
+
+Where a write is offered an edit, the terminal's prompt binds `e` to it and draws the key in its row.
+Where the write is not offered one, `e` is unbound and the row does not draw it. The key hands the
+terminal to the editor the person set for the prompt box, on a scratch file outside the workspace that
+nobody else can read, which is removed when the editor returns and is named with the extension of the
+path so the editor treats the body as the kind of file it is.
+
+What the editor saved is returned exactly as written, with its line endings and its final newline. It
+is no answer: the turn puts the question again for the new text, and nothing is written until a key at
+that prompt approves. An editor that returns what it was given, or that only adds the final newline a
+body lacked, leaves the question where it was, at the same place in the diff. One that would not start,
+or returned nothing, is said above the question, which stays open. The key opens no note field. It is
+taken only when it arrived on its own, as the key that opens a note is: an editor reads whatever
+arrives after the key that started it.
+
+**Why.** An edit that approved by being saved would write text nobody had looked at as a diff, and a
+key that failed in silence would look the same as a key that does nothing.
+
+**Known cost.** The key is drawn by the terminal alone. The desktop window and a session in lines
+draw the write prompt without it.
+
+`verified-by: bravebot_tui::confirm::write::the_edit_key_is_bound_only_where_the_request_offers_it`
+`verified-by: bravebot_tui::confirm::write::the_key_row_offers_the_editor_only_where_the_request_does`
+`verified-by: bravebot_tui::confirm::write::text_saved_from_the_editor_is_returned_and_approves_nothing`
+`verified-by: bravebot_tui::confirm::write::an_unchanged_body_leaves_the_question_where_it_was`
+`verified-by: bravebot_tui::confirm::write::an_editor_that_fails_is_said_above_the_question`
+`verified-by: bravebot_tui::confirm::write::a_final_newline_the_editor_added_is_not_an_edit`
+`verified-by: bravebot_tui::confirm::write::an_e_that_arrived_with_other_keys_opens_no_editor`
+`verified-by: bravebot_tui::confirm::write::the_place_in_a_long_diff_survives_an_editor_that_returns_nothing`
+`verified-by: bravebot_tui::confirm::write::the_stop_key_stays_whole_beside_the_editor_key_on_a_narrow_terminal`
+`verified-by: bravebot_tui::confirm::write::every_key_label_is_drawn_whole_beside_the_editor_and_both_standing_answers`
+`verified-by: bravebot_tui::remote_confirm::saved_text_travels_back_to_the_worker_and_approves_nothing`
+`verified-by: bravebot_tui::editor::a_body_comes_back_exactly_as_the_editor_wrote_it`
+`verified-by: bravebot_tui::editor::the_file_a_body_is_edited_in_is_private_named_for_its_kind_and_removed`
+`verified-by: bravebot_tui::editor::a_scratch_file_takes_a_plain_extension_from_the_path_and_nothing_else`

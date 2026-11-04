@@ -1,0 +1,361 @@
+---
+id: FETCH
+title: fetch_url
+status: normative
+governs:
+  - crates/agent/src/tools.rs
+  - crates/agent/src/tools/offered.rs
+  - crates/core/src/policy.rs
+  - crates/core/src/url.rs
+  - crates/net/src/address.rs
+  - crates/net/src/lib.rs
+  - crates/sandbox/src/address.rs
+guards:
+  - symbol: Policy::before_fetch_rules
+  - symbol: Policy::before_fetch
+  - symbol: Policy::before_network
+documented-by: docs/website/docs/reference/tools.md
+---
+
+## Scope
+
+Fetching an http or https URL. `url` is routing; the only content argument is the `why` every tool takes
+([TOOL-5](tool-surface.md#TOOL-5)), and the `read` that asks for the result in the same result
+([FETCH-9](#FETCH-9)). The result is a
+reference, unless that release is asked for and made. Where a rule about a host is written and how one is matched is
+[permissions.md](../permissions.md); what a label means is [labels.md](../labels.md).
+
+## Why a URL is admissible as routing
+
+A URL is one destination, and a person can read it and say yes or no to it. That is the whole test
+[TOOL-2](tool-surface.md#TOOL-2) applies, and it is what a shell string fails: there is no second
+thing bundled into a URL that an approval would be silently covering. The body that comes back is
+content, carried and never consulted, exactly as a quarantined file's is.
+
+## Clauses
+
+<a id="FETCH-1"></a>
+### FETCH-1: a fetched body is untrusted and public, and no approval changes that
+
+The label comes from `Capability::WebFetch`, so it is fixed before the request goes out and nothing
+about the reply can raise it. The planner gets a reference and never the bytes: it may hand them to
+a processor, or write them to a file with `contents_ref`, and it cannot read them or be told what
+they say.
+
+The release a person, a check or the mode makes of a body is [vet-content.md](vet-content.md)'s, and
+the body is released only by it, whether the planner calls `vet_content` or asks for it with `read`
+([FETCH-9](#FETCH-9)).
+
+**Why.** This is the difference between a fetch and a run, and the one place the two could be
+confused. Vouching for a command trusts what it prints, because a person can read one command and
+answer for both its effect and its output. A host answers every later request however it likes, so
+approving one is consent to talk to it and says nothing whatever about what it returns. If an
+approval could trust a body, one yes would turn a web page into routing, which is the whole thing
+the labels exist to stop.
+
+Public rather than private, because a fetched page is not the user's own data: it may be written
+without a further question about confidentiality, and there is nothing of theirs in it to release.
+
+`verified-by: bravebot_core::policy::approving_a_fetch_never_trusts_what_comes_back`
+`verified-by: bravebot_agent::turn::a_fetched_page_never_reaches_the_planner`
+`verified-by: bravebot_agent::turn::a_fetched_page_can_be_processed_and_written_without_being_read`
+
+<a id="FETCH-2"></a>
+### FETCH-2: every fetch asks, unless a rule names the host
+
+A URL nobody has ruled on is put to a person, who is shown the URL and, separately, the host it
+will reach. An `allow` rule matching the host answers the prompt; a `deny` rule refuses without
+asking.
+
+```
+╭ fetch this? ─────────────────────────────────────────────╮
+│  talking to docs.example.com                             │
+│                                                          │
+│Fetch https://docs.example.com/api                        │
+│                                                          │
+│  what comes back stays quarantined however you answer:   │
+│  the model can pass it to a processor or write it to a   │
+│  file, and cannot read it or be told what it says.       │
+│                                                          │
+│  y fetch it    n don't    ctrl-c stop the turn           │
+╰──────────────────────────────────────────────────────────╯
+```
+
+The host is drawn on its own line rather than left inside the URL, and is taken from the URL by the
+parser rather than from what the string looks like. `https://example.com@evil.test/` names one site
+to a person skimming it and reaches another, so what they are answering about is put where it cannot
+be misread.
+
+In the terminal, the host is drawn above the URL in rows the URL cannot take, and so is the
+metadata warning where the host is this machine's metadata service. A URL longer than the box
+scrolls under them ([PROMPT-4](../prompting.md#PROMPT-4)). `y` is not taken at a draw that cuts
+off the host, the warning or the keys, or that leaves the URL no row.
+
+**Why the host and not the URL.** A rule is a standing statement about who may be talked to, which
+is a thing a person can hold in their head. A path is where a URL carries the particular thing being
+asked for, so a rule matching one would be answering a different question on every call.
+
+`verified-by: bravebot_core::policy::a_host_nobody_has_ruled_on_is_put_to_a_person`
+`verified-by: bravebot_core::policy::a_rule_written_in_advance_answers_the_fetch_prompt`
+`verified-by: bravebot_core::policy::a_denied_host_is_refused_rather_than_put_to_a_person`
+`verified-by: bravebot_agent::turn::a_denied_host_is_refused_without_asking`
+`verified-by: bravebot_core::url::userinfo_is_not_mistaken_for_the_host`
+`verified-by: bravebot_agent::turn::a_domain_rule_lets_a_fetch_through_without_asking`
+`verified-by: bravebot_agent::turn::a_refused_fetch_sends_no_request`
+`verified-by: bravebot_tui::confirm::grants::a_url_longer_than_the_fetch_box_keeps_the_host_above_it_and_says_how_much_is_below`
+`verified-by: bravebot_tui::confirm::grants::a_userinfo_that_fills_the_fetch_box_leaves_the_host_and_what_it_is_on_screen`
+`verified-by: bravebot_tui::confirm::grants::the_end_of_a_long_url_can_be_scrolled_to_with_the_host_still_shown`
+`verified-by: bravebot_tui::confirm::grants::a_fetch_question_takes_a_yes_only_from_a_draw_showing_the_host_and_the_keys`
+`verified-by: bravebot_tui::confirm::grants::a_fetch_scroll_moves_from_where_the_url_was_drawn`
+`verified-by: bravebot_agent::turn::a_fetch_prompt_carries_the_host_the_url_reaches_as_its_own_field`
+
+<a id="FETCH-3"></a>
+### FETCH-3: an approval is bound to the URL it was given for, and nothing is remembered
+
+The endorsement names that exact URL and is single-use, so an answer cannot be spent on another
+request. There is no "always" at this prompt: approving one fetch records nothing, and the next one
+asks again. Standing permission is a rule in a settings file, which is a person writing a host down
+in advance rather than answering a question about one URL.
+
+**Why no remembering.** `run` offers it because vouching is keyed to an exact argv, which is the
+thing the person read. The equivalent for a fetch would be keyed to a host, and a host is not what
+was in front of them: they approved one page, and every later URL on that host is one they have not
+seen. Offering it would collect a standing grant from a question about something narrower.
+
+`verified-by: bravebot_core::policy::an_approval_for_one_url_does_not_fetch_another`
+`verified-by: bravebot_core::policy::a_fetch_without_an_endorsement_is_refused`
+`verified-by: bravebot_core::policy::an_endorsement_is_single_use`
+`verified-by: bravebot_core::policy::approving_a_fetch_leaves_nothing_behind_for_the_next_one`
+
+<a id="FETCH-4"></a>
+### FETCH-4: a redirect may not leave the host that was approved
+
+Every hop passes the egress gate, and while a fetch is in flight that gate also checks the hop's
+host against the one approved. A redirect within that host is ordinary and continues; a redirect
+anywhere else is refused unless a rule allows that host too. A `deny` rule refuses a hop whatever
+else says otherwise.
+
+A hop the gate refuses for leaving the approved host is put to the person before the fetch is
+reported as refused. The gate keeps the host the hop named, as the server's own bytes, and
+`fetch_url` draws it through the fetch prompt of [FETCH-2](#FETCH-2): the host on its own row, then a
+row saying it was reached by redirect from the host that was approved, then the URL that was
+approved, and the metadata-service warning where the host is one. A yes sends that one request
+again with that host allowed for it alone. It is bound to the host as it was drawn, spent once and
+gone when the request reports back, and nothing is remembered ([FETCH-3](#FETCH-3)): a further hop to
+another host is refused without a question, and the next fetch asks again. A no leaves the hop refused at the egress gate, as the paragraph above says.
+Bypassing does not answer this question, since the host is a server's choice and not the planner's.
+A host a `deny` rule covers is not asked about, because that refusal is final.
+
+This is the host and not the transport. A hop that keeps the approved host satisfies everything this
+clause asks even where it drops TLS to do it, so whether one may is decided for every request that
+leaves this process, in [network-egress.md](../network-egress.md).
+
+**Why.** The approval named one URL, and the host at the end of a redirect chain is one nobody was
+ever shown. Without this, a page on a host somebody approved could send the request wherever it
+liked, and the answer a person gave would be covering a destination they never saw.
+
+**What this gate is not.** Reaching the configured model endpoint is egress too, and it goes through
+the same gate. It is this program operating rather than something a turn asked for, so a `WebFetch`
+rule does not apply to it: a rule about a website must not be able to stop the agent from talking to
+its own backend. The distinction is whether a `fetch_url` call is in flight, which the policy layer
+knows because it set it, and which no reply can influence.
+
+`verified-by: bravebot_core::policy::a_fetch_cannot_be_redirected_to_a_host_nobody_approved`
+`verified-by: bravebot_core::policy::a_denied_host_is_refused_at_the_egress_gate_so_a_redirect_cannot_reach_it`
+`verified-by: bravebot_core::policy::a_denied_host_is_refused_at_the_egress_gate_on_its_own_account`
+`verified-by: bravebot_core::policy::a_web_fetch_rule_does_not_govern_this_programs_own_connection`
+`verified-by: bravebot_core::policy::a_finished_fetch_stops_confining_the_turns_other_egress`
+`verified-by: bravebot_core::policy::a_redirect_to_a_host_a_rule_allows_is_followed`
+`verified-by: bravebot_core::policy::a_hop_refused_for_leaving_the_host_is_kept_untrusted_for_the_prompt`
+`verified-by: bravebot_core::policy::an_approved_hop_is_for_that_host_and_that_fetch_alone`
+`verified-by: bravebot_agent::turn::a_redirect_off_the_approved_host_is_put_to_the_person_and_followed_on_a_yes`
+`verified-by: bravebot_agent::turn::a_redirect_off_the_approved_host_that_is_declined_sends_nothing_to_it`
+`verified-by: bravebot_agent::turn::a_redirect_to_a_denied_host_is_refused_without_asking`
+`verified-by: bravebot_agent::permission_mode::bypassing_answers_a_fetch_but_not_a_redirect`
+`verified-by: bravebot_approval::lib::the_fetch_lines_say_where_a_redirect_was_approved_for`
+`verified-by: bravebot_tui::confirm::grants::a_fetch_prompt_for_a_redirect_says_where_it_was_approved_for`
+`verified-by: bravebot_ui_bridge::wire::a_fetch_a_redirect_led_to_names_the_host_that_was_approved`
+
+<a id="FETCH-5"></a>
+### FETCH-5: what is not text is carried anyway, and a cap is reported
+
+A body that is not valid UTF-8 is decoded lossily rather than refused. Responses are size-capped by
+the egress layer, and a truncated one says so.
+
+**Why.** Nothing here reads the body, so a decoding failure protects nobody: a page with one bad
+byte is still the page that was asked for, and refusing it would be a fetch that failed for a reason
+the planner cannot act on. That is the opposite of a file read, where
+[READ-3](read-file.md#READ-3) reports a binary file as binary because the planner was going to be
+shown the text.
+
+`verified-by: bravebot_agent::turn::a_fetched_body_that_is_not_text_is_carried_anyway`
+`verified-by: bravebot_net::lib::bodies_are_capped`
+`verified-by: bravebot_net::lib::small_bodies_are_not_reported_as_truncated`
+`verified-by: bravebot_agent::turn::a_fetched_body_cut_at_the_cap_is_reported_as_incomplete`
+
+<a id="FETCH-6"></a>
+### FETCH-6: a result names the URL that was asked for
+
+Every URL a fetch puts in a result is the URL the caller gave, on both roads. A fetch that succeeds
+names it as the origin of the content it produced; one that fails or is refused names it as the
+request that did not work, with the kind of failure. A redirect target, the host at the end of a
+chain, and the transport's own words about a URL it could not use are in neither. A refusal at the
+egress gate names the host that was approved and not the one a hop went to, and so does the result
+of a fetch whose person was asked about that host: the planner's sentence is the same on a yes and
+on a no, and the host reaches the person's screen alone.
+
+Where a chain went stays with the crate that followed it: neither value a successful fetch hands
+back carries the URL the body arrived from, so a result cannot name it by reaching for it. The gate
+that checks a hop is told that hop's URL, because [FETCH-4](#FETCH-4) is a decision about it, and
+records the host it allowed; that is a gate's record of a check it made, not a result.
+
+**Why.** A result's URL is trusted whichever road it came by: `fetch_url` formats it into a
+sentence the planner is sent verbatim, the gate that quarantines the body writes the same string
+into the trace, and a person reads it in the transcript. Past the first hop the URL a request is on
+is a string a server wrote into a `Location` header, and [FETCH-4](#FETCH-4) makes a same-host
+redirect the ordinary case, so a result that named where the request ended up would be handing the
+planner a server's bytes with the driver's attribution on them. That is the one channel
+[FETCH-1](#FETCH-1) otherwise closes: a body that arrives is quarantined whole, and neither a body
+that does not nor the address one arrived from may arrive as trusted prose instead.
+
+The caller asked about one URL and is told what became of that request, which is what it can act
+on. Where the chain went is a detail of following it, and keeping that detail inside the crate that
+followed it is what makes this a property of the code rather than of whoever wrote the call.
+
+`verified-by: bravebot_net::egress::a_redirect_that_leads_nowhere_names_the_url_that_was_asked_for`
+`verified-by: bravebot_net::egress::a_status_after_a_redirect_names_the_url_that_was_asked_for`
+`verified-by: bravebot_net::lib::a_refused_downgrade_names_the_url_that_was_asked_for`
+`verified-by: bravebot_core::policy::a_refused_redirect_names_the_approved_host_and_not_the_one_a_server_chose`
+`verified-by: bravebot_agent::turn::a_failed_fetch_names_the_url_that_was_asked_for_and_not_where_a_redirect_went`
+`verified-by: bravebot_agent::turn::a_fetch_refused_for_leaving_its_host_names_no_host_the_server_chose`
+`verified-by: bravebot_net::lib::a_call_failure_is_worded_by_its_kind_and_never_by_the_transport`
+`verified-by: bravebot_net::egress::a_first_hop_failure_is_worded_by_this_crate_and_not_the_transport`
+`verified-by: bravebot_agent::turn::a_fetched_page_names_the_host_that_was_asked_for_and_not_where_a_redirect_went`
+`verified-by: by-construction (neither value a successful fetch hands back carries the URL a redirect chain ended at, so no result can name one)`
+
+<a id="FETCH-7"></a>
+### FETCH-7: every fetch asks for Markdown first, with a header nothing can change
+
+Every request a fetch sends carries one `Accept` header, fixed in this program's source:
+
+```
+Accept: text/markdown, */*;q=0.9
+```
+
+The driver sets it before the request goes out. The planner's `url` argument takes no part in it,
+no reply can change it, and every hop of a redirect chain sends the same bytes.
+
+Markdown is the only type ranked. A server holding no Markdown answers with whatever it would
+have answered for `*/*`, so this header changes which type a fetch gets only where Markdown is
+one of the choices.
+
+This changes nothing else. The label is still fixed by `Capability::WebFetch` before the request
+goes out ([FETCH-1](#FETCH-1)), so a `text/markdown` body is untrusted and public exactly as an
+HTML one is and a server cannot raise it by naming a type. The 2 MiB cap is the egress layer's
+and is unchanged ([NET-4](../network-egress.md#NET-4)). The planner still gets a reference and
+never the bytes.
+
+**Why.** The body is read by a processor and by nothing else, and the same page as Markdown costs
+a fraction of the tokens its HTML costs. A server able to answer with either answers with HTML
+unless asked otherwise, so without this the whole HTML body, up to the cap, is what a processor
+has to read.
+
+**Why nothing but Markdown is ranked.** Ranking the rest would state a preference this program
+does not hold. An endpoint that negotiates answers `*/*` with a compact form and `text/html` with
+a full page, so naming HTML above `*/*` would cost a processor more tokens than sending no header
+at all, which is the opposite of the reason for sending one. `*/*` also keeps a server holding
+none of the named types answering with what it has rather than refusing.
+
+**Why no conversion here.** Asking is all the driver does. Turning HTML into Markdown means
+reading the bytes, and [processors.md](../processors.md) makes a processor the one component that
+reads untrusted content, holding no capabilities of its own ([PROC-1](../processors.md#PROC-1)), so
+a converter in the driver would be the driver reading a page.
+
+`verified-by: bravebot_agent::turn::a_fetch_asks_for_markdown_ahead_of_html`
+`verified-by: bravebot_agent::turn::a_redirected_fetch_still_asks_for_markdown_ahead_of_html`
+`verified-by: bravebot_agent::turn::a_markdown_body_is_labelled_exactly_as_an_html_body_is`
+
+<a id="FETCH-8"></a>
+### FETCH-8: a name that resolves to a non-public address is not fetched
+
+A person approves a host as written, and a name resolves to whatever its server says. While a
+fetch is in flight, each hop's host is looked up once and the answer is classified before anything
+is sent. If any address in it is loopback, private, link-local (the cloud metadata address among
+them), unique-local, carrier-grade NAT, unspecified, multicast or reserved, the hop is not sent and
+the fetch fails. IPv4 addresses inside IPv6 ones (`::ffff:a.b.c.d`, `64:ff9b::/96`) are classified as
+the IPv4 address. The connection is made to the addresses classified and no second lookup is made,
+so an answer that differs the next time cannot be connected to.
+
+The failure names the URL that was asked for, as every failure does ([FETCH-6](#FETCH-6)). The
+address stays inside `bravebot-net`, in the result, the log and the trail alike.
+
+A host written as an address is not a name, and a person approving it approved that address. It is
+fetched, and `localhost` is a name. The check is the fetch's, as [FETCH-4](#FETCH-4)'s is: it does not
+apply to the configured model endpoint or to anything else that is not a `fetch_url` call, so a
+model on loopback is reached.
+
+**Why.** [FETCH-4](#FETCH-4) holds the chain to the host a person was shown, and a host is a string.
+Without this, `docs.example.com` can be made to answer with `169.254.169.254` and reach a service
+that hands credentials to whoever opens the socket, with a prompt that said nothing was wrong. The
+refusal covers every address in the answer rather than the one that would be connected to: the
+public half of a mixed answer is trusted only as far as the server that wrote the other half.
+
+**Known cost.** Behind a proxy the proxy resolves the target, and the lookup this program makes is
+for the proxy itself, so a proxied fetch is not classified here. The proxy is the one that
+connects, and what it is allowed to reach is its own configuration's.
+
+`verified-by: bravebot_sandbox::address::every_class_the_issue_names_is_not_public`
+`verified-by: bravebot_sandbox::address::a_public_address_is_public`
+`verified-by: bravebot_sandbox::address::an_ipv4_address_in_ipv6_clothes_is_classified_as_the_ipv4_address`
+`verified-by: bravebot_net::address::a_host_written_as_an_address_is_not_a_name`
+`verified-by: bravebot_net::lib::a_name_resolving_to_a_non_public_address_is_refused_before_any_request_is_sent`
+`verified-by: bravebot_net::lib::a_refused_address_is_never_connected_to`
+`verified-by: bravebot_net::lib::one_non_public_address_among_public_ones_refuses_the_name`
+`verified-by: bravebot_net::lib::a_redirect_hop_resolving_to_a_non_public_address_is_refused_and_names_the_url_asked_for`
+`verified-by: bravebot_net::lib::the_connection_is_made_to_the_address_that_was_classified`
+`verified-by: bravebot_net::lib::an_approved_host_that_is_itself_an_address_is_fetched`
+`verified-by: bravebot_net::lib::a_request_that_is_not_a_fetch_may_still_resolve_to_this_machine`
+`verified-by: bravebot_net::lib::a_proxied_fetch_is_not_sent_through_the_guarded_lookup`
+`verified-by: bravebot_net::lib::a_refused_address_is_a_failure_that_says_nothing_of_the_address_and_is_not_retried`
+`verified-by: bravebot_net::egress::a_fetched_name_that_resolves_to_this_machine_is_refused_without_a_connection`
+`verified-by: bravebot_net::egress::the_same_name_is_reached_when_no_fetch_is_in_flight`
+`verified-by: bravebot_net::egress::an_approved_address_literal_on_this_machine_is_fetched`
+`verified-by: bravebot_core::policy::a_fetch_is_in_flight_from_its_approval_until_it_finishes`
+`verified-by: bravebot_agent::turn::a_fetch_to_a_name_that_resolves_to_this_machine_fails_without_reaching_it`
+
+<a id="FETCH-9"></a>
+### FETCH-9: a fetch may ask for its body in the same result, and gets it where the mode or a check answers
+
+`fetch_url` takes a boolean `read` beside `url`. It is offered only on a list that holds
+`vet_content`, and the property is described there as asking for the page in the result of the
+call. `read: true` does not change the request: the URL, the headers, the redirect chain and the
+label are those of any fetch ([FETCH-1](#FETCH-1), [FETCH-4](#FETCH-4), [FETCH-7](#FETCH-7)), and
+the body is quarantined before anything else happens to it.
+
+Whether the body is then released in the result, what the check reads and says, what the trail
+records, what the result holds where it is not released, and what a size of 0, a size past the output
+cap and a picture do, are [VET-6](vet-content.md#VET-6)'s. A fetch that failed has no body and no
+slot, so `read` has nothing to release, and the failure is reported as it is without `read`.
+
+A `read` that is neither `true` nor `false` is refused before the host is asked about, so a person
+is not shown a question for a call that was going to be refused. Absent and null are `false`.
+
+**Why.** A planner that wants a page it will read has nothing to decide between the fetch and the
+`vet_content` call that follows it where the mode or a check answers that call, and the second round
+only adds a model call and the whole conversation sent again. The argument is set before the body
+exists and is not routing: the host is the only field a person approves ([FETCH-2](#FETCH-2)), and
+approving it grants nothing about what the host returns ([FETCH-1](#FETCH-1)).
+
+**This changes no label.** The body is untrusted and public when the request goes out, and a release
+by the flag is the release `vet_content` makes of it. No byte of the page is read to decide it.
+
+`verified-by: bravebot_agent::turn::an_unscreened_unattended_fetch_that_asks_to_read_is_handed_the_page_in_the_same_result`
+`verified-by: bravebot_agent::turn::a_screened_fetch_that_asks_to_read_is_handed_the_page_where_the_check_finds_nothing`
+`verified-by: bravebot_agent::turn::a_screened_fetch_that_asks_to_read_keeps_the_page_back_where_the_check_does_not_say_safe`
+`verified-by: bravebot_agent::turn::a_screened_fetch_that_asks_to_read_keeps_the_page_back_where_the_check_cannot_be_made`
+`verified-by: bravebot_agent::turn::asking_to_read_a_fetched_page_changes_nothing_where_a_person_still_answers_for_it`
+`verified-by: bravebot_agent::turn::a_fetch_asked_to_read_in_a_turn_without_vet_content_stays_a_reference`
+`verified-by: bravebot_agent::turn::a_fetch_that_asks_to_read_more_than_one_result_may_hold_keeps_the_page_and_says_why`
+`verified-by: bravebot_agent::turn::a_fetch_that_asks_to_read_a_page_of_no_bytes_makes_no_check`
+`verified-by: bravebot_agent::turn::a_fetch_whose_read_is_not_a_boolean_is_refused_before_anything_is_fetched`
+`verified-by: bravebot_agent::turn::a_fetched_image_asked_to_be_read_is_released_as_vet_content_releases_the_same_fetch`

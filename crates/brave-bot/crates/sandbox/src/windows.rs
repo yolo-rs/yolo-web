@@ -1,0 +1,1321 @@
+//! Windows confinement via AppContainer.
+//!
+//! A lowbox token is default-deny against every securable object on the machine, so a
+//! process holding one reaches nothing it has not been granted by name. A grant is an
+//! access-control entry for the container's own security identifier, written onto the
+//! directory the policy names; egress is a capability, so it is denied by leaving the
+//! capability out rather than by a rule that has to be got right.
+//!
+//! What that costs, and what neither the Seatbelt nor the Landlock backend costs, is
+//! that a grant is a change to the filesystem rather than to this process: it is on the
+//! directory when the confined process starts and it is still there afterwards unless
+//! something removes it. [`AppContainerSandbox`] removes the grants it wrote and the
+//! profile it created as it is dropped, and a run that ends without reaching that leaves
+//! entries behind. They name a security identifier no other run uses, because the
+//! profile is this run's alone, so what is left is an entry for a container that no
+//! longer exists rather than a standing grant to something still running.
+//!
+//! Subprocess denial is not enforceable here: a container bounds what a process reaches,
+//! not whether it creates children, and a child of a confined process is in the same
+//! container rather than outside it. A policy asking for that denial is refused
+//! ([`refusal_for`]) rather than applied without it.
+//!
+//! What a process starts is in its job as well. The process is created in a job of its own, which
+//! the creation call names, so it is in the job before it runs, and killing it ends every process it
+//! started. So does closing the job, which dropping the process and this process ending both do.
+//!
+//! Compiled under test on every platform as well as on the one it confines, so what this
+//! backend decides before a process starts is pinned by every job that runs the suite:
+//! which capability the policy asks for, what each grant permits, and which policies are
+//! refused. The Win32 calls that apply those decisions are in [`appcontainer`], which
+//! only the Windows build compiles and only `make check-windows` and CI's Windows job
+//! check.
+
+use crate::SandboxError;
+use crate::policy::{Capabilities, ConfinementLevel, SandboxPolicy};
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+
+/// The capability that lets a confined process open an outbound socket.
+///
+/// Named rather than numbered: capabilities are resolved from this name by the platform,
+/// and a well-known one spelled wrong derives a security identifier that grants nothing,
+/// which would read as egress denied and be egress denied by accident.
+const INTERNET_CLIENT: &str = "internetClient";
+
+/// What a container is granted over a path the policy names.
+///
+/// The mask is a Win32 access mask and the inheritance is Win32 ACE flags, spelled here
+/// as numbers so that what is granted is decided by something every platform's test run
+/// can call. The Windows build holds each of them to the platform constant it stands for,
+/// so a number here cannot drift from the right it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Grant {
+    /// The rights the entry allows.
+    mask: u32,
+    /// How the entry reaches what is under the directory it is written on.
+    inheritance: u32,
+}
+
+/// `FILE_GENERIC_READ`: open, read, and read the entry's own attributes.
+const FILE_GENERIC_READ: u32 = 0x0012_0089;
+/// `FILE_GENERIC_WRITE`: create, write, append, and write the entry's own attributes.
+const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+/// `FILE_GENERIC_EXECUTE`: run a program from the path.
+const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+/// `DELETE`: remove an entry, and the right the source of a rename needs.
+const DELETE: u32 = 0x0001_0000;
+/// `SUB_CONTAINERS_AND_OBJECTS_INHERIT`: the entry reaches files and directories under
+/// the one it is written on.
+const SUB_CONTAINERS_AND_OBJECTS_INHERIT: u32 = 3;
+
+/// What a path the policy lists as readable is granted.
+///
+/// Execution comes with reading rather than separately, because a policy naming a
+/// directory of programs means the confined process to run them and there is no list of
+/// paths it may read but not execute. Landlock and Seatbelt both carry execution in their
+/// read grant, so splitting it here would make the same policy mean a different thing on
+/// this platform.
+const fn grant_for_reading() -> Grant {
+    Grant {
+        mask: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        inheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    }
+}
+
+/// What a path the policy lists as writable is granted.
+///
+/// `DELETE` as well as the write rights, because [SANDBOX-7] requires a write grant to
+/// cover moving a file within it and the source of a rename is deleted from where it was.
+///
+/// `FILE_ALL_ACCESS` is not what this is: it carries `WRITE_DAC` and `WRITE_OWNER`, and a
+/// confined process holding either can write itself an entry for any right it likes on
+/// anything under the path, which is a container that grants whatever it is asked for.
+///
+/// [SANDBOX-7]: ../../../docs/specs/sandboxing.md
+const fn grant_for_writing() -> Grant {
+    Grant {
+        mask: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+        inheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    }
+}
+
+/// Every grant this policy asks to be written, in the order they are written.
+///
+/// A path named in both lists is granted once, for writing, since a second entry for the
+/// same container on the same path adds nothing the first did not already allow and
+/// leaves a second entry to remove.
+fn grants_for(policy: &SandboxPolicy) -> Vec<(PathBuf, Grant)> {
+    let mut grants: Vec<(PathBuf, Grant)> = Vec::new();
+    for row in &policy.writable {
+        if !grants.iter().any(|(granted, _)| *granted == row.path) {
+            grants.push((row.path.clone(), grant_for_writing()));
+        }
+    }
+    for path in &policy.readable {
+        if !grants.iter().any(|(granted, _)| granted == path) {
+            grants.push((path.clone(), grant_for_reading()));
+        }
+    }
+    grants
+}
+
+/// The capabilities the token is built with, which is what the policy asks for and never
+/// more.
+///
+/// A capability is the only thing an AppContainer holds beyond its grants, so an empty
+/// list is a process that reaches neither the network nor anything else the platform
+/// gates this way. That is what makes [`Capabilities::network_denial_enforced`] true here
+/// rather than aspirational: denial is the absence of a grant, not a rule to apply.
+fn capability_names(policy: &SandboxPolicy) -> Vec<&'static str> {
+    if policy.allow_network {
+        vec![INTERNET_CLIENT]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Why this backend will not apply `policy`, where it will not.
+///
+/// Decided before anything is created, so a refusal costs no profile and writes no entry
+/// onto a directory.
+pub(crate) fn refusal_for(policy: &SandboxPolicy) -> Option<SandboxError> {
+    if !policy.is_meaningful() {
+        return Some(SandboxError::PolicyTooPermissive);
+    }
+
+    if !policy.unreadable.is_empty() {
+        return Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: "a container is granted the paths it is given and reaches nothing else, so a \
+                     read refusal subtracts from nothing here; refusing rather than reporting a \
+                     credential held back that was never reachable"
+                .into(),
+        });
+    }
+
+    if !policy.unwritable.is_empty() {
+        return Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: "a container is granted the paths it is given and a write grant cannot be \
+                     narrowed beneath its row, so a write refusal subtracts from nothing here; \
+                     refusing rather than reporting a path held back that was still writable"
+                .into(),
+        });
+    }
+
+    if policy.egress_only_to.is_some() {
+        return Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: "a container holds the internet capability or does not, so egress cannot be \
+                     limited to one port here; refusing rather than reporting confinement that \
+                     is not applied"
+                .into(),
+        });
+    }
+
+    if !policy.allow_subprocesses {
+        return Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: "a container bounds what a process reaches and not whether it creates \
+                     children, so subprocess denial is not enforced here; refusing rather \
+                     than reporting confinement that is not applied"
+                .into(),
+        });
+    }
+
+    None
+}
+
+/// The paths `policy` names that `on_disk` says are not there, each named once.
+///
+/// An entry is written onto an object, so a path that is not on disk is a grant this
+/// backend cannot install, and installing the rest of the policy instead would confine
+/// the process to fewer paths than the policy names with nothing saying so
+/// ([SANDBOX-6]).
+///
+/// The existence test is a parameter so the answer is decided by something a test can
+/// call with either answer, rather than by what the machine running the suite happens to
+/// carry.
+///
+/// [SANDBOX-6]: ../../../docs/specs/sandboxing.md
+fn paths_that_are_not_there(
+    policy: &SandboxPolicy,
+    on_disk: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    for (path, _) in grants_for(policy) {
+        if !on_disk(&path) && !missing.contains(&path) {
+            missing.push(path);
+        }
+    }
+    missing
+}
+
+/// The components of a Windows path, lower-cased, or `None` where the path cannot be compared by
+/// its text.
+///
+/// Split on both separators, since the same path is written either way, and lower-cased because
+/// the file system does not tell `Windows` from `WINDOWS`. The `\\?\` prefix a resolved path
+/// carries is dropped. A path with a `.` or `..` component is `None`: its text does not say where
+/// it ends up.
+fn components_of(path: &Path) -> Option<Vec<String>> {
+    let text = path.to_string_lossy();
+    let mut parts: Vec<String> = text
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if parts.first().is_some_and(|first| first == "?") {
+        parts.remove(0);
+    }
+    if parts.iter().any(|part| part == "." || part == "..") {
+        return None;
+    }
+    Some(parts)
+}
+
+/// Whether every container may already read `path`, because it is at or below one of `roots`.
+///
+/// The machine's own directories, `C:\Windows` and the Program Files directories, carry an entry
+/// for the group every container belongs to. A grant there is an entry only an account allowed to
+/// change the directory's permissions can write, so one asked of an ordinary account fails and
+/// takes the whole program with it, for access the container has. Decided by the path's text and
+/// never by asking the file system, so a link cannot make a directory of the person's own count.
+fn readable_by_every_container(path: &Path, roots: &[PathBuf]) -> bool {
+    let Some(path) = components_of(path) else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        components_of(root).is_some_and(|root| {
+            !root.is_empty()
+                && path.starts_with(&root)
+                && path
+                    .get(root.len())
+                    .is_none_or(|next| !NOT_READABLE_BY_EVERY_CONTAINER.contains(&next.as_str()))
+        })
+    })
+}
+
+/// The directories directly under those roots that carry no such entry: the machine's shared
+/// temporary directory and the packaged applications' store keep their own access lists.
+const NOT_READABLE_BY_EVERY_CONTAINER: [&str; 2] = ["temp", "windowsapps"];
+
+/// The grants of `policy` that need an entry written, given the roots every container reads.
+///
+/// A write grant always needs one, however the path sits: a container is not given the right
+/// to write the machine's directories by default, and a row asking for it is one that fails.
+fn grants_to_write(policy: &SandboxPolicy, readable_roots: &[PathBuf]) -> Vec<(PathBuf, Grant)> {
+    grants_for(policy)
+        .into_iter()
+        .filter(|(path, grant)| {
+            *grant != grant_for_reading() || !readable_by_every_container(path, readable_roots)
+        })
+        .collect()
+}
+
+/// Why this backend will not start `program` with `args`, where it will not.
+///
+/// A batch file is run by `cmd.exe`, which reads its own command line again after the one
+/// [`command_line`] wrote, and an argument that was quoted so a program gets it back unchanged
+/// can be read there as an operator. No quoting is right for both readers, so a program that is
+/// one is refused rather than started with arguments that mean something other than what a
+/// person approved.
+///
+/// `cmd.exe` started directly reads its line by the same rules of its own and not by
+/// `CommandLineToArgvW`'s. After `/c`, `/k` or `/r` it drops the first and last quotation mark
+/// of what follows when that starts with one, and it reads operators, `%` and its delimiters
+/// wherever they are left unquoted. It is started only where its reading and the line
+/// [`command_line`] writes agree: no argument holds a character in [`CMD_READS`], and the first
+/// argument after the switch is written quoted only when it is the last one.
+pub fn refusal_for_program(program: &str, args: &[String]) -> Option<SandboxError> {
+    let is_a_batch_file = Path::new(program)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+        });
+    if is_a_batch_file {
+        return Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: format!(
+                "{program} is a batch file, and `cmd.exe` reads its arguments a second time, so \
+                 an argument quoted for a program can be read there as a command; refusing \
+                 rather than starting it"
+            ),
+        });
+    }
+    if !is_cmd(program) {
+        return None;
+    }
+    let refused = |why: String| {
+        Some(SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: format!(
+                "`cmd.exe` reads its command line by rules of its own, and {why}, so the \
+                 arguments it ran would not be the ones approved; refusing rather than starting \
+                 it. Run the program directly instead of through `cmd.exe`"
+            ),
+        })
+    };
+    if let Some(read) = args
+        .iter()
+        .find_map(|arg| arg.chars().find(|c| CMD_READS.contains(c)))
+    {
+        return refused(format!(
+            "it reads {read:?} in an argument as its own syntax"
+        ));
+    }
+    let after_switch = args
+        .iter()
+        .position(|arg| {
+            ["/c", "/k", "/r"]
+                .iter()
+                .any(|s| arg.eq_ignore_ascii_case(s))
+        })
+        .map_or(&[][..], |switch| &args[switch + 1..]);
+    if let [first, _, ..] = after_switch
+        && is_written_quoted(first)
+    {
+        return refused(
+            "it drops the quotation marks around the first argument after its switch when \
+             another follows"
+                .into(),
+        );
+    }
+    None
+}
+
+/// What `cmd.exe` reads as its own in a line it runs: the quotation mark, the operators, the
+/// escape, the two expansions, the line ends, and the delimiters its built-in commands split on.
+/// Quoting an argument does not keep one out of its reading: the quotation marks around the
+/// first argument after the switch can be dropped, `%` and `!` are expanded inside quotation marks,
+/// and a quotation mark is not escaped by the backslash [`quoted`] writes before it.
+const CMD_READS: [char; 15] = [
+    '"', '&', '|', '<', '>', '^', '(', ')', '%', '!', '\n', '\r', ',', ';', '=',
+];
+
+/// Whether `program` is the command interpreter, spelled with or without its extension and in
+/// any directory.
+fn is_cmd(program: &str) -> bool {
+    let name = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("cmd.exe")
+}
+
+/// The program and arguments as the text a command line is written from, or a refusal of the
+/// first that is not text.
+///
+/// A command line is one string, so a value that is not valid Unicode cannot be written into it
+/// without being replaced by a character it does not hold, and the process started would then be
+/// the one that character names. It is refused here, before a profile or a grant exists.
+pub fn text_of(program: &OsStr, args: &[OsString]) -> Result<(String, Vec<String>), SandboxError> {
+    let refused = |value: &OsStr| SandboxError::SetupFailed {
+        mechanism: "appcontainer",
+        detail: format!(
+            "{} is not text and cannot be written into a command line without naming a \
+             different file or value; refusing rather than starting that one",
+            value.to_string_lossy()
+        ),
+    };
+    let program = program.to_str().ok_or_else(|| refused(program))?.to_owned();
+    let args = args
+        .iter()
+        .map(|arg| arg.to_str().map(str::to_owned).ok_or_else(|| refused(arg)))
+        .collect::<Result<_, _>>()?;
+    Ok((program, args))
+}
+
+/// What an AppContainer enforces here.
+fn capabilities() -> Capabilities {
+    Capabilities {
+        // The filesystem and the network are both the kernel's decision: a lowbox token
+        // is denied every object whose list does not name the container, and egress needs
+        // a capability the token either carries or does not. Subprocess denial is not
+        // enforced, which is why this is not reported as full kernel confinement, and a
+        // policy asking for it is refused rather than run under this level.
+        level: ConfinementLevel::Partial,
+        mechanisms: vec!["appcontainer"],
+        network_denial_enforced: true,
+        egress_limited_to_a_port: false,
+        // An entry is written onto an object, and there is nothing at a path that is not
+        // on disk to write one onto.
+        grants_paths_that_do_not_exist: false,
+        // A grant is written onto an object with everything beneath it, and nothing narrower
+        // than the grant can be taken from it, so `refusal_for` starts no stage holding a refusal.
+        subtracts_from_a_grant: false,
+        // A socket with a path is a file on disk, so a connect to one is decided by its access
+        // list like any other object the container opens.
+        governs_sockets_with_a_path: true,
+    }
+}
+
+/// The name of the container profile a run confines through.
+///
+/// One per backend rather than one per installation, because a grant outlives the process
+/// it was written for when a run is interrupted. A name no other run uses means the entry
+/// left behind names a container that no longer exists, so the residue is unreachable
+/// rather than a standing grant to whatever holds the shared name next.
+///
+/// A process identifier is reused once its process is gone, and the sequence restarts at zero
+/// in every process, so those two alone give a run the name of an earlier run that ended
+/// without deleting its profile. `nonce` is chosen when the backend is created and differs
+/// between runs, which keeps the name, and so the security identifier derived from it, from
+/// being one an earlier run wrote entries for.
+///
+/// The platform accepts up to 64 characters, and rejects the whole profile rather than
+/// truncating, so the three numbers are the only variable part and each is bounded by its
+/// own width.
+fn profile_name(process: u32, sequence: u64, nonce: u64) -> String {
+    format!("bravebot-{process}-{sequence}-{nonce:x}")
+}
+
+/// The longest profile name the platform accepts.
+///
+/// Held by a test rather than checked at runtime: both numbers in a name are bounded by
+/// their own width, so the longest one this can produce is known here.
+#[cfg(test)]
+const LONGEST_PROFILE_NAME: usize = 64;
+
+/// The command line `CreateProcessW` is given, which is the one thing on this platform
+/// that is a string rather than a vector.
+///
+/// Windows starts a process from a single command line and leaves the program to split
+/// it, so an argument containing a space or a quotation mark is two arguments unless it
+/// is quoted here. A policy's paths reach this as arguments, so an unquoted one is a path
+/// deciding what the program was asked to do ([SANDBOX-4]).
+///
+/// The rules are the ones `CommandLineToArgvW` parses back, which is what the C runtime
+/// and every language runtime on this platform use: an argument [`is_written_quoted`] is
+/// quoted, a backslash run immediately before the closing
+/// quotation mark is doubled, and a backslash run before an embedded quotation mark is doubled
+/// and the quotation mark escaped. A backslash anywhere else is literal, so a path is not
+/// rewritten by being quoted. Any other argument is written as it is, since `cmd.exe` reads its
+/// own switches from the command line and does not find `/c` once it is quoted. What `cmd.exe`
+/// does with the rest of its line is not decided by quoting, so [`refusal_for_program`] refuses
+/// the lines it would read differently.
+///
+/// [SANDBOX-4]: ../../../docs/specs/sandboxing.md
+fn command_line(program: &str, args: &[String]) -> String {
+    let mut line = quoted(program);
+    for arg in args {
+        line.push(' ');
+        if is_written_quoted(arg) {
+            line.push_str(&quoted(arg));
+        } else {
+            line.push_str(arg);
+        }
+    }
+    line
+}
+
+/// Whether [`command_line`] writes `arg` between quotation marks: it is empty, or holds a space,
+/// a tab, a quotation mark, a character `cmd.exe` reads as its own (`& | < > ^ % ( ) !`), or a
+/// `*` or `?`, which a program built with the MinGW or MSVC wildcard runtime expands into file
+/// names where the argument is left unquoted.
+fn is_written_quoted(arg: &str) -> bool {
+    arg.is_empty()
+        || arg.contains([
+            ' ', '\t', '"', '&', '|', '<', '>', '^', '%', '(', ')', '!', '*', '?',
+        ])
+}
+
+/// One argument, written so `CommandLineToArgvW` gives it back unchanged.
+fn quoted(arg: &str) -> String {
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for character in arg.chars() {
+        match character {
+            '\\' => {
+                backslashes += 1;
+                quoted.push('\\');
+            }
+            '"' => {
+                // The run before a quotation mark is doubled so it is read as backslashes
+                // rather than as escapes, and the quotation mark is escaped so it is read
+                // as content rather than as the end of the argument.
+                quoted.extend(std::iter::repeat_n('\\', backslashes + 1));
+                backslashes = 0;
+                quoted.push('"');
+            }
+            other => {
+                backslashes = 0;
+                quoted.push(other);
+            }
+        }
+    }
+    // The run before the closing quotation mark is doubled for the same reason.
+    quoted.extend(std::iter::repeat_n('\\', backslashes));
+    quoted.push('"');
+    quoted
+}
+
+/// The environment block `CreateProcessW` is handed for `environment`, or `None` for this
+/// process's own.
+///
+/// Sorted by name without regard to case, which the platform requires of a block, and
+/// written through `encode` so the rule is checked on every platform rather than on the
+/// one whose strings are UTF-16. A name or a value with a terminator inside it is refused,
+/// since the platform reads to the first one and would hand over a different variable,
+/// and so is a name holding `=`, which the platform reads as the end of the name.
+fn environment_block(
+    environment: &crate::process::Environment,
+    encode: impl Fn(&std::ffi::OsStr) -> Vec<u16>,
+) -> std::io::Result<Option<Vec<u16>>> {
+    use crate::process::Environment;
+
+    let variables = match environment {
+        Environment::Inherited => return Ok(None),
+        // Two terminators: one ends the last variable and one ends the block, so this is
+        // a block holding nothing rather than a block that was never terminated.
+        Environment::Empty => return Ok(Some(vec![0, 0])),
+        Environment::Only(variables) => variables,
+    };
+
+    let refused = |what: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("a variable handed to the platform has {what}"),
+        )
+    };
+    let mut entries = Vec::new();
+    for (name, value) in variables.iter() {
+        let name = encode(name);
+        let value = encode(value);
+        if name.is_empty() || name.contains(&u16::from(b'=')) {
+            return Err(refused("a name the platform would not read back"));
+        }
+        if name.contains(&0) || value.contains(&0) {
+            return Err(refused("a terminator inside it"));
+        }
+        entries.push((name, value));
+    }
+    entries.sort_by_key(|(name, _)| upper(name));
+
+    let mut block = Vec::new();
+    for (name, value) in entries {
+        block.extend(name);
+        block.push(u16::from(b'='));
+        block.extend(value);
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(Some(block))
+}
+
+/// `name` in upper case, for the order the platform sorts a block in. A unit that is not
+/// text is kept as it is, since it only decides where the variable falls.
+fn upper(name: &[u16]) -> Vec<u16> {
+    let mut upper = Vec::with_capacity(name.len());
+    for unit in char::decode_utf16(name.iter().copied()) {
+        match unit {
+            Ok(character) => {
+                for c in character.to_uppercase() {
+                    let mut buffer = [0u16; 2];
+                    upper.extend_from_slice(c.encode_utf16(&mut buffer));
+                }
+            }
+            Err(unpaired) => upper.push(unpaired.unpaired_surrogate()),
+        }
+    }
+    upper
+}
+
+/// The access list a file created for a write row ([SANDBOX-11]) is given: one entry,
+/// allowing full control to the owner rights of the file and to nobody else.
+///
+/// Protected, so nothing is inherited from the directory holding it. The trustee is the
+/// owner rights identifier (`OW`): with an entry for it in the list, the platform grants
+/// the owner only what that entry says, and the list names no other account or group,
+/// `SYSTEM` and the administrators included. Spelled here so every platform's test run can
+/// check its shape; the Windows build passes it to the call that creates the file.
+///
+/// [SANDBOX-11]: ../../../../docs/specs/sandboxing.md#SANDBOX-11
+const OWNER_ONLY_FILE_SDDL: &str = "D:P(A;;FA;;;OW)";
+
+/// The access list a directory created for a write row is given: the file's, and inherited
+/// by the files and directories later made under it.
+const OWNER_ONLY_DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;OW)";
+
+#[cfg(windows)]
+pub use appcontainer::AppContainerSandbox;
+#[cfg(windows)]
+pub(crate) use appcontainer::{
+    CreatedProcess, create_directory_owner_only, create_file_owner_only,
+};
+
+#[cfg(windows)]
+mod appcontainer;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row created for a write ([SANDBOX-11](../../../docs/specs/sandboxing.md#SANDBOX-11))
+    /// is reachable by its owner and nobody else. The access lists the Windows build hands
+    /// to the creating call are checked here on every platform: protected so nothing is
+    /// inherited from the directory holding the path, and holding one allowing entry whose
+    /// trustee is the owner rights identifier, so a list that named `WD` (everyone), `BU`,
+    /// `AU`, `SY` or `BA` as well would fail.
+    #[test]
+    fn the_access_list_of_a_created_row_names_only_its_owner() {
+        for (name, sddl, inheritance) in [
+            ("file", OWNER_ONLY_FILE_SDDL, ""),
+            ("directory", OWNER_ONLY_DIRECTORY_SDDL, "OICI"),
+        ] {
+            let list = sddl
+                .strip_prefix("D:P")
+                .unwrap_or_else(|| panic!("the {name} list is not a protected DACL: {sddl}"));
+            assert_eq!(
+                list,
+                format!("(A;{inheritance};FA;;;OW)"),
+                "the {name} list is not one entry allowing the owner"
+            );
+        }
+    }
+
+    fn roots() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from(r"C:\Windows"),
+            PathBuf::from(r"C:\Program Files"),
+            PathBuf::from(r"C:\Program Files (x86)"),
+        ]
+    }
+
+    /// The directories every container reads need no entry, in whatever case and with whichever
+    /// separator and prefix the path was written, so a program installed there starts.
+    #[test]
+    fn what_every_container_reads_is_the_machines_own_directories() {
+        for path in [
+            r"C:\Windows",
+            r"C:\Windows\System32",
+            r"c:\windows\system32\cmd.exe",
+            "C:/Windows/System32",
+            r"\\?\C:\Windows\System32",
+            r"C:\Program Files\Git\cmd",
+            r"C:\Program Files (x86)\Microsoft",
+        ] {
+            assert!(
+                readable_by_every_container(Path::new(path), &roots()),
+                "{path}"
+            );
+        }
+    }
+
+    /// Nothing outside them is, and a path that only starts the same way, a sibling named like a
+    /// root, one that climbs out of a root, or one in the two directories under a root that keep
+    /// their own access lists, is a path whose entry has to be written: skipping it would be a
+    /// program that cannot read what it was granted.
+    #[test]
+    fn nothing_else_is_taken_to_be_readable_by_every_container() {
+        for path in [
+            r"C:\Users\a-person\project",
+            r"C:\WindowsApps",
+            r"C:\Windows.old\Users",
+            r"C:\Program Files Extra\tool",
+            r"C:\Windows\..\Users\a-person",
+            r"C:\Windows\.\System32",
+            r"C:\Windows\Temp",
+            r"c:\windows\TEMP\a-run",
+            r"C:\Program Files\WindowsApps\a.package",
+            r"D:\Windows",
+            r"C:\",
+            "",
+        ] {
+            assert!(
+                !readable_by_every_container(Path::new(path), &roots()),
+                "{path}"
+            );
+        }
+        assert!(!readable_by_every_container(Path::new(r"C:\Windows"), &[]));
+        assert!(!readable_by_every_container(
+            Path::new(r"C:\Windows"),
+            &[PathBuf::from("")]
+        ));
+    }
+
+    /// Only a read grant is spared its entry. A write under the machine's directories is the one
+    /// thing a container does not have there, and dropping the row would be the policy applied
+    /// without it.
+    #[test]
+    fn a_write_grant_under_a_system_directory_still_needs_its_entry() {
+        let policy = a_policy_this_backend_applies()
+            .allow_read(r"C:\Windows\System32")
+            .allow_write(r"C:\Windows\System32\spool");
+
+        let written: Vec<PathBuf> = grants_to_write(&policy, &roots())
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+
+        assert!(written.contains(&PathBuf::from(r"C:\Windows\System32\spool")));
+        assert!(written.contains(&PathBuf::from("/workspace")));
+        assert!(!written.contains(&PathBuf::from(r"C:\Windows\System32")));
+    }
+
+    /// A program that is a batch file is refused whatever case and directory it is spelled in,
+    /// and an executable whose name merely contains the extension is not.
+    #[test]
+    fn a_batch_file_is_refused_and_an_executable_is_not() {
+        for program in [
+            r"C:\tools\build.bat",
+            r"C:\tools\BUILD.CMD",
+            "npm.cmd",
+            r"C:\tools\a.b.Bat",
+        ] {
+            assert!(refusal_for_program(program, &[]).is_some(), "{program}");
+        }
+        for program in [
+            r"C:\tools\build.exe",
+            r"C:\tools\bat",
+            r"C:\tools\build.bat.exe",
+            r"C:\bat\build",
+            "git",
+        ] {
+            assert!(refusal_for_program(program, &[]).is_none(), "{program}");
+        }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    /// SANDBOX-4 for `cmd.exe`: an argument holding a character `cmd.exe` reads as its own is
+    /// refused, as the only argument after the switch and as one of several, however the program
+    /// is spelled. The same arguments to another program start, since that program reads them back
+    /// through `CommandLineToArgvW`. The regression it rejects is a `cmd.exe` started with an
+    /// argument it reads as an operator, an expansion or a delimiter.
+    #[test]
+    fn cmd_is_refused_an_argument_it_would_read_as_its_own_syntax() {
+        let read_by_cmd = [
+            "a&b",
+            "a|b",
+            "a>b",
+            "a<b",
+            "a^b",
+            "%PATH%",
+            "(a)",
+            "a!",
+            r#"say "hi""#,
+            "a;b",
+            "a,b",
+            "a=b",
+            "a\nb",
+            "a\rb",
+        ];
+        for program in [
+            "cmd.exe",
+            r"C:\Windows\System32\CMD.EXE",
+            "cmd",
+            "C:/Windows/cmd",
+        ] {
+            for argument in read_by_cmd {
+                for args in [
+                    strings(&["/c", argument]),
+                    strings(&["/c", "echo", argument]),
+                    strings(&["/K", r"C:\tools\x.exe", argument]),
+                ] {
+                    assert!(
+                        refusal_for_program(program, &args).is_some(),
+                        "{program} {args:?}"
+                    );
+                }
+            }
+        }
+        for argument in read_by_cmd {
+            let args = strings(&["/c", "echo", argument]);
+            assert!(
+                refusal_for_program(r"C:\tools\x.exe", &args).is_none(),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// `cmd.exe` drops the first and last quotation mark of the line after its switch when the line
+    /// starts with one, so the first argument after the switch is refused where it is written
+    /// quoted and another argument follows it: that program would be read as the words of its
+    /// path. The regression it rejects is a refusal that looks only at the characters of each
+    /// argument, which starts this line with nothing in it `cmd.exe` acts on.
+    #[test]
+    fn cmd_is_refused_a_quoted_first_argument_after_its_switch_with_another_after_it() {
+        for args in [
+            strings(&["/c", r"C:\Program Files\x.exe", "a b"]),
+            strings(&["/d", "/C", r"C:\Program Files\x.exe", "next"]),
+            strings(&["/s", "/c", r"C:\Program Files\x.exe", "next"]),
+            strings(&["/r", "", "next"]),
+            strings(&["/c", "*.txt", "next"]),
+        ] {
+            assert!(refusal_for_program("cmd.exe", &args).is_some(), "{args:?}");
+        }
+    }
+
+    /// The lines `cmd.exe` reads as the line written: one argument after the switch, spaces and
+    /// all, since that argument is the line `cmd.exe` is asked to run; and several where none
+    /// holds a character it reads and the first after the switch is not quoted. The regression it
+    /// rejects is a refusal of every `cmd.exe` line, which leaves a confined stage no way to run
+    /// the interpreter's own commands.
+    #[test]
+    fn cmd_starts_where_it_reads_the_line_as_it_was_written() {
+        for args in [
+            strings(&["/c", "echo hello"]),
+            strings(&["/c", r"type C:\dir\note.txt"]),
+            strings(&["/c", r"C:\Program Files\x.exe"]),
+            strings(&["/d", "/c", "mkdir", r"C:\dir\made"]),
+            strings(&["/c", "set", "HTTPS_PROXY"]),
+            strings(&["/c", "type", r"C:\my dir\note.txt"]),
+            strings(&["/c", "dir", "*.txt"]),
+            strings(&[]),
+        ] {
+            assert!(refusal_for_program("cmd.exe", &args).is_none(), "{args:?}");
+        }
+    }
+
+    /// A policy that grants everything this backend can withhold, so a test about one
+    /// refusal is not quietly a test about another.
+    fn a_policy_this_backend_applies() -> SandboxPolicy {
+        SandboxPolicy::strict()
+            .allow_subprocesses()
+            .allow_read("/workspace")
+    }
+
+    /// Egress is denied by the absence of a capability rather than by a rule, so a
+    /// backend that asked for the capability regardless would report network denial
+    /// enforced and enforce nothing.
+    #[test]
+    fn a_policy_that_did_not_ask_for_the_network_asks_for_no_capability() {
+        assert!(capability_names(&a_policy_this_backend_applies()).is_empty());
+    }
+
+    /// The other half: a policy that did ask for egress has to get it, or a stage that
+    /// needs the network fails while the record says the policy was applied.
+    #[test]
+    fn a_policy_that_asked_for_the_network_asks_for_the_internet_client_capability() {
+        let policy = a_policy_this_backend_applies().allow_network_egress();
+        assert_eq!(capability_names(&policy), vec!["internetClient"]);
+    }
+
+    /// SANDBOX-3: a container holds the internet capability or does not, and no part of a policy
+    /// reaches the token, the grants or the refusal through `loopback`, so a policy that names it
+    /// is applied or refused exactly as the same policy without it. This pins what the code reads
+    /// and shows nothing about which ports a container can reach. The regression it rejects: a
+    /// backend that gives a request for `loopback` a capability or a grant of its own while the
+    /// record says it changes nothing here.
+    #[test]
+    fn a_policy_granted_loopback_asks_for_what_the_same_policy_without_it_asks_for() {
+        let policies = [
+            a_policy_this_backend_applies(),
+            a_policy_this_backend_applies().allow_network_egress(),
+            a_policy_this_backend_applies().allow_network_egress_only_to(8123),
+        ];
+
+        for plain in policies {
+            let lent = plain.clone().allow_loopback();
+            assert!(lent.allow_loopback && !plain.allow_loopback);
+            assert_eq!(capability_names(&lent), capability_names(&plain));
+            assert_eq!(grants_for(&lent), grants_for(&plain));
+            assert_eq!(
+                refusal_for(&lent).map(|refusal| refusal.to_string()),
+                refusal_for(&plain).map(|refusal| refusal.to_string()),
+            );
+        }
+    }
+
+    /// `FILE_WRITE_DATA`, `FILE_APPEND_DATA` and `FILE_WRITE_EA`: the rights that change
+    /// what is at a path, as against the ones every grant carries.
+    const CHANGES_WHAT_IS_THERE: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0010;
+
+    /// A read grant is what a policy said it was. An entry carrying the write rights
+    /// would let a program the policy meant to read a directory rewrite it, and nothing
+    /// about the policy would say so.
+    #[test]
+    fn a_path_granted_for_reading_is_not_granted_writing_or_deleting() {
+        let reading = grant_for_reading();
+        assert_eq!(reading.mask & CHANGES_WHAT_IS_THERE, 0);
+        assert_eq!(reading.mask & DELETE, 0);
+        assert_eq!(reading.mask & FILE_GENERIC_READ, FILE_GENERIC_READ);
+    }
+
+    /// SANDBOX-7: writing a temporary file and renaming it into place is how a compiler
+    /// and a package manager write anything, and the source of a rename is deleted from
+    /// where it was, so a write grant without `DELETE` holds a program to less than the
+    /// policy granted it.
+    #[test]
+    fn a_path_granted_for_writing_can_be_written_and_moved_within() {
+        let writing = grant_for_writing();
+        assert_eq!(
+            writing.mask & CHANGES_WHAT_IS_THERE,
+            CHANGES_WHAT_IS_THERE,
+            "a write grant that cannot change what is at the path"
+        );
+        assert_eq!(writing.mask & DELETE, DELETE);
+    }
+
+    /// A container that can rewrite an access list can grant itself anything, so the
+    /// grant is bounded rights and not `FILE_ALL_ACCESS`.
+    #[test]
+    fn no_grant_lets_a_confined_process_rewrite_an_access_list() {
+        const WRITE_DAC: u32 = 0x0004_0000;
+        const WRITE_OWNER: u32 = 0x0008_0000;
+        for grant in [grant_for_reading(), grant_for_writing()] {
+            assert_eq!(grant.mask & (WRITE_DAC | WRITE_OWNER), 0);
+        }
+    }
+
+    /// A grant is written on the directory the policy names, and what the policy means is
+    /// the tree under it. An entry that is not inherited reaches the directory entry
+    /// alone, so every file in it stays unreachable and the policy reads as applied.
+    #[test]
+    fn a_grant_reaches_what_is_under_the_directory_it_is_written_on() {
+        for grant in [grant_for_reading(), grant_for_writing()] {
+            assert_eq!(grant.inheritance, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+        }
+    }
+
+    /// Resolution keeps a path in the list it was named in, and so does this: a path the
+    /// policy wanted read must not arrive at the platform carrying the write rights.
+    #[test]
+    fn each_path_is_granted_what_the_list_it_was_named_in_asks_for() {
+        let policy = a_policy_this_backend_applies().allow_write("/workspace/out");
+
+        assert_eq!(
+            grants_for(&policy),
+            vec![
+                (PathBuf::from("/workspace/out"), grant_for_writing()),
+                (PathBuf::from("/workspace"), grant_for_reading()),
+            ]
+        );
+    }
+
+    /// A path in both lists is one entry to write and one to remove. Two entries for the
+    /// same container on the same path allow nothing the first did not, and the second is
+    /// residue nothing later looks for.
+    #[test]
+    fn a_path_named_for_reading_and_for_writing_is_granted_once_for_writing() {
+        let policy = SandboxPolicy::strict()
+            .allow_subprocesses()
+            .allow_read("/workspace")
+            .allow_write("/workspace");
+
+        assert_eq!(
+            grants_for(&policy),
+            vec![(PathBuf::from("/workspace"), grant_for_writing())]
+        );
+    }
+
+    /// SANDBOX-2, on this backend: a policy granting everything is not a confinement
+    /// decision, and applying one would present a container that bounds nothing as a
+    /// sandbox.
+    #[test]
+    fn a_fully_permissive_policy_is_refused() {
+        let policy = SandboxPolicy::strict()
+            .allow_network_egress()
+            .allow_subprocesses()
+            .allow_write("/");
+
+        assert!(matches!(
+            refusal_for(&policy),
+            Some(SandboxError::PolicyTooPermissive)
+        ));
+    }
+
+    /// A container reaches only the paths it is granted, so a refusal subtracts from nothing
+    /// and applying one would record a credential as held back that was never reachable. The
+    /// policy is otherwise one this backend applies, so the refusal is the only reason.
+    #[test]
+    fn a_policy_refusing_a_read_is_refused_rather_than_applied() {
+        let workspace = std::path::PathBuf::from(if cfg!(windows) {
+            r"C:\workspace"
+        } else {
+            "/workspace"
+        });
+        let policy = a_policy_this_backend_applies()
+            .allow_read(&workspace)
+            .deny_read(workspace.join("credentials"));
+
+        let refusal = refusal_for(&policy).expect("a read refusal is not enforceable here");
+
+        assert!(matches!(refusal, SandboxError::SetupFailed { .. }));
+        assert!(refusal.to_string().contains("refusing"));
+    }
+
+    /// The write counterpart of the read refusal above: a container cannot narrow a grant, so a
+    /// policy refusing a write beneath a row is refused rather than applied with the path writable.
+    #[test]
+    fn a_policy_refusing_a_write_is_refused_rather_than_applied() {
+        let policy = a_policy_this_backend_applies().deny_write("/workspace/.env");
+
+        let refusal = refusal_for(&policy).expect("a write refusal is not enforceable here");
+
+        assert!(matches!(refusal, SandboxError::SetupFailed { .. }));
+        assert!(refusal.to_string().contains("write refusal"));
+    }
+
+    /// A container holds the internet capability or not, so a policy limiting egress to a proxy's
+    /// port is refused rather than applied with egress to everywhere. The policy is otherwise
+    /// one this backend applies, so the limit is the only reason.
+    #[test]
+    fn a_policy_limiting_egress_to_one_port_is_refused() {
+        assert!(refusal_for(&a_policy_this_backend_applies()).is_none());
+        let policy = a_policy_this_backend_applies().allow_network_egress_only_to(8123);
+
+        let refusal = refusal_for(&policy).expect("a port limit is not enforceable here");
+
+        assert!(matches!(refusal, SandboxError::SetupFailed { .. }));
+        assert!(refusal.to_string().contains("one port"));
+    }
+
+    /// A container does not stop a process creating children, so a policy asking for that
+    /// denial is refused. Applying the rest would run the program with the record saying
+    /// children were denied.
+    #[test]
+    fn a_policy_requiring_subprocess_denial_is_refused() {
+        let policy = SandboxPolicy::strict().allow_read("/workspace");
+
+        let refusal = refusal_for(&policy).expect("subprocess denial is not enforceable here");
+        assert!(matches!(refusal, SandboxError::SetupFailed { .. }));
+        assert!(refusal.to_string().contains("refusing"));
+    }
+
+    /// The denial this backend does enforce must not be refused with the one it does not:
+    /// a policy withholding egress is the ordinary case and has to be applied.
+    #[test]
+    fn a_policy_withholding_the_network_is_applied_rather_than_refused() {
+        assert!(refusal_for(&a_policy_this_backend_applies()).is_none());
+    }
+
+    /// SANDBOX-6: a path the backend cannot grant is named rather than dropped, because a
+    /// process confined to fewer paths than the policy lists is the degradation
+    /// SANDBOX-1 forbids reached one grant at a time.
+    #[test]
+    fn a_path_that_is_not_on_disk_is_named_rather_than_left_out() {
+        let policy = a_policy_this_backend_applies().allow_write("/workspace/out");
+
+        let missing = paths_that_are_not_there(&policy, |path| path != Path::new("/workspace/out"));
+
+        assert_eq!(missing, vec![PathBuf::from("/workspace/out")]);
+    }
+
+    /// The other answer: a policy every path of which is there is applied, so a backend
+    /// refusing on a path it could have granted is caught here rather than by a program
+    /// that never starts.
+    #[test]
+    fn a_policy_whose_paths_are_all_there_names_none() {
+        let policy = a_policy_this_backend_applies().allow_write("/workspace/out");
+
+        assert!(paths_that_are_not_there(&policy, |_| true).is_empty());
+    }
+
+    /// Two runs sharing a profile share a security identifier, and then an entry one of
+    /// them left behind is a live grant to whatever the other is running.
+    #[test]
+    fn each_run_confines_through_a_profile_of_its_own() {
+        assert_ne!(profile_name(4, 1, 9), profile_name(4, 2, 9));
+        assert_ne!(profile_name(4, 1, 9), profile_name(5, 1, 9));
+    }
+
+    /// A crashed run leaves its profile and the entries naming it behind, and a later run
+    /// can be handed the same process identifier and the same first sequence number. The
+    /// name has to differ anyway, or the later run confines through the earlier run's
+    /// security identifier and the leftover entries apply to it.
+    #[test]
+    fn a_reused_process_identifier_and_sequence_still_get_a_profile_of_their_own() {
+        assert_ne!(profile_name(4, 0, 1), profile_name(4, 0, 2));
+    }
+
+    /// The platform rejects a name longer than this rather than truncating it, so a run
+    /// on a machine handing out long process identifiers would have no confinement at
+    /// all.
+    #[test]
+    fn a_profile_name_fits_what_the_platform_accepts() {
+        let longest = profile_name(u32::MAX, u64::MAX, u64::MAX);
+        assert!(
+            longest.len() <= LONGEST_PROFILE_NAME,
+            "{longest} is {} characters",
+            longest.len()
+        );
+    }
+
+    /// RUN-8: a command line is text, so a program or an argument that is not text is refused
+    /// where it would otherwise be written as the file or value whose name spells the replacement
+    /// of its bytes. The regression it rejects is the lossy rendering written into the line.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_or_an_argument_that_is_not_text_is_refused_for_a_command_line() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let not_text = OsStr::from_bytes(b"dir-\xff");
+        let text = OsString::from("fine");
+
+        assert!(matches!(
+            text_of(not_text, &[]),
+            Err(SandboxError::SetupFailed { .. })
+        ));
+        assert!(matches!(
+            text_of(
+                OsStr::new("s.exe"),
+                &[text.clone(), not_text.to_os_string()]
+            ),
+            Err(SandboxError::SetupFailed { .. })
+        ));
+        assert_eq!(
+            text_of(OsStr::new("s.exe"), &[text]).expect("text"),
+            ("s.exe".to_owned(), vec!["fine".to_owned()])
+        );
+    }
+
+    /// SANDBOX-4 on a platform whose process creation takes one string: a path with a
+    /// space in it is one argument, and a backend that did not quote it would hand the
+    /// program two.
+    #[test]
+    fn a_path_containing_a_space_reaches_the_program_as_one_argument() {
+        assert_eq!(
+            command_line("C:\\Program Files\\server.exe", &["a b".to_string()]),
+            r#""C:\Program Files\server.exe" "a b""#
+        );
+    }
+
+    /// The hostile case: a quotation mark in an argument would otherwise end it, and
+    /// everything after it would be read as further arguments the caller never passed.
+    #[test]
+    fn a_quotation_mark_in_an_argument_does_not_end_it() {
+        assert_eq!(
+            command_line("s.exe", &[r#"a" --elsewhere "b"#.to_string()]),
+            r#""s.exe" "a\" --elsewhere \"b""#
+        );
+    }
+
+    /// A backslash run directly before a quotation mark inside an argument is doubled and the mark
+    /// escaped. Undoubled, `\"` would be read as a literal quotation mark and the argument would
+    /// stay open, so the next argument would be absorbed into it.
+    #[test]
+    fn a_backslash_before_a_quotation_mark_does_not_escape_the_escape() {
+        assert_eq!(
+            command_line("s.exe", &[r#"a\"b"#.to_string(), "next".to_string()]),
+            r#""s.exe" "a\\\"b" next"#
+        );
+        assert_eq!(
+            command_line("s.exe", &[r#"a\\"b"#.to_string()]),
+            r#""s.exe" "a\\\\\"b""#
+        );
+    }
+
+    /// A path ends in a separator often enough to matter, and a trailing backslash left
+    /// undoubled escapes the closing quotation mark, which joins the argument to the next
+    /// one.
+    #[test]
+    fn a_path_ending_in_a_separator_does_not_swallow_the_argument_after_it() {
+        assert_eq!(
+            command_line("s.exe", &["C:\\my dir\\".to_string(), "next".to_string()]),
+            r#""s.exe" "C:\my dir\\" next"#
+        );
+    }
+
+    /// A backslash that is not before a quotation mark is content, so quoting must not
+    /// rewrite an ordinary path into one naming a different directory.
+    #[test]
+    fn quoting_a_path_leaves_the_path_it_names_alone() {
+        assert_eq!(
+            command_line("s.exe", &["C:\\dir\\file".to_string()]),
+            r#""s.exe" C:\dir\file"#
+        );
+    }
+
+    /// The regression it rejects: every argument quoted, which hands `cmd.exe` a `"/c"` it does
+    /// not read as its switch, so it starts and runs nothing. What it is asked to run still
+    /// arrives as the one argument it is.
+    #[test]
+    fn an_argument_that_needs_no_quoting_is_written_as_it_is() {
+        assert_eq!(
+            command_line("cmd.exe", &["/c".to_string(), "echo hello".to_string()]),
+            r#""cmd.exe" /c "echo hello""#
+        );
+    }
+
+    /// The regression it rejects: the quoting dropped for every argument that holds no space,
+    /// which hands `cmd.exe` or a batch file the `&` of `a&calc` as a second command.
+    #[test]
+    fn an_argument_cmd_would_act_on_stays_quoted() {
+        for argument in ["a&calc", "a|b", "a>b", "a<b", "a^b", "%PATH%", "(a)", "a!"] {
+            assert_eq!(
+                command_line("cmd.exe", &["/c".to_string(), argument.to_string()]),
+                format!(r#""cmd.exe" /c "{argument}""#)
+            );
+        }
+    }
+
+    /// A program built with the MinGW or MSVC wildcard runtime expands an unquoted `*` or `?` into
+    /// the names of the files it matches, so an argument holding one is quoted and the program is
+    /// given the argument rather than a list of files.
+    #[test]
+    fn an_argument_holding_a_wildcard_reaches_the_program_unexpanded() {
+        assert_eq!(
+            command_line("s.exe", &["*.txt".to_string(), "a?".to_string()]),
+            r#""s.exe" "*.txt" "a?""#
+        );
+    }
+
+    /// An argument with nothing in it is still an argument, and one written unquoted
+    /// disappears, shifting every argument after it.
+    #[test]
+    fn an_empty_argument_is_still_an_argument() {
+        assert_eq!(
+            command_line("s.exe", &[String::new(), "after".to_string()]),
+            r#""s.exe" "" after"#
+        );
+    }
+
+    /// SANDBOX-5: what is reported is what a container actually enforces. An overstated
+    /// level is the same failure as a silent fallback, and an understated
+    /// `grants_paths_that_do_not_exist` costs the caller a grant it did not mean to lose.
+    #[test]
+    fn capabilities_report_what_a_container_enforces() {
+        let reported = capabilities();
+        assert_eq!(reported.level, ConfinementLevel::Partial);
+        assert!(reported.network_denial_enforced);
+        assert!(!reported.egress_limited_to_a_port);
+        assert!(!reported.grants_paths_that_do_not_exist);
+        assert!(!reported.subtracts_from_a_grant);
+        assert!(reported.governs_sockets_with_a_path);
+        assert!(reported.mechanisms.contains(&"appcontainer"));
+    }
+
+    fn utf16(text: &std::ffi::OsStr) -> Vec<u16> {
+        text.to_str()
+            .expect("a test variable is text")
+            .encode_utf16()
+            .collect()
+    }
+
+    fn block_text(block: &[u16]) -> String {
+        String::from_utf16(block).expect("a block written from text")
+    }
+
+    /// The block a server is handed holds the variables its declaration named and nothing
+    /// else, in the order the platform requires, so `PATH` named for a server is `PATH`
+    /// and not this process's whole environment.
+    #[test]
+    fn named_variables_are_written_as_a_sorted_block_of_those_alone() {
+        let block = environment_block(
+            &crate::process::Environment::Only(
+                crate::process::Variables::new()
+                    .with("weather_token", "a value")
+                    .with("Zed", "z")
+                    .with("PATH", r"C:\Tools")
+                    .with("apple", "a"),
+            ),
+            utf16,
+        )
+        .expect("text names and values")
+        .expect("named variables are a block");
+
+        // Ordered without regard to case, as the platform orders a block.
+        assert_eq!(
+            block_text(&block),
+            "apple=a\0PATH=C:\\Tools\0weather_token=a value\0Zed=z\0\0"
+        );
+    }
+
+    /// An empty environment is a block holding nothing, and this process's own is no
+    /// block at all, which is how the platform is asked to pass it on.
+    #[test]
+    fn an_empty_environment_is_an_empty_block_and_an_inherited_one_is_none() {
+        assert_eq!(
+            environment_block(&crate::process::Environment::Empty, utf16).expect("no text"),
+            Some(vec![0, 0])
+        );
+        assert_eq!(
+            environment_block(&crate::process::Environment::Inherited, utf16).expect("no text"),
+            None
+        );
+        assert_eq!(
+            environment_block(
+                &crate::process::Environment::Only(crate::process::Variables::new()),
+                utf16
+            )
+            .expect("no text"),
+            Some(vec![0, 0])
+        );
+    }
+
+    /// The platform reads a block to the first terminator and a name to the first `=`,
+    /// so either one inside a variable would hand the process a different variable from
+    /// the one named.
+    #[test]
+    fn a_variable_the_platform_would_misread_is_refused() {
+        for (name, value) in [("A=B", "value"), ("NAME", "one\0two"), ("", "value")] {
+            assert!(
+                environment_block(
+                    &crate::process::Environment::Only(
+                        crate::process::Variables::new().with(name, value)
+                    ),
+                    utf16,
+                )
+                .is_err(),
+                "{name:?} was written into a block"
+            );
+        }
+    }
+}

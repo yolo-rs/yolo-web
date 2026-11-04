@@ -1,0 +1,129 @@
+#[cfg(feature = "defmt")]
+use defmt::{
+    Format as DeFormat,
+    Formatter as DeFormatter,
+    write as dewrite
+};
+use {
+    super::super::{
+        SmallVec,
+        allocator::{
+            Allocator,
+            global::Global
+        }
+    },
+    core::{
+        fmt::{
+            Debug,
+            Formatter,
+            Result as Format
+        },
+        ptr::copy_nonoverlapping
+    }
+};
+
+/// An iterator which uses a closure to determine if an element should be
+/// removed.
+///
+/// Returned from [`SmallVec::extract_if`][1].
+///
+/// [1]: struct.SmallVec.html#method.extract_if
+pub struct ExtractIf<'valid, Item, const INLINE: usize, F, Heap: Allocator = Global>
+where F: FnMut(&mut Item) -> bool
+{
+    pub(crate) vec: &'valid mut SmallVec<Item, INLINE, Heap>,
+    /// The index of the item that will be inspected by the next call to `next`.
+    pub(crate) idx: usize,
+    /// Elements at and beyond this point will be retained. Must be equal or
+    /// smaller than `old_len`.
+    pub(crate) end: usize,
+    /// The number of items that have been drained (removed) thus far.
+    pub(crate) del: usize,
+    /// The original length of `vec` prior to draining.
+    pub(crate) old_len: usize,
+    /// The filter test predicate.
+    pub(crate) pred: F
+}
+
+impl<Item, const INLINE: usize, Heap: Allocator, F> Debug for ExtractIf<'_, Item, INLINE, F, Heap>
+where
+    F: FnMut(&mut Item) -> bool,
+    Item: Debug
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Format {
+        f.debug_tuple("ExtractIf")
+            .field(&self.vec.as_ref())
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl<Item, const INLINE: usize, Heap: Allocator, F> DeFormat
+    for ExtractIf<'_, Item, INLINE, F, Heap>
+where
+    F: FnMut(&mut Item) -> bool,
+    Item: DeFormat
+{
+    fn format(&self, fmt: DeFormatter) {
+        dewrite!(fmt, "ExtractIf({=[?]})", self.vec.as_ref());
+    }
+}
+
+impl<Item, F, const INLINE: usize, Heap: Allocator> Iterator
+    for ExtractIf<'_, Item, INLINE, F, Heap>
+where F: FnMut(&mut Item) -> bool
+{
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Item> {
+        unsafe {
+            while self.idx < self.end {
+                let i = self.idx;
+                // SAFETY: `i < self.end <= self.old_len`
+                let cur = self.vec.as_mut_ptr().add(i);
+                let drained = (self.pred)(&mut *cur);
+                // Update the index *after* the predicate is called. If the
+                // index is updated prior and the predicate
+                // panics, the element at this index would be
+                // leaked.
+                self.idx += 1;
+                if drained {
+                    self.del += 1;
+                    return Some(cur.read());
+                } else if self.del > 0 {
+                    // SAFETY: `self.del <= i` therefore `i - self.del` is valid
+                    copy_nonoverlapping(cur, cur.sub(self.del), 1);
+                }
+            }
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.end - self.idx))
+    }
+}
+
+impl<Item, F, const INLINE: usize, Heap: Allocator> Drop for ExtractIf<'_, Item, INLINE, F, Heap>
+where F: FnMut(&mut Item) -> bool
+{
+    fn drop(&mut self) {
+        unsafe {
+            if self.idx < self.old_len && self.del > 0 {
+                // This is a pretty messed up state, and there isn't really an
+                // obviously right thing to do. We don't want to keep trying
+                // to execute `pred`, so we just backshift all the unprocessed
+                // elements and tell the vec that they still exist. The
+                // backshift is required to prevent a
+                // double-drop of the last successfully
+                // drained item prior to a panic in the predicate.
+                let pointer = self.vec.as_mut_ptr();
+                let source = pointer.add(self.idx);
+                let destination = source.sub(self.del);
+                let tail_len = self.old_len - self.idx;
+                source.copy_to(destination, tail_len);
+            }
+            self.vec.set_len(self.old_len - self.del);
+        }
+    }
+}

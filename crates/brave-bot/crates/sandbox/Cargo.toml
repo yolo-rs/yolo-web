@@ -1,0 +1,30 @@
+[package]
+name = "bravebot-sandbox"
+description = "OS-level confinement for untrusted subprocesses"
+version = "0.20.0"
+edition = "2024"
+rust-version = "0.20.0"
+license = "MPL-2.0"
+repository = "https://github.com/brave/bravebot"
+
+
+[dependencies]
+
+# The core dump limit, which is a Unix call rather than a Linux one. Already a dependency of
+# this crate on Linux, and in the lockfile as one: this widens which targets compile it and adds
+# nothing to the tree.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
+
+# The job a confined process and everything it starts are put in is a module of its own in these
+# bindings. A feature of a crate already in the tree, which adds nothing to the lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_JobObjects"] }
+
+# The console calls a test asks which processes are attached to its console with, which the crate
+# itself makes none of.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }

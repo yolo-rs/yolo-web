@@ -1,0 +1,89 @@
+//! Driving bravebot from a graphical front-end.
+//!
+//! Everything in this crate is transport-agnostic. It knows how to list and open the
+//! sessions the agent already keeps, how to run a turn and report what it is doing, and
+//! how to carry an approval question to whoever is watching and an answer back. It does
+//! not know what is watching.
+//!
+//! That is deliberate and it is enforced by two rules, because the whole point of the
+//! layout is that the transport stays replaceable:
+//!
+//! 1. **Nothing below `src/bin/` writes to stdout or exits the process.** The kernel
+//!    never prints, for the same reason: a stray `println!` interleaves with the
+//!    protocol and there is no way for a caller to stop it.
+//! 2. **Events leave through a callback, never a global.** A second front-end has to be
+//!    able to install its own.
+//!
+//! See `docs/phase-0-rpc-protocol.md` for the protocol these calls project onto.
+
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "the test names its program")
+)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "a test that unwraps fails at the line that did"
+    )
+)]
+
+mod account_words;
+mod accounts;
+pub mod acp;
+pub mod acp_loop;
+pub mod allowlist;
+mod answerers;
+pub mod arguments;
+pub mod attached;
+pub mod bridge;
+pub mod bug_report;
+pub mod connectors;
+// Public so the integration tests and the persistent host can reach it, and hidden from the
+// documentation until a caller outside the tests settles what it offers.
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod control_link;
+pub mod definitions;
+pub mod emit;
+pub mod enhance;
+pub mod fork;
+pub mod help;
+pub mod hooks;
+#[cfg(unix)]
+pub mod host;
+mod key_entry;
+pub mod language;
+pub mod manifest;
+pub mod mentions;
+pub mod models;
+pub mod protocol;
+pub mod rules;
+pub mod running;
+mod schedule_command;
+pub mod settings;
+pub mod store;
+pub mod turn;
+pub mod update_status;
+pub mod view;
+pub mod window_fault;
+pub mod wire;
+pub mod workers;
+
+/// Which build of the agent this bridge is linked against.
+///
+/// Read from the agent rather than computed here, so a record written by the app and one
+/// written by `bravebot` carry the same string with no coordination. A transcript is read
+/// after the fact, usually because something went wrong, and the first question is which
+/// code produced it.
+pub fn agent_build() -> &'static str {
+    bravebot_stamp::BUILD
+}
+
+/// Which front end this is, written into every record a turn here saves.
+///
+/// Stated once rather than at each call site, so every record the app writes says the same thing
+/// and the answer sits beside the build it is read with. The terminal writes the other word, and
+/// a resume across the two says so.
+pub const FRONT: bravebot_session::sessions::Front = bravebot_session::sessions::Front::Desktop;

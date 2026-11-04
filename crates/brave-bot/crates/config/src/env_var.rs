@@ -1,0 +1,227 @@
+// Environment variable names, kept together so the set is auditable at a glance.
+//
+// The build script includes this file directly, so it must stay dependency-free:
+// constants only.
+
+pub const SIGNING_KEY: &str = "SERVICES_KEY_AICHAT";
+pub const KEY_ID: &str = "BRAVE_SERVICES_KEY_ID";
+pub const ENDPOINT: &str = "BRAVE_AI_CHAT_ENDPOINT";
+/// Host for the premium tier, in place of the one compiled in.
+///
+/// Optional: with nothing set the host is [`crate::DEV_PREMIUM_ENDPOINT`] or
+/// [`crate::PROD_PREMIUM_ENDPOINT`], whichever the free endpoint's environment calls for. A
+/// separate variable rather than a prefix swap on ENDPOINT: the two are independent deployments,
+/// and deriving one host from another by string substitution would break the moment either name
+/// changed.
+pub const PREMIUM_ENDPOINT: &str = "BRAVE_AI_CHAT_PREMIUM_ENDPOINT";
+/// The model to request when the user has not chosen one.
+///
+/// A default rather than the model: `/model` picks one per user and that choice wins, so this
+/// applies until someone makes one. It names the default for every service, Bedrock and a
+/// `provider` block's gateways as well as Brave's endpoint, so it is prefixed for this program
+/// rather than for that endpoint. An unqualified `MODEL` in a shared shell profile would collide
+/// with whatever else wanted the name.
+pub const DEFAULT_MODEL: &str = "BRAVEBOT_DEFAULT_MODEL";
+
+/// How many prompt tokens a conversation may reach before it is compacted.
+///
+/// Deliberately absent from ALL, so it is never baked into a binary. The others are credentials
+/// and hosts, which belong to the build; this is a knob one person turns while working, and a
+/// value someone exported to debug a session would otherwise ship to everyone who used their
+/// release.
+pub const CONTEXT_BUDGET: &str = "BRAVEBOT_CONTEXT_BUDGET";
+
+/// How many tokens one reply may run to before the service cuts it off.
+///
+/// Read by the Bedrock backend, which is the only one that states a ceiling at all: the aichat
+/// protocol carries no such field, so a request there is bounded by whatever the service decides.
+/// A model may state its own in a `provider` block, and this outranks that, for the reason the
+/// rest of the file's order gives.
+///
+/// Absent from ALL, along with the rest of the Bedrock names, on the same footing as
+/// [`CONTEXT_BUDGET`]: it is a knob one person turns while working rather than a property of a
+/// build or of an account, and a value exported to get one long answer should not ship to everyone
+/// who used that release.
+pub const OUTPUT_BUDGET: &str = "BRAVEBOT_OUTPUT_BUDGET";
+
+/// Set to `1` to reach a model through AWS Bedrock rather than the aichat backend.
+///
+/// Brave-prefixed like the rest of this file: the switch decides which backend this program uses,
+/// so it belongs to this program. The model names below keep Claude Code's spelling, since those
+/// name someone's Bedrock deployment rather than anything here.
+///
+/// Absent from ALL, along with the rest of the Bedrock names. They describe one person's AWS
+/// account, not the build.
+pub const USE_BEDROCK: &str = "BRAVEBOT_USE_BEDROCK";
+
+/// Which AWS region to reach Bedrock in. Required once [`USE_BEDROCK`] is on.
+pub const AWS_REGION: &str = "AWS_REGION";
+
+/// Which profile in the AWS configuration names the credentials to sign with.
+///
+/// Optional: with nothing set the AWS CLI resolves credentials as it would for any other command,
+/// which is what a machine using instance credentials or a bare access key already relies on.
+pub const AWS_PROFILE: &str = "AWS_PROFILE";
+
+/// The model each tier names, as either a model id or an inference-profile ARN.
+///
+/// A tier whose variable is unset is one this configuration cannot reach, and it is left out rather
+/// than guessed at: an ARN cannot be derived from a model name, so inventing one would produce a
+/// request that fails at the far end for a reason nothing here could explain.
+pub const BEDROCK_OPUS_MODEL: &str = "ANTHROPIC_DEFAULT_OPUS_MODEL";
+pub const BEDROCK_SONNET_MODEL: &str = "ANTHROPIC_DEFAULT_SONNET_MODEL";
+pub const BEDROCK_HAIKU_MODEL: &str = "ANTHROPIC_DEFAULT_HAIKU_MODEL";
+
+/// The key a request to Google Vertex AI is sent with.
+///
+/// A name other Google clients read, which is why it is only ever sent to the one host compiled in
+/// for that service and only once a model naming that service is chosen.
+pub const GOOGLE_API_KEY: &str = "GOOGLE_API_KEY";
+
+/// The Google Cloud project a Vertex AI request is made under. Without it the key reaches Vertex AI
+/// express mode, which needs no project.
+pub const GOOGLE_CLOUD_PROJECT: &str = "GOOGLE_CLOUD_PROJECT";
+
+/// The location a Vertex AI request is made in. `global` where it is not set, and not read where
+/// there is no project.
+pub const VERTEX_LOCATION: &str = "VERTEX_LOCATION";
+
+/// The names that decide what this process trusts and where it sends requests, which a settings file
+/// may state in place of the environment (BACKEND-33). Absent from ALL and from SCRUBBED: they
+/// describe a machine's network rather than a build, and are read by `bravebot-net`, which keeps the
+/// same list and is held to it by a test in `bravebot-agent`.
+pub const NETWORK: [&str; 6] = [
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+];
+
+/// The three names that choose which Google account receives a conversation (BACKEND-33), read from
+/// the person's own layers alone as [`NETWORK`] is: a checkout that named them would choose the
+/// project and key a request to Vertex AI is made under.
+pub const GOOGLE: [&str; 3] = [GOOGLE_API_KEY, GOOGLE_CLOUD_PROJECT, VERTEX_LOCATION];
+
+/// The six names that choose which AWS account, region, profile and tier models a conversation is
+/// sent through (BACKEND-33), read from the person's own layers alone as [`NETWORK`] is: a checkout
+/// that named them would choose the account the conversation goes to.
+pub const BEDROCK: [&str; 6] = [
+    USE_BEDROCK,
+    AWS_REGION,
+    AWS_PROFILE,
+    BEDROCK_OPUS_MODEL,
+    BEDROCK_SONNET_MODEL,
+    BEDROCK_HAIKU_MODEL,
+];
+
+/// Whether `name` is one of the network, Google or Bedrock names, which a checkout's files decide
+/// nothing for.
+pub fn is_person_only(name: &str) -> bool {
+    NETWORK
+        .iter()
+        .chain(&GOOGLE)
+        .chain(&BEDROCK)
+        .any(|listed| *listed == name)
+}
+
+/// Every name a build may bake in, in the order `doctor` reports them.
+///
+/// CRASH_REPORT_URL is the one name no build needs: without it the build reports no crashes.
+pub const ALL: [&str; 6] = [
+    SIGNING_KEY,
+    KEY_ID,
+    ENDPOINT,
+    PREMIUM_ENDPOINT,
+    DEFAULT_MODEL,
+    CRASH_REPORT_URL,
+];
+
+/// Names a build must have.
+///
+/// DEFAULT_MODEL is absent because it has a default. PREMIUM_ENDPOINT is absent because the premium
+/// host is compiled in.
+pub const REQUIRED: [&str; 3] = [SIGNING_KEY, KEY_ID, ENDPOINT];
+
+/// Set to `1` to build without configuration, producing a binary that must be given
+/// the variables at run time.
+pub const ALLOW_UNCONFIGURED_BUILD: &str = "BRAVEBOT_ALLOW_UNCONFIGURED_BUILD";
+
+/// Set to `0` to let a subprocess inherit this process's credentials after all.
+///
+/// The escape hatch for a setup that turns out to need one of the names in [`SCRUBBED`], and the
+/// only way to switch the filtering off. Deliberately not a settings-file key: a file is the
+/// easiest thing on the machine to write to, and the one control that restores a credential to
+/// every command the agent starts should not be settable by whatever last edited one.
+pub const SUBPROCESS_ENV_SCRUB: &str = "BRAVEBOT_SUBPROCESS_ENV_SCRUB";
+
+/// The credentials this agent holds, which are removed from the environment of a program it runs.
+///
+/// The signing key, the key id and the crash report submission URL, which are always withheld. The
+/// variables a gateway's provider block names are withheld as well, read from the configuration by
+/// [`crate::scrub`] rather than listed here. The first two name a secret that reaches Brave's
+/// backend and the third carries the token that adds reports to a Backtrace project, and no
+/// subprocess has any use for one: a program the planner chose is doing whatever the person
+/// approved, never authenticating as this agent. Everything else is left alone, including the
+/// endpoints and the model names, which are hosts and identifiers rather than secrets.
+///
+/// **Not a list of every credential on the machine.** `AWS_PROFILE`, `GITHUB_TOKEN` and the rest of
+/// the user's own environment stay, because `run aws s3 ls` and `run gh pr list` are things people
+/// ask for and a name-matching filter cannot tell one of those from an exfiltration. What holds
+/// here is narrow and exact: this agent's own secrets are not handed to programs it starts.
+pub const SCRUBBED: [&str; 3] = [SIGNING_KEY, KEY_ID, CRASH_REPORT_URL];
+
+/// How this copy of bravebot was installed, set by a launcher that knows.
+///
+/// The npm package's launcher sets it to `npm` before it starts the binary, which is the only way
+/// the binary could tell: what npm unpacked is an ordinary executable in an ordinary directory.
+/// It decides which update command a person is shown at startup and nothing else, so a value
+/// nothing here recognises leaves the startup screen as it would have been. The packaged desktop
+/// app sets it to `desktop` before it starts `bravebot-rpc`, which then asks for the newest release
+/// (UPDATE-12).
+///
+/// Absent from ALL: it describes one installation rather than the build.
+pub const INSTALLED_VIA: &str = "BRAVEBOT_INSTALLED_VIA";
+
+/// Set to `0` to stop the startup screen checking for a newer release.
+///
+/// With it set, no record is read, no request is made, no record is written and no line is said. The
+/// `updateCheck` settings key turns the same check off, and either one does: this exists for a
+/// machine where updates are managed from outside, and one that wants the check on has nothing to
+/// set. Any value other than `0`, or none, leaves the check as the settings say.
+///
+/// Absent from ALL: it describes one person's machine rather than the build.
+pub const UPDATE_CHECK: &str = "BRAVEBOT_UPDATE_CHECK";
+
+/// Where a crash report is sent: the submission URL of the Backtrace project, token included.
+///
+/// Read only from what the build baked in. Neither the environment at run time nor a settings file
+/// can name another, so a variable a checkout's `.envrc` exports does not redirect where reports go
+/// (CRASH-3). A build without it reports nothing, which is every build from source that did not
+/// have it set.
+///
+/// The name is the service's rather than this program's, as `SERVICES_KEY_AICHAT` is.
+pub const CRASH_REPORT_URL: &str = "BACKTRACE_SUBMIT_URL";
+
+/// Set to `0` to stop crash reports.
+///
+/// With it set, no hook is installed, no report is written, no report is sent and no line is said.
+/// The `crashReports` settings key turns the same reports off, and either one does: this exists for
+/// a machine where the environment is the one place a person or an administrator can state it, and
+/// one that wants reports on has nothing to set. Any value other than `0`, or none, leaves them as
+/// the settings say.
+///
+/// Absent from ALL: it describes one person's machine rather than the build.
+pub const CRASH_REPORTS: &str = "BRAVEBOT_CRASH_REPORTS";
+
+/// Where the directory this session has to itself is, set on every program the agent runs.
+///
+/// Written by this process rather than read by it: a line that wants somewhere to put an
+/// intermediate file names this, and what it wrote is removed when the session ends. Whatever
+/// value this process was started with is replaced, because the directory a program the agent
+/// starts may write in is the one this session was given and not one an outer environment named.
+///
+/// Absent from ALL, since it describes a session rather than the build, and absent from SCRUBBED,
+/// since it holds a path rather than a secret.
+pub const SCRATCH_DIR: &str = "BRAVEBOT_SCRATCH_DIR";

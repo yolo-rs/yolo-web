@@ -1,0 +1,389 @@
+# Releasing
+
+Reproducible cross-platform binaries are built in a pinned container, so the same artifact
+comes out on any host:
+
+```sh
+make all-platforms
+```
+
+## Publishing a version
+
+Two steps to name the version, then manual publishes: Jenkins for signed binaries, then
+GitHub Actions for the npm package, then the package manifests. Each can wait days after the tag.
+
+```sh
+make bump-version BUMP=bugfix   # or minor, major
+# review the commit it made, land it on main
+make github-release
+# later: Jenkins job bravebot-build with UPLOAD and RELEASE
+# later: make publish-npm TAG=v<version>
+# later: make package-manifests TAG=v<version>
+```
+
+Before it changes anything, `bump-version` warns and asks whether to go on when any of these hold:
+
+- open issues carry the `release-blocking` label, which it lists with their links;
+- a translation is missing messages, counted per locale from `contrib/untranslated-messages.txt`;
+- the peer-advisories skill last ran more than seven days ago. The date is the newest run the
+  skill recorded in a comment on [#1901](https://github.com/brave/bravebot/issues/1901), written by
+  a person with write access, and the warning says it came from there. Where there is no such
+  comment yet or `gh` cannot read it, the date is the last commit to `docs/peer-advisories-vetted`
+  and the warning says so.
+
+The checks are in `contrib/release-preflight.py` and use no model. Answering `n`, or running without a
+terminal, stops the bump, and `make bump-version BUMP=bugfix YES=1` goes on without asking. The
+ledger's commit date is only a lower bound on when the advisory check last ran, because a run that
+finds nothing new commits nothing, which is why the comment is preferred.
+
+`bump-version` rewrites the version in `Cargo.toml`, `Cargo.lock`, `package.json`,
+and `ui/package.json`, commits exactly those four as
+`Bump version to <version>`, and stops there: nothing is pushed and nothing is tagged. It refuses
+if any of the four is already modified, rather than committing changes it did not write, and it
+runs `make check-versions` before committing, so a bump that misses one fails there rather than
+at the tag. `github-release` refuses to tag unless the tree is clean, every file that states the
+version agrees, and HEAD is `main` at the release remote's `main`, then pushes `v<version>` there.
+
+The desktop application is packaged from `ui/package.json`, so its version is the one the app
+bundle carries and the one the About window shows beside the agent build. It is the same release:
+the app ships an agent build rather than versioning separately. `make check-versions` is what
+holds the six together, and CI runs it, so a manifest left behind fails the pull request that
+left it rather than the release weeks later.
+
+**The release remote.** `origin` by default, which is right for a clone of this repository and
+wrong for a clone of a fork of it, where `origin` names the fork. A tag pushed to a fork is one
+the releases page never sees, and the tag ruleset here refuses an update or a deletion, so the
+mistake cannot be corrected in place: the version has to be bumped again. A clone whose `origin`
+is a fork names the remote that is not, once:
+
+```sh
+git config bravebot.releaseRemote upstream
+```
+
+`github-release` fails before tagging if no remote by that name exists.
+
+The tag push does not publish binaries. GitHub Actions still builds and tests on the tag.
+Signed, configured assets are built, notarised, and uploaded by the Jenkins job
+`bravebot-build` with `UPLOAD` and `RELEASE` enabled. That job builds the tip of the branch it
+is given. A RELEASE run refuses unless tag `v<version>` from `Cargo.toml` already exists and
+points at that commit, then creates a GitHub release of that name and attaches the signed
+binaries plus the `.sha256` files written after signing. `gh release create` fails if that
+release already exists.
+
+After Jenkins has created that GitHub release, `make publish-npm TAG=v<version>` dispatches
+`publish-npm.yml` from that tag. It publishes seven packages: `@brave/bravebot-<platform>-<arch>`
+for each of the six platforms, each holding that platform's binary, and then `@brave/bravebot`,
+which lists the six as `optionalDependencies` at its own version and holds no binary. Without
+`TAG` the target takes the latest GitHub release rather than the version in the tree, which may
+already be bumped past it. The workflow, not the target, refuses a tag that does not match its
+tree or a release missing an asset. OIDC trusted publishing; there is no `NPM_TOKEN`, and the
+trusted publisher on npmjs.com must name that workflow file, and the `npm-publish` environment, for
+each of the seven packages. The publishing jobs wait on that environment's required reviewer, so
+the dispatch is followed by an approval from a second maintainer
+([branch-protection.md](branch-protection.md#the-npm-publish-environment)).
+
+A trusted publisher can be added only to a package that exists, so a platform package name the
+registry has never held is created first. Log in with `npm login` as a maintainer who can publish
+under `@brave`, then run `make npm-bootstrap`. It publishes a placeholder, `0.0.0-bootstrap` under
+the `bootstrap` tag, for each platform package the registry lacks, and prints the npmjs.com page
+for each. On each page add a trusted publisher: GitHub Actions, repository `brave/bravebot`,
+workflow `publish-npm.yml`, environment `npm-publish`. This is needed once per new package name, not
+once per release, and `make npm-bootstrap` does nothing when every name exists. `make publish-npm`
+stops before it dispatches when a platform package is missing
+([RELEASE-21](../specs/releases.md#RELEASE-21)).
+
+Each platform package is built by `npm/scripts/stage-platform-package.js` on a runner of that
+platform's own kind. It verifies the binary against its published `.sha256` before writing it, and
+then its signature: the `.sha256` on Linux, the code signature on macOS and Windows. `install.sh`
+does the same when it runs, except on Windows, which it does not install, and `install.ps1` does
+the same for Windows alone. Installing the npm
+package runs no script and checks nothing itself. A dispatch after a partial failure publishes
+the packages that are missing and skips the ones the registry already has.
+
+After Jenkins has created that GitHub release, `make package-manifests TAG=v<version>` downloads
+the macOS and Windows `.sha256` files from it and runs `contrib/package-manifests.py`, which writes
+`dist/packages/Casks/bravebot.rb` and the three WinGet manifests under
+`dist/packages/manifests/b/Brave/Bravebot/<version>/`. It refuses a tag that is not `v` plus the
+tree's version and any missing or malformed digest, and writes nothing then. Opening the change
+against the Homebrew tap and `microsoft/winget-pkgs` is done by hand with those files; nothing here
+holds a credential for either, and neither package verifies a signature when it installs
+([RELEASE-18](../specs/releases.md#RELEASE-18)).
+
+`BRAVEBOT_ALLOW_UNCONFIGURED_BUILD` is set in GitHub Actions so forks and PRs compile without
+secrets. Jenkins does not set it on an upload, so a missing credential fails the release
+instead of shipping a binary that cannot reach the backend.
+
+Darwin binaries are codesigned and notarised, Windows binaries are Authenticode-signed, and
+`install.sh`, `install.ps1` and the platform package script hold each to that: the Developer ID team
+`KL8N8XSYF4` on macOS, the signer `Brave Software, Inc.` on Windows. A change of certificate or team
+has to be made in `install.sh`, `install.ps1` and `npm/scripts/stage-platform-package.js` before the
+first release signed by the new one is published, or installs and publishes of it are refused. The commands for checking a download by hand are on the
+[install page](../website/docs/install.md#check-a-download-by-hand).
+
+## The desktop application
+
+```sh
+make darwin-arm64 darwin-amd64 strip
+make app-release
+```
+
+The third family of artifact, and the one the tag does not produce. macOS gets a disk image per
+architecture, Linux a `.deb` and an `.rpm` per architecture from
+[the Linux packages](#the-linux-packages) below, and Windows an installer per architecture from
+[the Windows installers](#the-windows-installers).
+
+`app-release` runs on a Mac of either architecture and needs no Rust toolchain. It does need
+macOS 26 and Xcode 26 or later, whose `actool` compiles the Icon Composer icon `ui/build/icon.icon`
+into each bundle; packaging fails without them. It packages the
+app once per architecture from what the cross-build left in `dist/`, and writes a disk image for
+each:
+
+| Reads | Writes |
+| --- | --- |
+| `dist/bravebot-rpc-darwin-arm64`, `dist/bravebot-ui-files-darwin-arm64` | `dist/bravebot-app-darwin-arm64.dmg` |
+| `dist/bravebot-rpc-darwin-amd64`, `dist/bravebot-ui-files-darwin-amd64` | `dist/bravebot-app-darwin-amd64.dmg` |
+
+Those two executables are the agent the app talks to and its secure file helper. A Mac
+cross-build writes them beside the CLI and `make strip` strips them with it, so the agent inside
+the app is the build the CLI asset on the same release page is. They go into the images and are not
+assets of their own, so `make checksums` leaves them out. Each image holds
+`Brave Bot.app`, a link to `/Applications`, and the Electron and Chromium licence files.
+`ui/package.json` states the app's version, which is the version above, so the app names the
+release it ships an agent build of. Its bundle id is `com.brave.bravebot`: macOS keys privacy
+grants and keychain items on it, so it stays the same across releases.
+
+The app is fused and not signed. The fuses turn off `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` and
+`--inspect`, each a way to make the signed binary run code that is not the app's, and turn on
+asar integrity validation and loading only from the asar. Fusing rewrites the Electron binary,
+which a signature covers, so it comes first, and `app-release` is two steps with the signing
+between them:
+
+```sh
+make app-bundles   # ui/dist/Brave Bot-darwin-arm64/ and ui/dist/Brave Bot-darwin-x64/
+# sign and notarise each Brave Bot.app where it lies
+make app-dmg       # dist/bravebot-app-darwin-<arch>.dmg, then sign and notarise those
+```
+
+The two executables in `Contents/Resources/` have to be signed on their own before the app is:
+`codesign --deep` does not look there, and notarisation rejects an unsigned one.
+
+Nothing in this repository runs any of it: no CI job packages the app and the tag does not
+either. Like `make strip` and `make checksums`, the targets state the format and the release job
+consumes it.
+
+`make app-bundle` is the same app for the machine it runs on, from this checkout's own release
+build rather than from `dist/`, left in `ui/dist/` with no image. It refuses a build with no
+backend credentials in it, which the front end's own `pnpm run bridge` allows on purpose: a bundle
+built from an unconfigured shell starts, lists sessions, opens them, and fails at the first
+inference request, and Finder loads no shell configuration for the person who would then report
+that. So the credentials have to be in the environment `make` runs in, as they are for the
+cross-builds above.
+
+### The Linux packages
+
+```sh
+make linux-amd64 linux-arm64 strip
+make app-release-linux
+```
+
+On a Linux host, and needing no Rust toolchain. It packages the app once per architecture from
+what the cross-build left in `dist/`, and writes two packages for each:
+
+| Reads | Writes |
+| --- | --- |
+| `dist/bravebot-rpc-linux-arm64`, `dist/bravebot-ui-files-linux-arm64` | `dist/bravebot-app-linux-arm64.deb`, `dist/bravebot-app-linux-arm64.rpm` |
+| `dist/bravebot-rpc-linux-amd64`, `dist/bravebot-ui-files-linux-amd64` | `dist/bravebot-app-linux-amd64.deb`, `dist/bravebot-app-linux-amd64.rpm` |
+
+Both architectures are packaged on one host. `@electron/packager` downloads the Electron runtime
+for the architecture it is asked for, and `dpkg-deb` and `rpmbuild` archive a finished tree rather
+than executing anything in it, so neither step needs the machine the package is for. Each tool
+runs in a container pinned by digest, as the cross-build is: `make check-security` fails on one
+named by a tag.
+
+**Why a package and not a tarball.** Chromium's sandbox. Where unprivileged user namespaces are
+unavailable, which Ubuntu 24.04's AppArmor policy makes the default, Electron falls back to its
+setuid helper and aborts at start unless `chrome-sandbox` is owned by root with mode 4755. An
+installer can set that and something a person unpacks themselves cannot, which would leave
+`--no-sandbox` as the way to start it. That is not a supported way to run an agent.
+
+What the packages install:
+
+| Path | |
+| --- | --- |
+| `/opt/brave-bot/` | the bundle, with `chrome-sandbox` setuid root |
+| `/usr/bin/brave-bot` | a symlink to the executable inside it, whose name has a space |
+| `/usr/share/applications/brave-bot.desktop` | the launcher entry, running that symlink |
+| `/usr/share/icons/hicolor/<n>x<n>/apps/brave-bot.png` | `build/icons/`, the app's icon at each size a theme looks in |
+| `/usr/share/icons/hicolor/scalable/apps/brave-bot.svg` | `build/icon.svg`, the drawing those were rendered from, for a desktop that reads one |
+
+`ui/scripts/linux-package.mjs` writes that tree and both package descriptions, so the layout is
+the same whichever format was installed, and `make app-packages-linux` is only the packing. The
+runtime dependencies are declared there, in each distribution's names: Ubuntu 24.04's 64-bit time
+transition renamed several of them, so those are named as alternatives and a package built for one
+release still installs on the other.
+
+`brave-bot` is the package name in both formats. Upgrades and conflicts key on it, so like the
+macOS bundle id it is fixed by the first release. It is not the CLI's `bravebot`, which
+[the CLI packages](#the-cli-packages) below ship as a package of its own.
+
+The packages are fused and unsigned, as the Mac bundles are. Signing them, and an apt or dnf
+repository to serve updates from, are issue #770; the app has no updater on any platform.
+
+**What is not checked here.** Installing one. That needs a virtual machine of each supported
+release, because a container shares the host's kernel and AppArmor policy and so cannot exercise
+the sandbox the packages exist for. On a machine of each, the package has to install, start from
+its launcher with the sandbox on, start its agent, ignore `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`
+and `--inspect`, and uninstall cleanly.
+
+### The CLI packages
+
+```sh
+make linux-amd64 linux-arm64 strip
+make cli-packages-linux
+```
+
+Packages for the CLI, one per architecture under the name `bravebot`, from the same binaries the
+releases page publishes. It reads `dist/bravebot-linux-<arch>` and writes
+`dist/bravebot-linux-<arch>.deb` and `dist/bravebot-linux-<arch>.rpm` for amd64 and arm64, on a
+Linux host and needing no Rust toolchain. The payload is the one binary at `/usr/bin/bravebot`,
+and those four names are the ones the publish job uploads.
+
+A target packs each format where its tool is: `cli-packages-linux-deb` where `dpkg-deb` is, and
+`cli-packages-linux-rpm` where `rpmbuild` is. Neither starts a container of its own, so each can
+run inside one. `cli-packages-linux` runs each in the digest-pinned container the app's packages
+use, described under [the Linux packages](#the-linux-packages) above.
+
+The dependencies declared are the binary's own, from its dynamic section: `libm`, `libc`,
+`libpthread` and `libdl`, all of them `libc6` on Debian and `glibc` on Fedora, required at version
+2.30 or newer in both formats, the newest symbol version either architecture asks for. Nothing
+from the Electron dependency list the app declares is copied, since none of it is needed. The
+package files carry no signature of their own. Each is published with its `.sha256` and the
+signature on that checksum, as the Linux binaries are, so a download can be verified before it
+is installed. The repositories that serve them are described next.
+
+#### The apt and dnf repositories
+
+This tree builds the packages and gives the install instructions in the README and on
+[the install page](../website/docs/install.md#debian-ubuntu-and-fedora-packages). The publish job
+in devops generates the repositories over them, signs them with the release key of
+[RELEASE-14](../specs/releases.md#RELEASE-14) and uploads them
+([RELEASE-22](../specs/releases.md#RELEASE-22)), as it does for the binaries. Nothing in this tree
+writes, signs or uploads a repository. The job is tracked in
+[#3459](https://github.com/brave/bravebot/issues/3459).
+
+The repositories are published at `https://bravebot-apt-release.s3.brave.com` and
+`https://bravebot-rpm-release.s3.brave.com`. The apt repository is `dists/stable` with a signed
+`Release`, served as `InRelease` and `Release.gpg`. The dnf repository is a tree per architecture
+with a signed `repomd.xml`, and its rpms are signed with the release key. The install instructions
+fetch `bravebot-archive-keyring.gpg` and `bravebot.sources` from the first host and `bravebot.repo`
+from the second. A change to the host, the key or those file names changes the README, the install
+page and `crates/cli/tests/release_instructions.rs` with it.
+
+**What was checked.** On 2026-11-01 the served files were fetched and read. `bravebot.sources` has
+`Suites: stable`, `Components: main`, `Architectures: amd64 arm64` and
+`Signed-By: /usr/share/keyrings/bravebot-archive-keyring.gpg`. `dists/stable/Release` has
+`Suite: stable`, `Codename: stable` and `Architectures: amd64 arm64`, and `InRelease`, `Release.gpg`
+and both `Packages` files are served. The keyring and `bravebot-release.asc` each hold one key,
+with fingerprint `13F28F0405C49B0B232DBA1BC1E827646A2DE416`. `bravebot.repo` has `gpgcheck=1`, a
+`gpgkey` of `https://bravebot-rpm-release.s3.brave.com/bravebot-release.asc` and a `baseurl` of
+`https://bravebot-rpm-release.s3.brave.com/$basearch`, and `repomd.xml` and `repomd.xml.asc` are
+served for `x86_64` and `aarch64`. The deb and the rpm require `libc6 (>= 2.30)` and `glibc >= 2.30`.
+The apt source is a `stable` suite and not the flat `Suites: ./` form.
+
+**What is not checked here.** That `apt` and `dnf` install the package from the published
+repositories, because the machine this was written on had no container runtime or `gpg`. By hand,
+in a container of each release the install page lists (`debian:12`, `debian:13`, `ubuntu:22.04`,
+`ubuntu:24.04`, `ubuntu:26.04` and a supported `fedora`, each on amd64 and arm64 where the host
+runs both): install `curl`, `gpg` and `ca-certificates` on a Debian or Ubuntu image, follow the
+install page, check that the key's fingerprint is `13F28F0405C49B0B232DBA1BC1E827646A2DE416` (for
+dnf, at the key import prompt), confirm `apt update` reports no `NO_PUBKEY`, `not signed` or
+`Architectures` warning, install, run `bravebot --version` and remove the package. No test or
+make target runs this, because it needs a container runtime and the network. The result of a run is
+recorded in [#3466](https://github.com/brave/bravebot/issues/3466).
+
+### The Windows installers
+
+```sh
+make windows-amd64 windows-arm64 strip
+make app-release-windows
+```
+
+It packages the app once per architecture from what the cross-build left in `dist/`, and writes an
+installer for each:
+
+| Reads | Writes |
+| --- | --- |
+| `dist/bravebot-rpc-windows-arm64.exe`, `dist/bravebot-ui-files-windows-arm64.exe` | `dist/bravebot-desktop-windows-arm64-setup.exe` |
+| `dist/bravebot-rpc-windows-amd64.exe`, `dist/bravebot-ui-files-windows-amd64.exe` | `dist/bravebot-desktop-windows-amd64-setup.exe` |
+
+Two steps with the signing between them, as on the Mac, and each runs on different hosts:
+
+```sh
+make app-bundles-windows      # ui/dist/Brave Bot-win32-arm64/ and ui/dist/Brave Bot-win32-x64/, on any host
+# sign every PE in each bundle where it lies
+make app-installers-windows   # the two installers, on Windows or a Mac; then sign those
+```
+
+The bundles build on any host, because everything platform-specific about a Windows bundle is the
+icon and the version resource in `Brave Bot.exe`, and `@electron/packager` writes both with
+resedit, a JavaScript library. The Windows cross-build keeps the same pair of executables beside
+the CLI as the Mac one does, `make strip` strips them with the rest, and `make checksums` leaves
+them out of the assets. The bundle is fused, in `Brave Bot.exe` rather than in a framework, and
+unsigned. The job signs every PE in it where it lies: `Brave Bot.exe`, both helpers in
+`resources/`, and Electron's own DLLs.
+
+The installers do not build on Linux. electron-builder writes each one's uninstaller by running a
+stub build of the installer, which runs natively on Windows and which it reads in JavaScript on
+macOS, and on Linux it needs Wine. So the release builds the installers on the Windows node that
+signed the bundles, and signs them there too.
+
+**What the installer does.** It is NSIS, written by electron-builder from the bundle as
+`prepackaged`, so electron-builder packs and edits nothing and the files the job signed are the
+files installed. It is one click and per user, with no administrator prompt, as
+[#769](https://github.com/brave/bravebot/issues/769) settled:
+
+| | |
+| --- | --- |
+| Install directory | `%LOCALAPPDATA%\Programs\bravebot-desktop` |
+| Uninstall key | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\bravebot-desktop` |
+| Start menu entry, Apps list | `Brave Bot Desktop` |
+| Silent install | `/S`, which Intune and SCCM can run; Group Policy software installation takes only MSI |
+
+A newer installer finds the install it replaces through the uninstall key and runs that install's
+uninstaller first. So the key is fixed by the first release, like the macOS bundle id and the Linux
+package name, and so are the directory and the per-user scope: an installer that changes any of
+them installs a second copy beside the first. Uninstalling leaves the app's data and `~/.bravebot`
+where they are. `ui/scripts/windows-installer.mjs` states all of it, and refuses a bundle of the
+other architecture, or one that is not fused, which is what a debug bundle packaged on a Windows
+checkout looks like under the same directory name.
+
+The Start menu entry carries `com.brave.bravebot` as its AppUserModelID. Windows groups a window
+under the entry with the ID the process sets, and the app sets none yet, which is part of
+[#767](https://github.com/brave/bravebot/issues/767).
+
+The arm64 installer's archive puts every file through the BCJ filter, which makes it about a
+tenth larger. Left to choose, electron-builder's 7-Zip puts each ARM64 executable through a filter
+the installer's own 7-Zip lacks, and the installer then skips all of them and reports success.
+
+Each installer carries an uninstaller that electron-builder writes during the build, so the job
+cannot sign it afterwards the way it signs the installer. electron-builder signs it in the same
+build when given a certificate there, and setting that up is
+[#770](https://github.com/brave/bravebot/issues/770).
+
+**What CI checks.** CI's `Windows installer` jobs build one installer each, per architecture, with
+`make app-release-windows` from the cross-built helpers, and `Install on Windows` installs each on a
+hosted runner of its own architecture, `windows-latest` and `windows-11-arm`, with
+`ui/scripts/check-windows-install.mjs`. The install is silent, its Apps list entry is the per-user
+key above and the only one, and the installed files are the bundle's, byte for byte. The Start menu
+entry starts the app, and the app starts its agent. Started with `ELECTRON_RUN_AS_NODE=1`, with a
+`--require` in `NODE_OPTIONS`, or with `--inspect`, the app ignores each and starts as usual. It
+uninstalls cleanly, upgrades over an older installer, and leaves the app's data and `~/.bravebot`
+in place through both.
+
+What that cannot show. A runner's account is an administrator, so no prompt could appear either way:
+that the installer needs none shows only in where it installs, a per-user Apps list key with no
+per-machine one, the files under `%LOCALAPPDATA%`, and a Start menu entry under `%APPDATA%`.
+The installers are unsigned, which is #770. And the older installer is this build's bundle under a
+lower version, since no release carries one yet, so an upgrade from a release that changed the
+names above would pass here; `ui/scripts/windows-installer.test.mjs` pins them instead, and once a
+release carries an installer the job can upgrade from that.

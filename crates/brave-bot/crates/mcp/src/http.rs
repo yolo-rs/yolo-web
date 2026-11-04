@@ -1,0 +1,398 @@
+//! HTTP transport.
+//!
+//! A remote server at a user-configured URL. Unlike stdio there is no process to confine,
+//! so the protections are different: every request goes through the egress chokepoint, so
+//! the policy gate sees it, and a redirect off the declared destination is not followed
+//! without the person who declared the server approving where it went.
+//!
+//! That matters more here than for the model endpoint. MCP servers are arbitrary URLs a
+//! user adds, not one hardcoded host, so a server that redirects elsewhere is a realistic
+//! way to reach an unintended destination. It is a question rather than a rule because a
+//! server that has moved writes the same header as one redirecting a call away, and only
+//! the person who wrote the declaration can tell those apart. This transport refuses the hop
+//! and sends nothing to where it pointed; the policy keeps that destination for whoever asks
+//! (see [`bravebot_core::policy::Policy::take_server_hop`]), and a yes is a new declaration
+//! and a new [`HttpServer`] rather than this one following the header.
+
+use crate::protocol::{
+    Listing, PromptListing, PromptResult, RpcRequest, RpcResponse, ToolOutput, ToolResult,
+    call_params, declares_prompts, get_prompt_params, initialize_params, paged, paged_prompts,
+};
+use crate::{McpError, McpResult, log_step, malformed, named};
+use bravebot_core::capability::{Capability, ServerAlias};
+use bravebot_core::event::Sink;
+use bravebot_core::policy::Policy;
+use bravebot_core::value::Labelled;
+use bravebot_net::{Egress, EgressError, Request};
+use serde_json::Value;
+use std::time::Duration;
+
+/// A server reached over HTTP.
+#[derive(Debug)]
+pub struct HttpServer {
+    url: String,
+    name: String,
+    headers: Vec<(String, String)>,
+    next_id: u64,
+    /// Set from the initialize response, and echoed on later requests. Servers that keep
+    /// state across calls require it.
+    session: Option<String>,
+    /// How long a reply may take.
+    bound: Duration,
+    /// How long a reply to the handshake may take, which a server reached again after it moved is
+    /// given as it was when it was first reached.
+    startup: Duration,
+    /// Whether the handshake said the server has prompts, which is what a request for them waits
+    /// on (MCP-10).
+    prompts: bool,
+}
+
+impl HttpServer {
+    /// Configure a server. No request is made yet.
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            name: name.into(),
+            headers: Vec::new(),
+            next_id: 1,
+            session: None,
+            bound: Duration::from_secs(bravebot_config::mcp::TOOL_SECS),
+            startup: Duration::from_secs(bravebot_config::mcp::STARTUP_SECS),
+            prompts: false,
+        }
+    }
+
+    /// Add configured headers to send to this server on its declared socket.
+    pub fn with_headers(mut self, headers: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.headers.extend(headers);
+        self
+    }
+
+    /// Give the handshake's replies `bound`, which [`HttpServer::startup`] says again, and no
+    /// longer.
+    pub fn starting_within(mut self, bound: Duration) -> Self {
+        self.startup = bound;
+        self.bound = bound;
+        self
+    }
+
+    /// How long a reply to the handshake may take.
+    pub fn startup(&self) -> Duration {
+        self.startup
+    }
+
+    /// Give each reply `bound` and no longer.
+    pub fn within(mut self, bound: Duration) -> Self {
+        self.bound = bound;
+        self
+    }
+
+    /// Give each later reply `bound` and no longer.
+    pub fn set_bound(&mut self, bound: Duration) {
+        self.bound = bound;
+    }
+
+    /// How long a reply may take.
+    pub fn bound(&self) -> Duration {
+        self.bound
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The capability a call to this server needs, which names this server and no other.
+    fn capability(&self) -> Capability {
+        Capability::McpCall(ServerAlias::new(self.name.clone()))
+    }
+
+    fn send<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+        method: &str,
+        params: Option<Value>,
+    ) -> McpResult<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let body = serde_json::to_vec(&RpcRequest::new(id, method, params))
+            .map_err(|e| McpError::Transport(format!("could not encode {method}: {e}")))?;
+
+        let mut request = Request::post(&self.url, body)
+            .header("content-type", "application/json")
+            // Servers may reply with either, and the streaming form is accepted so a
+            // server that prefers it is not rejected outright.
+            .header("accept", "application/json, text/event-stream")
+            .reply_within(self.bound);
+
+        if let Some(session) = &self.session {
+            request = request.header("mcp-session-id", session);
+        }
+
+        for (name, value) in &self.headers {
+            request = request.socket_header(name, value);
+        }
+
+        // The declaration names one destination, so the gate holds the hops to it rather than
+        // following wherever a reply points: the body going out is this server's call, with its
+        // arguments and its session id, and a redirect is somewhere nobody declared yet.
+        policy.before_server_request(&self.url);
+        // Untrusted-public: a remote server's reply is third-party content.
+        let sent = egress.fetch(
+            policy,
+            request,
+            bravebot_core::label::Label::untrusted_public(),
+        );
+        // Before anything returns, so a failed request does not leave the rest of the turn's
+        // egress confined to this server's host.
+        policy.server_request_finished();
+
+        let response = sent.map_err(|e| match e {
+            EgressError::Denied(d) => McpError::Denied(d),
+            EgressError::OutOfTime { .. } => McpError::TimedOut {
+                what: method.to_string(),
+                after: self.bound,
+            },
+            // A status other than a success and a redirect that cannot be followed are things
+            // the server answered with.
+            replied @ (EgressError::Status { .. }
+            | EgressError::TooManyRedirects { .. }
+            | EgressError::MissingLocation { .. }
+            | EgressError::InsecureRedirect { .. }) => McpError::Unusable(replied.to_string()),
+            other => McpError::Transport(other.to_string()),
+        })?;
+
+        // Decoding the envelope needs the bytes; the label is reapplied to extracted
+        // content by the caller.
+        let label = response.body.label();
+        let (bytes, _label) = policy.decode_transport(method, label).decode(response.body);
+
+        // A server may frame its reply as SSE even when JSON was requested.
+        let text = String::from_utf8_lossy(&bytes);
+        let payload = extract_json(&text).ok_or_else(|| {
+            McpError::Unusable(format!(
+                "{method} returned no json payload ({} bytes)",
+                bytes.len()
+            ))
+        })?;
+
+        let parsed: RpcResponse = serde_json::from_str(payload)
+            .map_err(|e| malformed(format!("reply to {method}"), &e))?;
+
+        if let Some(error) = parsed.error {
+            // The code and the method are structure, and they are the whole of what is reported:
+            // the sentence the server sent with them is prose it composed. `RpcError` does not
+            // carry it here to be dropped, because it is never deserialised.
+            return Err(McpError::Server {
+                code: error.code,
+                method: method.to_string(),
+            });
+        }
+
+        parsed.result.ok_or_else(|| {
+            McpError::Unusable(format!("{method} returned neither a result nor an error"))
+        })
+    }
+
+    /// Complete the handshake.
+    pub fn initialize<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+        client_name: &str,
+        client_version: &str,
+    ) -> McpResult<()> {
+        let done = self
+            .send(
+                policy,
+                egress,
+                "initialize",
+                Some(initialize_params(client_name, client_version)),
+            )
+            .map(|initialized| {
+                self.prompts = declares_prompts(&initialized);
+            });
+        log_step("mcp.initialize", &done);
+        done
+    }
+
+    /// List the tools this server offers, as the one labelled text a person vouches for before any
+    /// of them is offered. SERVERS-8.
+    pub fn list_tools<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+    ) -> McpResult<Listing> {
+        let listed = paged(|params| self.send(policy, egress, "tools/list", params));
+        log_step("mcp.list_tools", &listed);
+        Ok(listed?.listing(&self.name))
+    }
+
+    /// List the prompts this server offers, as the text a person is shown in a menu. None where the
+    /// handshake did not say the server has any, and nothing is asked of it then. MCP-10.
+    pub fn list_prompts<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+    ) -> McpResult<PromptListing> {
+        if !self.prompts {
+            return Ok(PromptListing::none(&self.name));
+        }
+        let list = paged_prompts(|params| self.send(policy, egress, "prompts/list", params))?;
+        Ok(list.listing(&self.name))
+    }
+
+    /// Get a prompt's text, given the arguments a person typed for it, labelled untrusted-private
+    /// as a tool's result is (MCP-11). Asked for only of a server that said it has prompts.
+    pub fn get_prompt<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+        name: &str,
+        arguments: &[(String, String)],
+    ) -> McpResult<Labelled<String>> {
+        policy
+            .before_capability(self.capability())
+            .map_err(McpError::Denied)?;
+        if !self.prompts {
+            return Err(McpError::Transport("the server offers no prompts".into()));
+        }
+
+        let result = self.send(
+            policy,
+            egress,
+            "prompts/get",
+            Some(get_prompt_params(name, arguments)),
+        )?;
+        let parsed: PromptResult =
+            serde_json::from_value(result).map_err(|e| malformed("prompt result", &e))?;
+        if !parsed.carries_text() {
+            return Err(McpError::Transport("the prompt returned no text".into()));
+        }
+
+        let label = policy
+            .observe(self.capability())
+            .map_err(McpError::Denied)?;
+        Ok(Labelled::new(parsed.text(), label))
+    }
+
+    /// Call a tool. The result is labelled untrusted-private, text and pictures alike (MCP-1, MCP-6).
+    pub fn call_tool<S: Sink>(
+        &mut self,
+        policy: &mut Policy<'_, S>,
+        egress: &Egress,
+        tool: &str,
+        arguments: Value,
+    ) -> McpResult<ToolOutput> {
+        policy
+            .before_capability(self.capability())
+            .map_err(McpError::Denied)?;
+
+        let result = self
+            .send(
+                policy,
+                egress,
+                "tools/call",
+                Some(call_params(tool, arguments)),
+            )
+            .map_err(|error| named(error, tool))?;
+
+        let parsed: ToolResult =
+            serde_json::from_value(result).map_err(|e| malformed("tool result", &e))?;
+
+        let label = policy
+            .observe(self.capability())
+            .map_err(McpError::Denied)?;
+
+        if parsed.is_error {
+            return Err(McpError::ToolFailed {
+                tool: tool.to_string(),
+                detail: Labelled::new(parsed.text(), label),
+            });
+        }
+
+        Ok(parsed.output(label))
+    }
+}
+
+/// Pull the JSON payload out of a reply that may be plain JSON or SSE-framed.
+///
+/// SSE puts the payload on a `data:` line. Handling both means a server that upgrades to
+/// streaming does not break the client.
+fn extract_json(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') {
+        return Some(trimmed);
+    }
+
+    // Last data line wins: earlier ones may be progress notifications.
+    trimmed
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .rfind(|payload| payload.starts_with('{'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_json_is_extracted_as_is() {
+        let payload = extract_json(r#"{"jsonrpc":"2.0","id":1}"#).expect("json");
+        assert!(payload.starts_with('{'));
+    }
+
+    #[test]
+    fn whitespace_around_json_is_tolerated() {
+        assert!(extract_json("\n  {\"id\":1}  \n").is_some());
+    }
+
+    #[test]
+    fn an_sse_framed_reply_is_unwrapped() {
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let payload = extract_json(sse).expect("payload");
+        assert_eq!(payload, r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+    }
+
+    /// Progress notifications may precede the real reply, so the last payload wins.
+    #[test]
+    fn the_last_sse_payload_wins() {
+        let sse = "data: {\"method\":\"progress\"}\n\ndata: {\"id\":1,\"result\":{}}\n\n";
+        let payload = extract_json(sse).expect("payload");
+        assert!(payload.contains("result"));
+    }
+
+    #[test]
+    fn a_reply_with_no_json_is_none() {
+        assert!(extract_json("event: ping\n\n").is_none());
+        assert!(extract_json("").is_none());
+        assert!(extract_json("not json at all").is_none());
+    }
+
+    /// A server given its call bound after the handshake still says what its handshake was given,
+    /// which is what reaching it again after a move starts from.
+    #[test]
+    fn a_servers_startup_bound_is_kept_apart_from_its_call_bound() {
+        let mut server = HttpServer::new("remote", "https://mcp.example/api")
+            .starting_within(Duration::from_secs(5));
+        assert_eq!(server.bound(), Duration::from_secs(5));
+
+        server.set_bound(Duration::from_secs(300));
+
+        assert_eq!(server.startup(), Duration::from_secs(5));
+        assert_eq!(server.bound(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_server_records_its_configuration() {
+        let server = HttpServer::new("remote", "https://mcp.example/api");
+        assert_eq!(server.name(), "remote");
+        assert_eq!(server.url(), "https://mcp.example/api");
+    }
+}

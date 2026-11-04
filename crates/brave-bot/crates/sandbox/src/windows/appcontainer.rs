@@ -1,0 +1,1213 @@
+//! The Win32 calls behind the Windows backend, and the only unsafe in this crate outside
+//! the Linux one.
+//!
+//! Every entry point here is a thin wrapper reporting the platform's error as an
+//! [`std::io::Error`], so the backend above reads the same as the other two. What is
+//! *decided* is in the parent module instead, where a test on any platform can call it:
+//! which capability the token carries, what each grant permits, which policies are
+//! refused, and how an argument is written onto a command line.
+
+use super::{
+    Grant, OWNER_ONLY_DIRECTORY_SDDL, OWNER_ONLY_FILE_SDDL, capability_names, command_line,
+    environment_block, grants_to_write, paths_that_are_not_there, profile_name, refusal_for,
+    refusal_for_program, text_of,
+};
+use crate::policy::{Capabilities, SandboxPolicy};
+use crate::process::{Attached, ConfinedChild, Environment, Stream, Streams};
+use crate::{Sandbox, SandboxError};
+use std::ffi::{OsStr, OsString, c_void};
+use std::fs::{File, OpenOptions};
+use std::io::{Error, Result};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::path::{Path, PathBuf};
+use std::ptr::{null, null_mut};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_SUCCESS, GENERIC_WRITE, HANDLE,
+    HLOCAL, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ACCESS_MODE, ConvertStringSecurityDescriptorToSecurityDescriptorW, EXPLICIT_ACCESS_W,
+    GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID,
+    TRUSTEE_W,
+};
+use windows_sys::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeleteAppContainerProfile,
+};
+use windows_sys::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName, FreeSid, GetLengthSid,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_EXECUTE,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+};
+use windows_sys::Win32::System::JobObjects::{
+    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
+};
+
+/// The numbers the parent module writes its grants in are the platform's own rights.
+///
+/// Spelled there so every platform's test run decides what a grant permits, and held here
+/// so a number there cannot come to mean something other than the right it names. A
+/// mismatch is a build failure on the target that ships rather than a grant that is wider
+/// than it reads.
+const _: () = {
+    assert!(super::grant_for_reading().mask == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+    assert!(
+        super::grant_for_writing().mask
+            == FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE
+    );
+};
+
+/// `SE_GROUP_ENABLED`: the capability is in force in the token rather than merely listed.
+///
+/// Spelled rather than imported, because the module holding it is not one this build
+/// compiles for anything else.
+const CAPABILITY_ENABLED: u32 = 4;
+
+/// What the platform records about the profile, which is the only place this name is read
+/// by a person: Windows lists it under the account's app containers.
+const PROFILE_DESCRIPTION: &str = "Confinement for a program bravebot runs on your behalf";
+
+/// How many profiles this process has created, so each backend gets one of its own.
+static PROFILES: AtomicU64 = AtomicU64::new(0);
+
+/// A number that differs between runs of this program, including runs that are handed the
+/// same process identifier.
+///
+/// The standard library seeds its hash maps from the operating system's random source, so
+/// the seed of a fresh hasher is not predictable from the process identifier. The clock is
+/// mixed in so two backends in one process differ even if the seeds were ever equal.
+fn run_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    hasher.write_u128(now);
+    hasher.finish()
+}
+
+/// AppContainer-based confinement.
+///
+/// Holds the profile it created and the grants it wrote, because both outlive the confined
+/// process and both are this backend's to remove.
+#[derive(Debug)]
+pub struct AppContainerSandbox {
+    /// The profile name, as the platform takes it.
+    name: Vec<u16>,
+    /// The container's security identifier, held as its own bytes so this backend is plain
+    /// data rather than a pointer into somebody else's allocation.
+    sid: Sid,
+    /// Every grant written, so dropping this can take them off again.
+    granted: Mutex<Vec<(PathBuf, Grant)>>,
+}
+
+impl AppContainerSandbox {
+    /// Create this run's container profile, or refuse.
+    pub fn new() -> std::result::Result<Self, SandboxError> {
+        let name = profile_name(
+            std::process::id(),
+            PROFILES.fetch_add(1, Ordering::Relaxed),
+            run_nonce(),
+        );
+        let name = wide(OsStr::new(&name)).map_err(|e| SandboxError::Unavailable {
+            platform: "windows",
+            detail: format!("the container profile could not be named: {e}"),
+        })?;
+
+        let sid = create_profile(&name).map_err(|e| SandboxError::Unavailable {
+            platform: "windows",
+            detail: format!(
+                "an appcontainer profile could not be created ({e}); refusing to run \
+                 untrusted code unconfined"
+            ),
+        })?;
+
+        Ok(Self {
+            name,
+            sid,
+            granted: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Write one grant onto `path`, recording it so it can be taken off again.
+    ///
+    /// Recorded before the call rather than after, so a grant the platform wrote and then
+    /// reported a failure for is still one this backend removes.
+    fn write(&self, path: &Path, grant: Grant) -> Result<()> {
+        // Inheritance is a property of a directory's entry, and a file has nothing under it for
+        // the entry to reach.
+        let grant = if path.is_file() {
+            Grant {
+                inheritance: 0,
+                ..grant
+            }
+        } else {
+            grant
+        };
+        self.granted
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((path.to_path_buf(), grant));
+        set_entry(path, &self.sid, GRANT_ACCESS, grant)
+    }
+}
+
+impl Drop for AppContainerSandbox {
+    /// Take off every grant and delete the profile.
+    ///
+    /// Best effort, and the reason a leftover entry is survivable: the profile is this
+    /// run's alone, so an entry that outlives a run names a container nothing else is,
+    /// and no later run inherits the access it describes.
+    #[allow(unsafe_code, reason = "calls `DeleteAppContainerProfile`")]
+    fn drop(&mut self) {
+        let granted = std::mem::take(
+            self.granted
+                .get_mut()
+                .unwrap_or_else(|held| held.into_inner()),
+        );
+        for (path, grant) in granted {
+            let _ = set_entry(&path, &self.sid, REVOKE_ACCESS, grant);
+        }
+        let name = self.name.as_ptr();
+        // SAFETY: `name` points at the terminated profile name this value owns, which is alive for
+        // the call. The call reads it and nothing else.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { DeleteAppContainerProfile(name) };
+    }
+}
+
+impl Sandbox for AppContainerSandbox {
+    fn capabilities(&self) -> Capabilities {
+        super::capabilities()
+    }
+
+    fn spawn(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        policy: &SandboxPolicy,
+        streams: Streams,
+        environment: Environment,
+    ) -> std::result::Result<ConfinedChild, SandboxError> {
+        let (program, args) = text_of(program, args)?;
+        let capabilities = self.prepare(&program, &args, policy)?;
+        start(
+            &self.sid,
+            &capabilities,
+            &program,
+            &args,
+            Wiring::Streams(streams),
+            &environment,
+            policy.starting_in.as_deref(),
+        )
+    }
+
+    fn spawn_attached(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        policy: &SandboxPolicy,
+        attached: Attached,
+        environment: Environment,
+    ) -> std::result::Result<ConfinedChild, SandboxError> {
+        let (program, args) = text_of(program, args)?;
+        let capabilities = self.prepare(&program, &args, policy)?;
+        start(
+            &self.sid,
+            &capabilities,
+            &program,
+            &args,
+            Wiring::Handles(attached),
+            &environment,
+            policy.starting_in.as_deref(),
+        )
+    }
+}
+
+impl AppContainerSandbox {
+    /// Refuse what this backend will not apply, write the grants, and resolve the capabilities
+    /// the token is built with.
+    fn prepare(
+        &self,
+        program: &str,
+        args: &[String],
+        policy: &SandboxPolicy,
+    ) -> std::result::Result<Vec<Sid>, SandboxError> {
+        if let Some(refusal) = refusal_for(policy) {
+            return Err(refusal);
+        }
+        if let Some(refusal) = refusal_for_program(program, args) {
+            return Err(refusal);
+        }
+
+        // Before a profile is touched, so a policy this backend cannot apply costs no
+        // entry on anybody's directory.
+        let missing = paths_that_are_not_there(policy, |path| path.exists());
+        if !missing.is_empty() {
+            let named: Vec<_> = missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            return Err(SandboxError::SetupFailed {
+                mechanism: "appcontainer",
+                detail: format!(
+                    "a grant is an entry written onto an object, and the policy names {} \
+                     path(s) that are not on disk ({}); refusing rather than confining to \
+                     less than it asked for",
+                    missing.len(),
+                    named.join(", ")
+                ),
+            });
+        }
+
+        for (path, grant) in grants_to_write(policy, &readable_by_every_container()) {
+            self.write(&path, grant)
+                .map_err(|e| SandboxError::SetupFailed {
+                    mechanism: "appcontainer",
+                    detail: format!(
+                        "the policy grants {} and the entry for it could not be written \
+                         ({e}); refusing rather than confining to less than it asked for",
+                        path.display()
+                    ),
+                })?;
+        }
+
+        capability_sids(&capability_names(policy)).map_err(|e| SandboxError::SetupFailed {
+            mechanism: "appcontainer",
+            detail: format!("a capability the policy grants could not be resolved: {e}"),
+        })
+    }
+}
+
+/// The directories every container reads without an entry of its own: the system directory and
+/// the two Program Files directories, as this machine spells them.
+fn readable_by_every_container() -> Vec<PathBuf> {
+    [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+    ]
+    .into_iter()
+    .filter_map(std::env::var_os)
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// A process started under a container, with the job it and every process it starts are in.
+///
+/// The standard library's [`Child`](std::process::Child) cannot be built from a handle,
+/// and a process started through `CreateProcessW` with an attribute list is one this crate
+/// created itself, so this is what a caller waits on and kills instead.
+///
+/// The job ends every process in it when its last handle is closed, and this holds the only one,
+/// so dropping this ends them, as this process ending does.
+#[derive(Debug)]
+pub(crate) struct CreatedProcess {
+    handle: OwnedHandle,
+    id: u32,
+    job: OwnedHandle,
+}
+
+impl CreatedProcess {
+    pub(crate) fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// The handle as the platform takes it.
+    fn raw(&self) -> HANDLE {
+        self.handle.as_raw_handle() as HANDLE
+    }
+
+    #[allow(
+        unsafe_code,
+        reason = "calls `WaitForSingleObject` and `GetExitCodeProcess`"
+    )]
+    pub(crate) fn wait(&mut self) -> Result<std::process::ExitStatus> {
+        use std::os::windows::process::ExitStatusExt;
+
+        let process = self.raw();
+        // SAFETY: `process` is the handle `self` owns, which stays open until `self` is dropped.
+        // The call takes the handle and an integer and reads no memory.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let waited = unsafe { WaitForSingleObject(process, INFINITE) };
+        if waited != WAIT_OBJECT_0 {
+            return Err(Error::last_os_error());
+        }
+
+        let mut code = 0u32;
+        // SAFETY: `process` is the handle `self` owns, which stays open until `self` is dropped,
+        // and `code` is a local `u32` that is alive for the call and the only memory it writes.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let read = unsafe { GetExitCodeProcess(process, &mut code) };
+        if read == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(std::process::ExitStatus::from_raw(code))
+    }
+
+    #[allow(
+        unsafe_code,
+        reason = "calls `WaitForSingleObject` and `GetExitCodeProcess`"
+    )]
+    pub(crate) fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        use std::os::windows::process::ExitStatusExt;
+
+        let process = self.raw();
+        // SAFETY: `process` is the handle `self` owns, which stays open until `self` is dropped.
+        // The call takes the handle and a zero timeout and reads no memory.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let waited = unsafe { WaitForSingleObject(process, 0) };
+        if waited == WAIT_TIMEOUT {
+            return Ok(None);
+        }
+        if waited != WAIT_OBJECT_0 {
+            return Err(Error::last_os_error());
+        }
+
+        let mut code = 0u32;
+        // SAFETY: `process` is the handle `self` owns, which stays open until `self` is dropped,
+        // and `code` is a local `u32` that is alive for the call and the only memory it writes.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let read = unsafe { GetExitCodeProcess(process, &mut code) };
+        if read == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(Some(std::process::ExitStatus::from_raw(code)))
+    }
+
+    /// End the process and every process it started.
+    ///
+    /// The job rather than the process, since a child of a confined process outlives its parent
+    /// and keeps its token, its network and the pipes it was handed.
+    #[allow(unsafe_code, reason = "calls `TerminateJobObject`")]
+    pub(crate) fn kill(&mut self) -> Result<()> {
+        // The code a killed process reports. One rather than zero, so a caller reading the
+        // status cannot mistake a process this ended for one that succeeded.
+        const KILLED: u32 = 1;
+
+        let job = self.job.as_raw_handle() as HANDLE;
+        // SAFETY: `job` is the handle `self.job` owns, which stays open until `self` is dropped.
+        // The call takes the handle and an integer and reads no memory.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let ended = unsafe { TerminateJobObject(job, KILLED) };
+        if ended == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// A job that ends every process in it when its last handle is closed.
+///
+/// Not inheritable, and handed to no process, so the handle this returns is the last one.
+#[allow(
+    unsafe_code,
+    reason = "calls `CreateJobObjectW` and `SetInformationJobObject`"
+)]
+fn job_ending_on_close() -> Result<OwnedHandle> {
+    // SAFETY: both arguments are null, so the job is unnamed and has default security. The call
+    // reads no memory.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    if job.is_null() {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: the call reported success, which means it returned a handle nothing else owns, so
+    // the `OwnedHandle` is its only owner and closes it once.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let job = unsafe { OwnedHandle::from_raw_handle(job as RawHandle) };
+
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the handle is the job created above, still open. `limits` is a local of exactly
+    // the size passed, alive for the call, and the call only reads it.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let limited = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as HANDLE,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast::<c_void>(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if limited == 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(job)
+}
+
+/// A security identifier held as its own bytes.
+///
+/// Copied out of whatever allocated it, so nothing in this crate holds a pointer whose
+/// lifetime belongs to the platform, and the backend stays plain data.
+#[derive(Debug, Clone)]
+struct Sid {
+    /// Words rather than bytes, so the value is aligned as the platform expects to read it.
+    words: Vec<u32>,
+}
+
+impl Sid {
+    /// Copy the identifier at `psid`.
+    ///
+    /// # Safety
+    ///
+    /// `psid` points at a valid security identifier.
+    #[allow(
+        unsafe_code,
+        reason = "an `unsafe fn` that calls `GetLengthSid` on a `psid` its caller vouches for"
+    )]
+    unsafe fn copied_from(psid: PSID) -> Self {
+        // SAFETY: the caller guarantees that `psid` points at a valid security identifier, as this
+        // function's `# Safety` section requires, and the call only reads it.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let length = unsafe { GetLengthSid(psid) } as usize;
+        let mut words = vec![0u32; length.div_ceil(size_of::<u32>()).max(1)];
+        // SAFETY: the destination holds at least `length` bytes and the two do not overlap: one is
+        // this vector and the other is the platform's own allocation, which the caller vouches
+        // for and which holds `length` bytes.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                psid.cast::<u8>(),
+                words.as_mut_ptr().cast::<u8>(),
+                length,
+            )
+        };
+        Self { words }
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.words.as_ptr() as PSID
+    }
+}
+
+/// A pointer the platform allocated with `LocalAlloc`, freed when this is dropped.
+struct LocalBuffer(*mut c_void);
+
+impl Drop for LocalBuffer {
+    #[allow(
+        unsafe_code,
+        reason = "calls `LocalFree` on the allocation this value owns"
+    )]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let allocation = self.0 as HLOCAL;
+            // SAFETY: the pointer is non-null and is the allocation this value owns, and `drop`
+            // runs once, so it is freed once and not used afterwards.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            unsafe { LocalFree(allocation) };
+        }
+    }
+}
+
+/// Create the profile named `name` and return its identifier.
+///
+/// A profile that already exists is an error. The name carries a nonce chosen for this
+/// backend, so an existing profile is not one this run created: it belongs to another run,
+/// and adopting it would apply the access entries that run left on directories to this one.
+#[allow(
+    unsafe_code,
+    reason = "calls `CreateAppContainerProfile` and `FreeSid`"
+)]
+fn create_profile(name: &[u16]) -> Result<Sid> {
+    let description = wide(OsStr::new(PROFILE_DESCRIPTION))?;
+    let mut psid: PSID = null_mut();
+
+    // SAFETY: `name` and `description` are terminated vectors alive for the call. The capability
+    // list is null with a count of zero, and `psid` is a local the call writes.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let created = unsafe {
+        CreateAppContainerProfile(
+            name.as_ptr(),
+            name.as_ptr(),
+            description.as_ptr(),
+            null(),
+            0,
+            &mut psid,
+        )
+    };
+
+    if created < 0 {
+        return Err(reported("CreateAppContainerProfile", created));
+    }
+
+    // SAFETY: the call above reported success, which means it wrote a valid identifier to
+    // `psid`, and it is not freed until after the copy.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let sid = unsafe { Sid::copied_from(psid) };
+    // SAFETY: `psid` is the identifier the call above wrote, which this function owns. `sid` holds
+    // a copy, and `psid` is not used after this call.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe { FreeSid(psid) };
+    Ok(sid)
+}
+
+/// The identifiers of the capabilities `names` describes.
+///
+/// Each is copied out before the platform's arrays are freed, so what the token is built
+/// from outlives the call that resolved it.
+#[allow(
+    unsafe_code,
+    reason = "calls `DeriveCapabilitySidsFromName` and `LocalFree`"
+)]
+fn capability_sids(names: &[&str]) -> Result<Vec<Sid>> {
+    let mut sids = Vec::with_capacity(names.len());
+    for name in names {
+        let name = wide(OsStr::new(name))?;
+        let mut groups: *mut PSID = null_mut();
+        let mut group_count = 0u32;
+        let mut resolved: *mut PSID = null_mut();
+        let mut resolved_count = 0u32;
+
+        // SAFETY: `name` is a terminated vector alive for the call, and the four out-pointers are
+        // locals the call writes.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let derived = unsafe {
+            DeriveCapabilitySidsFromName(
+                name.as_ptr(),
+                &mut groups,
+                &mut group_count,
+                &mut resolved,
+                &mut resolved_count,
+            )
+        };
+        if derived == 0 {
+            return Err(Error::last_os_error());
+        }
+
+        // SAFETY: the call reported success, so both arrays hold as many identifiers as it
+        // counted, and each of them and the arrays themselves are this caller's to free. Each is
+        // freed once and not used afterwards, and every identifier is copied before it is freed.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            for index in 0..resolved_count as usize {
+                let psid = *resolved.add(index);
+                sids.push(Sid::copied_from(psid));
+                LocalFree(psid as HLOCAL);
+            }
+            for index in 0..group_count as usize {
+                LocalFree(*groups.add(index) as HLOCAL);
+            }
+            LocalFree(resolved as HLOCAL);
+            LocalFree(groups as HLOCAL);
+        }
+    }
+    Ok(sids)
+}
+
+/// Add `grant` for `sid` to what `path` already allows, or take it off again.
+///
+/// The list is read, the entry merged into it and the result written back, rather than a
+/// list built from scratch: a directory carries entries that are not this backend's, and
+/// replacing them would take somebody's own access to their own files away.
+#[allow(
+    unsafe_code,
+    reason = "calls `GetNamedSecurityInfoW`, `SetEntriesInAclW` and `SetNamedSecurityInfoW`"
+)]
+fn set_entry(path: &Path, sid: &Sid, mode: ACCESS_MODE, grant: Grant) -> Result<()> {
+    let path = wide(path.as_os_str())?;
+
+    let mut existing: *mut ACL = null_mut();
+    let mut descriptor = null_mut();
+    // SAFETY: `path` is a terminated vector alive for the call, and `existing` and `descriptor`
+    // are locals the call writes. The other out-pointers are null, which the call allows.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let read = unsafe {
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut existing,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if read != ERROR_SUCCESS {
+        return Err(Error::from_raw_os_error(read as i32));
+    }
+    let _descriptor = LocalBuffer(descriptor);
+
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: grant.mask,
+        grfAccessMode: mode,
+        grfInheritance: grant.inheritance,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            // A container identifier names no account, which is what this form is for.
+            TrusteeType: TRUSTEE_IS_GROUP,
+            ptstrName: sid.as_psid().cast::<u16>(),
+        },
+    };
+
+    let mut merged: *mut ACL = null_mut();
+    // SAFETY: `entry` is a local, and the count of one matches it. `existing` is the list the
+    // read above returned, which `_descriptor` keeps alive, and `merged` is a local the call
+    // writes.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let built = unsafe { SetEntriesInAclW(1, &entry, existing, &mut merged) };
+    if built != ERROR_SUCCESS {
+        return Err(Error::from_raw_os_error(built as i32));
+    }
+    let _merged = LocalBuffer(merged.cast::<c_void>());
+
+    // SAFETY: `path` is a terminated vector alive for the call, and `merged` is the list built
+    // above, which `_merged` keeps alive until this function returns. The other pointers are
+    // null, which the call allows.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let written = unsafe {
+        SetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            merged,
+            null(),
+        )
+    };
+    if written != ERROR_SUCCESS {
+        return Err(Error::from_raw_os_error(written as i32));
+    }
+    Ok(())
+}
+
+/// A list of process creation attributes, freed when it is dropped.
+struct AttributeList {
+    /// Words rather than bytes, so the platform's own structures are aligned inside it.
+    buffer: Vec<u64>,
+}
+
+impl AttributeList {
+    #[allow(unsafe_code, reason = "calls `InitializeProcThreadAttributeList`")]
+    fn holding(count: u32) -> Result<Self> {
+        let mut size = 0usize;
+        // The call that asks how large the list has to be fails saying so, which is the
+        // only way to find out.
+        // SAFETY: a null list with a size out-pointer to a local is how the call is asked for the
+        // size. It writes only `size` and initialises nothing.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size) };
+        if size == 0 {
+            return Err(Error::last_os_error());
+        }
+
+        let mut list = Self {
+            buffer: vec![0u64; size.div_ceil(size_of::<u64>())],
+        };
+        let buffer = list.as_ptr();
+        // SAFETY: `buffer` points at the vector `list` owns, which holds `size` bytes aligned to
+        // eight and is alive for the call. `size` is the local the first call filled in.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let ready = unsafe { InitializeProcThreadAttributeList(buffer, count, 0, &mut size) };
+        if ready == 0 {
+            // Nothing was initialised, so nothing is there to delete. Forgetting the list
+            // rather than dropping it is what keeps the deletion off an uninitialised one.
+            std::mem::forget(list);
+            return Err(Error::last_os_error());
+        }
+        Ok(list)
+    }
+
+    fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.buffer.as_mut_ptr().cast::<c_void>()
+    }
+
+    /// Point `attribute` at `value`, which must outlive the process creation this list is
+    /// used for: the list holds the pointer rather than a copy of what it points at.
+    #[allow(unsafe_code, reason = "calls `UpdateProcThreadAttribute`")]
+    fn set(&mut self, attribute: usize, value: *const c_void, size: usize) -> Result<()> {
+        // SAFETY: the list is initialised, because `holding` is the only way to build one and
+        // forgets the list when initialising fails. The caller of `set` keeps `value` alive until
+        // the process is created, as this function's documentation requires.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let updated = unsafe {
+            UpdateProcThreadAttribute(self.as_ptr(), 0, attribute, value, size, null_mut(), null())
+        };
+        if updated == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AttributeList {
+    #[allow(unsafe_code, reason = "calls `DeleteProcThreadAttributeList`")]
+    fn drop(&mut self) {
+        let buffer = self.as_ptr();
+        // SAFETY: the list was initialised by `holding`, and `drop` runs once, so it is deleted
+        // once and not used afterwards.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { DeleteProcThreadAttributeList(buffer) };
+    }
+}
+
+/// The two ends of what one of the confined process's streams is attached to: the handle
+/// it is given, and the pipe this process keeps where there is one.
+struct Attachment {
+    child: OwnedHandle,
+    ours: Option<File>,
+}
+
+/// What the confined process reads its input from.
+fn input(stream: Stream) -> Result<Attachment> {
+    match stream {
+        Stream::Piped => {
+            let (reader, writer) = std::io::pipe()?;
+            let reader = OwnedHandle::from(reader);
+            Ok(Attachment {
+                child: inheritable(reader.as_raw_handle())?,
+                ours: Some(File::from(OwnedHandle::from(writer))),
+            })
+        }
+        Stream::Inherited => Ok(Attachment {
+            child: inheritable(std::io::stdin().as_raw_handle())?,
+            ours: None,
+        }),
+        Stream::Null => {
+            let nowhere = discarded()?;
+            Ok(Attachment {
+                child: inheritable(nowhere.as_raw_handle())?,
+                ours: None,
+            })
+        }
+    }
+}
+
+/// What the confined process writes one of its output streams to.
+///
+/// `inherited` is this process's own end of that stream, so each of the two is attached to
+/// what this process is attached to rather than both to one of them.
+fn output(stream: Stream, inherited: RawHandle) -> Result<Attachment> {
+    match stream {
+        Stream::Piped => {
+            let (reader, writer) = std::io::pipe()?;
+            let writer = OwnedHandle::from(writer);
+            Ok(Attachment {
+                child: inheritable(writer.as_raw_handle())?,
+                ours: Some(File::from(OwnedHandle::from(reader))),
+            })
+        }
+        Stream::Inherited => Ok(Attachment {
+            child: inheritable(inherited)?,
+            ours: None,
+        }),
+        Stream::Null => {
+            let nowhere = discarded()?;
+            Ok(Attachment {
+                child: inheritable(nowhere.as_raw_handle())?,
+                ours: None,
+            })
+        }
+    }
+}
+
+/// Somewhere a write goes nowhere and a read is at its end.
+fn discarded() -> Result<File> {
+    OpenOptions::new().read(true).write(true).open("NUL")
+}
+
+/// A copy of `handle` the confined process inherits.
+///
+/// A copy rather than the handle itself, because inheritance is a property of the handle
+/// and marking this process's own would hand it to every process started from here rather
+/// than to this one.
+#[allow(unsafe_code, reason = "calls `DuplicateHandle`")]
+fn inheritable(handle: RawHandle) -> Result<OwnedHandle> {
+    let mut copy: HANDLE = null_mut();
+    // SAFETY: `handle` is open for the call, `copy` is a local the call writes, and the pseudo
+    // handle for the current process is valid in any process.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let duplicated = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle as HANDLE,
+            GetCurrentProcess(),
+            &mut copy,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if duplicated == 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: the call reported success, which means it wrote a handle nothing else owns, so the
+    // `OwnedHandle` is its only owner and closes it once.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    Ok(unsafe { OwnedHandle::from_raw_handle(copy as RawHandle) })
+}
+
+/// What the three standard streams of the process are attached to.
+enum Wiring {
+    /// Decided here: a pipe this process keeps an end of, nothing, or this process's own.
+    Streams(Streams),
+    /// Handles the caller made, for a pipeline wiring one stage's output to the next.
+    Handles(Attached),
+}
+
+impl Wiring {
+    fn attach(self) -> Result<(Attachment, Attachment, Attachment)> {
+        match self {
+            Self::Streams(streams) => Ok((
+                input(streams.stdin)?,
+                output(streams.stdout, std::io::stdout().as_raw_handle())?,
+                output(streams.stderr, std::io::stderr().as_raw_handle())?,
+            )),
+            Self::Handles(Attached {
+                stdin,
+                stdout,
+                stderr,
+            }) => {
+                let held = |handle: OwnedHandle| -> Result<Attachment> {
+                    Ok(Attachment {
+                        child: inheritable(handle.as_raw_handle())?,
+                        ours: None,
+                    })
+                };
+                Ok((held(stdin)?, held(stdout)?, held(stderr)?))
+            }
+        }
+    }
+}
+
+/// Start the process, or refuse.
+///
+/// The job is made first, so a job the platform will not make is a refusal to confine that costs
+/// no process, as against a process that could not be created.
+fn start(
+    sid: &Sid,
+    capabilities: &[Sid],
+    program: &str,
+    args: &[String],
+    wiring: Wiring,
+    environment: &Environment,
+    directory: Option<&Path>,
+) -> std::result::Result<ConfinedChild, SandboxError> {
+    let job = job_ending_on_close().map_err(|e| SandboxError::SetupFailed {
+        mechanism: "appcontainer",
+        detail: format!(
+            "the job that ends a process with everything it starts could not be made ({e}); \
+             refusing rather than starting a program whose children would outlive it"
+        ),
+    })?;
+    // Under the gate every start of a program takes. The copies of the streams the process is
+    // given are inheritable until it exists, and a program the standard library starts on another
+    // thread meanwhile inherits every inheritable handle this process holds, so it would hold this
+    // stage's input and keep its output from ending.
+    crate::process::starting_a_program(|| {
+        started(
+            sid,
+            capabilities,
+            program,
+            args,
+            wiring,
+            environment,
+            directory,
+            job,
+        )
+    })
+    .map_err(SandboxError::SpawnFailed)
+}
+
+#[allow(
+    unsafe_code,
+    clippy::too_many_arguments,
+    reason = "calls `CreateProcessW` and `CloseHandle`, and takes the parts of one process creation"
+)]
+fn started(
+    sid: &Sid,
+    capabilities: &[Sid],
+    program: &str,
+    args: &[String],
+    wiring: Wiring,
+    environment: &Environment,
+    directory: Option<&Path>,
+    job: OwnedHandle,
+) -> Result<ConfinedChild> {
+    let mut line = wide(OsStr::new(&command_line(program, args)))?;
+
+    let (stdin, stdout, stderr) = wiring.attach()?;
+
+    let mut granted: Vec<SID_AND_ATTRIBUTES> = capabilities
+        .iter()
+        .map(|capability| SID_AND_ATTRIBUTES {
+            Sid: capability.as_psid(),
+            Attributes: CAPABILITY_ENABLED,
+        })
+        .collect();
+    let security = SECURITY_CAPABILITIES {
+        AppContainerSid: sid.as_psid(),
+        Capabilities: granted.as_mut_ptr(),
+        CapabilityCount: granted.len() as u32,
+        Reserved: 0,
+    };
+
+    // The three the confined process is given, and the whole of what it inherits: every
+    // other inheritable handle this process holds stays here, which is what the list is
+    // for. Without it the flag that lets the three through lets all of them through.
+    let inherited: [HANDLE; 3] = [
+        stdin.child.as_raw_handle() as HANDLE,
+        stdout.child.as_raw_handle() as HANDLE,
+        stderr.child.as_raw_handle() as HANDLE,
+    ];
+
+    // The process is in the job from the moment it exists, so nothing it starts is ever outside
+    // the job, and a job the platform will not put it in is a process that is not created.
+    let jobs: [HANDLE; 1] = [job.as_raw_handle() as HANDLE];
+
+    let mut attributes = AttributeList::holding(3)?;
+    attributes.set(
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+        std::ptr::from_ref(&security).cast::<c_void>(),
+        size_of::<SECURITY_CAPABILITIES>(),
+    )?;
+    attributes.set(
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+        inherited.as_ptr().cast::<c_void>(),
+        size_of_val(&inherited),
+    )?;
+    attributes.set(
+        PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+        jobs.as_ptr().cast::<c_void>(),
+        size_of_val(&jobs),
+    )?;
+
+    let mut startup = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: inherited[0],
+            hStdOutput: inherited[1],
+            hStdError: inherited[2],
+            ..Default::default()
+        },
+        lpAttributeList: attributes.as_ptr(),
+    };
+
+    let written = environment_block(environment, |text| text.encode_wide().collect())?;
+    let (block, unicode) = match &written {
+        Some(block) => (block.as_ptr().cast::<c_void>(), CREATE_UNICODE_ENVIRONMENT),
+        None => (null(), 0),
+    };
+    let directory = directory.map(|path| wide(path.as_os_str())).transpose()?;
+    let start_in = directory.as_ref().map_or(null(), |path| path.as_ptr());
+
+    let mut created = PROCESS_INFORMATION::default();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the command line the caller asked to run confined, created inside the AppContainer"
+    )]
+    // On a console of its own with no window, rather than on this process's: any process attached
+    // to a console can write input into it, which on the terminal's console is typing an answer
+    // to a prompt. Detaching it instead would give each console program it starts a console, and
+    // a window, of its own; with this they share the one it was given.
+    // SAFETY: `line` is a terminated, mutable vector, and `block`, `start_in` and the startup
+    // information point at values that live until the call returns: `written`, `directory`,
+    // `startup` and the attribute list it names. `startup` is an extended structure, as the flag
+    // says and its `cb` records, and `created` is a local the call writes.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let started = unsafe {
+        CreateProcessW(
+            null(),
+            line.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | unicode,
+            block,
+            start_in,
+            std::ptr::from_mut(&mut startup).cast::<STARTUPINFOW>(),
+            &mut created,
+        )
+    };
+    if started == 0 {
+        return Err(Error::last_os_error());
+    }
+
+    // Nothing here resumes or waits on the initial thread, and a handle to it left open
+    // keeps the thread object alive for as long as this process runs.
+    // SAFETY: the call above succeeded, so `hThread` is an open handle this function owns, and it
+    // is closed once and not used afterwards.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe { CloseHandle(created.hThread) };
+
+    // SAFETY: the call succeeded, which means `hProcess` is an open handle nothing else owns, so
+    // the `OwnedHandle` is its only owner and closes it once.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let handle = unsafe { OwnedHandle::from_raw_handle(created.hProcess as RawHandle) };
+
+    Ok(crate::process::confined(
+        CreatedProcess {
+            handle,
+            id: created.dwProcessId,
+            job,
+        },
+        stdin.ours,
+        stdout.ours,
+        stderr.ours,
+    ))
+}
+
+/// `text` as the platform takes a string, terminated.
+///
+/// A string with a terminator inside it is refused rather than truncated at it: the
+/// platform reads to the first one, so a path carrying one would name a different path
+/// from the one the policy granted.
+fn wide(text: &OsStr) -> Result<Vec<u16>> {
+    let mut encoded: Vec<u16> = text.encode_wide().collect();
+    if encoded.contains(&0) {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a string handed to the platform has a terminator inside it",
+        ));
+    }
+    encoded.push(0);
+    Ok(encoded)
+}
+
+/// The attributes that give an object being created an access list of its own, and the
+/// descriptor they point at.
+struct OwnerOnly {
+    /// Freed when this is dropped, after the attributes that point at it.
+    _descriptor: LocalBuffer,
+    attributes: SECURITY_ATTRIBUTES,
+}
+
+impl OwnerOnly {
+    /// The attributes for the access list `sddl` writes.
+    #[allow(
+        unsafe_code,
+        reason = "calls `ConvertStringSecurityDescriptorToSecurityDescriptorW`"
+    )]
+    fn described_by(sddl: &str) -> Result<Self> {
+        let text = wide(OsStr::new(sddl))?;
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: `text` is a terminated vector alive for the call, and `descriptor` is a local
+        // the call writes. The size out-pointer is null, which the call allows.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(Error::last_os_error());
+        }
+        let descriptor = LocalBuffer(descriptor);
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        Ok(Self {
+            _descriptor: descriptor,
+            attributes,
+        })
+    }
+}
+
+/// Create an empty directory at `path`, and every directory above it that is absent, each
+/// with an access list naming only its owner ([`OWNER_ONLY_DIRECTORY_SDDL`]).
+///
+/// A directory already there is left as it is. The standard library's recursive builder
+/// takes no access list on this platform, so a directory made through it carries whatever
+/// its parent hands down.
+pub(crate) fn create_directory_owner_only(path: &Path) -> Result<()> {
+    let owner_only = OwnerOnly::described_by(OWNER_ONLY_DIRECTORY_SDDL)?;
+    create_directories(path, &owner_only)
+}
+
+fn create_directories(path: &Path, owner_only: &OwnerOnly) -> Result<()> {
+    match create_directory(path, owner_only) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                Some(parent) => {
+                    create_directories(parent, owner_only)?;
+                    create_directory(path, owner_only)
+                }
+                None => Err(e),
+            }
+        }
+        Err(_) if path.is_dir() => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[allow(unsafe_code, reason = "calls `CreateDirectoryW`")]
+fn create_directory(path: &Path, owner_only: &OwnerOnly) -> Result<()> {
+    let path = wide(path.as_os_str())?;
+    // SAFETY: `path` is a terminated vector alive for the call, `owner_only.attributes` points at
+    // a descriptor that `owner_only` keeps alive for the call.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let created = unsafe { CreateDirectoryW(path.as_ptr(), &owner_only.attributes) };
+    if created == 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Create an empty file at `path` with an access list naming only its owner
+/// ([`OWNER_ONLY_FILE_SDDL`]), failing if anything is there. The directory holding it is
+/// the caller's to have made.
+#[allow(unsafe_code, reason = "calls `CreateFileW` and `CloseHandle`")]
+pub(crate) fn create_file_owner_only(path: &Path) -> Result<()> {
+    let owner_only = OwnerOnly::described_by(OWNER_ONLY_FILE_SDDL)?;
+    let path = wide(path.as_os_str())?;
+    // SAFETY: `path` is a terminated vector alive for the call, `owner_only.attributes` points at
+    // a descriptor that `owner_only` keeps alive for the call, and the template handle is null.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &owner_only.attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: the handle is not `INVALID_HANDLE_VALUE`, so it is open and owned here, and it is
+    // closed once and not used afterwards.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe { CloseHandle(handle) };
+    Ok(())
+}
+
+/// What a call reporting an `HRESULT` failed with.
+///
+/// Written as the number rather than translated, because these come from `userenv` rather
+/// than from `GetLastError` and the platform's message table is keyed on the other kind.
+fn reported(call: &str, result: i32) -> Error {
+    Error::other(format!("{call} failed (0x{:08x})", result as u32))
+}

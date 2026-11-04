@@ -1,0 +1,752 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use app_units::{Au, MAX_AU, MIN_AU};
+use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
+use euclid::Rect;
+use malloc_size_of_derive::MallocSizeOf;
+use once_cell::race::OnceBox;
+use servo_arc::Arc as ServoArc;
+use servo_base::id::{AtomicOptionScrollTreeNodeId, ScrollTreeNodeId};
+use servo_base::print_tree::PrintTree;
+use servo_geometry::f32_rect_to_au_rect;
+use style::Zero;
+use style::computed_values::border_collapse::T as BorderCollapse;
+use style::computed_values::overflow_x::T as ComputedOverflow;
+use style::logical_geometry::WritingMode;
+use style::properties::ComputedValues;
+
+use super::{BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment, FragmentFlags};
+use crate::SharedStyle;
+use crate::display_list::{ClipId, ToWebRender};
+use crate::formatting_contexts::Baselines;
+use crate::fragment_tree::CumulativeContentRectCalculation;
+use crate::geom::{
+    AuOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, SyncPhysicalRectAu, ToLogical,
+};
+use crate::style_ext::ComputedValuesExt;
+use crate::table::SpecificTableGridInfo;
+use crate::taffy::SpecificTaffyGridInfo;
+
+/// Describes how a [`BoxFragment`] paints its background.
+#[derive(Clone, MallocSizeOf)]
+pub(crate) enum BackgroundMode {
+    /// Draw the normal [`BoxFragment`] background as well as the extra backgrounds
+    /// based on the style and positioning rectangles in this data structure.
+    Extra(Vec<ExtraBackground>),
+    /// Do not draw a background for this Fragment. This is used for elements like
+    /// table tracks and table track groups, which rely on cells to paint their
+    /// backgrounds.
+    None,
+    /// Draw the background normally, getting information from the Fragment style.
+    Normal,
+}
+
+#[derive(Clone, MallocSizeOf)]
+pub(crate) struct ExtraBackground {
+    pub style: SharedStyle,
+    pub rect: PhysicalRect<Au>,
+}
+
+#[derive(Clone, Debug, MallocSizeOf)]
+pub(crate) enum SpecificLayoutInfo {
+    Grid(Box<SpecificTaffyGridInfo>),
+    TableCellWithCollapsedBorders,
+    TableGridWithCollapsedBorders(Box<SpecificTableGridInfo>),
+    TableWrapper,
+}
+
+#[derive(Clone, MallocSizeOf)]
+pub(crate) struct BlockLevelLayoutInfo {
+    /// When the `clear` property is not set to `none`, it may introduce clearance.
+    /// Clearance is some extra spacing that is added above the top margin,
+    /// so that the element doesn't overlap earlier floats in the same BFC.
+    /// The presence of clearance prevents the top margin from collapsing with
+    /// earlier margins or with the bottom margin of the parent block.
+    /// <https://drafts.csswg.org/css2/#clearance>
+    pub clearance: Option<Au>,
+
+    pub block_margins_collapsed_with_children: CollapsedBlockMargins,
+}
+
+#[derive(Clone, Default, MallocSizeOf)]
+pub(crate) struct BoxFragmentRareData {
+    /// The resolved box insets if this box is `position: sticky`. These are calculated
+    /// during `StackingContextTree` construction because they rely on the size of the
+    /// scroll container.
+    pub(crate) resolved_sticky_insets: Option<Box<PhysicalSides<AuOrAuto>>>,
+
+    /// Information that is specific to a layout system (e.g., grid, table, etc.).
+    pub specific_layout_info: Option<SpecificLayoutInfo>,
+
+    /// If the associated [`BoxFragment`] establishes a clip via CSS this holds the
+    /// [`ClipId`] for the generated clip set during stacking context tree construction.
+    pub generated_clip_id: Option<ClipId>,
+
+    /// If the associated [`BoxFragment`] establishes a spatial node via CSS this holds the
+    /// [`ScrollTreeNodeId`] for the generated node set during stacking context tree construction.
+    pub generated_scroll_tree_node_id: Option<ScrollTreeNodeId>,
+}
+
+impl BoxFragmentRareData {
+    /// Create a new rare data based on information given to the fragment. Ideally, We should
+    /// avoid creating rare data as much as possible to reduce the memory cost.
+    fn new(specific_layout_info: Option<SpecificLayoutInfo>) -> OnceBox<AtomicRefCell<Self>> {
+        specific_layout_info
+            .map(|info| {
+                OnceBox::with_value(Box::new(AtomicRefCell::new(BoxFragmentRareData {
+                    resolved_sticky_insets: None,
+                    specific_layout_info: Some(info),
+                    generated_clip_id: None,
+                    generated_scroll_tree_node_id: None,
+                })))
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[derive(MallocSizeOf)]
+pub(crate) struct BoxFragment {
+    pub base: BaseFragment,
+
+    /// The style for this [`BoxFragment`].
+    pub style: SharedStyle,
+
+    pub children: Vec<Fragment>,
+
+    /// The cumulative content rect of this [`BoxFragment`]'s parent in coordinates
+    /// relative to the initial containing block, but not taking into account any
+    /// transforms.
+    pub cumulative_parent_content_rect: SyncPhysicalRectAu,
+
+    pub padding: PhysicalSides<Au>,
+    pub border: PhysicalSides<Au>,
+    pub margin: PhysicalSides<Au>,
+
+    /// When this [`BoxFragment`] is for content that has a baseline, this tracks
+    /// the first and last baselines of that content. This is used to propagate baselines
+    /// to things such as tables and inline formatting contexts.
+    baselines: Baselines,
+
+    /// The scrollable overflow of this box fragment in the same coordiante system as
+    /// [`Self::content_rect`] ie a rectangle within the parent fragment's content
+    /// rectangle. This does not take into account any transforms this fragment applies.
+    /// This is handled when calling [`Self::scrollable_overflow_for_parent`].
+    scrollable_overflow: SyncPhysicalRectAu,
+    scrollable_overflow_is_up_to_date: AtomicBool,
+
+    pub background_mode: BackgroundMode,
+
+    /// Rare data that not all kinds of [`BoxFragment`] would have.
+    pub rare_data: OnceBox<AtomicRefCell<BoxFragmentRareData>>,
+
+    /// Additional information for block-level boxes.
+    pub block_level_layout_info: Option<Box<BlockLevelLayoutInfo>>,
+
+    /// The containing spatial tree node of this [`BoxFragment`]. This is assigned during
+    /// `StackingContextTree` construction, so isn't available before that time. This is
+    /// used to for determining final viewport size and position of this node and will
+    /// also be used in the future for hit testing.
+    pub spatial_tree_node: AtomicOptionScrollTreeNodeId,
+}
+
+impl BoxFragment {
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        base_fragment_info: BaseFragmentInfo,
+        style: ServoArc<ComputedValues>,
+        children: Vec<Fragment>,
+        content_rect: PhysicalRect<Au>,
+        padding: PhysicalSides<Au>,
+        border: PhysicalSides<Au>,
+        margin: PhysicalSides<Au>,
+        specific_layout_info: Option<SpecificLayoutInfo>,
+    ) -> Self {
+        let rare_data = BoxFragmentRareData::new(specific_layout_info);
+        Self {
+            base: BaseFragment::new(base_fragment_info, content_rect),
+            style: style.into(),
+            children,
+            cumulative_parent_content_rect: Default::default(),
+            padding,
+            border,
+            margin,
+            baselines: Baselines::default(),
+            scrollable_overflow: Default::default(),
+            scrollable_overflow_is_up_to_date: AtomicBool::new(false),
+            background_mode: BackgroundMode::Normal,
+            rare_data,
+            block_level_layout_info: None,
+            spatial_tree_node: AtomicOptionScrollTreeNodeId::new(None),
+        }
+    }
+
+    pub(crate) fn with_baselines(mut self, baselines: Baselines) -> Self {
+        self.baselines = baselines;
+        self
+    }
+
+    pub(crate) fn style<'a>(&'a self) -> AtomicRef<'a, ServoArc<ComputedValues>> {
+        self.style.borrow()
+    }
+
+    pub(crate) fn with_style(self: &Arc<Self>) -> BoxFragmentWithStyle<'_> {
+        BoxFragmentWithStyle {
+            box_fragment: self,
+            style: self.style(),
+        }
+    }
+
+    /// Get the baselines for this [`BoxFragment`] if they are compatible with the given [`WritingMode`].
+    /// If they are not compatible, [`Baselines::default()`] is returned.
+    pub(crate) fn baselines(&self, writing_mode: WritingMode) -> Baselines {
+        let style = self.style();
+        let mut baselines = if writing_mode.is_horizontal() == style.writing_mode.is_horizontal() {
+            self.baselines
+        } else {
+            // If the writing mode of the container requesting baselines is not
+            // compatible, ensure that the baselines established by this fragment are
+            // not used.
+            Baselines::default()
+        };
+
+        // From the https://drafts.csswg.org/css-align-3/#baseline-export section on "block containers":
+        // > However, for legacy reasons if its baseline-source is auto (the initial
+        // > value) a block-level or inline-level block container that is a scroll container
+        // > always has a last baseline set, whose baselines all correspond to its block-end
+        // > margin edge.
+        //
+        // This applies even if there is no baseline set, so we unconditionally set the value here
+        // and ignore anything that is set via [`Self::with_baselines`].
+        if style.establishes_scroll_container(self.base.flags) {
+            let content_rect_size = self.content_rect().size.to_logical(writing_mode);
+            let padding = self.padding.to_logical(writing_mode);
+            let border = self.border.to_logical(writing_mode);
+            let margin = self.margin.to_logical(writing_mode);
+            baselines.last = Some(
+                content_rect_size.block + padding.block_end + border.block_end + margin.block_end,
+            )
+        }
+        baselines
+    }
+
+    pub(crate) fn add_extra_background(&mut self, extra_background: ExtraBackground) {
+        match self.background_mode {
+            BackgroundMode::Extra(ref mut backgrounds) => backgrounds.push(extra_background),
+            _ => self.background_mode = BackgroundMode::Extra(vec![extra_background]),
+        }
+    }
+
+    pub(crate) fn set_does_not_paint_background(&mut self) {
+        self.background_mode = BackgroundMode::None;
+    }
+
+    pub(crate) fn ensure_rare_data(&self) -> AtomicRefMut<'_, BoxFragmentRareData> {
+        self.rare_data.get_or_init(Default::default).borrow_mut()
+    }
+
+    pub(crate) fn specific_layout_info(&self) -> Option<AtomicRef<'_, SpecificLayoutInfo>> {
+        let rare_data = self.rare_data.get()?.borrow();
+
+        AtomicRef::filter_map(rare_data, |rare_data| {
+            rare_data.specific_layout_info.as_ref()
+        })
+    }
+
+    pub(crate) fn clear_stacking_context_tree_traversal_data(&self) {
+        if let Some(rare_data) = self.rare_data.get() {
+            let mut rare_data = rare_data.borrow_mut();
+            rare_data.generated_clip_id = None;
+            rare_data.generated_scroll_tree_node_id = None;
+            rare_data.resolved_sticky_insets = None;
+        }
+    }
+
+    pub(crate) fn resolved_sticky_insets(
+        &self,
+    ) -> Option<AtomicRef<'_, Box<PhysicalSides<AuOrAuto>>>> {
+        let rare_data = self.rare_data.get()?.borrow();
+
+        AtomicRef::filter_map(rare_data, |rare_data| {
+            rare_data.resolved_sticky_insets.as_ref()
+        })
+    }
+
+    pub(crate) fn set_resolved_sticky_insets(&self, sticky_insets: PhysicalSides<AuOrAuto>) {
+        self.ensure_rare_data().resolved_sticky_insets = Some(sticky_insets.into());
+    }
+
+    pub(crate) fn generated_clip_id(&self) -> Option<ClipId> {
+        self.rare_data.get()?.borrow().generated_clip_id
+    }
+
+    pub(crate) fn set_generated_clip_id(&self, generated_clip_id: ClipId) {
+        self.ensure_rare_data().generated_clip_id = Some(generated_clip_id);
+    }
+
+    pub(crate) fn generated_scroll_tree_node_id(&self) -> Option<ScrollTreeNodeId> {
+        self.rare_data.get()?.borrow().generated_scroll_tree_node_id
+    }
+
+    pub(crate) fn set_generated_scroll_tree_node_id(
+        &self,
+        generated_scroll_tree_node_id: ScrollTreeNodeId,
+    ) {
+        self.ensure_rare_data().generated_scroll_tree_node_id = Some(generated_scroll_tree_node_id);
+    }
+
+    pub(crate) fn with_block_level_layout_info(
+        mut self,
+        block_margins_collapsed_with_children: CollapsedBlockMargins,
+        clearance: Option<Au>,
+    ) -> Self {
+        self.block_level_layout_info = Some(Box::new(BlockLevelLayoutInfo {
+            block_margins_collapsed_with_children,
+            clearance,
+        }));
+        self
+    }
+
+    /// Clear the scrollable overflow on this [`BoxFragment`]. This is called
+    /// during damage propagation when a fragment is preserved, itself or one of its
+    /// descendants has scrollable overflow damage.
+    pub(crate) fn clear_scrollable_overflow(&self) {
+        self.scrollable_overflow_is_up_to_date
+            .store(false, Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn set_cumulative_content_rect(&self, content_rect: &PhysicalRect<Au>) {
+        self.cumulative_parent_content_rect.set(*content_rect);
+    }
+
+    pub(crate) fn offset_by_cumulative_content_offset(
+        &self,
+        rect: &PhysicalRect<Au>,
+        cumulative_content_rect_calculation: CumulativeContentRectCalculation<'_>,
+    ) -> PhysicalRect<Au> {
+        cumulative_content_rect_calculation.ensure();
+        rect.translate(self.cumulative_parent_content_rect.origin().to_vector())
+    }
+
+    pub(crate) fn cumulative_content_box_rect(
+        &self,
+        cumulative_content_rect_calculation: CumulativeContentRectCalculation<'_>,
+    ) -> PhysicalRect<Au> {
+        self.offset_by_cumulative_content_offset(
+            &self.base.rect(),
+            cumulative_content_rect_calculation,
+        )
+    }
+
+    pub(crate) fn cumulative_padding_box_rect(
+        &self,
+        cumulative_content_rect_calculation: CumulativeContentRectCalculation<'_>,
+    ) -> PhysicalRect<Au> {
+        self.offset_by_cumulative_content_offset(
+            &self.padding_rect(),
+            cumulative_content_rect_calculation,
+        )
+    }
+
+    pub(crate) fn cumulative_border_box_rect(
+        &self,
+        cumulative_content_rect_calculation: CumulativeContentRectCalculation<'_>,
+    ) -> PhysicalRect<Au> {
+        self.offset_by_cumulative_content_offset(
+            &self.border_rect(),
+            cumulative_content_rect_calculation,
+        )
+    }
+
+    pub(crate) fn content_rect(&self) -> PhysicalRect<Au> {
+        self.base.rect()
+    }
+
+    pub(crate) fn padding_rect(&self) -> PhysicalRect<Au> {
+        self.content_rect().outer_rect(self.padding)
+    }
+
+    pub(crate) fn border_rect(&self) -> PhysicalRect<Au> {
+        self.padding_rect().outer_rect(self.border)
+    }
+
+    pub(crate) fn margin_rect(&self) -> PhysicalRect<Au> {
+        self.border_rect().outer_rect(self.margin)
+    }
+
+    pub(crate) fn padding_border_margin(&self) -> PhysicalSides<Au> {
+        self.margin + self.border + self.padding
+    }
+
+    pub(crate) fn is_root_element(&self) -> bool {
+        self.base.flags.intersects(FragmentFlags::IS_ROOT_ELEMENT)
+    }
+
+    pub(crate) fn is_body_element_of_html_element_root(&self) -> bool {
+        self.base
+            .flags
+            .intersects(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT)
+    }
+
+    pub(crate) fn print(self: &Arc<Self>, tree: &mut PrintTree) {
+        let with_style = self.with_style();
+        tree.new_level(format!(
+            "Box\
+                \nbase={:?}\
+                \ncontent={:?}\
+                \npadding rect={:?}\
+                \nborder rect={:?}\
+                \nmargin={:?}\
+                \nscrollable_overflow={:?}\
+                \nbaselines={:?}\
+                \noverflow={:?}",
+            self.base,
+            self.content_rect(),
+            self.padding_rect(),
+            self.border_rect(),
+            self.margin,
+            with_style.scrollable_overflow(),
+            self.baselines,
+            with_style.style().effective_overflow(self.base.flags),
+        ));
+
+        for child in &self.children {
+            child.print(tree);
+        }
+        tree.end_level();
+    }
+
+    /// Whether or this is a flex or grid item.
+    pub(crate) fn is_flex_or_grid_item(&self) -> bool {
+        self.base
+            .flags
+            .contains(FragmentFlags::IS_FLEX_OR_GRID_ITEM)
+    }
+
+    /// Whether or this box is for replaced content.
+    pub(crate) fn is_replaced(&self) -> bool {
+        self.base.flags.contains(FragmentFlags::IS_REPLACED)
+    }
+
+    /// Whether this is a table wrapper box.
+    /// <https://www.w3.org/TR/css-tables-3/#table-wrapper-box>
+    pub(crate) fn is_table_wrapper(&self) -> bool {
+        matches!(
+            self.specific_layout_info().as_deref(),
+            Some(SpecificLayoutInfo::TableWrapper)
+        )
+    }
+
+    /// Whether or not this is the [`BoxFragment`] for a table grid with collapsed borders.
+    pub(crate) fn is_table_grid_with_collapsed_borders(&self) -> bool {
+        matches!(
+            self.specific_layout_info().as_deref(),
+            Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(_))
+        )
+    }
+
+    pub(crate) fn spatial_tree_node(&self) -> Option<ScrollTreeNodeId> {
+        self.spatial_tree_node.get()
+    }
+
+    /// Compute a physical containing block rectangle relative to the content box of this
+    /// fragment for absolutely positioned boxes for which this fragment establishes a
+    /// containing block.
+    ///
+    /// - For grid containers: the grid area rectangle.
+    /// - For everything else: the padding box of the box that establishes the containing block.
+    pub(crate) fn containing_block_rect_for_absolute(
+        &self,
+        item_style: &ComputedValues,
+    ) -> PhysicalRect<Au> {
+        self.grid_info()
+            .map(|grid_info| {
+                // Resolve the hoisted node's grid area from its own grid position styles
+                // into a rectangle in `Au` units relative to the container's content box.
+                grid_info.resolve_grid_area(self, item_style)
+            })
+            .unwrap_or_else(|| {
+                // Get the padding box of this fragment relative to the content box.
+                let mut padding_rect = self.padding_rect();
+                padding_rect.origin -= self.content_rect().origin.to_vector();
+                padding_rect
+            })
+    }
+
+    pub(crate) fn grid_info(&self) -> Option<AtomicRef<'_, SpecificTaffyGridInfo>> {
+        let rare_data = self.rare_data.get().map(|ref_cell| ref_cell.borrow());
+        rare_data.and_then(|rare_data| {
+            AtomicRef::filter_map(rare_data, |rare_data| {
+                match rare_data.specific_layout_info.as_ref() {
+                    Some(SpecificLayoutInfo::Grid(grid_info)) => Some(&**grid_info),
+                    _ => None,
+                }
+            })
+        })
+    }
+}
+
+/// Contains `&Arc<BoxFragment>` and dereferences to it so it can mostly
+/// be used in the same ways, except the `.style()` method is shadowed to use an existing
+/// `atomic_refcell::AtomicRef` that lives as long as `BoxFragmentWithStyle`.
+///
+/// Compared to calling `BoxFragment::style()` repeatedly, this reduce the number of atomic
+/// increments and decrements on `ArcRefCell`’s borrow counter.
+pub(crate) struct BoxFragmentWithStyle<'a> {
+    pub(crate) box_fragment: &'a Arc<BoxFragment>,
+    pub(crate) style: AtomicRef<'a, ServoArc<ComputedValues>>,
+}
+
+impl std::ops::Deref for BoxFragmentWithStyle<'_> {
+    type Target = Arc<BoxFragment>;
+
+    fn deref(&self) -> &Self::Target {
+        self.box_fragment
+    }
+}
+
+impl<'a> BoxFragmentWithStyle<'a> {
+    pub(crate) fn style(&self) -> &ServoArc<ComputedValues> {
+        &self.style
+    }
+
+    /// Return the clipped scrollable overflow based on its scroll origin, determined by
+    /// overflow direction. Return [`None`] if the scrollable overflow from child is wholly
+    /// unreachable. For an element, the clip rect is the padding rect and for viewport,
+    /// it is the initial containing block.
+    pub(crate) fn clip_wholly_unreachable_scrollable_overflow(
+        &self,
+        scrollable_overflow_from_child: PhysicalRect<Au>,
+        clipping_rect: PhysicalRect<Au>,
+    ) -> PhysicalRect<Au> {
+        // From <https://drafts.csswg.org/css-overflow/#unreachable-scrollable-overflow-region>:
+        // > Unless otherwise adjusted (e.g. by content alignment [css-align-3]), the area
+        // > beyond the scroll origin in either axis is considered the unreachable scrollable
+        // > overflow region: content rendered here is not accessible to the reader, see § 2.2
+        // > Scrollable Overflow. A scroll container is said to be scrolled to its scroll
+        // > origin when its scroll origin coincides with the corresponding corner of its
+        // > scrollport. This scroll position, the scroll origin position, usually, but not
+        // > always, coincides with the initial scroll position.
+        let scrolling_direction = self.style().overflow_direction();
+        let mut clipping_box = clipping_rect.to_box2d();
+        if scrolling_direction.rightward {
+            clipping_box.max.x = MAX_AU;
+        } else {
+            clipping_box.min.x = MIN_AU;
+        }
+
+        if scrolling_direction.downward {
+            clipping_box.max.y = MAX_AU;
+        } else {
+            clipping_box.min.y = MIN_AU;
+        }
+
+        let scrollable_overflow_box = scrollable_overflow_from_child
+            .to_box2d()
+            .intersection_unchecked(&clipping_box);
+
+        match scrollable_overflow_box.is_negative() {
+            false => scrollable_overflow_box.to_rect(),
+            true => Rect::zero(),
+        }
+    }
+
+    pub(crate) fn scrollable_overflow_for_parent(&self) -> PhysicalRect<Au> {
+        let style = self.style();
+        let mut overflow = self.border_rect();
+        if !style.establishes_scroll_container(self.base.flags) {
+            // https://www.w3.org/TR/css-overflow-3/#scrollable
+            // Only include the scrollable overflow of a child box if it has overflow: visible.
+            let scrollable_overflow = self.scrollable_overflow();
+            let bottom_right = PhysicalPoint::new(
+                overflow.max_x().max(scrollable_overflow.max_x()),
+                overflow.max_y().max(scrollable_overflow.max_y()),
+            );
+
+            let overflow_style = style.effective_overflow(self.base.flags);
+            if overflow_style.y == ComputedOverflow::Visible {
+                overflow.origin.y = overflow.origin.y.min(scrollable_overflow.origin.y);
+                overflow.size.height = bottom_right.y - overflow.origin.y;
+            }
+
+            if overflow_style.x == ComputedOverflow::Visible {
+                overflow.origin.x = overflow.origin.x.min(scrollable_overflow.origin.x);
+                overflow.size.width = bottom_right.x - overflow.origin.x;
+            }
+        }
+
+        if !style.has_effective_transform_or_perspective(self.base.flags) {
+            return overflow;
+        }
+
+        // <https://drafts.csswg.org/css-overflow-3/#scrollable-overflow-region>
+        // > ...accounting for transforms by projecting each box onto the plane of
+        // > the element that establishes its 3D rendering context. [CSS3-TRANSFORMS]
+        // Both boxes and its scrollable overflow (if it is included) should be transformed accordingly.
+        //
+        // TODO(stevennovaryo): We are supposed to handle perspective transform and 3d
+        // contexts, but it is yet to happen.
+        self.calculate_transform_matrix(&self.border_rect())
+            .and_then(|transform| {
+                transform.outer_transformed_rect(&overflow.to_webrender().to_rect())
+            })
+            .map(|transformed_rect| f32_rect_to_au_rect(transformed_rect).cast_unit())
+            .unwrap_or(overflow)
+    }
+
+    /// Get the scrollable overflow for this [`BoxFragment`] relative to its containing
+    /// block, recalculating scrollable overflow when necessary, for instance after a
+    /// style change.
+    pub(crate) fn scrollable_overflow(&self) -> PhysicalRect<Au> {
+        if self
+            .scrollable_overflow_is_up_to_date
+            .load(Ordering::Acquire)
+        {
+            self.scrollable_overflow.get()
+        } else {
+            let rect = self.calculate_scrollable_overflow();
+            self.scrollable_overflow.set(rect);
+            self.scrollable_overflow_is_up_to_date
+                .store(true, Ordering::Release);
+            rect
+        }
+    }
+    /// This is an implementation of:
+    /// - <https://drafts.csswg.org/css-overflow-3/#scrollable>.
+    /// - <https://drafts.csswg.org/cssom-view/#scrolling-area>
+    fn calculate_scrollable_overflow(&self) -> PhysicalRect<Au> {
+        // Fragments with `IS_COLLAPSED` (currently only table cells that are part of
+        // table tracks with `visibility: collapse`) should not contribute to scrollable
+        // overflow. This behavior matches Chrome, but not Firefox.
+        // See https://github.com/w3c/csswg-drafts/issues/12689
+        if self.base.flags.contains(FragmentFlags::IS_COLLAPSED) {
+            return Rect::zero();
+        }
+
+        let physical_padding_rect = self.padding_rect();
+        let content_origin = self.base.rect().origin.to_vector();
+
+        // > The scrollable overflow area is the union of:
+        // > * The scroll container’s own padding box.
+        // > * All line boxes directly contained by the scroll container.
+        // > * The border boxes of all boxes for which it is the containing block and
+        // >   whose border boxes are positioned not wholly in the unreachable
+        // >   scrollable overflow region, accounting for transforms by projecting
+        // >   each box onto the plane of the element that establishes its 3D
+        // >   rendering context.
+        // > * The margin areas of grid item and flex item boxes for which the box
+        // >   establishes a containing block.
+        // > * The scrollable overflow areas of all of the above boxes (including zero-area
+        // >   boxes and accounting for transforms as described above), provided they
+        // >   themselves have overflow: visible (i.e. do not themselves trap the overflow)
+        // >   and that scrollable overflow is not already clipped (e.g. by the clip property
+        // >   or the contain property).
+        // > * Additional padding added to the scrollable overflow rectangle as necessary
+        //     to enable scroll positions that satisfy the requirements of both place-content:
+        //     start and place-content: end alignment.
+        //
+        // TODO(mrobinson): Below we are handling the border box and the scrollable
+        // overflow together, but from the specification it seems that if the border
+        // box of an item is in the "wholly unreachable scrollable overflow region", but
+        // its scrollable overflow is not, it should also be excluded.
+        let mut scrollable_overflow =
+            self.children
+                .iter()
+                .fold(physical_padding_rect, |acc, child| {
+                    let scrollable_overflow_from_child = child
+                        .scrollable_overflow_for_parent()
+                        .translate(content_origin);
+
+                    // Note that this doesn't just exclude the wholly unreachable
+                    // scrollable overflow area from the rectangle, but also clips it.
+                    // This makes the resulting value more like the "scroll area" rather
+                    // than the "scrollable overflow."
+                    let scrollable_overflow_from_child = self
+                        .clip_wholly_unreachable_scrollable_overflow(
+                            scrollable_overflow_from_child,
+                            physical_padding_rect,
+                        );
+
+                    acc.union(&scrollable_overflow_from_child)
+                });
+
+        // From <https://drafts.csswg.org/css-overflow-3/#scrollable>:
+        // > Additional padding added to the scrollable overflow rectangle as necessary to
+        // > enable scroll positions that satisfy the requirements of both place-content:
+        // > start and place-content: end alignment.
+        //
+        // Whether we should include additional padding to the scrollable overflow to satisfy
+        // the requirements of `place-content: start` and `place-content: end` for boxes that
+        // establish scroll containers. Note: This padding is different from the CSS concept
+        // of padding. See <https://github.com/w3c/csswg-drafts/issues/129>.
+        //
+        // TODO: For input elements, we also disable the padding in the inline direction, as we
+        // do not have a way to scroll the textual input element in inline direction yet.
+        let should_include_additional_padding =
+            self.style().establishes_scroll_container(self.base.flags) &&
+                !self.base.flags.intersects(FragmentFlags::IS_INPUT_ELEMENT);
+
+        if should_include_additional_padding {
+            scrollable_overflow = self
+                .children
+                .iter()
+                .fold(scrollable_overflow, |acc, child| {
+                    let Some(padding_contribution) =
+                        child.scrollable_overflow_padding_contribution_for_parent()
+                    else {
+                        return acc;
+                    };
+
+                    let padding_contribution = padding_contribution
+                        .translate(content_origin)
+                        .outer_rect(self.padding);
+
+                    // Applying padding could also cause the rectangle to overflow to
+                    // the wholly unreachable scrollable overflow, clipping the overflow
+                    // here prevents this.
+                    let padding_contribution = self.clip_wholly_unreachable_scrollable_overflow(
+                        padding_contribution,
+                        physical_padding_rect,
+                    );
+
+                    acc.union(&padding_contribution)
+                });
+        }
+        scrollable_overflow
+    }
+
+    /// Whether this is a non-replaced inline-level box whose inner display type is `flow`.
+    /// <https://drafts.csswg.org/css-display-3/#inline-box>
+    pub(crate) fn is_inline_box(&self) -> bool {
+        self.style().is_inline_box(self.base.flags)
+    }
+
+    /// Whether this is an atomic inline-level box.
+    /// <https://drafts.csswg.org/css-display-3/#atomic-inline>
+    pub(crate) fn is_atomic_inline_level(&self) -> bool {
+        self.style().is_atomic_inline_level(self.base.flags)
+    }
+
+    pub(crate) fn has_collapsed_borders(&self) -> bool {
+        match self.specific_layout_info().as_deref() {
+            Some(SpecificLayoutInfo::TableCellWithCollapsedBorders) => true,
+            Some(SpecificLayoutInfo::TableGridWithCollapsedBorders(_)) => true,
+            Some(SpecificLayoutInfo::TableWrapper) => {
+                self.style().get_inherited_table().border_collapse == BorderCollapse::Collapse
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether or not this [`BoxFragment`] has outlines.
+    pub(crate) fn has_outline(&self) -> bool {
+        let style = self.style();
+        let outline = style.get_outline();
+        !outline.outline_style.none_or_hidden() && !outline.outline_width.0.is_zero()
+    }
+}

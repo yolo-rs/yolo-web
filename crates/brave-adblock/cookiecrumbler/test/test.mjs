@@ -1,0 +1,226 @@
+import { pathToFileURL } from 'url'
+import { createHash } from 'crypto'
+import path from 'path'
+import { existsSync } from 'fs'
+import { readFile } from 'fs/promises'
+import { before, describe, it } from 'node:test'
+import { cpus } from 'os'
+
+import { checkPage, prepareProfile } from '../src/lib.mjs'
+import { wprGoBinaryPath } from '../src/wpr.mjs'
+
+// Get browser path from environment variables with fallbacks
+const browserPath = process.env.BRAVE_BINARY || '/usr/bin/brave'
+console.log('Using browser executable:', browserPath)
+
+const args = {
+  seconds: 0,
+  executablePath: browserPath,
+  adblockLists: {
+    eaokkjgnlhceblfhbhpeoebmfldocmnc: false,
+    adcocjohghhfpidemphmcmlmhnfgikei: false,
+    cdbbhgbmjhfnhnmgeddbliobbofkgdhe: false,
+    bfpgedeaaibpoidldhjcknekahbikncb: false
+  }
+}
+// Calculate concurrency based on available CPU cores
+const CONCURRENCY = Math.max(1, Math.floor(cpus().length / 2))
+console.log(`Running tests with concurrency: ${CONCURRENCY}`)
+
+async function testPage (t, testCasePath, expectedCookieNotice, expectedScrollBlocking, problematicOverlay, unsupportedBrowser) {
+  const url = pathToFileURL(path.join(import.meta.dirname, 'data', testCasePath, 'index.html')).href
+  const r = await checkPage({ url, hostOverride: testCasePath, blockNonHttpRequests: false, ...args })
+
+  if (r.error) {
+    throw new Error(`[${testCasePath}] ERROR: ${r.error}`)
+  }
+
+  await testReportAssertions(t, testCasePath, r, expectedCookieNotice, expectedScrollBlocking, problematicOverlay, unsupportedBrowser)
+}
+
+// Shared report assertions for the file-based and WPR replay test flows
+async function testReportAssertions (t, label, r, expectedCookieNotice, expectedScrollBlocking, problematicOverlay, unsupportedBrowser) {
+  let markupHash
+  if (r.identified) {
+    markupHash = createHash('sha256').update(r.markupInner).digest('base64')
+  }
+
+  if (expectedCookieNotice === undefined) {
+    await t.test('should not detect notice', async (t) => {
+      t.assert.strictEqual(markupHash, expectedCookieNotice,
+        `unexpectedly found cookie notice with markup hash "${markupHash}"`)
+    })
+  } else {
+    const [expectedMarkupHash, expectedRange] = expectedCookieNotice
+    await t.test('should detect notice', async (t) => {
+      if (markupHash !== expectedMarkupHash && r.markup) {
+        t.diagnostic(`Markup for ${label}:`)
+        t.diagnostic(`raw HTML: ${r.markup}`)
+        t.diagnostic(`base64 HTML: ${Buffer.from(r.markup).toString('base64')}`)
+        t.diagnostic(`raw HTML (inner): ${r.markupInner}`)
+        t.diagnostic(`base64 HTML (inner): ${Buffer.from(r.markupInner).toString('base64')}`)
+      }
+      t.assert.strictEqual(markupHash, expectedMarkupHash,
+        `expected cookie notice hash "${expectedMarkupHash}" did not match result "${markupHash}"`)
+      t.assert.strictEqual(r.hideableElementRange, expectedRange,
+        `expected cookie notice range "${expectedRange}" did not match result "${r.hideableElementRange}"`)
+    })
+  }
+
+  await t.test('scroll blocking detection', async (t) => {
+    if (expectedScrollBlocking === undefined) {
+      t.todo('scroll blocking test ignored')
+    } else {
+      t.assert.strictEqual(r.scrollBlocked, expectedScrollBlocking,
+        `expected scroll blocking result [${expectedScrollBlocking}] did not match detected result [${r.scrollBlocked}]`)
+    }
+  })
+
+  await t.test('problematic overlay detection', async (t) => {
+    if (problematicOverlay === undefined) {
+      t.todo('problematic overlay test ignored')
+    } else {
+      t.assert.strictEqual(r.problematicOverlay, problematicOverlay,
+        `expected problematic overlay result [${problematicOverlay}] did not match detected result [${r.problematicOverlay}]`)
+    }
+  })
+
+  await t.test('unsupported browser detection', async (t) => {
+    if (unsupportedBrowser === undefined) {
+      t.todo('unsupported browser test ignored')
+    } else {
+      t.assert.strictEqual(r.unsupportedBrowser, unsupportedBrowser,
+        `expected unsupported browser result [${unsupportedBrowser}] did not match detected result [${r.unsupportedBrowser}]`)
+    }
+  })
+}
+
+const testCases = [
+  ['2021.rca.ac.uk', ['fOBTu1EHcX9tzkrWM343dsu2kqDUM9w+cMbTc5tm2oc=', 1], false, false, false],
+  ['abxxx.com', undefined, false, false, false],
+  ['bongacams.com', undefined, false, false, false],
+  ['brave.com', undefined, false, false, false],
+  ['cam4.com', ['O+Y60jG333dyHi6a3W1ZodZ7phKLk1Pr0SzhRHcKSps=', 1], false, false, false],
+  ['cleveradvertising.com', undefined, false, false, false],
+  ['copilot.microsoft.com', undefined, false, false, false],
+  ['docs.base.org', ['n7VghBvQo9fKfh5nqf8XLRdgA5KpZc2xjjIla8XHO+k=', 1], false, false, false],
+  ['drpc.org', ['59blMPXMrimFarphox8PzbXUl7EGzBkqQXlb2DjMJYU=', 1], false, false, false],
+  ['euronews.com', ['00Qf2C8vDmh5NYlIspQWh06S9rkUgq37TTrzAP+Odtg=', 3], false, false, false],
+  ['fellou.ai', ['V9lzT6lt/awn/TLYKFlhRXSqolxZvA0nu2Ld5LL3Gkw=', 1], false, false, false],
+  ['fortune.com', ['a1+3zJekpAmX/usMwCHTBbpo/osoiNAJpGCKuOBzoLE=', 1], false, false, false],
+  ['freevideo.cz', undefined, false, false, false],
+  ['github.com', undefined, false, false, false],
+  ['goibibo.com', undefined, false, false, false],
+  ['goodreads.com', undefined, false, false, false],
+  ['gostateparks.hawaii.gov', ['JBYwuwip4exVrQIqPUVGz+FWrjnVqwLj8vqq8TXAGs0=', 1], false, false, false],
+  ['jamieoliver.com', undefined, false, false, false],
+  ['jetsmart.com', undefined, false, false, false],
+  ['liu.se', undefined, false, false, false],
+  ['login.libero.it', ['EFDuHT+cKspFIMwPpsLit5MBkADL4cFifJSluFLUu6k=', 1], false, false, false],
+  ['mamba.ru', ['3Cyijp+TBuq8kMOT+yFakpK3GUdgBw3dH5M9x5gLbok=', 2], false, false, false],
+  ['massagerepublic.com', undefined, false, false, false],
+  ['moovitapp.com', ['yHJeNokduuywPXOjaF6MP9CJ4CBlF+X2H2u28UzLU6Y=', 2], false, false, false],
+  ['myworldfix.com', undefined, false, true, false],
+  ['nordarun.com', ['3hfzlWrqxNkDKbXjcST9vWASCuPWUfA1e41DXZMZ82o=', 3], false, false, false],
+  ['opensource.fb.com', ['+5qjgLXR5vQPllW7bnKVkb97tTv4xG8TdAHJXmhiH2E=', 1], false, false, false],
+  ['pleo.io', ['DRv+MeADAubtGiWXFF9agr8Wk9IkZmCZEoUVvK3CqAs=', 1], false, true, false],
+  ['primor.eu', ['Gp7z9GqoTBMAwsgh9GKMrcNpQtXY+LCzL6miyu9TvdQ=', 3], false, false, false],
+  ['privatekeys.pw', ['UCeiNrGF2DKp4gRogdcWQlWSrKi93/o6SsJkFpAb20U=', 1], false, false, false],
+  ['publicboard.edsby.com', undefined, false, false, true],
+  ['sendgrid.com', ['WJ1cN7pc6ZMZkOUS+7qmrTn+AtlUMLKZONI8/eVhddc=', 1], false, false, false],
+  ['stripchatgirls.com', ['O87YRCJw7yJGJVXqcPcWzgCuEFcva+67/ZChFxR0ULk=', 1], false, false, false],
+  ['supabase.com', ['fyNq/gQyR53P46zGnFaQmzAcXthZrNTPgpjE5Qp+coE=', 2], false, false, false],
+  ['tabelog.com', undefined, false, false, false],
+  ['temporal.cloud', ['bMYtB8cqUekB8ICfqzhjKDjkvqLxMMrfVEJsH55J+Pc=', 1], false, true, false],
+  ['temporal.io', ['yOY8MZfiQ7cLtdQNOHeOgGlYP6AfZrRRmeZyjCLDIp4=', 1], false, false, false],
+  ['videosdemadurasx.com', undefined, false, false, false],
+  ['vine.co', undefined, false, false, false],
+  ['voximplant.com', ['eibP8jYZYDWd1gOydbPONk71HShOp8TeCxdcrY37weI=', 1], false, false, false],
+  ['withpersona.com', ['BttgC24/jLdzla0v9kPROTNRLx/guLNXvIJQcGlX0+g=', 2], false, false, false],
+  ['worldoftanks.eu', undefined, false, false, false],
+  ['www.arnotts.com', ['+/BFJe+enU6qj0ZxCjZRR54Nvc1UHk4dSJ5othAycE0=', 1], false, false, false],
+  ['www.asdatyres.co.uk', ['Qc9jfsaR6bbwRxt3Zgy7TmZpBjKPAOFCTf3D3ddzYoc=', 1], false, false, false],
+  ['www.ashemaletube.com', undefined, false, false, false],
+  ['www.epiphone.com', ['xBn4GTL8C3TLWkLdf1iDPXXSWC0Y/QfnTmr6M5bK4sI=', 1], false, false, false],
+  ['www.escort.club', undefined, false, false, false],
+  ['www.finance-magazin.de', ['jA+itzKHMdXEReaEUaNOKbEWnuzTajy8UqdzzfWI1Po=', 3], false, false, false],
+  ['www.finn.no', ['YLqo3cOckIQCrg0TY5cvEVYKVjguJDBcJTRdZsrrLDM=', 1], true, true, false],
+  ['www.france24.com', ['36uVkl4m+wUMPRZrHDdZDnrnK6/lz+ETsDoZArrbeNY=', 3], false, false, false],
+  ['www.g-star.com', ['tElFyJc98b8e1eIcMu7T4AyOR6b0mIaNvOAU6wwcPdU=', 2], false, false, false],
+  ['www.gov.br', ['2jP5ZkNOLK185bl96B/kXsg1SScsGjOzbSdy8VdLnZg=', 2], false, false, false],
+  ['www.heise.de', ['ILZYIEAu9Dh3pcdm7FS9EhQ3RKU8z7cfKVLp3h3NchI=', 1], true, true, false],
+  ['www.intelligems.io', undefined, false, false, false],
+  ['www.kafijasdraugs.lv', ['PNqCk+fE2Az2o+hzvNXiqe+HHWh23mmAzrZNd9zeHzo=', 2], false, false, false],
+  ['www.kellanova.com', ['aZxeT/PGvgW5wcPMCkeXGJlXw88lC/GfEEJY+0bUXBU=', 2], false, false, false],
+  ['www.lyrath.com', ['k2lGP0argaS6Iu+9XWZxDgNim2kFpq6JQGy5o7b6BHc=', 1], false, false, false],
+  ['www.meld.io', ['SrMn/AlL+1vb9Ob9MneGIdHzuDVdK0QzOfBpLbBatCQ=', 1], false, false, false],
+  ['www.meteomatics.com', ['6Ps/8TBEuIaGYIyKkGiWhCO06jOtFFBwZkpvt2MES5w=', 1], false, false, false],
+  ['www.mytime.mk', ['tOFLQjiyjNl9dtaePfbDtKWouVwXBY7lxmakEVQK208=', 1], true, true, false],
+  ['www.myway.com', undefined, false, false, false],
+  ['www.nerdwallet.com', undefined, false, false, false],
+  ['www.newsflare.com', ['A1REDzJ4zCkWa3pUNGFFmChRUyObXuXONKwF/QA1s7A=', 1], false, false, false],
+  ['www.northcoast.com', ['agltnUgo6/v/bKDMe116cck0BQqmYn17Ma8G1R3ZVm0=', 1], false, false, false],
+  ['www.outdooractive.com', ['TFZ0mmoCPPMzbEMynO5ldHJqTTjto4jXA4SXpwFD5mU=', 1], false, false, false],
+  ['www.pibank.com', ['/R/SbX32j2pKrsl33C+CGURTgOWeC2kNe1PW9VMh098=', 1], false, false, false],
+  ['www.plannedparenthood.org', ['MTBXRXupEgImCJ6PURX2LZ3fqceWDu2mmZDqB8pCj5w=', 1], false, false, false],
+  ['www.promod.fr', undefined, true, true, false],
+  ['www.rebelmouse.com', undefined, false, false, false],
+  ['www.refinery29.com', ['+bdOjXMDngBgmjcnMxUSgSVBw9y0YCBZaGlrmJe9HF8=', 1], true, true, false],
+  ['www.rfi.fr', ['t8byePWKBspylgvPO568uEjwI4czAJ0ujhE3XfS2ur4=', 3], false, false, false],
+  ['www.ryanair.com', ['1aXesNIeRzje8VpkE6hjGYCeBYPk1nnVpNynB1YCQY8=', 1], false, false, false],
+  ['www.unilad.com', ['/PXxl4ws/HZVHq2wBHQVO9PtKFNSHHrl1wfCfmoaZ9w=', 1], true, true, false],
+  ['www.wardvillage.com', ['RiDcFOm/YVgP1DuCErIfD5/Va9KAXFoem+Pdcn2qZLA=', 1], false, false, false],
+  ['www.whatnot.com', undefined, false, false, false],
+  ['zora.co', ['ZQGVsHwN2dm4XfAmUeYQeV2b0eJxM45CFdQtDyeVjU0=', 2], false, false, false]
+]
+
+// Shared by both test types (HTML and WPR); prepareProfile returns early if
+// the template profile already exists
+before(async () => {
+  await prepareProfile(args)
+})
+
+describe('Cookie consent tests', { concurrency: CONCURRENCY }, () => {
+  for (const [testCasePath, expectedHash, expectedScrollBlocking, problematicOverlay, unsupportedBrowser] of testCases) {
+    it(testCasePath, async (t) => {
+      await testPage(t, testCasePath, expectedHash, expectedScrollBlocking, problematicOverlay, unsupportedBrowser)
+    })
+  }
+})
+
+// WPR replay test cases: [archiveName, expectedUrl, expectedHash,
+// expectedScrollBlocking, problematicOverlay, unsupportedBrowser].
+// Archives live in test/data_wpr/<archiveName>.wprgo and are replayed through
+// WprGo, so the browser loads the recorded page without internet access.
+// Expectations mirror the cookie consent tests; capture hashes from a first
+// run's diagnostics output.
+const wprTestCases = [
+  ['www.planespotters.net', 'https://www.planespotters.net/', undefined, false, false, false]
+]
+
+// The wpr binary comes from the Docker image (/usr/local/bin/wpr) or a
+// locally-built webpagereplay checkout at the repo root; tests are skipped
+// when neither is present
+const wprAvailable = existsSync(wprGoBinaryPath)
+if (!wprAvailable) {
+  console.log(`WprGo binary not found (${wprGoBinaryPath}); skipping WPR replay tests`)
+}
+
+describe('WPR replay tests', { concurrency: CONCURRENCY, skip: !wprAvailable }, () => {
+  for (const [archiveName, expectedUrl, expectedHash, expectedScrollBlocking, problematicOverlay, unsupportedBrowser] of wprTestCases) {
+    it(`wpr: ${archiveName}`, async (t) => {
+      const archiveData = (await readFile(path.join(import.meta.dirname, 'data_wpr', `${archiveName}.wprgo`))).toString('base64')
+      const r = await checkPage({ wprGo: { action: 'replay', data: archiveData }, ...args })
+
+      if (r.error) {
+        throw new Error(`[${archiveName}] ERROR: ${r.error}`)
+      }
+
+      // The browser must have navigated to the entry URL recorded in the archive
+      t.assert.strictEqual(r.url, expectedUrl,
+        `expected replay to load "${expectedUrl}" but landed on "${r.url}"`)
+
+      await testReportAssertions(t, archiveName, r, expectedHash, expectedScrollBlocking, problematicOverlay, unsupportedBrowser)
+    })
+  }
+})

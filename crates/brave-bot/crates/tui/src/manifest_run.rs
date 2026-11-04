@@ -1,0 +1,140 @@
+//! Live manifest progress, completion and session persistence.
+
+use crate::remote_confirm::ToMain;
+use crate::state::Session;
+use bravebot_agent::{Outcome, Spent, TurnError};
+use bravebot_core::cancel::Cancel;
+use bravebot_core::trust::TrustStore;
+use bravebot_i18n::t;
+use bravebot_session::audit::{Stamped, Trail};
+use bravebot_session::sessions::{self, Front, Handle, Standing};
+use std::path::Path;
+use std::thread::JoinHandle;
+
+/// What a manifest worker ends with: the outcome, the audit trail and the file decisions it holds.
+pub type Worked = (Result<Outcome, TurnError>, Trail, TrustStore);
+
+/// Join the worker and leave the session's map holding the decisions it ended with.
+///
+/// The worker's map is the one it was lent, so it carries attachment grants and every file
+/// decision the run made, whether the run finished, failed or was stopped. A worker that panicked
+/// returns nothing, and the map the session held before the run stays.
+pub fn join(
+    worker: JoinHandle<Worked>,
+    trust: &mut TrustStore,
+) -> (Result<Outcome, TurnError>, Trail) {
+    match worker.join() {
+        Ok((outcome, sink, worker_trust)) => {
+            *trust = worker_trust;
+            (outcome, sink)
+        }
+        Err(_) => (
+            Err(TurnError::Precommit(
+                t!(manifest_ended_unexpectedly).to_string(),
+            )),
+            Trail::new(),
+        ),
+    }
+}
+
+/// Cumulative progress belongs to one run and is replaced by its final outcome on success.
+#[derive(Default)]
+pub struct Run {
+    retained: Option<Spent>,
+}
+
+impl Run {
+    /// Apply progress and return questions for the terminal to answer.
+    pub fn progress(&mut self, session: &mut Session, message: ToMain) -> Option<ToMain> {
+        match message {
+            ToMain::Spent(spent) => self.retained = Some(spent),
+            ToMain::PromptRecorded(_) => {}
+            other => return crate::from_worker::show(session, other),
+        }
+        None
+    }
+
+    /// Charge the continuing session once and record runs the person did not stop.
+    pub fn complete(
+        &self,
+        session: &mut Session,
+        project: &Path,
+        task: &str,
+        outcome: &Result<Outcome, TurnError>,
+        cancel: &Cancel,
+    ) -> Option<String> {
+        let usage = sessions::manifest_usage(outcome, self.retained);
+        session.end_run(usage.map_or(0, |s| s.tokens), usage.map(|s| s.timing));
+        if let Some(spent) = usage {
+            session.charged_split(spent.tokens, spent.output_tokens);
+        }
+        if outcome.is_err() && cancel.is_cancelled() {
+            None
+        } else {
+            sessions::record_manifest_run(
+                project,
+                task,
+                outcome,
+                self.retained,
+                Front::Terminal,
+                bravebot_stamp::BUILD,
+            )
+        }
+    }
+}
+
+/// Persist the continuing conversation only after it has a turn to resume.
+pub fn save_session(stored: &mut Handle, standing: Standing<'_>, events: &[Stamped]) {
+    if standing.turns > 0 {
+        let title = stored.title().to_string();
+        let turns = standing.turns;
+        stored.save(&title, standing);
+        stored.append_audit(turns, events);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run the person stopped is charged what its completed requests cost and writes no record,
+    /// and the charge says how it divided: a run charged to the total alone would leave its tokens
+    /// out of both columns of `stats`.
+    #[test]
+    fn a_stopped_run_is_charged_with_the_split_of_its_latest_report() {
+        let mut session = Session::new("none");
+        let mut run = Run::default();
+        for (tokens, written) in [(40, 5), (90, 25)] {
+            let held = run.progress(
+                &mut session,
+                ToMain::Spent(Spent {
+                    tokens,
+                    output_tokens: written,
+                    ..Default::default()
+                }),
+            );
+            assert!(held.is_none());
+        }
+        let cancel = Cancel::new();
+        cancel.cancel();
+
+        let recorded = run.complete(
+            &mut session,
+            Path::new("/work"),
+            "summarise",
+            &Err(TurnError::Cancelled { attempts: None }),
+            &cancel,
+        );
+
+        assert!(recorded.is_none(), "a stopped run was written down");
+        assert_eq!(session.tokens, 90);
+        assert_eq!(
+            session.split(),
+            sessions::Split {
+                read: 65,
+                written: 25
+            },
+            "the split was not the latest report's"
+        );
+    }
+}

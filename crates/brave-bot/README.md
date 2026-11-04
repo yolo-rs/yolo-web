@@ -1,0 +1,187 @@
+<h1 align="center">
+  <img src="docs/assets/readme-banner.svg" alt="bravebot: a general-purpose agent that untrusted data cannot redirect." width="100%">
+</h1>
+
+<p align="center">
+  <a href="#getting-started">Install</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="https://brave.github.io/bravebot/">Documentation</a> ·
+  <a href="docs/specs/README.md">Specs</a> ·
+  <a href="#reporting-a-vulnerability">Report a vulnerability</a>
+</p>
+
+> **Not a released or supported Brave product.** Brave does not release or support bravebot at this
+> time. It is early, and it is being developed in the open. Binaries, the install script, and the
+> npm package are published for early testing and feedback only. Brave expects to release and
+> support it as a product in the future.
+
+Brave Bot is a general-purpose agent, meant as a drop-in replacement for Claude Code, Codex and
+OpenCode. Brave has always shipped user agents, and this one is the user's agent in both senses:
+
+- **Structural resistance to indirect prompt injection:** no untrusted data the agent reads can
+  redirect it, whether a web page, a file, a command's output, a tool's result or an email.
+- **As few tokens as possible.**
+- **As fast as it can be.**
+- **Nothing hidden:** what it read and what it decided are on the screen.
+- **Developed completely in the open.**
+- **No lock-in:** Brave Leo, Anthropic, OpenAI, Google Vertex AI, AWS Bedrock, OpenRouter and other
+  OpenAI-compatible gateways, and local models in Ollama, LM Studio and llama-server, with settings
+  on your own machine.
+- **Easy to switch to:** it reads `AGENTS.md` (or `CLAUDE.md` where there is none) and skills in
+  `.claude/skills`, offers on first run to copy the model service Claude Code or opencode already
+  reaches, and imports Claude Code sessions with `bravebot sessions import claude-code`.
+- **Where you work:** the terminal, an editor that speaks the Agent Client Protocol such as Zed
+  (`bravebot-acp`), and scripts and pipes (`bravebot -p`).
+- **The power of a shell without the risk:** command lines are compiled into the trust model rather than handed to one.
+
+## Getting started
+
+```sh
+npm install -g @brave/bravebot
+```
+
+Or on macOS and Linux, without npm:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brave/bravebot/main/install.sh | sh
+```
+
+That puts the binary in `/usr/local/bin`, and takes `INSTALL_DIR` for somewhere else:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brave/bravebot/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+Or with apt, on Debian and Ubuntu, from the apt repository. The key it is signed with has the
+fingerprint `13F28F0405C49B0B232DBA1BC1E827646A2DE416`:
+
+```sh
+sudo curl -fsSL -o /usr/share/keyrings/bravebot-archive-keyring.gpg \
+  https://bravebot-apt-release.s3.brave.com/bravebot-archive-keyring.gpg
+gpg --show-keys --with-fingerprint /usr/share/keyrings/bravebot-archive-keyring.gpg
+sudo curl -fsSL -o /etc/apt/sources.list.d/bravebot.sources \
+  https://bravebot-apt-release.s3.brave.com/bravebot.sources
+sudo apt update && sudo apt install bravebot
+```
+
+The fingerprint `gpg` prints has to be the one above. The install page lists the releases the
+packages are for, and what a minimal image needs first.
+
+Or with dnf, from the dnf repository, whose packages dnf checks against the same key:
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/bravebot.repo \
+  https://bravebot-rpm-release.s3.brave.com/bravebot.repo
+sudo dnf install bravebot
+```
+
+The [install page](docs/website/docs/install.md#debian-ubuntu-and-fedora-packages) says how to
+check the key's fingerprint first.
+
+Or on Windows, in PowerShell, without Node:
+
+```powershell
+irm https://raw.githubusercontent.com/brave/bravebot/main/install.ps1 | iex
+```
+
+That puts `bravebot.exe` in `%LOCALAPPDATA%\Programs\bravebot`, takes `INSTALL_DIR` for somewhere
+else, and adds the directory to your user `PATH` unless `BRAVEBOT_NO_MODIFY_PATH` is set.
+
+Either way, run `bravebot` in a repository afterwards. The installers verify the release
+checksum and the signature on the binary (see "Check a download by hand" on the
+[install page](docs/website/docs/install.md#check-a-download-by-hand)), and a session started on an old version says so and gives the line that updates it. See
+[docs/getting-started.md](docs/getting-started.md) for installing, running, and what it asks you.
+
+The documentation site at
+[brave.github.io/bravebot](https://brave.github.io/bravebot/)
+covers the same ground for somebody using bravebot rather than working on it, and is maintained
+in-tree under [docs/website](docs/website).
+
+## How it works
+
+<p align="center">
+  <img src="docs/assets/readme-how-it-works.svg" alt="Instructions in a web page are blocked and never reach the planner. The planner is handed a reference to the page, ref:2, and starts processors that work on it. A processor holds no tools, no memory and no conversation." width="100%">
+</p>
+
+Before data is processed it is labelled as trusted or untrusted and as public or private.
+An example of untrusted content is text from a web page. An example of private data is a project's secrets.
+Brave Bot can work with untrusted and private content, but it never lets that content into its planner's context.
+Processors are used to work on immutable untrusted content. A processor is a sub-agent with no tools, no memory and no conversation. It can read untrusted content and rewrite it. Its answer can be read for one number, which fills one argument that a server's declaration names, in a call you are asked about and allow. Nothing else it produces directs anything.
+One or more labelled data slots are passed into a processor, and it outputs at most one new immutable data slot.
+The planner is never influenced by untrusted context.
+
+[How Brave Bot works](docs/website/docs/how-it-works.md) covers labels, quarantine and processors
+in full. Traces of the gates running are in [docs/specs/](docs/specs/README.md).
+
+### Plan first, then execute
+
+<p align="center">
+  <img src="docs/assets/readme-plan-first.svg" alt="Manifest mode in three steps. The planner writes the whole plan before it has read anything. You approve the plan once, before the first step runs. A driver runs the steps with no model in the control path, and nothing is re-planned." width="100%">
+</p>
+
+The default decides each step after the last one has run. `--mode manifest` plans the whole run
+before anything is read, asks you to approve the plan, and then runs the steps with nothing
+re-planned:
+
+```sh
+bravebot --mode manifest "collect every TODO comment into notes/todos.md"
+```
+
+In a session, `/manifest <task>` does the same for one task.
+[A plan is put to you first](docs/website/docs/using/manifest-mode.md#a-plan-is-put-to-you-first) says
+what the approval covers.
+
+## Specs
+
+Behaviour is specified clause by clause, and each clause names the tests that pin it. See
+[docs/specs/](docs/specs/README.md).
+
+## Data collection, usage, and retention
+
+We do not use your data and we do not store it. Prompts and used file contents are sent to Brave's
+endpoint to produce a reply and are discarded once it has been produced. Nothing is retained and
+nothing is used for training. Local settings are stored in `~/.bravebot` on your own machine.
+
+That describes Brave's endpoint. If you configure another provider (Anthropic, OpenAI, Google
+Vertex AI, AWS Bedrock or a gateway), your prompts and file contents go to that provider instead,
+and its terms govern what it retains and whether it trains on them. A model server on your own
+machine, such as Ollama, keeps them on your machine.
+
+If bravebot panics, the next launch sends a crash report to Brave's Backtrace project. A report holds
+the version, the operating system and architecture, how bravebot was installed, and the source file,
+line and column of the panic. It never holds your prompts, file contents, credentials or paths on your
+machine, or anything a model or a server said, and nothing in it is the same from one report to the
+next. The service sees the network address the report came from, as any server does. Reports are on in
+released builds. Set `BRAVEBOT_CRASH_REPORTS=0`, or `"crashReports": false` in
+`~/.bravebot/settings.json`, to stop them. A build from source sends nothing unless it was built with
+a submission address. See [docs/specs/crash-reports.md](docs/specs/crash-reports.md) for what a report
+may hold.
+
+`bravebot --incognito` runs a session that adds nothing to `~/.bravebot`: no prompt history, no
+session record, no audit trail, and no change to the model or theme you have chosen. It still reads
+all of that, so the session is the one you configured rather than a fresh install. It edits your
+project as usual, since that is the work rather than a trace of it. See
+[Incognito sessions](docs/website/docs/using/incognito.md) for what it covers and what it does not,
+and [docs/specs/incognito.md](docs/specs/incognito.md) for the clauses.
+
+## Reporting a Vulnerability
+
+See [https://hackerone.com/brave](https://hackerone.com/brave) for details, and
+[SECURITY.md](.github/SECURITY.md) for the versions that are supported.
+
+## Development
+
+`cargo build` and `make check`, which runs fmt, clippy and the tests. See
+[docs/development/](docs/development/README.md) for checks, commits, cross-builds, configuration
+and releasing, and [docs/best_practices.md](docs/best_practices.md) for what a pull request is
+reviewed against.
+
+For the `.envrc` configuration, message bbondy.
+
+## Credit
+
+[docs/credit.md](docs/credit.md).
+
+## License
+
+[MPL-2.0](LICENSE)

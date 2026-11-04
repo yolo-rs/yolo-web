@@ -1,0 +1,1096 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A push to a pull request cancels the run still going for its previous head, which nobody will
+# merge. Every other run is a group of its own, so each commit on main and each tag is checked
+# whole rather than replaced by the next one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # No credentials here, and none needed: these jobs compile and test rather than
+  # producing a binary anyone installs. Signed, configured release binaries are built
+  # and published by Jenkins, not this workflow.
+  BRAVEBOT_ALLOW_UNCONFIGURED_BUILD: "1"
+  # Line tables keep a backtrace's files and lines and drop the rest of the debug info, which is
+  # most of what every test binary costs to compile, link and cache. Nothing here runs a debugger.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  # Which of the jobs below this change could affect, from the paths it touches. A job its
+  # condition skips reports success, which branch protection counts as passing, so every
+  # condition here runs its job unless this said "false": a run where this job failed runs
+  # everything. Anything but a pull request runs everything too, so main and every tag are
+  # checked whole. The jobs with no condition answer in seconds and run on every change.
+  changes:
+    name: Affected checks
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.affected.outputs.rust }}
+      ui: ${{ steps.affected.outputs.ui }}
+      mobile: ${{ steps.affected.outputs.mobile }}
+      build: ${{ steps.affected.outputs.build }}
+      installers: ${{ steps.affected.outputs.installers }}
+      docs: ${{ steps.affected.outputs.docs }}
+      help: ${{ steps.affected.outputs.help }}
+      npm: ${{ steps.affected.outputs.npm }}
+      fuzz: ${{ steps.affected.outputs.fuzz }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent, which is the base as the change would land on it.
+          fetch-depth: 2
+
+      # The classifier decides which required checks a pull request skips as passing, so the
+      # pull request does not get to decide it: a change to the classifier is judged by the copy
+      # it replaces, which is the base as the change would land on it. CODEOWNERS owns the file.
+      - name: Take the classifier from the base
+        if: ${{ github.event_name == 'pull_request' }}
+        run: git show HEAD^1:contrib/affected-checks.py > contrib/affected-checks.py
+
+      - name: Decide which checks this change needs
+        id: affected
+        run: python3 contrib/affected-checks.py --github-output
+
+  check:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA, which is the control this rule is really after.
+        # dtolnay/rust-toolchain publishes no semver release to name alongside it: its refs
+        # are branches (`stable`, `master`, `1.104.0`) plus a single `v1` tag.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only. The repository's caches share a 10 GB allowance, and a pull
+        # request that moves the lockfile saves its own copy of every job's cache, which pushes
+        # main's out and leaves every other pull request building from cold.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # The lints the tree has hundreds of sites of cannot be denied yet. This holds each to the
+      # number the base has, per crate, by running clippy at both. The base commit is the pull
+      # request's own, fetched because the checkout is the merge commit alone.
+      - name: No new sites of the lints held to the base
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          make check-lint-increase
+
+      # nextest runs the test binaries side by side, where `cargo test` runs them one after another
+      # and waits on each one's slowest test. Each test is a process of its own, so the locks a test
+      # file holds around the environment or a fork have nothing left to share.
+      - name: Install nextest
+        # Pinned to a full commit SHA, like every other step here.
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: cargo-nextest@0.9.146
+
+      # Everything but the usability suite, which the step after next runs once with its output.
+      - name: Test
+        run: cargo nextest run --workspace --locked --no-fail-fast -E 'not binary(usability)'
+
+      # nextest does not run doctests.
+      - name: Doctests
+        run: cargo test --workspace --doc --locked
+
+      # Run once, with its output, to put the number of workflows skipped for want of a tool in the
+      # log. Running it inside the Test step as well used to double its tens of seconds.
+      - name: Report the everyday workflows under the sandbox default
+        run: cargo test -p bravebot-agent --test usability --locked -- --nocapture
+
+      # A runner starts with no ~/.bravebot, so anything in its session store now is a record a
+      # test saved into the person's home instead of the profile `in_isolated_profile` makes.
+      - name: Check the tests left the session store empty
+        run: |
+          store="$HOME/.bravebot/sessions"
+          if [ -n "$(ls -A "$store" 2>/dev/null)" ]; then
+            echo "The tests wrote into $store:"
+            find "$store" -mindepth 1
+            exit 1
+          fi
+
+  # The macOS confinement backend is compiled on no other platform, so without this job the
+  # whole Seatbelt half of crates/sandbox, and every test that pins it, is neither built, run,
+  # nor linted anywhere in CI. Clippy runs here for the same reason as the tests: the `check`
+  # job cannot lint a module its target never compiles. Formatting is not repeated, since it
+  # does not vary by platform.
+  macos:
+    name: Lint and test on macOS
+    runs-on: macos-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # As in the `check` job.
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: cargo-nextest@0.9.146
+
+      - name: Test
+        run: cargo nextest run --workspace --locked --no-fail-fast -E 'not binary(usability)'
+
+      - name: Doctests
+        run: cargo test --workspace --doc --locked
+
+      - name: Report the everyday workflows under the sandbox default
+        run: cargo test -p bravebot-agent --test usability --locked -- --nocapture
+
+      - name: Check the tests left the session store empty
+        run: |
+          store="$HOME/.bravebot/sessions"
+          if [ -n "$(ls -A "$store" 2>/dev/null)" ]; then
+            echo "The tests wrote into $store:"
+            find "$store" -mindepth 1
+            exit 1
+          fi
+
+  # Windows is a platform this project publishes binaries for, and nothing else here compiles its
+  # arms of the tree for a check. cross-build produces the shipped binary and stops there: no
+  # clippy, and no test target, so a `#[cfg(windows)]` block in a test is compiled nowhere and a
+  # lint on one is reported nowhere. Same reason the macos job exists, for the platform with no
+  # runner here.
+  #
+  # The target is the one that ships. A windows-latest runner defaults to -msvc, which is not what
+  # npm/scripts/postinstall.js hands anybody, while -gnu is reachable from this ubuntu runner for
+  # the price of a linker package. The aarch64 Windows build shares what is checked here, since
+  # what these arms are gated on is `windows` rather than the architecture.
+  #
+  # Linting, not running. Most of the suite needs a Windows host, and it spawns a POSIX shell and
+  # drives a pty; whether those are made to work is the question of whether Windows is supported at
+  # all, which is #88. The desktop app's pair is run on a Windows host in windows-desktop below, the
+  # confinement backend in sandbox-windows below, and the tests over awkward file names in
+  # names-windows below.
+  windows:
+    name: Lint the Windows target
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # ring compiles C for whichever target it is built for, so the C half needs a cross compiler
+      # even though the Rust half needs none. Nothing is linked: clippy stops before that, which is
+      # what makes a Windows host unnecessary.
+      - name: Find the week of the apt cache
+        id: apt-week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      # The downloaded packages are kept for a week, so a run that finds them skips the download
+      # from the runner image's mirror, which is the step that has stalled.
+      - name: Cache the cross compiler packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bravebot-apt/*.deb
+          key: apt-mingw-${{ runner.os }}-${{ steps.apt-week.outputs.week }}
+
+      - name: Install the cross compiler ring builds with
+        # Each attempt is killed after 3 minutes, since a stalled apt mirror connection otherwise
+        # holds the job until the 6 hour default. One attempt and up to three retries fit in the step limit.
+        # The first two attempts use the runner image's mirror list. The last two use
+        # archive.ubuntu.com, so one slow mirror cannot fail every attempt.
+        # Only the win32 compiler is installed: ring compiles C and links nothing, and the
+        # gcc-mingw-w64-x86-64 package adds the posix compiler and its runtime on top of it.
+        timeout-minutes: 15
+        run: |
+          archives="$HOME/.cache/bravebot-apt"
+          mkdir -p "$archives"
+          for attempt in 1 2 3 4; do
+            if [ "$attempt" -ge 3 ]; then
+              sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/*.sources
+            fi
+            if sudo timeout 180 sh -c "apt-get update && apt-get install -y --no-install-recommends -o Dir::Cache::archives=$archives gcc-mingw-w64-x86-64-win32"; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed or timed out" >&2
+            sleep 5
+          done
+          exit 1
+
+      - name: Clippy
+        # --locked where the two sibling clippy jobs do without it: they each run a locked
+        # command afterwards, and this job is the only check the Windows target has, so a
+        # manifest and a lockfile that disagree would go unreported here.
+        run: cargo clippy --target x86_64-pc-windows-gnu --all-targets --all-features --locked -- -D warnings
+
+  npm-lockfile:
+    name: npm lockfile
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.npm != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      # Corepack provides the pnpm version each project's package.json pins.
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Test the installer, check the lockfiles against their manifests and lint them
+        run: make check-npm
+
+      # check-reviewdog's npm-audit reads only package-lock.json, so the pnpm lockfiles get
+      # their advisory audit here. `pnpm audit` reads pnpm-lock.yaml and needs no install.
+      - name: Audit the lockfiles for known advisories
+        run: |
+          for dir in ui docs/website packages/agent-client mobile; do
+            (cd "$dir" && pnpm audit --audit-level=high)
+          done
+
+  # The documentation website under docs/website. Docusaurus throws on broken links or
+  # broken anchors, so this job validates documentation correctness across the site. It links
+  # to the rest of the tree by URL, which the build does not follow.
+  docs:
+    name: Documentation website
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      # Corepack provides the pnpm version docs/website/package.json pins.
+      - name: Enable pnpm
+        id: pnpm
+        run: |
+          corepack enable
+          echo "store=$(cd docs/website && pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-docs-${{ runner.os }}-${{ hashFiles('docs/website/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-docs-${{ runner.os }}-
+
+      # --ignore-scripts because this job runs on a pull request, which means it runs the
+      # install hooks of whatever a fork put in the lockfile. The site builds without them.
+      - name: Build documentation website
+        run: |
+          pnpm --dir docs/website install --frozen-lockfile --ignore-scripts
+          pnpm --dir docs/website run build
+
+  # help.rs compiles each page under docs/website/docs into a fixed table, builds an index
+  # naming every page by its front matter title, and loads a page by the exact name that index
+  # gives. An add, an edit that breaks a page's front matter, or a remove can fail a test that
+  # reads one of those, and `rust` is more than they need: it maps to `make check` and gates
+  # `check-msrv`, `check-windows` and `check-linux` besides, none of which reads a page.
+  help:
+    name: Documentation pages in the binary
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.help != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test
+        run: make check-help
+
+  # The mechanical half of docs/specs, which decides nothing a person has to read a diff for:
+  # clause numbering, the tests a clause names, the paths it governs, and the call sites a
+  # guarded symbol pins. Standard library Python over the checkout, so it needs no toolchain
+  # and answers in seconds. Without it the guard allowlist only holds for whoever remembers to
+  # run it, which is the state it exists to replace.
+  specs:
+    name: Specs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent. A clause id is checked against the first
+          # parent, which is main, so a renumber this change commits is seen.
+          fetch-depth: 2
+
+      - name: Check the specs against the implementation
+        run: make check-spec
+
+  # The mechanical half of the security audit: whether two documents agree on how many exceptions
+  # to the label rule are admitted, whether anything reaches into a Labelled, whether a spec pins
+  # the constructors, whether every workflow step is on a commit rather than a movable tag, and
+  # whether a job holding a credential installs or runs a dependency beside it.
+  # Standard library Python like the specs job. It was held out of CI while `Labelled::trusted`
+  # had no `guards` entry and the check therefore failed; it has one as of this change.
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Audit the label rule mechanically
+        run: make check-security
+
+      - name: Test local check orchestration and scanner failures
+        run: make check-scripts
+
+  # Whether every message catalog matches contrib/untranslated-messages.txt. A translation may lag the
+  # reference, since what it lacks is shown in English and a catalog nobody could use unfinished
+  # would never be started, so what this decides is whether the lag is written down. The build
+  # script counts it too and prints a warning, which is silent on a cached build and does not fail
+  # a green job, so before this nothing stopped a message shipping untranslated: eleven had.
+  # Standard library Python like the two jobs above.
+  locales:
+    name: Locales
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Hold the catalogs to the record of what they are missing
+        run: make check-locales
+
+  # Whether every file that states the version states the same one: the workspace manifest, the
+  # published wrapper and its lockfile, and the desktop application and its lockfile. The tagging
+  # path refuses a disagreement as well, but that is release day, and folding the front end in
+  # brought a manifest that had been at 0.1.0 against a 0.9.0 workspace with nothing to say so.
+  # Standard library Python like the three jobs above, so it needs no toolchain.
+  versions:
+    name: Versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check that every file stating the version agrees
+        run: make check-versions
+
+  # Whether each variable gcloud's launcher reads to choose code to run has a test that keeps a safe
+  # value and a test that removes one a stage may write. Standard library Python, so it needs no
+  # toolchain.
+  code-selectors:
+    name: Code selectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check that every code-selecting variable has its tests
+        run: make check-code-selectors
+
+  # Builds against the declared minimum toolchain. The pinned cross-build container
+  # ships an older Rust than most developers have locally, so without this a feature
+  # that only compiles on a newer toolchain reaches the release build unnoticed.
+  minimum-toolchain:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read rust-version from the workspace
+        id: msrv
+        run: |
+          version="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([0-9.]+)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "::error::rust-version is not declared in Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust ${{ steps.msrv.outputs.version }}
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build
+        run: cargo build --all --locked
+
+  # The fuzz targets in fuzz/, which build with a nightly toolchain and AddressSanitizer in a
+  # workspace of their own, so no job above compiles them. `make check-fuzz` lints them, builds
+  # them, replays the committed seeds and the reproducers of fixed crashes, and runs each target
+  # for a short time. On a pull request, only where fuzz/, the root manifest or a crate the targets
+  # build changed.
+  fuzz:
+    name: Fuzz build and replay
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.fuzz != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The date of the nightly is written once, in the Makefile.
+      - name: Read the fuzz toolchain
+        id: toolchain
+        run: echo "version=$(make -s fuzz-toolchain)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust ${{ steps.toolchain.outputs.version }}
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-fuzz
+        run: make fuzz-install
+
+      - name: Lint, build, replay and run the fuzz targets
+        run: make check-fuzz
+
+      # The short run starts from a seed of its own each time, so it can find a defect the code
+      # already had. A crash, a timeout and an out-of-memory stop each leave a file here.
+      - name: Keep what a target stopped on
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ github.run_attempt }}
+          path: fuzz/artifacts/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # On a pull request, only where what is linked or how it is built could have changed: a
+  # manifest, the lockfile, a build script or the Dockerfile. Nothing in the tree is gated on an
+  # architecture, and the jobs above lint every platform these build, so for anything else a
+  # cross-build proves again what they did. Main and every tag build all six.
+  #
+  # Not after `check`: the installers and the install on each Windows architecture wait on this,
+  # so waiting here put the length of the test suite in front of the longest chain in the run.
+  cross-build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            target: aarch64-apple-darwin
+            ext: ""
+          - name: darwin-amd64
+            target: x86_64-apple-darwin
+            ext: ""
+          - name: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - name: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+          - name: windows-amd64
+            target: x86_64-pc-windows-gnu
+            ext: ".exe"
+          - name: windows-arm64
+            target: aarch64-pc-windows-gnullvm
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same Dockerfile the Makefile uses, so a local build and a CI build produce
+      # the same artifact rather than diverging through a separate host toolchain.
+      #
+      # No credentials are baked in. Every job here carries the permission to compile
+      # without them, which is what lets a fork or a pull request run this at all.
+      # The binaries people install are built and signed by Jenkins.
+      - name: Build ${{ matrix.target }}
+        run: |
+          env_file="$(mktemp)"
+          trap 'rm -f "$env_file"' EXIT
+          printf 'export BRAVEBOT_ALLOW_UNCONFIGURED_BUILD=%s\n' \
+            "$BRAVEBOT_ALLOW_UNCONFIGURED_BUILD" > "$env_file"
+          DOCKER_BUILDKIT=1 docker build -f contrib/Dockerfile.cross \
+            -t bravebot-${{ matrix.name }} \
+            --build-arg TARGET=${{ matrix.target }} \
+            --secret id=bravebot_env,src="$env_file" .
+
+      - name: Extract binary
+        run: |
+          mkdir -p dist
+          docker create --name extract bravebot-${{ matrix.name }} /dev/null
+          docker cp extract:/bravebot "dist/bravebot-${{ matrix.name }}${{ matrix.ext }}"
+          docker rm extract
+
+      - name: Verify the artifact is the expected format
+        run: file "dist/bravebot-${{ matrix.name }}${{ matrix.ext }}"
+
+      # The desktop app's two executables, which the Windows installers job below packages,
+      # stripped as a release strips them before it does.
+      - name: Keep the desktop helpers
+        if: startsWith(matrix.name, 'windows-')
+        run: |
+          docker create --name helpers bravebot-${{ matrix.name }} /dev/null
+          for helper in bravebot-rpc bravebot-ui-files; do
+            docker cp "helpers:/$helper" "dist/$helper-${{ matrix.name }}.exe"
+          done
+          docker rm helpers
+          make strip
+
+      - if: startsWith(matrix.name, 'windows-')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-helpers-${{ matrix.name }}
+          path: |
+            dist/bravebot-rpc-${{ matrix.name }}.exe
+            dist/bravebot-ui-files-${{ matrix.name }}.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  # The front end under ui/: its TypeScript, its Node tests, and one real Electron
+  # walkthrough under Xvfb.
+  #
+  # The `check` job above is what lints and tests the two bridge crates, as members of the
+  # workspace like any other: path-filtering them away by directory would rebuild the
+  # submodule problem inside one repository, which is the whole thing folding the front end
+  # in was meant to fix. This job compiles them anyway, because `pnpm run build` runs
+  # `scripts/build-bridge.sh` to produce the two binaries the app spawns, so it needs the
+  # toolchain and the cache the sibling Rust jobs have, and it runs when any crate those two
+  # name changes, however far down.
+  ui:
+    name: Front end
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ui != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      # Corepack provides the pnpm version ui/package.json pins, and Leo's prepare step uses it
+      # too. pnpm keeps Leo's build in its store, so a warm store installs without preparing Leo
+      # again.
+      - name: Enable pnpm
+        id: pnpm
+        run: |
+          corepack enable
+          echo "store=$(cd ui && pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-ui-${{ runner.os }}-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-ui-${{ runner.os }}-
+
+      - name: Install desktop test dependencies
+        # Retried with a per-attempt limit for the reason given on the Windows lint job's apt step.
+        timeout-minutes: 15
+        run: |
+          for attempt in 1 2 3 4; do
+            if sudo timeout 180 sh -c 'apt-get update && apt-get install -y xvfb libgtk-3-0 libnss3 libasound2t64'; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed or timed out" >&2
+            sleep 5
+          done
+          exit 1
+
+      - name: Build and test the desktop UI
+        run: make check-ui-build
+
+      - name: Walkthrough regression
+        timeout-minutes: 5
+        run: make check-ui-walkthrough
+
+      # The TypeScript session client, against the bridge this job has just built. It needs no
+      # display and none of the desktop app's dependencies.
+      - name: Build and test the session client
+        run: make check-agent-client
+
+  # The React Native app's types and tests against the session client it links, which this job
+  # builds first. No device or simulator is involved, so a native build is not checked here.
+  mobile:
+    name: Mobile app
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.mobile != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The committed Gradle wrapper jar is a binary that runs on every Android build. This checks
+      # it against the checksums of Gradle's published wrappers.
+      - name: Validate the Gradle wrapper
+        # Pinned to a full commit SHA, which is the control this rule is really after.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      - name: Enable pnpm
+        id: pnpm
+        run: |
+          corepack enable
+          echo "store=$(cd mobile && pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-mobile-${{ runner.os }}-${{ hashFiles('mobile/pnpm-lock.yaml', 'packages/agent-client/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-mobile-${{ runner.os }}-
+
+      - name: Type-check and test the mobile app
+        run: make check-mobile
+
+  # The desktop app where it runs rather than cross-compiled for it. The helper's walk refuses
+  # junctions, streams and device names on NTFS, which no other host has, and the walkthrough
+  # drives the pair end to end. -gnu for the reason the windows job gives, which on this runner
+  # means asking for it: its default is -msvc. The recipes and pnpm's scripts are written for a
+  # POSIX shell, so both run under Git's bash.
+  windows-desktop:
+    name: Desktop on Windows
+    runs-on: windows-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ui != 'false' }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      pnpm_config_script_shell: C:\Program Files\Git\bin\bash.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      # As in the Front end job.
+      - name: Enable pnpm
+        id: pnpm
+        run: |
+          corepack enable
+          echo "store=$(cd ui && pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-ui-${{ runner.os }}-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-ui-${{ runner.os }}-
+
+      - name: Test the file helper on NTFS
+        run: cargo test -p bravebot-ui-files --locked
+
+      # Not `make check-ui-build`: scripts/*.test.mjs assume a POSIX host for packaging, and the
+      # Front end job runs them.
+      - name: Build the desktop UI
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          BRAVEBOT_BUILD_UNCONFIGURED=1 pnpm --dir ui run build
+
+      - name: Walkthrough regression
+        timeout-minutes: 10
+        run: make check-ui-walkthrough
+
+  # The AppContainer backend with real processes. The windows job above compiles the calls and
+  # starts nothing, so without this job no process is started under a container and the refusals
+  # and the empty Windows base rest on the code alone.
+  #
+  # Only the tests written for Windows run. The rest of the sandbox crate's tests use Unix paths
+  # and programs, and the agent's other confined-process tests spawn a POSIX shell. Target as in
+  # the windows job above.
+  sandbox-windows:
+    name: Sandbox on Windows
+    runs-on: windows-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Let a container open the NUL device
+        # The device's access list on this image names no ALL APPLICATION PACKAGES entry, so a
+        # container is denied `NUL`, and `git`, which opens it before it reads its arguments, never
+        # starts. This adds the entry, which is what an administrator does on a machine that runs
+        # `git` confined, and it is why `git_starts_under_the_empty_base` can pass here.
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.ComponentModel;
+          using System.Runtime.InteropServices;
+
+          public static class NulDevice
+          {
+              [StructLayout(LayoutKind.Sequential)]
+              struct Trustee
+              {
+                  public IntPtr Multiple;
+                  public int MultipleOperation;
+                  public int Form;
+                  public int Type;
+                  public IntPtr Name;
+              }
+
+              [StructLayout(LayoutKind.Sequential)]
+              struct ExplicitAccess
+              {
+                  public uint Permissions;
+                  public int Mode;
+                  public uint Inheritance;
+                  public Trustee Trustee;
+              }
+
+              [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+              static extern uint GetNamedSecurityInfoW(string name, int type, uint information,
+                  IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+
+              [DllImport("advapi32.dll")]
+              static extern uint SetEntriesInAclW(uint count, ref ExplicitAccess entry, IntPtr old,
+                  out IntPtr merged);
+
+              [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+              static extern uint SetNamedSecurityInfoW(string name, int type, uint information,
+                  IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+              [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+
+              static void Check(uint code)
+              {
+                  if (code != 0) throw new Win32Exception((int)code);
+              }
+
+              public static void Allow()
+              {
+                  const string device = @"\\.\NUL";
+                  const int FileObject = 1;
+                  const uint DaclInformation = 4;
+                  const uint GenericRead = 0x80000000;
+                  const uint GenericWrite = 0x40000000;
+                  IntPtr dacl, descriptor, sid, merged;
+                  Check(GetNamedSecurityInfoW(device, FileObject, DaclInformation, IntPtr.Zero,
+                      IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor));
+                  if (!ConvertStringSidToSidW("S-1-15-2-1", out sid))
+                      throw new Win32Exception(Marshal.GetLastWin32Error());
+                  var entry = new ExplicitAccess
+                  {
+                      Permissions = GenericRead | GenericWrite,
+                      Mode = 1,
+                      Inheritance = 0,
+                      Trustee = new Trustee { Form = 0, Type = 2, Name = sid },
+                  };
+                  Check(SetEntriesInAclW(1, ref entry, dacl, out merged));
+                  Check(SetNamedSecurityInfoW(device, FileObject, DaclInformation, IntPtr.Zero,
+                      IntPtr.Zero, merged, IntPtr.Zero));
+              }
+          }
+          '@
+          [NulDevice]::Allow()
+
+      - name: Test the backend's decisions
+        run: cargo test -p bravebot-sandbox --locked --no-fail-fast --lib 'windows::'
+
+      - name: Test the backend with real processes
+        run: cargo test -p bravebot-sandbox --locked --no-fail-fast --test windows
+
+      - name: Test a confined program run for a person
+        # The session is granted its temporary directory, so it is a directory of its own and not
+        # the runner's.
+        run: |
+          mkdir -p "$RUNNER_TEMP/confine"
+          export TMP="$(cygpath -w "$RUNNER_TEMP/confine")"
+          export TEMP="$TMP"
+          cargo test -p bravebot-agent --locked --no-fail-fast --test confine
+
+  # The tests that ask the volume whether two awkward names are two files, run on the volume that
+  # holds names apart that no other host does (#2869, TRUST-2). On every other host `two_files`
+  # makes pairs of the names that host holds, so a key step that joins two files NTFS holds apart
+  # but ext4 and APFS do not would pass here and nowhere else. `held_names()` leaves out the names
+  # a Windows host cannot hold as written, so the floor `least_pairs()` sets is the one a Windows
+  # host reaches.
+  #
+  # Only the tests over those names run: the rest of the agent's suite spawns a POSIX shell or
+  # drives a pty, and whether it is made to pass here is #88. Each filter is a test's whole name,
+  # and the step reads how many ran, because a filter that matches nothing, after a rename,
+  # passes. A pair test added over `held_names()` belongs in the list. Target as in the windows
+  # job above.
+  names-windows:
+    name: Awkward names on Windows
+    runs-on: windows-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        # Pinned to a full commit SHA; see the note in the `check` job above.
+        # nosemgrep: brave-third-party-action-not-pinned-to-commit-sha
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Saved from main only; see the note in the `check` job above.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test the pairs of names the volume holds apart
+        # The temporary directory is the runner's, which is a long-form path where the default
+        # `TEMP` is the 8.3 short form, so a root a test builds and the root the workspace
+        # canonicalises it to spell the same directory.
+        run: |
+          mkdir -p "$RUNNER_TEMP/names"
+          export TMP="$(cygpath -w "$RUNNER_TEMP/names")"
+          export TEMP="$TMP"
+          tests=(
+            two_names_the_volume_holds_apart_are_two_rules_unless_they_are_one_group
+            two_names_the_volume_holds_apart_have_two_keys_and_are_not_one_writer_unless_they_are_one_group
+            a_listing_has_two_entries_for_two_files_and_each_is_trusted_by_its_own_rule
+            a_rule_about_one_name_decides_no_file_the_volume_holds_apart_from_it
+          )
+          cargo test -p bravebot-agent --locked --test workspace -- --exact "${tests[@]}" \
+            | tee "$RUNNER_TEMP/workspace.log"
+          grep -q "test result: ok. ${#tests[@]} passed" "$RUNNER_TEMP/workspace.log"
+
+      - name: Test the names a mention offers
+        run: |
+          mkdir -p "$RUNNER_TEMP/names"
+          export TMP="$(cygpath -w "$RUNNER_TEMP/names")"
+          export TEMP="$TMP"
+          cargo test -p bravebot-mentions --locked --lib -- --exact \
+            tests::every_awkward_name_is_offered_and_read_back_as_the_file_it_is \
+            | tee "$RUNNER_TEMP/mentions.log"
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/mentions.log"
+
+  # The installers a release ships, built as a release builds them from the cross-built helpers,
+  # and each installed on a runner of its own architecture by the job after this one. Beside each
+  # goes an installer of the same bundle under a lower version, for that job to upgrade from, since
+  # no release carries an installer yet.
+  #
+  # One job per architecture. The four installers took over sixteen minutes one after another,
+  # most of it compressing, and nothing one architecture builds is read by the other.
+  #
+  # On a pull request, only where the scripts that build, fuse or check an installer changed. A
+  # change to the lockfile or a manifest still runs the cross-builds, which link every target, but
+  # is no longer packaged and installed on Windows before it lands: main and every tag build and
+  # install both, so a dependency that breaks the installed app is found on main instead.
+  windows-installers:
+    name: Windows installer (${{ matrix.arch }})
+    runs-on: windows-latest
+    needs: [changes, cross-build]
+    if: ${{ !cancelled() && needs.cross-build.result == 'success' && needs.changes.outputs.installers != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            electron: x64
+          - arch: arm64
+            electron: arm64
+    defaults:
+      run:
+        shell: bash
+    env:
+      pnpm_config_script_shell: C:\Program Files\Git\bin\bash.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      # As in the Front end job. The store is the one Desktop on Windows saves.
+      - name: Enable pnpm
+        id: pnpm
+        run: |
+          corepack enable
+          echo "store=$(cd ui && pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-store-ui-${{ runner.os }}-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-ui-${{ runner.os }}-
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-helpers-windows-${{ matrix.arch }}
+          path: dist
+
+      - name: Build the installer
+        run: make app-release-windows APP_ARCHES=${{ matrix.arch }}:${{ matrix.electron }}
+
+      - name: Build an older installer
+        run: |
+          npm --prefix ui pkg set version=0.0.1
+          node ui/scripts/windows-installer.mjs --bundle="ui/dist/Brave Bot-win32-${{ matrix.electron }}" \
+            --arch=${{ matrix.arch }} --out=dist/previous
+          git checkout -- ui/package.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-installer-${{ matrix.arch }}
+          path: |
+            dist/bravebot-desktop-windows-${{ matrix.arch }}-setup.exe
+            dist/previous/bravebot-desktop-windows-${{ matrix.arch }}-setup.exe
+            ui/dist/Brave Bot-win32-${{ matrix.electron }}/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ui/scripts/check-windows-install.mjs says what is checked. The arm64 installer on an arm64
+  # runner, because on an x64 one it would not start at all, and an x64 app on an arm64 one runs
+  # under emulation.
+  windows-install:
+    name: Install on Windows (${{ matrix.arch }})
+    needs: windows-installers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+
+      # Into the checkout, so each file lands at the path the installers job built it at.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-installer-${{ matrix.arch }}
+
+      - name: Install, start, upgrade and uninstall
+        timeout-minutes: 30
+        run: node ui/scripts/check-windows-install.mjs --arch=${{ matrix.arch }}

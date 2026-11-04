@@ -1,0 +1,560 @@
+// Turning parsed catalogs into the Rust the crate exposes.
+//
+// The build script includes this file, so it must stay dependency-free, and the crate compiles it
+// again under `cfg(test)`: what a catalog compiles to is decided here, and a rule that only a
+// build script can reach is a rule nothing can pin. Nothing in here runs while the agent does; it
+// writes the code that does.
+
+use crate::catalog::*;
+
+/// One catalog as the build script holds it: what it is named for, what language its words are
+/// in, and what it defines.
+pub struct Catalog {
+    /// The BCP-47 tag the file is named for.
+    pub tag: String,
+    pub language: String,
+    pub variant: String,
+    pub messages: std::collections::BTreeMap<String, Message>,
+}
+
+impl Catalog {
+    /// The catalog whose words a reader of this one is shown for `id`.
+    ///
+    /// Its own when it defines the message, the reference when it does not: a translation may
+    /// leave a message out and fall back (LOCALE-3), and what reaches the screen then is the
+    /// reference's prose. One catalog answers for both the words and the plural rules that form
+    /// them, so the two cannot be taken from different places. French rules applied to an English
+    /// sentence read wrongly only to a French speaker, which is a defect no review in English
+    /// finds.
+    fn words_for<'a>(&'a self, id: &str, reference: &'a Catalog) -> &'a Catalog {
+        if self.messages.contains_key(id) {
+            self
+        } else {
+            reference
+        }
+    }
+
+    /// The first message of this catalog that selects on a plural in a language `known` has no
+    /// rule for.
+    ///
+    /// The build script refuses to generate anything while this is `Some`: a select in such a
+    /// language would be formed by some other language's rule (LOCALE-5). `known` is passed in
+    /// because the build script and the crate reach the plural rules by different paths.
+    pub fn select_without_a_plural_rule(&self, known: impl Fn(&str) -> bool) -> Option<&Message> {
+        if known(&self.language) {
+            return None;
+        }
+        self.messages
+            .values()
+            .find(|message| matches!(message.value, Value::Select { .. }))
+    }
+
+    /// The message itself. A catalog `words_for` answered with has it, by construction.
+    fn message(&self, id: &str) -> &Message {
+        self.messages
+            .get(id)
+            .unwrap_or_else(|| panic!("locales/{}.ftl defines `{id}`", self.tag))
+    }
+}
+
+/// The catalog's own `locale-name`, or its tag where it has none: the reference's name for itself
+/// is not a name for another language. A name is fixed text, so one that takes an argument or
+/// selects is refused.
+pub fn own_name(locale: &Catalog) -> Result<String, String> {
+    match locale
+        .messages
+        .get("locale-name")
+        .map(|message| &message.value)
+    {
+        Some(Value::Pattern(parts)) => parts
+            .iter()
+            .map(|part| match part {
+                Part::Text(text) => Ok(text.as_str()),
+                Part::Arg(_) => Err(format!(
+                    "locales/{}.ftl: `locale-name` takes no argument",
+                    locale.tag
+                )),
+            })
+            .collect(),
+        Some(Value::Select { .. }) => Err(format!(
+            "locales/{}.ftl: `locale-name` is not a select",
+            locale.tag
+        )),
+        None => Ok(locale.tag.clone()),
+    }
+}
+
+/// Every catalog in `locales/`, reference first so generated indices are stable.
+pub fn load(dir: &std::path::Path, reference: &str) -> Vec<Catalog> {
+    let mut found: Vec<Catalog> = Vec::new();
+
+    let entries = std::fs::read_dir(dir).expect("locales/ exists");
+    let mut paths: Vec<_> = entries
+        .map(|e| e.expect("read locales/").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ftl"))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let tag = path
+            .file_stem()
+            .expect("a .ftl file has a stem")
+            .to_str()
+            .expect("locale filenames are ASCII")
+            .to_string();
+        let (language, region) = match tag.split_once('-') {
+            Some((language, region)) => (language, Some(region)),
+            None => (tag.as_str(), None),
+        };
+        let well_formed = language.len() >= 2
+            && language.len() <= 3
+            && language.chars().all(|c| c.is_ascii_lowercase())
+            && region.is_none_or(|r| r.len() == 2 && r.chars().all(|c| c.is_ascii_uppercase()));
+        assert!(
+            well_formed,
+            "locales/{tag}.ftl is not named for a locale: use `fr.ftl` or `fr-CA.ftl`"
+        );
+
+        let source = std::fs::read_to_string(&path).expect("read a catalog");
+        let parsed = parse(&source).unwrap_or_else(|e| panic!("locales/{tag}.ftl: {e}"));
+
+        let mut messages = std::collections::BTreeMap::new();
+        for message in parsed {
+            messages.insert(message.id.clone(), message);
+        }
+
+        found.push(Catalog {
+            tag: tag.clone(),
+            language: language.to_string(),
+            variant: camel_case(&tag.to_lowercase()),
+            messages,
+        });
+    }
+
+    // The reference leads so `Locale as usize` indexes the per-message tables with the fallback
+    // at a known position.
+    found.sort_by_key(|l| (l.tag != reference, l.tag.clone()));
+    found
+}
+
+pub fn messages(catalogs: &[Catalog], reference: &Catalog) -> String {
+    let mut out = String::new();
+    for (id, source) in &reference.messages {
+        let args = arguments(&source.value);
+        // Which catalog each locale is shown this message out of, which is not always its own.
+        let from: Vec<&Catalog> = catalogs
+            .iter()
+            .map(|catalog| catalog.words_for(id, reference))
+            .collect();
+
+        if args.is_empty() {
+            out.push_str(&constant(id, catalogs, &from));
+        } else {
+            out.push_str(&structure(id, catalogs, &from, &args));
+        }
+    }
+    out
+}
+
+/// A message with no arguments: one table, indexed by locale.
+fn constant(id: &str, catalogs: &[Catalog], from: &[&Catalog]) -> String {
+    let table = from
+        .iter()
+        .map(|catalog| match &catalog.message(id).value {
+            Value::Pattern(parts) => literal(parts),
+            Value::Select { .. } => unreachable!("a select takes the argument it selects on"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "\n#[allow(dead_code, reason = \"every message in the catalog is generated, used or not\")]\npub fn {}() -> &'static str {{\n    \
+         const TEXT: [&str; {}] = [{table}];\n    TEXT[crate::locale() as usize]\n}}\n",
+        snake_case(id),
+        catalogs.len()
+    )
+}
+
+/// A message with arguments: a struct whose fields are those arguments, by name.
+///
+/// A struct rather than a function so the call site names what it passes, in any order, and so a
+/// forgotten argument is a missing-field error naming the field rather than a count mismatch.
+fn structure(id: &str, catalogs: &[Catalog], from: &[&Catalog], args: &[(String, bool)]) -> String {
+    let name = camel_case(id);
+    let parameters = args
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("T{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bounds = args
+        .iter()
+        .enumerate()
+        .map(|(i, (_, selects))| {
+            if *selects {
+                format!("T{i}: Into<crate::Count>")
+            } else {
+                format!("T{i}: ::std::fmt::Display")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fields = args
+        .iter()
+        .enumerate()
+        .map(|(i, (arg, _))| format!("    pub {arg}: T{i},\n"))
+        .collect::<String>();
+
+    let mut out = format!(
+        "\n#[allow(dead_code, reason = \"every message in the catalog is generated, used or not\")]\npub struct {name}<{parameters}> {{\n{fields}}}\n\n\
+         #[allow(dead_code, reason = \"every message in the catalog is generated, used or not\")]\nimpl<{bounds}> {name}<{parameters}> {{\n    \
+         // A locale that says the same thing without one of the arguments leaves it unread.\n    \
+         #[allow(unused_variables, reason = \"a locale that says it without an argument leaves it unread\")]\n    \
+         pub fn render(self) -> String {{\n        let mut out = String::new();\n"
+    );
+    for (arg, selects) in args {
+        if *selects {
+            out.push_str(&format!(
+                "        let {arg}: crate::Count = self.{arg}.into();\n"
+            ));
+        } else {
+            out.push_str(&format!("        let {arg} = self.{arg};\n"));
+        }
+    }
+
+    out.push_str("        match crate::locale() {\n");
+    // The locale being asked for and the catalog the words come from are two different things,
+    // and a plural is formed by the rules of the second.
+    for (catalog, from) in catalogs.iter().zip(from) {
+        out.push_str(&format!("            Locale::{} => {{\n", catalog.variant));
+        out.push_str(&render(&from.message(id).value, &from.language, 16));
+        out.push_str("            }\n");
+    }
+    out.push_str("        }\n        out\n    }\n}\n");
+    out
+}
+
+/// The body that appends one locale's text to `out`.
+fn render(value: &Value, language: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let Value::Select {
+        arg,
+        variants,
+        default,
+    } = value
+    else {
+        let Value::Pattern(parts) = value else {
+            unreachable!("a value is a pattern or a select")
+        };
+        return append(parts, &pad);
+    };
+
+    let others: Vec<&Variant> = variants
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index != default)
+        .map(|(_, variant)| variant)
+        .collect();
+
+    // A select whose only variant is the default decides nothing, so it reads the count for
+    // display and never asks which category it is in.
+    if others.is_empty() {
+        return append(&variants[*default].parts, &pad);
+    }
+
+    // Nor does a select whose variants all say the same. The reference may state the forms a
+    // translation needs and say them alike where its own language does not tell them apart.
+    if others
+        .iter()
+        .all(|variant| variant.parts == variants[*default].parts)
+    {
+        return append(&variants[*default].parts, &pad);
+    }
+
+    let mut out = String::new();
+    if others.iter().any(|v| matches!(v.key, Key::Exact(_))) {
+        out.push_str(&format!("{pad}let exact = {arg}.get();\n"));
+    }
+    if others.iter().any(|v| matches!(v.key, Key::Category(_))) {
+        out.push_str(&format!(
+            "{pad}let category = crate::plural::category({language:?}, {arg}.get());\n"
+        ));
+    }
+
+    for (position, variant) in others.iter().enumerate() {
+        let condition = match &variant.key {
+            Key::Exact(n) => format!("exact == {n}"),
+            Key::Category(c) => format!("category == {c:?}"),
+        };
+        let keyword = if position == 0 { "if" } else { "} else if" };
+        out.push_str(&format!("{pad}{keyword} {condition} {{\n"));
+        out.push_str(&append(&variant.parts, &format!("{pad}    ")));
+    }
+    out.push_str(&format!("{pad}}} else {{\n"));
+    out.push_str(&append(&variants[*default].parts, &format!("{pad}    ")));
+    out.push_str(&format!("{pad}}}\n"));
+    out
+}
+
+fn append(parts: &[Part], pad: &str) -> String {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            // A one-character run becomes a `push`, because clippy is right that it should and
+            // because clippy reads what is generated here as readily as what is written by hand.
+            Part::Text(text) => {
+                let mut chars = text.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(only), None) => {
+                        out.push_str(&format!("{pad}out.push({only:?});\n"));
+                    }
+                    _ => out.push_str(&format!("{pad}out.push_str({text:?});\n")),
+                }
+            }
+            Part::Arg(name) => {
+                out.push_str(&format!("{pad}out.push_str(&{name}.to_string());\n"));
+            }
+        }
+    }
+    out
+}
+
+/// A message with no arguments is one run of text, written back out as a Rust literal.
+fn literal(parts: &[Part]) -> String {
+    let text: String = parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => text.as_str(),
+            Part::Arg(_) => unreachable!("a message with an argument is not a constant"),
+        })
+        .collect();
+    format!("{text:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message that counts, as the reference states it.
+    const ROUNDS: &str = "rounds = { $rounds ->\n    [one] sent back { $rounds } time\n   *[other] sent back { $rounds } times\n    }\n";
+
+    /// The same message translated, which French says with its own two forms.
+    const ROUNDS_IN_FRENCH: &str = "rounds = { $rounds ->\n    [one] renvoyé { $rounds } fois\n   *[other] renvoyés { $rounds } fois\n    }\n";
+
+    fn catalog(tag: &str, source: &str) -> Catalog {
+        let language = tag.split('-').next().expect("a tag has a language");
+        Catalog {
+            tag: tag.to_string(),
+            language: language.to_string(),
+            variant: camel_case(&tag.to_lowercase()),
+            messages: parse(source)
+                .expect("the fixture parses")
+                .into_iter()
+                .map(|message| (message.id.clone(), message))
+                .collect(),
+        }
+    }
+
+    /// A catalog names itself in its own words, a catalog that does not is named by its tag, and a
+    /// name that would vary with an argument or a select is refused.
+    #[test]
+    fn a_catalog_is_named_by_its_own_fixed_locale_name_or_its_tag() {
+        assert_eq!(
+            own_name(&catalog("fr", "locale-name = Français\n")).as_deref(),
+            Ok("Français")
+        );
+        assert_eq!(own_name(&catalog("fr-CA", "")).as_deref(), Ok("fr-CA"));
+        let takes_an_argument = own_name(&catalog("fr", "locale-name = Français { $region }\n"));
+        assert_eq!(
+            takes_an_argument.as_deref().map_err(String::as_str),
+            Err("locales/fr.ftl: `locale-name` takes no argument")
+        );
+        let selects = own_name(&catalog(
+            "fr",
+            "locale-name = { $n ->\n    [one] Français\n   *[other] Français\n    }\n",
+        ));
+        assert_eq!(
+            selects.as_deref().map_err(String::as_str),
+            Err("locales/fr.ftl: `locale-name` is not a select")
+        );
+    }
+
+    /// The arm of the generated `match` that a request for `variant` runs.
+    fn arm(generated: &str, variant: &str) -> String {
+        let wanted = format!("{variant} => ");
+        generated
+            .split("Locale::")
+            .find(|chunk| chunk.starts_with(&wanted))
+            .unwrap_or_else(|| panic!("no arm for Locale::{variant} in:\n{generated}"))
+            .to_string()
+    }
+
+    /// A translation may leave a message out, and then what a French reader is shown is the
+    /// reference's English words. Deciding the variant by French rules would hand them "sent
+    /// back 0 time" out of an English sentence, since French counts zero as singular and English
+    /// does not. It is a defect only a speaker of the language can see, and one no review in
+    /// English catches.
+    #[test]
+    fn a_message_a_translation_omits_is_pluralised_by_the_language_it_is_written_in() {
+        let catalogs = vec![catalog("en-US", ROUNDS), catalog("fr", "")];
+        let generated = messages(&catalogs, &catalogs[0]);
+
+        let french = arm(&generated, "Fr");
+        assert!(
+            french.contains(r#"category("en", rounds.get())"#),
+            "the fallback took the reader's rules rather than the catalog's:\n{french}"
+        );
+        assert!(
+            french.contains(r#"out.push_str("sent back ")"#),
+            "the fallback did not take the reference's words:\n{french}"
+        );
+    }
+
+    /// The other half of the same rule: a catalog that has the message says it in its own words,
+    /// which are its own language's to pluralise.
+    #[test]
+    fn a_message_a_translation_has_is_pluralised_by_that_translation_s_rules() {
+        let catalogs = vec![catalog("en-US", ROUNDS), catalog("fr", ROUNDS_IN_FRENCH)];
+        let generated = messages(&catalogs, &catalogs[0]);
+
+        let french = arm(&generated, "Fr");
+        assert!(
+            french.contains(r#"category("fr", rounds.get())"#),
+            "a translation's own plurals were formed by the reference's rules:\n{french}"
+        );
+        assert!(
+            french.contains(r#"out.push_str("renvoyé ")"#),
+            "the translation's own words were not used:\n{french}"
+        );
+        assert!(
+            arm(&generated, "EnUs").contains(r#"category("en", rounds.get())"#),
+            "the reference stopped being formed by its own rules:\n{generated}"
+        );
+    }
+
+    /// The reference may state the forms of a count and say them alike, where its language does not
+    /// tell them apart and a translation's does. What is generated for the reference is the text
+    /// once, with no choice among equal branches, and the translation keeps its own forms. A select
+    /// in which any form differs from the default is still chosen between, since a language that
+    /// has that form needs it.
+    ///
+    /// Rejects: an `if` over variants that say the same, which clippy refuses in the generated
+    /// code, a translation that loses its own forms because the reference's are alike, and a
+    /// collapse that looks at only some of the variants, which drops `y` from `[one] x`, `[few] y`,
+    /// `*[other] x` and from `[one] y`, `[few] x`, `*[other] x`.
+    #[test]
+    fn a_select_whose_forms_say_the_same_is_generated_as_that_text() {
+        const ALIKE: &str =
+            "done = { $count ->\n    [one] +{ $count } done\n   *[other] +{ $count } done\n    }\n";
+        const ALIKE_IN_FRENCH: &str = "done = { $count ->\n    [one] +{ $count } terminée\n   *[other] +{ $count } terminées\n    }\n";
+        let catalogs = vec![catalog("en-US", ALIKE), catalog("fr", ALIKE_IN_FRENCH)];
+        let generated = messages(&catalogs, &catalogs[0]);
+
+        let english = arm(&generated, "EnUs");
+        assert!(
+            !english.contains("category") && !english.contains("if "),
+            "alike forms were still chosen between:\n{english}"
+        );
+        assert!(
+            english.contains(r#"out.push_str(" done")"#),
+            "the text was not generated:\n{english}"
+        );
+        let french = arm(&generated, "Fr");
+        assert!(
+            french.contains(r#"category("fr", count.get())"#)
+                && french.contains(r#"out.push_str(" terminée")"#)
+                && french.contains(r#"out.push_str(" terminées")"#),
+            "the translation lost one of its own forms:\n{french}"
+        );
+
+        // One form that differs, first or last of the variants that are not the default, keeps the
+        // choice and the form.
+        for differing in [
+            "done = { $count ->\n    [one] x\n    [few] y\n   *[other] x\n    }\n",
+            "done = { $count ->\n    [one] y\n    [few] x\n   *[other] x\n    }\n",
+        ] {
+            let catalogs = vec![catalog("en-US", differing)];
+            let english = arm(&messages(&catalogs, &catalogs[0]), "EnUs");
+            assert!(
+                english.contains("if ") && english.contains(r#"out.push('y')"#),
+                "a form that differs was dropped from {differing:?}:\n{english}"
+            );
+        }
+    }
+
+    /// A language nothing writes a plural rule for would have its select formed by another
+    /// language's rule, so the build refuses it. A catalog that only has plain messages, or whose
+    /// language has a rule, is let through.
+    #[test]
+    fn a_select_in_a_language_with_no_plural_rule_is_found() {
+        let known = crate::plural::is_known;
+
+        let unwritten = catalog("qq", ROUNDS);
+        let found = unwritten
+            .select_without_a_plural_rule(known)
+            .expect("a select in a language with no rule was let through");
+        assert_eq!(found.id, "rounds");
+
+        assert!(
+            catalog("qq", "greeting = hello\n")
+                .select_without_a_plural_rule(known)
+                .is_none(),
+            "a language with no rule was refused for a message that counts nothing"
+        );
+        assert!(
+            catalog("fr", ROUNDS_IN_FRENCH)
+                .select_without_a_plural_rule(known)
+                .is_none(),
+            "a language with a rule was refused"
+        );
+        assert!(
+            catalog("en-US", ROUNDS)
+                .select_without_a_plural_rule(known)
+                .is_none(),
+            "the reference was refused"
+        );
+    }
+
+    /// A message with no arguments falls back the same way, and the table it compiles to holds
+    /// the reference's text in the omitting locale's slot.
+    #[test]
+    fn a_message_with_no_arguments_falls_back_to_the_reference_text() {
+        let catalogs = vec![catalog("en-US", "greeting = hello\n"), catalog("fr", "")];
+        let generated = messages(&catalogs, &catalogs[0]);
+
+        assert!(
+            generated.contains(r#"["hello", "hello"]"#),
+            "the omitting locale's slot is not the reference's text:\n{generated}"
+        );
+    }
+
+    /// The generated code silences `dead_code` on every message and `unused_variables` on the
+    /// arguments a locale leaves unread. It is compiled with the rest of the crate, so
+    /// `clippy::allow_attributes_without_reason` reads it, once for each of the thousands of
+    /// messages. No source file holds these attributes, so the check of the source files
+    /// cannot see them, and a message with arguments and one without take different paths here.
+    #[test]
+    fn every_allow_the_generated_code_carries_gives_a_reason() {
+        let catalogs = vec![
+            catalog("en-US", &format!("greeting = hello\n{ROUNDS}")),
+            catalog("fr", ROUNDS_IN_FRENCH),
+        ];
+        let generated = messages(&catalogs, &catalogs[0]);
+
+        let allows: Vec<&str> = generated
+            .match_indices("#[allow(")
+            .map(|(at, _)| generated[at..].lines().next().expect("a line"))
+            .collect();
+        assert!(
+            allows.len() >= 4,
+            "a message and a message with arguments generate four, so the generator changed what \
+             it writes and this test reads the wrong text:\n{generated}"
+        );
+        for allow in allows {
+            assert!(
+                allow.contains(", reason = \"") && allow.ends_with("\")]"),
+                "the generated code allows a lint with no reason: {allow}"
+            );
+        }
+    }
+}

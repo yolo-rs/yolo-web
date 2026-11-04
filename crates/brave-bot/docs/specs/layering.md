@@ -1,0 +1,367 @@
+---
+id: LAYER
+title: Layering
+status: normative
+governs:
+  - crates/*/Cargo.toml
+  - crates/*/src/lib.rs
+  - crates/*/src/main.rs
+  - crates/*/build.rs
+  - crates/*/examples/*.rs
+  - crates/agent/src/conversation.rs
+  - crates/ui-bridge/src/view.rs
+  - crates/ui-bridge/src/wire.rs
+  - crates/ui-bridge/src/fork.rs
+  - ui/src/renderer/components/Transcript.tsx
+  - ui/src/renderer/components/Markdown.tsx
+  - ui/src/renderer/transcript.ts
+  - ui/scripts/marking.test.mjs
+  - ui/scripts/ux-state.test.mjs
+documented-by: none (internal: which crate may depend on what is how the repository is built, not something a reader acts on)
+---
+
+## Scope
+
+Which crate is allowed to do what. A change to a crate's dependencies or its reach is a change to
+this spec.
+
+## Clauses
+
+<a id="LAYER-1"></a>
+### LAYER-1: which crate may do what
+
+| Crate | Purpose | Depends on | Constraint |
+|---|---|---|---|
+| `bravebot-core` | The information-flow kernel: the label lattice, slots, references, capabilities, and every policy gate | none | No I/O, and nothing prints. Owns every decision derived from content, and the only place a declassification witness can be minted |
+| `bravebot-agent` | Task execution: the tools, the turn loop, and the standing watches a session keeps | `core`, `aichat`, `bedrock`, `choice`, `config`, `connector`, `filetype`, `i18n`, `lsp`, `mcp`, `net`, `sandbox`, `skus` | Carries labelled values and must not inspect them. `exec` stays argv-only, and `shell` runs only a line a person typed. Offers a started MCP server's tools only once a person vouched for its list as drawn, and calls one only on their answer, a recorded one, a rule, or the mode they named that answers for them. See [mcp-servers.md](mcp-servers.md) |
+| `bravebot-net` | The network egress path for everything carrying labelled content | `core`, `diag`, `sandbox` | All agent traffic passes the policy gate here. See the known cost below. Reaches `sandbox` for the one classification of an address as public or not, which the host-list proxy there applies too, so a fetch and a confined program are refused the same addresses |
+| `bravebot-aichat` | Client for the OpenAI-compatible aichat backend and gateways, and for Anthropic's Messages API, and the walk from a conversation to turns of blocks that Bedrock's requests use as well | `core`, `diag`, `config`, `net`, `signing` | Speaks the wire protocols only, and reaches the network through `net`. The walk moves text between shapes and inspects none of it |
+| `bravebot-browser` | Relays tool calls between a stdio MCP server and a Brave extension's native messaging host | none | Not presentation: draws nothing and links no terminal library, because its stdout is native messaging's stream or the MCP protocol. Relays and decides nothing about what it relays: reads a message's `id` to route its reply, a request's `method` and a call's `name` to look the tool up in its own table, and an extension reply's `error`, the `message` of an error and `result` to tell a failure from an answer and to write it as text, and no other field, except that it takes the `data` and `mimeType` of the `image` object in the reply of a tool its table marks as returning a picture, by name and unchanged, into an MCP `image` part, and except that the server started for a group, the confined half, reads the `path` of a call to the tool its table marks as taking a file, looks at the file it leads to inside the `uploads` directory of the directory it was declared with, and sends the file's canonical path, size and name in place of the text or answers with a sentence of a closed list, never opening the file ([BROWSER-45](browser.md#BROWSER-45)). Carries no workspace content. Links no workspace crate, so the half Brave starts unconfined is this crate and nothing else. See [browser.md](browser.md) |
+| `bravebot-bedrock` | Client for models on AWS Bedrock | `core`, `diag`, `aichat`, `config`, `net`, `sandbox`, `signing` | Speaks the wire protocol only, and reaches the network through `net`. Runs the AWS CLI to resolve a credential, which is the one subprocess it starts, and finds it with `sandbox` so a program a confined stage wrote is not the one run |
+| `bravebot-session` | What a session leaves on disk: the record, the state directory, and the audit serialiser | `core`, `agent`, `aichat`, `config`, `i18n` | Not presentation: draws nothing and links no terminal library, so a record can be read back without linking a front end. Serialises what a session held, the rules it recorded included, and decides none of it. Which build wrote a record is supplied when a session opens rather than read here, so this crate does not depend on the crate holding the stamp: a record states the build its caller was, which is the build that wrote it, and a resume reads that back rather than overwriting it with its own |
+| `bravebot-tui` | The interactive terminal interface | `core`, `agent`, `aichat`, `backtrace`, `config`, `filetype`, `i18n`, `mcp`, `mentions`, `net`, `sandbox`, `schedule`, `session`, `skus`, `stamp`, `ui-bridge`, `update` | Presentation. Reaches `schedule` for `/schedule`, which runs the same subcommands as `bravebot schedule` for a line a person typed. Reaches `ui-bridge` only in tests, to exercise terminal/bridge session handoffs. Reaches `skus` only in tests, for its `test-hosts` feature, so a test of what the interface keeps and draws of a failed ChatGPT turn can sign in to a stand-in ([CHATGPT-2](chatgpt-sign-in.md#CHATGPT-2)). May display released content, always inside a margin it draws itself. Owns the clipboard and shell mode, both of which are gestures a person made, and the browser opener, which starts the person's browser at an `http` or `https` address and which `bravebot-cli` calls for a sign-in. Owns the terminal itself, so it may read the tty directly to ask the terminal about itself; what comes back describes the terminal and never enters a turn. Reads a credential a person types with nothing drawn, for `bravebot-cli` to store |
+| `bravebot-cli` | Command-line entry point | `core`, `diag`, `agent`, `approval`, `backtrace`, `config`, `i18n`, `mcp`, `net`, `sandbox`, `schedule`, `session`, `signing`, `skus`, `stamp`, `tui`, `ui-bridge` | Presentation. Where nobody can be asked, effects are refused rather than applied unseen. A run that reads input lines and was started with `--approve-input-lines` puts a write, a run or a fetch to the program sending them ([CLI-36](cli.md#CLI-36)). Reaches `signing` for one thing, the check of a delivery's signature in `bravebot trigger serve` ([TRIGGER-3](triggers.md#TRIGGER-3)), and listens on the loopback address for that command alone ([TRIGGER-6](triggers.md#TRIGGER-6)). Reaches `ui-bridge` for one thing, the loop `bravebot acp` runs for an editor ([CLI-39](cli.md#CLI-39)), so an installed copy serves the Agent Client Protocol without a second program and without a second path to the agent. Writes the one file that declares an MCP server, only from a command a person typed, and records an approval of one only on their answer at a terminal. Starts the servers a session was asked for, each only on an answer a person gave or recorded or under the mode they named that answers for them, a local one only confined and a remote one only through the egress gate. See [mcp-servers.md](mcp-servers.md) |
+| `bravebot-mcp` | Model Context Protocol client: the extension boundary for tools | `core`, `diag`, `config`, `net`, `sandbox` | An opaque call erases the routing/content split, so primitives stay native rather than moving behind it. Reaches `config` for the one rule of what a tool's word may be, so the name a list offers and the name a standing answer records are read alike. Sorts a tool result into its text, its pictures and a count of the parts it left out, taking a picture only under a closed list of four media types, a size cap and an encoding it writes itself, and labels every part alike ([MCP-6](mcp.md#MCP-6)). Holds the line it reads from a stdio server to a bound ([MCP-13](mcp.md#MCP-13)). Opens the `Carried` that `Policy::carry_a_choice` returns in one function, `with_choice`, to write the number of a choice into a call's arguments ([MCP-14](mcp.md#MCP-14)) |
+| `bravebot-choice` | Which whole number a processor's answer chose, from 1 to a limit the planner wrote, or 0 | `core` | Reads one answer for one number and returns it as a byte labelled as the answer was. Reaches the text only through `Policy::read_a_number`, so it mints no witness, holds no `declassify` and no `Labelled::new`, and takes nothing out of an answer but that byte. Does no I/O and starts no process. It is not the driver ([LABEL-4](labels.md#LABEL-4)), and the comparison it holds is the ninth entry of [Known costs](labels.md#known-costs) |
+| `bravebot-lsp` | Language server client: a read-only question about a symbol | `core`, `diag`, `sandbox` | Speaks the protocol only. Starts a server under the spawn gate in `sandbox` and reaches nothing else of it. Asks a closed set of read-only methods and never a name a caller supplies, so a server's own method list cannot widen what this does. Separates a location from the text at it: the type carrying a location holds no text, which is what [tools/lsp.md](tools/lsp.md) rests on |
+| `bravebot-connector` | Client for the credential authority that performs connector calls | `core`, `sandbox` | Holds no credential and names no service: starts the one program a person's definition names, under the spawn gate in `sandbox`, writes it one request built from the locked routing, and reads one reply. The reply's payload and failure detail are what a service sent, so they carry the call's capability label, untrusted and private for a connector, and are never read here. See [connectors.md](connectors.md) |
+| `bravebot-filetype` | Whether the start of a file says it is text and the text it decodes to (UTF-8, or UTF-16 and UTF-32 under a byte order mark), what a file's name says it is (carried as bytes in which media type, read as text, or neither, and the noun a dropped file's marker uses), and whether a directory's name is one a walk of the tree steps over | none | Pure: no I/O, no label and no dependency, so the agent, the terminal, the bridge, the desktop's file helper and `mentions` can share it without any of them depending on another. It judges the bytes or the name it is handed and reads nothing itself |
+| `bravebot-mentions` | Naming a file with `@` in a prompt: the entries offered while a name is typed, what Enter does with it, and which files a sent line names | `filetype` | Shared by `tui` and `ui-bridge` so both front ends read a line alike. Lists one directory's names for a person to choose from, and reads no file's contents. Decides nothing for the planner: a name it returns becomes context only when a person sends the line, and the read is the agent's. Links no terminal library, and neither `core` nor `agent`, so none of it runs inside the driver |
+| `bravebot-sandbox` | OS-level confinement: what a subprocess may reach, what a crash of this process may leave behind, and which of its pages swap may take | none | Confines processes running code we did not write. A processor's caller is our own code, so it is not what this confines. Also holds what a process says to the kernel about its own memory image, which is a platform call rather than a policy and belongs with the other ones: the crate that owns a credential forbids `unsafe`, so it can clear a buffer and asks this one for anything the kernel has to be told. Holds the gate every start of a program and every creation of a control channel runs under, so none overlaps another, and the switch that stops a same-user process reading this one on Linux. See [session-view.md](session-view.md#RPCVIEW-8) |
+| `bravebot-config` | Environment-derived configuration for the backend | `sandbox` | The configuration surface, on the same footing as the endpoint and the model. Reaches `sandbox` for the one platform call a credential needs, holding it in pages the kernel keeps out of swap, since this crate forbids `unsafe`. Reads the settings layers, including one a checkout may carry, and hands on rule text without matching a rule. Reads the premium key from its file in the state directory and holds it only with a premium host ([PREM-11](premium-credentials.md#PREM-11), [PREM-14](premium-credentials.md#PREM-14)). Reads an MCP server's declaration from the person's own directory and from no layer, and records a layer that tries to make one rather than acting on it. Reads and writes the standing answers about a server's tools in the same directory. Reads an installed connector definition from the same directory and from no layer, holds it to the rules its credential authority holds it to, and refuses one others could write. See [connectors.md](connectors.md). Reads a language server's declaration from the same directory and from nowhere else, under [LSP-11](tools/lsp.md#LSP-11). Holds which of the two installers put this binary here and the literal that updates it, because both front ends ask and neither may reach the other ([CLI-29](cli.md#CLI-29)). Its `test-hosts` feature, which only `[dev-dependencies]` enable and a release build refuses to compile, lets a variable name a stand-in for the serving host of the ChatGPT account and of the xAI account ([CHATGPT-2](chatgpt-sign-in.md#CHATGPT-2), [XAI-1](xai-sign-in.md#XAI-1)). See [backends.md](backends.md) and [mcp-servers.md](mcp-servers.md) |
+| `bravebot-i18n` | Message catalogs for everything a person reads, and the notes built from them that say a file was too large to attach and where a question stands in a series, which the terminal, the line-by-line interface and the desktop bridge all show | none | Presentation text only. Holds nothing the planner is sent, and decides nothing: a message is named in the source, so no value can pick one. See [localization.md](localization.md) |
+| `bravebot-approval` | The text of each question put to a person (a write, a run, a fetch, content to read, a server, its tools and calls, a plan), so the terminal and an editor read the same words | `agent`, `i18n` | Not presentation: draws nothing and links no terminal library, because an editor draws the text it returns. Shared by `bravebot-cli` and the ACP server in `bravebot-ui-bridge`, so a question reads the same in the terminal and in an editor, without either crate holding the text. Reads content only to label and show it: control characters are pictured, a write's length is capped, and a change too large to diff shows no guess. Takes plain data, so a sentence the agent words from its own catalog is passed in rather than read here. Decides nothing and holds no state |
+| `bravebot-backtrace` | Crash reports: the file a panic leaves, and sending it to Backtrace on a later launch | `core`, `agent`, `config`, `net`, `stamp` | Not presentation: draws nothing and links no terminal library. Writes one small file from a panic hook and makes no request there; a later launch sends it through `net`, the one way out, and holds no HTTP client of its own. A report holds numbers, words fixed in the source and one source location, so nothing a prompt, a file, a key or a server wrote can be in one, and the body of the reply is never read. Reaches `agent` only for the state directory's helpers, so the modes and the incognito answer are the ones every other write has. See [crash-reports.md](crash-reports.md) |
+| `bravebot-signing` | Brave services request signing, hs2019 HMAC-SHA256 over the body digest, and the check of a trigger delivery's HMAC-SHA256 signature | none | Auth only. Carries no workspace content. The delivery check ([TRIGGER-3](triggers.md#TRIGGER-3)) receives the secret, the registered event and the body bytes, returns a boolean, and compares in constant time |
+| `bravebot-stamp` | Which build this is: the version, the commit it was built from, and whether that tree was modified | none | Not presentation: draws nothing and links no terminal library, so a front end that draws nothing can still name the build it is. Asks git at compile time and holds one string; carries no workspace content and decides nothing |
+| `bravebot-schedule` | Scheduled runs: the entries a person registers, the system scheduler's files for them, and the record of each firing, as functions that return their lines and how they ended | `core`, `agent`, `approval`, `config`, `i18n`, `sandbox`, `session` | Not presentation: draws nothing and links no terminal library, and prints nothing, so the terminal and the desktop bridge say the same words without either depending on the other. Takes the proof that a person typed the line, the project directory and the mode as arguments and reads none of them from the terminal. Starts only the scheduler's own programs, the person's own run and the destination program the person named at `add`, under the spawn gate in `sandbox`. The destination is started without this agent's credentials, with the reduced search path, in a process group of its own and under a time limit ([SCHEDULE-7](schedule.md#SCHEDULE-7)). See [schedule.md](schedule.md) |
+| `bravebot-update` | Whether a newer release has been published: the hourly ask of the registry a copy came from, the record of its answer, the terminal's startup line and the desktop app's yes or no | `core`, `agent`, `config`, `i18n`, `net`, `session` | Not presentation: draws nothing and links no terminal library, so the terminal and the desktop bridge share one record without either depending on the other. Reaches the network through `net` alone, for one version number, which decides whether a line or a link is shown and reaches no turn. Reaches `agent` for the state directory's helpers and `session` for the audit trail its ask is recorded in. See [updates.md](updates.md) |
+| `bravebot-diag` | The diagnostic log: what went wrong, as hosts, counts and words, never content | none | Not presentation: draws nothing and links no terminal library. Write-only, with no function that reads a log back, and no field that can hold a string of unknown origin. Keeps its own copy of the state directory's modes rather than depending upward on `agent`. See [diagnostic-log.md](diagnostic-log.md) |
+| `bravebot-skus` | Signs in to OpenAI with a ChatGPT account through a browser, and signs in to xAI with a SuperGrok subscription through a code | none | Auth only. Carries no workspace content and no model output. Keeps its own HTTP client, over a transport its caller states, and follows no redirect in the ChatGPT and xAI sign-ins. Holds the file the two sign-ins keep their tokens in and the renewal of an access token, which each states itself to. Verifies the sign-in's ID token against the authorization server's key set, fetched with no credential. Listens on the loopback address for the browser's redirect and nowhere else. Starts no browser: `bravebot-cli` starts it, and depends on `bravebot-sandbox` for that, and for the desktop window's sign-in the window's main process opens it at the address the bridge hands it. Its `test-hosts` feature, which only `[dev-dependencies]` enable and a release build refuses to compile, lets a variable name a stand-in for the hosts of each sign-in ([CHATGPT-2](chatgpt-sign-in.md#CHATGPT-2), [XAI-1](xai-sign-in.md#XAI-1)). Holds the state directory's file helpers: the directory, a file created private to the account, which `bravebot-agent` also writes the gateway keys and the premium key with, for both `bravebot-cli` and the desktop bridge, a write that replaces a file by rename, and the claim a writer holds ([state-directory.md](state-directory.md)). The ChatGPT sign-in needs a crate of its own if it comes to need the secret type of `bravebot-config` or the clearing of buffers in `bravebot-sandbox`, which this crate spells for itself, and [CHATGPT-5](chatgpt-sign-in.md#CHATGPT-5) rests on the dependency set either way. See [chatgpt-sign-in.md](chatgpt-sign-in.md) and [xai-sign-in.md](xai-sign-in.md) |
+| `bravebot-ui-bridge` | Drives a turn for the graphical front end, over newline-delimited JSON on a pipe | `core`, `agent`, `aichat`, `approval`, `backtrace`, `config`, `diag`, `filetype`, `i18n`, `mentions`, `net`, `sandbox`, `schedule`, `session`, `skus`, `stamp`, `update` | Not presentation: draws nothing and links no terminal library, because the surface it serves is a renderer in another process. Owns the opt-in session view transitions described in [session-view.md](session-view.md). Provides `control_link`, which starts a host-chosen client over an anonymous socket pair, and the host that serves such a client and keeps its sessions ([local-host.md](local-host.md)). Serialises labelled values across the transport without inspecting them, and carries the label with the content rather than dropping it at the boundary. Composes no request to a service and decodes no reply from one: what a service serves is asked of the crate that speaks to it, so a field two front ends want differently widens that crate rather than being assembled here. Only the transport binaries, `bravebot-rpc`, `bravebot-acp` and `bravebot-host`, write to stdout or end the process, since a stray print elsewhere would interleave with the protocol. Also serves an editor over the Agent Client Protocol, as a projection of the same session ([acp.md](acp.md)). The loop that does so, `acp_loop::serve`, takes the reader and the writer it is given, prints nothing and never ends the process, so `bravebot-acp` and `bravebot acp` in `bravebot-cli` run the same one. Tells the window what a dropped file is by its name with `filetype`, as the terminal decides it, and builds the note for one too large to attach with `i18n`, in `en-US` because the window is in English only. Sends each question of a series with where it stands, worded with `i18n` as the picker words it, and whether settling it ends the series, which `Asking::ends_at` in `core` decides, so the window keeps which question it is on and counts none ([ASK-6](tools/ask-user.md#ASK-6)). Reads the `@` names out of a prompt a person sent with `mentions`, as the terminal does, and adds one to a turn's files only once the agent's own read of a named file has surveyed it; a prompt a front end or the agent composed names none. Reaches `skus` for the window's own sign-in to a ChatGPT or xAI account, from one file, over the transport `net` resolved, and tells the window only a closed outcome and what a person acts on ([CHATGPT-15](chatgpt-sign-in.md#CHATGPT-15), [XAI-20](xai-sign-in.md#XAI-20)). Its tests also enable the `test-hosts` feature, so a test of what the bridge sends and keeps for a failed ChatGPT turn can sign in to a stand-in ([CHATGPT-2](chatgpt-sign-in.md#CHATGPT-2)). Reaches `diag` for the log `bravebot-rpc` writes and the bug report's format, which the terminal's report shares, and `update` for whether a newer release is recorded, which the window is told as a yes or no ([UPDATE-12](updates.md#UPDATE-12)). See [naming-files.md](naming-files.md#NAME-9) |
+| `bravebot-ui-files` | Reads and writes the files the graphical front end is asked to open, under a directory it is handed | `filetype` | Reads and writes only under a directory its caller pins, resolving each path component relative to it and never following a link, so a path cannot leave the tree a person opened. Runs no command and hands nothing to a turn. The walk is `openat` on POSIX and `NtCreateFile` relative to a handle on Windows, the one native call there that opens relative to a directory. Which directories may be pinned is [trust-map.md](trust-map.md)'s question rather than this document's |
+
+`verified-by: bravebot_cli::layering::every_workspace_member_is_a_row_in_the_layering_table`
+`verified-by: bravebot_cli::layering::a_rows_dependency_list_is_what_the_manifest_asks_for`
+`verified-by: bravebot_cli::layering::a_crate_that_draws_nothing_reaches_no_terminal_library`
+`verified-by: bravebot_cli::layering::the_kernel_and_the_file_type_crate_do_no_io_and_print_nothing`
+`verified-by: bravebot_cli::layering::the_io_scan_sees_a_grouped_import_a_macro_and_skips_tests_and_comments`
+`verified-by: bravebot_cli::layering::the_ui_files_helper_starts_no_process`
+`verified-by: bravebot_cli::layering::the_process_scan_sees_a_grouped_import_and_a_command_and_skips_tests_and_comments`
+
+<a id="LAYER-2"></a>
+### LAYER-2: `bravebot-core` and `bravebot-agent` are both the driver
+
+Relocating a decision from one into the other does not remove it. A branch on untrusted bytes is
+a violation wherever it sits.
+
+**Why.** The dependency graph makes `core` look like the safe place to put things, and it is not.
+The kernel is where decisions derived from content are *taken*, not where they become allowed.
+
+`verified-by: by-construction (a labelled value exposes no accessor for its contents, so reading one takes either a witness the policy layer alone mints or a conversion that refuses anything not already trusted and public, and labels.md pins that witness's use file by file across both crates, and check-spec fails on a use written in a form the count cannot read, so a release of the bytes added in the kernel moves a pinned count rather than escaping one, while a decision taken from bytes an already counted release produced, inside a function that holds one, moves none and is found by reading the diff as reviewing-for-the-rule.md describes; the one thing a labelled value answers without a witness is how many bytes it holds, which is a number labels.md already shows the planner)`
+`verified-by: by-construction (the one class of untrusted bytes the kernel holds outside a labelled value is the address a slot carries, which is a bare string, so every accessor returning one takes a witness minted only inside the policy module, bar the single gate that releases the sentence for the screen asking about the slot, and labels.md pins their uses file by file as well; a decision on a slot's address relocated into another module of bravebot-core either does not compile or moves that one gate's pinned count, and one relocated into the policy module moves a pinned count only where it adds a use of a witness, since the counts pin releases and not the decisions taken from what they released)`
+
+<a id="LAYER-3"></a>
+### LAYER-3: presentation crates display untrusted content on purpose
+
+`bravebot-tui` and `bravebot-cli` show quarantined content to the person watching. A terminal is
+not a context, and an agent that will not say which file it is working on has protected nobody.
+Everything shown is marked with a margin the renderer draws, and has its control characters
+replaced, so the content cannot draw its own. A complete colour code in output drawn for reading is
+taken out and counted instead ([VIEW-30](terminal-transcript.md#VIEW-30)).
+
+`verified-by: bravebot_tui::marking::quarantined_content_cannot_paint_its_own_margin`
+`verified-by: bravebot_tui::render::quarantined_content_is_shown_and_marked_on_every_line`
+`verified-by: bravebot_cli::progress::quarantined_content_is_shown_and_marked_on_every_line`
+`verified-by: bravebot_cli::progress::quarantined_content_cannot_paint_its_own_margin`
+`verified-by: bravebot_cli::layering::every_presentation_crate_is_named_by_the_clause_that_marks_content`
+`verified-by: bravebot_cli::progress::a_dropped_rule_and_the_file_it_was_written_in_are_described_as_pictures`
+`verified-by: bravebot_cli::running::doctor_draws_the_control_characters_of_a_checkouts_settings_as_pictures`
+`verified-by: bravebot_cli::running::a_one_shot_run_draws_the_control_characters_of_a_checkouts_rule_as_pictures`
+`verified-by: bravebot_cli::running::permissions_check_draws_the_control_characters_of_a_checkouts_rules_as_pictures`
+`verified-by: bravebot_cli::running::a_session_in_lines_draws_a_checkouts_settings_as_pictures_before_the_startup_question`
+`verified-by: bravebot_cli::main::a_trail_line_draws_the_control_characters_of_a_checkouts_names_as_pictures`
+`verified-by: bravebot_cli::running::a_traced_run_draws_the_control_characters_of_a_checkouts_file_names_as_pictures`
+`verified-by: bravebot_cli::main::the_words_written_beside_the_reply_draw_a_checkouts_names_as_pictures`
+`verified-by: bravebot_cli::progress::the_lines_of_a_call_draw_a_checkouts_names_as_pictures`
+`verified-by: bravebot_cli::progress::a_call_line_draws_a_targets_control_characters_as_pictures`
+`verified-by: bravebot_cli::main::a_pick_set_aside_or_refused_draws_its_name_and_reason_as_pictures`
+`verified-by: bravebot_cli::main::a_stored_manifest_report_draws_its_text_as_pictures`
+`verified-by: bravebot_cli::main::the_resume_hint_draws_the_directory_it_names_as_pictures`
+`verified-by: bravebot_cli::main::the_complaint_about_a_model_not_served_draws_the_served_name_as_pictures`
+`verified-by: bravebot_cli::plain::the_opening_lines_draw_a_model_name_and_a_refusal_as_pictures`
+`verified-by: bravebot_cli::plain::the_kept_answer_line_draws_the_paths_it_names_as_pictures`
+`verified-by: bravebot_cli::running::a_one_shot_run_draws_the_control_characters_of_a_definitions_names_as_pictures`
+`verified-by: bravebot_cli::running::a_session_in_lines_draws_the_control_characters_of_a_definitions_names_as_pictures`
+`verified-by: bravebot_tui::render::transcript::the_trail_a_person_opens_draws_a_checkouts_names_as_pictures`
+`verified-by: bravebot_cli::running::doctor_draws_a_vouched_projects_skill_keys_and_directory_name_as_pictures`
+`verified-by: bravebot_cli::running::the_output_schema_refusal_draws_the_model_it_names_as_pictures`
+`verified-by: bravebot_agent::scratch::a_directory_that_cannot_be_made_is_the_systems_error_and_names_no_path`
+`verified-by: bravebot_cli::running::doctor_draws_the_model_the_settings_name_as_pictures`
+`verified-by: bravebot_cli::running::the_refusal_of_a_definitions_model_draws_the_definitions_name_as_pictures`
+`verified-by: bravebot_cli::running::the_sign_in_commands_draw_the_endpoint_the_configuration_quotes_as_pictures`
+`verified-by: bravebot_cli::running::the_refusal_of_a_directory_that_is_a_file_draws_its_name_as_pictures`
+`verified-by: bravebot_cli::plain::a_turn_that_could_not_run_is_said_beside_the_reply_drawn_as_pictures`
+`verified-by: bravebot_cli::model::the_managed_refusal_draws_the_model_and_the_file_as_pictures`
+`verified-by: bravebot_cli::running::the_off_schema_complaint_draws_the_property_it_names_as_pictures`
+`verified-by: bravebot_cli::running::a_sign_in_that_cannot_be_forgotten_draws_its_path_as_pictures`
+`verified-by: bravebot_cli::running::doctor_draws_the_endpoint_the_configuration_quotes_as_pictures`
+`verified-by: bravebot_cli::chatgpt::a_failure_of_the_file_is_worded_with_its_detail_made_printable_and_the_remedy`
+`verified-by: bravebot_cli::xai::a_file_that_cannot_be_used_is_a_sentence_with_the_remedy_and_a_detail_that_is_one_line`
+
+<a id="LAYER-4"></a>
+### LAYER-4: a crate root says what it does about unsafe
+
+Every crate root declares `#![forbid(unsafe_code)]`, or `#![deny(unsafe_code)]` with an
+`#[allow(unsafe_code)]` at each site that needs one. A library, a binary, an example, a benchmark
+and a build script are each a crate root, and a `cfg(test)` module is part of the crate it sits in,
+so an `unsafe` block there is one of the crate's own and is named the same way.
+
+**Why.** Nearly every crate here contains no `unsafe` at all. Undeclared, that is a property
+nothing records: it holds by accident, and the first `unsafe` to arrive arrives silently. Declared,
+the compiler decides it, and what a reviewer reads is the sites that name themselves rather than
+every crate in the workspace. Four crates name sites: `bravebot-sandbox`, whose landlock
+syscalls and whose Win32 calls creating a process inside a container are its reason for existing,
+and which also makes the calls on this process's own limits and pages that a crate holding a
+credential forbids itself ([CRED-23](credential-protection.md#CRED-23)),
+`bravebot-skus`, which asks Windows for the access-control list that
+keeps the ChatGPT and xAI sign-ins, the gateway keys `bravebot auth login gateway` stores and the
+premium key `bravebot auth login brave` stores to one account ([CHATGPT-6](chatgpt-sign-in.md#CHATGPT-6),
+[XAI-5](xai-sign-in.md#XAI-5), [CLI-18](cli.md#CLI-18), [PREM-14](premium-credentials.md#PREM-14)), and whose
+tests point `HOME` at a scratch directory, and `bravebot-agent`, which asks Windows for its own
+version ([INSTR-9](instructions.md#INSTR-9)) in the one call a platform states that in, and
+`bravebot-ui-files`, whose Windows walk opens, renames and removes relative to a handle in calls
+only the native API offers. `bravebot-fuzz`, a workspace of its own that the tests below do not
+read, names one site: the counting allocator its `event_stream` target measures with
+([fuzzing.md](../development/fuzzing.md)). Taking `deny` where `forbid` would do is the way the rule
+is kept in letter and lost in substance, because `deny` is the one an `allow` added later reopens.
+
+`bravebot-sandbox` additionally denies `clippy::undocumented_unsafe_blocks` at its library root and
+at `tests/windows.rs`, so each of its `unsafe` blocks carries a `// SAFETY:` comment. The other
+crates that name sites do not. A test in `bravebot-cli` checks that the attribute is present at
+every root of the sandbox crate that contains `unsafe`, and clippy on the three lint targets
+enforces the comments.
+
+`verified-by: bravebot_cli::unsafe_code::every_sandbox_root_that_has_unsafe_denies_undocumented_blocks`
+`verified-by: bravebot_cli::unsafe_code::every_crate_root_says_what_it_does_about_unsafe`
+`verified-by: bravebot_cli::unsafe_code::the_rule_reaches_every_example_and_benchmark_beside_a_crate`
+`verified-by: bravebot_cli::unsafe_code::a_crate_that_exempts_nothing_forbids_rather_than_denies`
+`verified-by: bravebot_cli::unsafe_code::allowing_unsafe_at_a_root_is_not_a_declaration`
+
+<a id="LAYER-5"></a>
+### LAYER-5: the marking rule is addressed to a surface, not to a crate
+
+Anything that puts released content in front of a person marks it, whether it is a crate in this
+workspace or a program elsewhere that links these crates. A surface can only mark content it can
+still tell apart, so whatever carries content to one carries the label with it: a boundary that
+drops the label has not lost a detail, it has made the content trusted by moving it.
+
+**Why.** The crates here offer no compatibility promise, so a program outside this workspace that
+links them links internal APIs across a pin of its own choosing, and a pin is not a contract. The
+break it defers is found by whoever next moves it rather than by the change that caused it, and the
+same distance applies to the marking: a rule written about the crates in this repository holds for
+the terminal and says nothing about the screen most people are looking at. Written about surfaces,
+it is a rule a second front end can be held to, which is the most this document can do about one it
+does not compile.
+
+**The desktop renderer is such a surface, and it is in this repository.** `ui/` is a React front
+end over [LABEL-10](labels.md#LABEL-10)'s transport, built by `npm` rather than by this workspace,
+so no row of LAYER-1's table reaches it and no Rust test renders it. Markup gives content two
+escapes a terminal does not have, so the marking rule reaches it as three properties rather than
+one:
+
+- **Released content is marked by a container the renderer draws, and cannot produce a second
+  one.** A quarantined preview sits inside a block whose head says `confined` and names the origin
+  and whose foot states the reach; an untrusted write is marked on the card. Content reaches the
+  tree as a text child rather than as markup, so its own spelling of that chrome is drawn as the
+  characters it is: neutralised rather than dropped, for the reason the terminal neutralises an
+  escape rather than removing it. A question whose turn ended before anybody answered it is drawn
+  as the card it was: it loses the controls, because the channel the answer would go down is gone,
+  and it keeps everything that marks its content, because a turn ending declassifies nothing.
+- **Content reaches no raw markup.** No plugin turning HTML in released content into elements is
+  installed, and nothing in the front end hands an element `dangerouslySetInnerHTML` or assigns
+  `innerHTML`. That is what makes the property above a property of the renderer rather than of
+  what the content happens to hold. An absence is checked as one rather than remembered: the test
+  named below reads every source under `ui/src` and the dependencies `ui/package.json` declares.
+  What is forbidden is the use rather than the word: `src/main/export.ts` names the route in the
+  paragraph explaining why the PDF window exists, and a rule against writing that down would cost
+  more than it bought.
+- **Nothing content renders makes the app fetch.** An image in released content is never an
+  `<img>`, and no element the renderer draws around such content carries an attribute a browser
+  resolves without being asked: no `src`, no `srcset`, no `url(` inside a style. So nothing
+  leaves the machine unless the person picks it, and what they may pick is bounded as well.
+  Following a link leaves the app only where a URL parser reads its scheme as `http:`, `https:` or
+  `mailto:`, and a relative path is not a link out at all: it becomes a preview inside this window,
+  and only where the path stays within the project. This is the question a terminal never had to
+  answer, and the answer is a capability rather than a decoration: the main process answers a
+  window-open by handing the URL to the operating system.
+
+Formatting is part of the marking rather than beside it. Markdown is applied to the assistant
+bubble and to nothing else, so a heading or a bold run is itself a statement that these words came
+from the planner. Giving quarantined content that vocabulary would hand it the signals the reader
+is meant to trust, an inch above them.
+
+`verified-by: bravebot_cli::layering::every_presentation_crate_is_named_by_the_clause_that_marks_content`
+`verified-by: by-construction (a surface this workspace compiles is one of its crates, and the test above holds the clause naming them to every row of the table whose constraint opens on presentation, in both directions; the desktop renderer is not one of its crates and is pinned instead by ui/scripts/marking.test.mjs, which renders the real components through react-dom and asserts the three properties above on the markup that comes out, for every kind of entry the transcript has and for each of those both as a live card and as one whose turn ended unanswered; the set of kinds is read out of the Entry union in transcript.ts rather than listed by hand, so a kind added without a card drawn for it fails the test, and one that shows no released content is recorded there with the reason, which is the half no grep decides; the second property is asserted as the absence it is stated as, over every source under ui/src and the dependencies ui/package.json declares; and make check-ui and the Front end CI job both run all of it, while the governs list above holds the file's existence to make check-spec; a surface in neither place has no run to check, which is the known cost below)`
+
+<a id="LAYER-6"></a>
+### LAYER-6: what a message is comes from the record, not from its words
+
+A conversation holds messages composed rather than typed: a file somebody named, put in front of
+the planner as a user-role message, a watch that fired while no turn was running to notice it, a
+prompt a front end sent on its own account rather than on anybody's instruction, and the messages
+the agent writes for the planner alone: a tool result sent as prose, the note a resume adds, the
+summary a compaction leaves, and a nudge, a report or a notice written between rounds, as well as a
+line it writes for a turn nobody typed, the standard input a run was given and the output of a shell
+line a person ran. Each is recorded
+with a tag saying which it is, the tag rides beside the message rather than inside it so that no
+part of it reaches a backend, and a surface drawing the conversation back decides what to draw from
+the tag. Reading the words to decide instead is a
+violation, even where those words are the agent's own. A surface whose transcript has no row of its
+own for a tag draws the message plainly, which is why the record reports the words beside the tag;
+what crosses to a surface in another process is the tag alone, since a client offered both is offered
+the choice this removes.
+
+**Why.** The words of an attached message are a line the agent wrote followed by the file's own
+bytes. A surface recognising the message by that line hands whoever wrote the file the choice of
+which row it appears as, the rows the interface draws about itself included, which reopens one level
+up the escape [LAYER-5](#LAYER-5) closes for chrome. It decides a count as well: the places a
+conversation may be cut are the prompts a person typed, so a surface taking a composed message for a
+prompt, or a typed prompt for a composed one, numbers them differently from the agent and cuts in the
+wrong place or refuses a cut that was asked for. A tag the composer writes leaves the choice with the
+composer, which is the discipline [labels.md](labels.md)'s transport already follows everywhere else:
+what crosses is the discriminant, never prose for a reader to parse.
+
+The tags the agent writes are its account of what a turn did, so a front end may name the tag for
+a prompt it composed itself and may name none of the agent's: one that could would be choosing the
+row a line a person typed is drawn as, by another route. A request naming a tag it may not have is
+refused rather than sent untagged, since an untagged prompt is drawn as one somebody typed.
+
+A record written before the tag existed holds a bare message where this holds a message and a tag,
+and reads as a message nobody composed, which is what it was. A tag a surface draws no row of its own
+for, because the build does not recognise it or because that transcript has no such row, is drawn as
+a plain message and never as a row the interface writes itself, since such a row asserts something
+about the conversation that the build cannot check; drawn rather than dropped, since a message a
+transcript leaves out silently is the failure the tags exist to prevent, and for a file read into a
+turn it is the context that turn worked from.
+
+`verified-by: bravebot_agent::turn::a_file_the_turn_admits_is_recorded_as_a_message_the_agent_composed`
+`verified-by: bravebot_agent::turn::a_prompt_the_agent_composed_is_recorded_as_one`
+`verified-by: bravebot_agent::turn::a_prompt_the_driver_wrote_is_recorded_as_one`
+`verified-by: bravebot_agent::turn::the_nudge_for_a_spent_tool_budget_is_not_a_prompt`
+`verified-by: bravebot_agent::conversation::a_message_the_agent_composed_is_recorded_as_one`
+`verified-by: bravebot_agent::conversation::the_tag_is_not_part_of_what_the_planner_is_sent`
+`verified-by: bravebot_agent::conversation::a_record_written_before_the_tag_still_reads`
+`verified-by: bravebot_agent::conversation::a_typed_prompt_that_opens_like_a_note_is_still_a_prompt`
+`verified-by: bravebot_agent::conversation::a_typed_prompt_that_opens_like_a_note_is_a_place_to_cut`
+`verified-by: bravebot_ui_bridge::wire::a_message_the_agent_composed_crosses_as_a_tag_and_no_prose`
+`verified-by: bravebot_ui_bridge::wire::a_prompt_a_front_end_composed_crosses_as_a_tag_and_no_prose`
+`verified-by: bravebot_ui_bridge::wire::a_front_end_may_name_its_own_tag_and_none_of_the_agents`
+`verified-by: bravebot_tui::state::a_replayed_composed_message_is_drawn_as_the_message_it_was`
+`verified-by: bravebot_ui_bridge::fork::a_file_the_agent_put_in_front_of_the_planner_is_not_a_prompt`
+`verified-by: bravebot_ui_bridge::fork::a_prompt_that_reads_like_a_composed_message_is_still_where_the_cut_lands`
+`verified-by: bravebot_ui_bridge::fork::a_typed_prompt_that_opens_like_a_note_is_a_fork_point`
+`verified-by: by-construction (the desktop renderer is not a crate this workspace compiles, so it is pinned instead by ui/scripts/ux-state.test.mjs, which loads the real transcript module and asserts that a tagged message is drawn from its fields, that a typed prompt imitating one, the app's own house-keeping included, is drawn as the prompt somebody typed and keeps the ordinal a fork of it cuts on, that a tag the build does not know is quoted rather than dropped, and that the two places counting prompts count the same list; make check-ui and the Front end CI job both run it, while the governs list above holds the file's existence to make check-spec)`
+
+## Open questions
+
+- **How the reach of [LAYER-5](#LAYER-5) is closed for a surface in another repository.** The desktop
+  renderer answers it for one in this repository and the answer does not travel: it lands inside the
+  paths this spec governs, so a diff under it is read against this clause, and it carries a test
+  runner of its own, so a CI job decides it. For a surface elsewhere, one built as a workspace
+  member lands inside those paths too and has to gain a row and a test before it compiles; a
+  published interface with a specified transport supplies instead the compatibility promise the pin
+  does not, and keeps the two release cadences apart. Both answer the clause and they differ in
+  everything else, and what decides between them is who maintains what rather than anything here.
+- **Whether the record should hold the types the front end holds in memory.** `bravebot-session`
+  declares its own structs for what it writes, which is what lets a struct on disk outlive the shape
+  of a struct in memory, and several of them are the interface's own live state as well: the
+  questions asked beside a session, the turns a rewind can go back to and the snapshot each of those
+  carries, the turns a resume replays, and a prompt in the recalled history. Those are the record's
+  types being used as the interface's, which is the coupling a second front end would find rather
+  than the serialiser being asked to hold the terminal's idea of a turn. Splitting them puts a second
+  definition of each under the front end with a conversion between the two; leaving them is a shape
+  the next front end inherits.
+
+## Known costs
+
+- **A front end composes one request of its own.** The rule is that it composes none: asking a
+  service what it serves belongs to the crate that speaks to that service, and a front end asks that
+  crate. One listing path does it anyway, assembling the request, choosing between a narrow and a
+  wide route, and decoding the answer, all of which already exist in the crate for that service. It
+  was copied because the shared version returns less than a graphical picker draws, which is a reason
+  to widen that function rather than to fork the road to it.
+
+  What it costs is not the duplication. Decoding a reply off the network is a declassification, so
+  [labels.md](labels.md) pins a guarded symbol to a front-end crate that would otherwise hold none,
+  and the entry stands for as long as the fork does. Tracked as
+  [issue #574](https://github.com/brave/bravebot/issues/574).
+
+- **A crate root says nothing about the test binaries beside it.** A file under `tests/` is its
+  own crate that no root attribute reaches, so the `unsafe` in `bravebot-agent`'s and
+  `bravebot-tui`'s test helpers sits outside what LAYER-4 decides. Nothing in such a file ships,
+  and covering them would take an attribute per file with nothing to keep a new file honest, which
+  is the accident LAYER-4 exists to remove.
+
+- **`bravebot-net` is not the only crate that opens a socket.** `bravebot-skus` builds HTTP clients of
+  its own, one for the ChatGPT sign-in and one for the xAI sign-in, without putting anything to the
+  policy gate. The ChatGPT sign-in's carries a code, a verifier and tokens to OpenAI's authorization
+  server, and fetches its key set with none ([CHATGPT-5](chatgpt-sign-in.md#CHATGPT-5)). The xAI
+  sign-in's carries a device code and tokens to xAI's ([XAI-1](xai-sign-in.md#XAI-1)). Neither
+  carries workspace content or model output, so no labelled value escapes the gate. LAYER-3 is worded as "all agent
+  traffic" for that reason. A second egress that ever carried content would be a violation. What
+  those clients trust and what they go through is not their own: the ChatGPT and xAI sign-ins and
+  the renewal of an access token are handed a transport configuration by the caller, which is
+  `bravebot-agent` or `bravebot-cli` and depends on `bravebot-net` already. That is the one thing
+  about the clients that must not differ ([NET-7](network-egress.md#NET-7),
+  [NET-8](network-egress.md#NET-8), [NET-11](network-egress.md#NET-11)), since a machine states one
+  certificate authority, one route off it and one client certificate, not one per client. The client
+  certificate is the exception to passing it to every client: it is presented only by a provider
+  request marked `with_client_certificate`, and only to the socket of that request's URL, so the
+  `bravebot-skus` clients present none. Passing it
+  in rather than depending on `bravebot-net` keeps this crate at no dependencies, which is what makes
+  "auth only" checkable by reading its manifest. What each client does with a redirect is the egress
+  register's ([network-egress.md](network-egress.md#known-costs)): the ChatGPT and xAI clients follow none.
+
+- **What the desktop renderer is held to is not in `make check`.** The properties
+  [LAYER-5](#LAYER-5) and [LAYER-6](#LAYER-6) state for it are asserted by Node tests rather than
+  Rust ones, so they are gated by `make check-ui`, which is in `check-all` and not in `check`. A
+  renderer change that drops the marking, or that goes back to reading a message's words to decide
+  what a row is, therefore passes the check a commit is expected to pass.
+
+- **A front end in another repository reaches nothing here.** The clause about marking is addressed
+  to any surface, and the surfaces checked against it are the crates in this workspace and the
+  renderer beside them. A front end elsewhere that links these crates is governed by nothing
+  written down, and whether it marks what it displays is not a thing this repository can state
+  either way. Markup is where that costs most, because its escapes are ones a terminal does not
+  have: content that reaches raw markup, a link or a remote resource can draw its own container and
+  can leave the machine, so a margin is the first of three questions rather than the whole of one.
+
+- **Reading a session record still links the agent.** `bravebot-session` links no terminal library,
+  which is what a second front end wanted from the move, and it is not a leaf: a record holds what a
+  turn produced, so the conversation, the backups a rewind can restore and the timing are
+  `bravebot-agent`'s types, and `bravebot-agent` reaches `bravebot-net` and `bravebot-sandbox`. A
+  program that only wants to list what sessions exist therefore links the turn loop. Declaring the
+  record's own version of each of those types would cut the edge and put a second definition of
+  every one of them under this crate, which is a copy to keep in step for a caller nothing has yet
+  asked for.

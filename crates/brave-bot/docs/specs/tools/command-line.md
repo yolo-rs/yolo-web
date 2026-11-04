@@ -1,0 +1,1015 @@
+---
+id: CMDLINE
+title: command lines
+status: proposed
+governs:
+  - crates/agent/src/cmdline.rs
+  - crates/agent/src/exec.rs
+  - crates/agent/src/tools.rs
+  - crates/agent/src/tools/offered.rs
+  - crates/agent/src/turn.rs
+  - crates/agent/src/turn/hooked.rs
+  - crates/agent/src/turn/result.rs
+  - crates/agent/src/turn/delegate_end.rs
+  - crates/agent/src/turn/setup.rs
+  - crates/agent/src/turn/round_steps.rs
+  - crates/agent/src/turn/prompts.rs
+  - crates/agent/src/turn/task.rs
+  - crates/agent/src/turn/sentences.rs
+  - crates/agent/src/programs.rs
+  - crates/core/src/command.rs
+  - crates/core/src/pure.rs
+  - crates/core/src/permissions.rs
+  - crates/core/src/policy.rs
+  - crates/agent/src/confirm.rs
+  - crates/tui/src/confirm.rs
+  - crates/tui/src/confirm/run.rs
+  - crates/ui-bridge/src/wire.rs
+guards:
+  - symbol: cmdline::compile
+  - symbol: Policy::before_plan
+  - symbol: Policy::read_output
+documented-by: docs/website/docs/reference/tools.md
+---
+
+## Scope
+
+Letting the planner express a command the way a person would write one, and what that costs.
+Replaces the argv-array surface of [run.md](run.md) as the planner's spelling, keeps every effect
+that spelling had, and adds the three things its absence made impossible: filtering at the source,
+reading a result without a second round trip, and running something long without holding the turn.
+
+Shell mode, the `!` prompt, is [shell-mode.md](../shell-mode.md) and is untouched. It runs a line
+through a real shell because a person typed it. Nothing here does that.
+
+## The parity target
+
+What the equivalent tool in Claude Code offers, as the list this spec is measured against:
+
+| | Claude Code | `run` today | This spec |
+|---|---|---|---|
+| Command spelling | one shell string | array of argv stages | one command line, compiled |
+| `\|`, `&&`, `\|\|`, `;` | yes | pipe only | yes |
+| Redirection | yes | no | yes, as a write destination |
+| Globs | yes, by the shell | no | yes, by the harness |
+| `$(...)`, backticks | yes | no | **refused** |
+| `$VAR` | yes | no | **refused** |
+| Output to the model | direct text | reference, then a second call | direct where the label allows |
+| Truncation | head and tail kept | none | head and tail kept |
+| Deadline | per call, 2min default, 10min ceiling | fixed 300s | per call, ceiling |
+| Background | yes, wakes on exit | no | yes, wakes on exit |
+| Working directory | persists between calls | per call | persists between calls |
+| Shell state (`export`, functions) | does not persist | n/a | does not persist |
+| Permission rules | per sub-command prefix | per stage | per compiled stage |
+
+The two rows in bold are where parity is refused on purpose, and [CMDLINE-2](#CMDLINE-2) says why.
+Everything else is adopted.
+
+## Why the shell exclusion said never, and what changes
+
+[shell-mode.md](../shell-mode.md) ends with a clause saying the planner gets no shell tool, ever,
+"not behind a capability, not behind an approval prompt". [run.md](run.md) gives the reasoning:
+a shell string is destination and payload at once, so there is nothing in it a person could
+approve on its own, and a parser that tried to work out what it means would be racing a shell it
+does not control.
+
+Both halves of that are about **handing a string to an interpreter**. Neither is about the
+syntax. The move here is to keep the ban on the interpreter and drop the ban on the notation:
+
+> The planner does not get a shell. It gets shell **syntax**, which the harness compiles into the
+> same argv stages `run` executes today, and refuses to compile when it cannot say exactly what
+> would happen.
+
+Nothing is ever passed to `sh -c`. The compiled plan is what runs. Each stage is spawned with an
+argument vector by the absolute path its name was found by, after a check that the path still leads
+to the binary it resolved to, through the same process plumbing as today. So:
+
+- **The routing field exists again.** It is the compiled plan: a list of stages with resolved
+  binaries and literal argv, plus every file the plan would write. That is a thing a person can
+  read and endorse, which is the property [run.md](run.md) protects by having a person endorse
+  argv, and the property a raw string lacked.
+- **The parser is not racing anything.** It is not predicting what a shell will do with a string,
+  because no shell will ever see the string. It is the only thing that reads it, and its output is
+  the whole of what happens.
+- **Ambiguity is refused, never guessed.** A construct the compiler cannot fully resolve is an
+  error, and there is no path from that error to running the line anyway.
+
+The distinction to hold onto is the same one `run.md` already draws, moved one step: it is not
+that shell strings turned out to be acceptable, it is that the exclusion was about *interpretation*
+and a compiled plan is not interpreted.
+
+## Clauses
+
+<a id="CMDLINE-1"></a>
+### CMDLINE-1: the planner sends a command line, and it is compiled rather than interpreted
+
+```
+run { command: "grep -rn kBraveWalletDisabledByPolicy components/ | head -30" }
+```
+
+The line is parsed by this repository's own grammar into an ordered plan of stages, each a
+resolved absolute path and a literal argument vector, together with the plan's write set, its read
+set, and its control flow. That plan is what executes, through the existing argv spawner. No shell
+is started at any point, and no part of the line is ever concatenated back into a string that
+something else parses.
+
+An argument that survives compilation is final. `; rm -rf /` inside quotes is one argument and
+arrives as one argument, because the only thing that ever split the line was the compiler, and it
+already ran.
+
+`verified-by: bravebot_agent::tools::run_takes_one_command_line_and_nothing_else`
+`verified-by: bravebot_agent::turn::a_line_with_a_pipe_is_compiled_into_its_steps`
+`verified-by: bravebot_agent::exec::a_command_line_runs_as_the_plan_it_compiled_to`
+`verified-by: bravebot_agent::exec::a_command_line_chains_its_steps`
+`verified-by: bravebot_agent::exec::a_metacharacter_inside_quotes_reaches_the_program_as_one_argument`
+`verified-by: bravebot_agent::exec::a_redirection_inside_quotes_writes_no_file`
+`verified-by: bravebot_agent::cmdline::a_step_carries_the_file_its_name_resolved_to`
+
+<a id="CMDLINE-2"></a>
+### CMDLINE-2: the grammar is closed, and a refusal is never a fallback
+
+Accepted, and nothing else:
+
+| Construct | Form |
+|---|---|
+| Simple command | `word...` |
+| Pipeline | `cmd \| cmd \| …` |
+| Sequencing | `&&`, `\|\|`, `;` |
+| Grouping | `( … )` for sequencing only, no subshell semantics |
+| Quoting | `'…'`, `"…"`, `\` |
+| Redirection | `>`, `>>`, `<`, `2>`, `2>>`, `2>&1`, `&>` with a literal target |
+| Globs | `*`, `?`, `[…]`, `**` in operand position |
+| Brace expansion | `{a,b}`, `{1..9}` |
+| Home | leading `~` |
+| Per-command environment | `NAME=literal cmd` |
+
+Refused, as a compile error with the offending span named:
+
+| Construct | Why |
+|---|---|
+| `$(…)`, `` `…` `` | a command whose text is computed is a destination nobody saw; inside double quotes it is still one, and the refusal says single quotes pass it as text |
+| `<(…)`, `>(…)` | same, plus a file descriptor nobody named |
+| `$VAR`, `${…}` | the value is not in the line, so the plan is not in the line; a `$` followed by no name, brace, parenthesis, special parameter or quote (the end anchor in `grep -E "x$"`) is an ordinary character, and a literal one before a name is written `'$'` or `\$` |
+| `$?` | the exit status of an earlier step is not in the line; the refusal names the whole `$?` and says the run result already reports how each step ended ([RUN-13](run.md#RUN-13)) and that single quotes pass the characters as text |
+| `$$`, `$@`, `$*`, `$#`, `$-`, `$!` | no shell holds parameters between the steps of a line, so there is no value for these to stand for; the refusal names both characters and says single quotes pass the text as one argument |
+| `$'…'`, `$"…"` | a quote after a `$` asks a shell to read escapes, and escapes are not read; the refusal names the whole quoted text (to the end of the line where it is never closed, a backslash keeping the next character inside it) and says a newline comes from a file or from standard input |
+| `$((…))` | arithmetic is a language, and a language needs an interpreter; inside double quotes it is still one, and the refusal says single quotes pass it as text |
+| `&` | backgrounding is a parameter of the call, not a token in the line |
+| `<<`, `<<<` | here-documents are content wearing the shape of syntax |
+| `eval`, `source`, `.`, `exec`, `trap` | reintroduce interpretation by name |
+| `cd`, `pushd`, `popd`, `export` | each stage is spawned fresh, so a stage of these names changes nothing for the stages after it; the refusal says the call's `directory` argument is how a line runs elsewhere and that `NAME=value` in front of a program sets a variable for it |
+| `ulimit`, `umask`, `unset`, `alias`, `unalias`, `hash`, `wait` | each is a shell builtin whose effect stays in the shell that runs it, and a host may ship a program of the name that runs it in a shell of its own and exits zero; a stage of these names changes nothing for the stages after it, in any form including a read. The refusal says so and, for `ulimit` and `umask`, that the whole line is written as `sh -c '... ulimit ...'`, which is approved as one line; for `alias` and `unalias` that an alias defined in one stage is not seen by the other stages and the host shell does not expand aliases in a non-interactive script, so the command is written out; for the others it says the whole script goes inside `sh -c '...'` |
+| `if`, `while`, `for`, `case`, `function` | control flow is a program |
+| `!` | history expansion is text the user typed reaching a line the planner wrote |
+| `(` or `)` written onto the end of an argument | grouping is syntax, so an argument holding a parenthesis has to be quoted, and the refusal says so |
+| a glob in program position | a program worked out from what is on disk is a program that changes when the tree does |
+
+**A refusal returns an error and runs nothing.** There is no degraded mode, no "fall back to
+`sh -c`", no "run the prefix that did compile". A compiler that can be made to give up and hand the
+string to a shell is a shell with extra steps, and it is the single change that would void every
+clause here.
+
+**Why `$VAR` is refused when a shell would allow it.** The plan a person endorses has to be the plan
+that runs. `rm -rf "$D/build"` is endorsable only if `D` is known at the prompt, and if it is known
+then the planner could have written it. Substituting it before the prompt makes the feature
+pointless; substituting it after makes the endorsement a lie. A closed set of harness-supplied
+names (the workspace root, say) could be admitted later by expanding them at compile time, which
+is the same thing as the planner having written them.
+
+`verified-by: bravebot_agent::cmdline::a_simple_command_is_its_program_and_its_operands`
+`verified-by: bravebot_agent::cmdline::a_pipeline_keeps_its_stages_in_order`
+`verified-by: bravebot_agent::cmdline::and_binds_tighter_than_a_semicolon`
+`verified-by: bravebot_agent::cmdline::parentheses_group_a_sequence`
+`verified-by: bravebot_agent::cmdline::a_backslash_makes_the_next_character_ordinary`
+`verified-by: bravebot_agent::cmdline::each_redirection_form_is_read_as_the_stream_it_names`
+`verified-by: bravebot_agent::cmdline::a_glob_survives_as_a_pattern_and_a_quoted_one_does_not`
+`verified-by: bravebot_agent::cmdline::braces_are_alternatives_or_a_range`
+`verified-by: bravebot_agent::cmdline::a_leading_tilde_stands_for_a_home_and_a_later_one_does_not`
+`verified-by: bravebot_agent::cmdline::an_assignment_in_front_of_the_program_is_environment`
+`verified-by: bravebot_agent::cmdline::a_command_whose_text_would_be_computed_is_refused`
+`verified-by: bravebot_agent::cmdline::process_substitution_is_refused`
+`verified-by: bravebot_agent::cmdline::a_variable_is_refused`
+`verified-by: bravebot_agent::cmdline::a_dollar_that_names_nothing_is_an_ordinary_character`
+`verified-by: bravebot_agent::cmdline::a_dollar_that_opens_an_expansion_is_still_refused`
+`verified-by: bravebot_agent::cmdline::a_refused_special_parameter_or_quoted_text_is_named_whole`
+`verified-by: bravebot_agent::cmdline::the_exit_status_refusal_says_the_run_result_reports_each_steps_status`
+`verified-by: bravebot_agent::cmdline::the_special_parameter_refusal_says_no_parameters_are_kept_and_single_quotes_pass_the_text`
+`verified-by: bravebot_agent::cmdline::the_dollar_quote_refusal_says_escapes_are_not_read_and_a_newline_comes_from_a_file`
+`verified-by: bravebot_agent::tools::the_run_description_names_the_special_parameters_and_the_dollar_quote_as_refused`
+`verified-by: bravebot_agent::cmdline::the_variable_refusal_names_the_quoting_that_works`
+`verified-by: bravebot_agent::cmdline::the_substitution_and_arithmetic_refusals_name_single_quotes`
+`verified-by: bravebot_agent::cmdline::arithmetic_is_refused`
+`verified-by: bravebot_agent::cmdline::backgrounding_is_refused`
+`verified-by: bravebot_agent::cmdline::a_here_document_is_refused`
+`verified-by: bravebot_agent::cmdline::a_program_that_reintroduces_interpretation_is_refused`
+`verified-by: bravebot_agent::cmdline::a_word_that_sets_shell_state_is_refused_wherever_it_stands`
+`verified-by: bravebot_agent::cmdline::a_word_that_only_looks_like_shell_state_is_not_refused`
+`verified-by: bravebot_agent::cmdline::a_shell_builtin_is_refused_wherever_it_stands`
+`verified-by: bravebot_agent::cmdline::the_ulimit_refusal_says_to_put_the_whole_line_in_sh_c`
+`verified-by: bravebot_agent::cmdline::the_other_builtin_refusals_say_what_is_true_of_them`
+`verified-by: bravebot_agent::cmdline::a_word_that_only_looks_like_a_shell_builtin_is_not_refused`
+`verified-by: bravebot_agent::cmdline::a_word_that_opens_control_flow_is_refused`
+`verified-by: bravebot_agent::cmdline::an_unquoted_exclamation_mark_is_refused`
+`verified-by: bravebot_agent::cmdline::an_unquoted_parenthesis_written_onto_an_argument_says_to_quote_the_argument`
+`verified-by: bravebot_agent::cmdline::a_parenthesis_not_written_onto_an_argument_keeps_the_general_refusal`
+`verified-by: bravebot_agent::cmdline::a_pattern_in_program_position_is_refused`
+`verified-by: bravebot_agent::cmdline::quoting_makes_a_refused_construct_ordinary_text`
+`verified-by: bravebot_agent::cmdline::a_line_that_half_compiles_yields_nothing`
+
+<a id="CMDLINE-3"></a>
+### CMDLINE-3: what a person endorses is the compiled plan, not the line they were sent
+
+The prompt shows the plan: each stage's resolved binary and argv with argument boundaries visible,
+each file the plan may write, and the directory it runs in. The line as the planner spelled it is
+shown as well, above the plan, as context, but it is not what the endorsement binds to.
+
+An endorsement binds to the plan. Two different lines that compile to the same plan are the same
+endorsement; one line that compiles to two different plans on two occasions, which glob expansion
+makes possible, is two endorsements.
+
+**Why.** The routing field is the thing that decides where an effect lands, and after compilation
+that is the plan. Binding to the text would let a change in the working tree change what a prior
+approval covers without the text changing at all.
+
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_shows_the_plan_it_would_endorse`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_shows_the_line_the_model_wrote_as_context`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_lists_every_file_the_line_would_write`
+`verified-by: bravebot_ui_bridge::wire::a_run_prompt_carries_the_line_the_planner_wrote_beside_the_plan_it_compiled_to`
+`verified-by: bravebot_ui_bridge::wire::a_call_that_was_never_spelled_as_a_line_says_so_rather_than_leaving_the_field_out`
+`verified-by: bravebot_core::command::a_plan_shows_its_resolved_binaries_and_argument_boundaries`
+`verified-by: bravebot_core::command::two_plans_never_encode_alike`
+`verified-by: bravebot_core::command::the_line_a_plan_came_from_is_not_part_of_what_it_encodes`
+`verified-by: bravebot_core::policy::an_endorsement_does_not_authorise_a_differently_joined_plan`
+`verified-by: bravebot_core::policy::an_endorsement_does_not_authorise_a_plan_that_writes_elsewhere`
+
+<a id="CMDLINE-4"></a>
+### CMDLINE-4: globs are expanded by the harness, before the prompt, and bounded
+
+Expansion happens against the workspace at compile time, so the person sees the file list rather
+than the pattern. A pattern matching no file is passed to the program as written, as a shell
+without `failglob` does, so `find . -name *.md` gives `find` the pattern `*.md` when no `.md` file
+is where it runs, and the plan shows `*.md`. A pattern that matches is replaced by the files it
+matches, so a pattern meant for the program is written quoted, as in `find . -name '*.md'`.
+
+**An option carrying a value is not a file pattern.** A word that starts with a dash and names the
+option before an `=` that comes ahead of any pattern, such as `--include=*.md`, stands for itself.
+It is never looked up, so it is passed as written whether or not anything matches it, and a file
+named like it cannot change what the program receives. A dash with no name before the `=`, a
+pattern ahead of the `=`, and a dash with no `=` are still patterns.
+
+Expansion is bounded. Past the bound the compile fails and says the count, rather than putting a
+thousand paths in front of a reader who will approve them unread.
+
+**The names a pattern matched are for the person, not the planner.** What is said to the planner
+about a line is said in the words the planner wrote: the result of a run, the account of a job that
+started, moved or ended, an error that the line did not start or run, and a refusal by a deny rule,
+which names the program and not its operands. The expanded plan is what the person is shown and
+endorses, so a file name read out of a directory nobody vouched for is never spelled into a
+sentence the driver writes to the planner. The names are drawn with a control character, a character
+that draws as nothing and the other characters [PROMPT-1](../prompting.md#PROMPT-1) lists written
+as `\u{..}`, so a name holding one does not draw as another name.
+
+The directory the line ran in and the file each redirection names are told in the words the planner
+wrote, with a `..` that lands in an added directory told as the workspace spells it for the file
+tools. Where a link in that tree led is a name whoever wrote the tree chose, so it is drawn for the
+person and never spelled into a sentence for the planner.
+
+Ignored directories are ignored the way the tree walk ignores them, so `**` does not descend into
+`.git` or `node_modules`.
+
+**A leading `~` stands for the person's home directory**, which is the directory `~/.bravebot`
+sits inside and never that directory itself. `run` is given it separately from the state directory
+it is given everything else, because a home-relative path the planner writes names a file of the
+person's own: resolved against the state directory, every one of them would instead name a file in
+the directory holding this program's settings, credentials and session records. A delegate resolves
+a `~` against the directory its parent did, and the interface expands a `~` somebody types against
+the same answer, so the two spellings cannot name different files. A machine naming no home
+directory refuses the `~` rather than inventing one.
+
+**Why bounded.** An approval prompt long enough that nobody reads it is a prompt that grants
+everything and asks nothing.
+
+`verified-by: bravebot_agent::cmdline::a_pattern_becomes_the_files_it_matches`
+`verified-by: bravebot_agent::cmdline::a_pattern_matches_within_one_segment_and_a_tree_across_them`
+`verified-by: bravebot_agent::cmdline::a_pattern_matching_nothing_is_passed_through_as_written`
+`verified-by: bravebot_agent::cmdline::a_pattern_for_find_matching_nothing_here_reaches_find_as_written`
+`verified-by: bravebot_agent::cmdline::an_option_value_pattern_is_passed_through_as_written`
+`verified-by: bravebot_agent::cmdline::an_option_value_pattern_is_not_replaced_by_a_file_named_like_it`
+`verified-by: bravebot_agent::cmdline::an_option_value_with_braces_is_passed_through_for_each_spelling`
+`verified-by: bravebot_agent::cmdline::only_an_option_carrying_a_value_is_passed_through`
+`verified-by: bravebot_agent::tools::the_run_description_says_when_a_pattern_for_the_program_is_quoted`
+`verified-by: bravebot_agent::cmdline::expansion_is_bounded_and_the_refusal_says_the_count`
+`verified-by: bravebot_agent::cmdline::a_tree_pattern_does_not_descend_into_an_ignored_directory`
+`verified-by: bravebot_agent::cmdline::a_dot_file_is_matched_only_by_a_pattern_that_writes_the_dot`
+`verified-by: bravebot_agent::cmdline::a_class_matches_the_characters_it_names`
+`verified-by: bravebot_agent::cmdline::a_word_with_no_pattern_names_a_file_that_need_not_exist`
+`verified-by: bravebot_agent::cmdline::a_quoted_pattern_is_not_expanded`
+`verified-by: bravebot_agent::cmdline::braces_multiply_a_word`
+`verified-by: bravebot_agent::cmdline::a_plan_is_told_to_the_planner_with_each_pattern_as_it_was_written`
+`verified-by: bravebot_core::command::an_argument_holding_an_invisible_character_is_spelled`
+`verified-by: bravebot_tui::confirm::run::a_run_prompt_draws_names_that_differ_in_an_invisible_character_apart`
+`verified-by: bravebot_agent::turn::a_run_result_does_not_spell_the_names_a_glob_matched_to_the_planner`
+`verified-by: bravebot_agent::turn::a_finished_jobs_account_does_not_spell_the_names_a_glob_matched_to_the_planner`
+`verified-by: bravebot_agent::turn::a_deny_rule_refusal_does_not_spell_the_names_a_glob_matched_to_the_planner`
+`verified-by: bravebot_agent::cmdline::a_redirection_is_told_to_the_planner_with_its_file_as_it_was_written`
+`verified-by: bravebot_core::command::what_the_planner_is_told_names_a_program_by_its_link_alone`
+`verified-by: bravebot_agent::turn::a_run_result_names_the_directory_as_typed_and_not_where_a_link_led`
+`verified-by: bravebot_agent::turn::a_finished_jobs_account_names_the_directory_as_typed_and_not_where_a_link_led`
+`verified-by: bravebot_agent::turn::a_background_line_that_did_not_start_names_the_directory_as_typed`
+`verified-by: bravebot_agent::turn::a_credential_refusal_names_the_redirection_under_the_directory_as_typed`
+`verified-by: bravebot_agent::turn::a_refused_redirection_is_named_under_the_directory_as_typed`
+`verified-by: bravebot_agent::turn::an_unopened_redirection_is_named_under_the_directory_as_typed`
+`verified-by: bravebot_agent::cmdline::a_range_counts_and_keeps_the_padding_it_was_written_with`
+`verified-by: bravebot_agent::cmdline::a_leading_tilde_becomes_the_home_directory`
+`verified-by: bravebot_agent::cmdline::a_tilde_with_no_home_to_stand_for_is_refused`
+`verified-by: bravebot_agent::home::the_profile_directory_is_the_home_itself_rather_than_the_state_directory`
+`verified-by: bravebot_agent::home::an_absent_home_names_no_profile_directory_for_a_tilde`
+`verified-by: bravebot_agent::turn::a_tilde_in_a_command_line_stands_for_the_home_directory_and_not_the_state_directory`
+`verified-by: bravebot_agent::turn::a_delegate_resolves_a_tilde_against_the_home_its_parent_did`
+`verified-by: bravebot_tui::app::a_typed_tilde_and_a_compiled_one_stand_for_the_same_directory`
+`verified-by: bravebot_ui_bridge::retention::worker::a_tilde_in_a_desktop_run_line_stands_for_the_home_directory`
+
+<a id="CMDLINE-5"></a>
+### CMDLINE-5: a redirection target is a write destination and takes the write gates
+
+`> out.txt` is a file this plan creates or truncates. It is routing, it appears in the plan's write
+set, it is shown at the prompt, and it is subject to every rule that governs writing a file: the
+permission rules, the trust map's answer for that path, and the confinement that keeps a write
+inside the workspace.
+
+That confinement is applied when the line is compiled and again immediately before each destination
+is opened, including one the line has already opened once. The parts of the line before it have run
+by then, and a program in one of them can have left a link at the name the person approved. A
+destination that lands outside the workspace and every opened directory at that moment is not
+opened, and the line stops there. The window between that check and the open is the one the known
+costs of [trust-map.md](../trust-map.md) accept for every write.
+
+**The one line it is not applied to is a line whose programs start with no profile**: one the
+person approved with no sandbox ([SANDBOX-29](../sandboxing.md#SANDBOX-29)), and any line under the
+mode `off` ([SANDBOX-22](../sandboxing.md#SANDBOX-22)), but not a delegate's. This process opens a
+destination in place of the stage, so the confinement is what keeps a redirection from reaching
+what the stage's profile holds its programs back from. Where the programs have no profile there is
+nothing for it to hold back, and a program in the same line can already write the same file. The
+prompt lists every destination, the person's `deny` rules still refuse a path, and a destination
+that is outside every opened directory is asked about under the name it was written with
+([TRUST-18](../trust-map.md#TRUST-18)). When the line is refused for leaving the workspace in a
+session that would accept the request, the refusal says that `unconfined` is the argument that
+makes the write possible.
+
+**Where the permission mode reaches a path.** While the mode that answers every permission question
+is in force ([MODE-4](../permission-modes.md#MODE-4)), a destination in a directory outside the
+workspace that the file tools reach ([PATHREQ-7](request-path.md#PATHREQ-7)) is not refused for
+leaving it, so the line needs no `unconfined` argument there. The refusals that hold for a granted
+request still refuse a destination, the check is made again at each open, and a delegate's
+destination is held to its definition's `writes:` limit as a tool's write is
+([DELEGATE-28](../delegation.md#DELEGATE-28)).
+
+`verified-by: bravebot_agent::turn::under_bypass_the_file_tools_reach_a_sibling_directory_with_no_request`
+`verified-by: bravebot_agent::turn::a_limited_delegate_of_a_bypass_turn_is_refused_a_sibling_directory_its_patterns_do_not_cover`
+`verified-by: bravebot_agent::turn::an_approved_unconfined_line_may_redirect_into_a_file_outside_the_workspace`
+`verified-by: bravebot_agent::turn::a_line_under_off_may_redirect_into_a_file_outside_the_workspace`
+`verified-by: bravebot_agent::tools::a_redirection_may_leave_the_workspace_only_where_the_line_has_no_profile`
+
+`verified-by: bravebot_agent::turn::a_redirection_an_earlier_part_of_its_line_linked_out_of_the_workspace_is_refused_when_opened`
+`verified-by: bravebot_agent::turn::a_destination_reopened_after_an_earlier_part_linked_it_out_of_the_workspace_is_refused`
+`verified-by: bravebot_agent::turn::a_redirection_into_an_added_directory_is_confined_again_when_it_is_opened`
+`verified-by: bravebot_agent::turn::a_redirection_an_earlier_part_linked_inside_the_workspace_lands_at_the_link_target`
+
+`>>` is a write. `<` is a read and joins the read set, and it is standard input as well: the
+file's bytes go into a program, so the plan reports it as private input and it takes the
+standard-input gate of [run.md](run.md#RUN-6) whichever file it names. `2>&1` renames a
+descriptor and touches no file.
+
+Neither does an output redirection to `/dev/null`, spelled exactly so. It discards the stream: the
+route stays in the plan and at the prompt, but the path joins no write set, takes none of the write
+gates, and enters no effect, because there is no file to confine, endorse or distrust. Any other
+spelling of the device, and any link to it, is an ordinary path and is held to all of the above.
+
+Immediately before a destination may be opened for writing, the shared file authority marks
+it untrusted and reserves that path until the process has stopped. Reads during execution cannot
+use the old grant. Other paths remain available, and no lock spans the process wait. Every early
+exit stops already-started stages before releasing their reservations.
+
+An untrusted line leaves its opened destinations untrusted. A complete successful trusted line
+may retain a destination's prior trust, but cannot raise it: `>>` can retain untrusted bytes.
+Failure, cancellation or an error after entry leaves explicit distrust. An untaken branch enters
+no effect and changes no decision. A failed attempt to open a destination is conservative about
+its possible effects; an approval alone changes nothing.
+
+`verified-by: bravebot_agent::turn::foreground_redirection_quarantines_live_reads_and_all_endings`
+
+**What the one direction costs.** A destination a vouched-for line overwrote stays untrusted until
+a person says otherwise, so reading it back is quarantined and costs a prompt. Recording a path as
+trusted on a write nobody can establish happened would be the round trip
+[trust-map.md](../trust-map.md) exists to close.
+
+A redirection whose target is a glob, or anything else that does not compile to one literal path,
+is a compile error.
+
+**Why.** This is the construct that most obviously fuses destination with payload in a raw string,
+and it is exactly the one that becomes safe once the destination is a named field. Refusing
+redirection while allowing pipes would be refusing the easy half.
+
+`verified-by: bravebot_agent::cmdline::a_redirection_joins_the_write_set`
+`verified-by: bravebot_agent::turn::a_redirection_carrying_untrusted_output_distrusts_the_file_it_wrote`
+`verified-by: bravebot_agent::turn::a_line_a_person_vouched_for_does_not_trust_the_file_it_wrote`
+`verified-by: bravebot_agent::turn::a_branch_that_does_not_run_leaves_its_destination_as_it_was`
+`verified-by: bravebot_agent::exec::a_line_reports_the_destinations_it_opened_and_no_others`
+`verified-by: bravebot_agent::exec::a_destination_that_cannot_be_opened_is_still_reported`
+`verified-by: bravebot_agent::cmdline::an_append_writes_and_an_input_reads`
+`verified-by: bravebot_agent::cmdline::an_input_redirection_is_private_input`
+`verified-by: bravebot_agent::cmdline::a_line_that_only_writes_releases_nothing`
+`verified-by: bravebot_agent::cmdline::joining_the_streams_writes_no_file`
+`verified-by: bravebot_agent::cmdline::discarding_a_stream_writes_no_file`
+`verified-by: bravebot_agent::cmdline::another_spelling_of_the_null_device_is_a_write`
+`verified-by: bravebot_agent::exec::a_discarded_stream_is_dropped_and_opens_nothing`
+`verified-by: bravebot_agent::turn::a_line_discarding_its_output_runs_and_names_no_file_to_write`
+
+<a id="CMDLINE-6"></a>
+### CMDLINE-6: every branch that could run is endorsed before anything runs
+
+`a && b` may run `b`. `a || b` may run `b`. `a ; b` runs `b`. All of them are in the plan, all of
+them are shown, and all of them are endorsed up front. Nothing is approved lazily part-way through
+a line, because a person answering a second prompt in the middle of a running line cannot tell what
+state the first half left behind.
+
+A stage that does not run because a branch was not taken is not an effect and needs no separate
+answer. It was still endorsed, and that is the conservative direction.
+
+**So a line cannot run a program an earlier step in it creates.** Every step's program is found
+when the line is compiled, before anything runs, so `python3 -m venv v && v/bin/python x.py` is
+refused for `v/bin/python`. The refusal for a program named by a path says nothing is runnable at
+that path and that the step creating it has to run on its own first. It does not mention `$PATH`,
+which a path does not consult. Whether the name is a path is read from the planner's own word, which
+is trusted.
+
+`verified-by: bravebot_agent::cmdline::every_branch_that_could_run_is_in_the_plan`
+`verified-by: bravebot_agent::cmdline::a_program_named_by_a_path_that_is_not_there_says_to_create_it_first`
+`verified-by: bravebot_agent::cmdline::a_program_that_cannot_be_found_is_refused`
+`verified-by: bravebot_core::command::a_plan_lists_every_step_that_could_run`
+`verified-by: bravebot_core::policy::an_endorsement_does_not_authorise_a_differently_joined_plan`
+`verified-by: bravebot_agent::exec::the_right_side_of_and_runs_only_when_the_left_succeeded`
+`verified-by: bravebot_agent::exec::the_right_side_of_or_runs_only_when_the_left_failed`
+`verified-by: bravebot_agent::exec::a_semicolon_runs_both_sides_whatever_the_first_did`
+`verified-by: bravebot_agent::exec::a_group_sequences_the_steps_it_holds`
+
+<a id="CMDLINE-7"></a>
+### CMDLINE-7: permission rules match compiled stages, one at a time
+
+A rule's command specifier is matched against each stage of the compiled plan, as its program word
+and argv with each word kept whole ([PERM-5](../permissions.md#PERM-5)). A quoted program word is one
+word however many spaces it holds, so an `allow` rule's space never falls inside it: `Bash(ls *)`
+does not cover `"ls /x"`. Restricting any one stage restricts the whole line. Granting the line
+needs every stage granted.
+
+This is the rule that already governs pipelines, applied to a longer plan. What changes is that the
+splitting is now done by the compiler rather than being impossible; what does not change is that an
+argument is never re-split, so a denied program cannot be smuggled inside one.
+
+A rule may also name a write destination, and a redirection target is matched as a path the same way
+`write_file`'s destination is.
+
+`verified-by: bravebot_core::policy::a_denied_step_refuses_the_whole_line`
+`verified-by: bravebot_core::policy::a_rule_denying_a_path_denies_a_redirection_to_it`
+`verified-by: bravebot_core::policy::a_rule_denying_a_path_denies_reading_it_into_a_line`
+`verified-by: bravebot_core::policy::a_denied_program_cannot_be_smuggled_inside_an_argument`
+`verified-by: bravebot_core::permissions::a_pipeline_is_allowed_only_when_every_stage_is`
+`verified-by: bravebot_core::permissions::restricting_one_stage_restricts_the_whole_pipeline`
+`verified-by: bravebot_core::policy::an_allow_rule_does_not_cover_a_program_whose_name_holds_a_space`
+`verified-by: bravebot_agent::turn::an_allow_rule_does_not_run_a_program_whose_name_holds_a_space_unasked`
+
+<a id="CMDLINE-8"></a>
+### CMDLINE-8: a plan may prove its output's label from what it read
+
+The audited table covers plans that name files and not only stdin-only filters. A stage is
+**read-proven** when its resolved program is in the table and, for the exact argv given, the
+table's audit establishes all four:
+
+1. it writes no file;
+2. it executes nothing and starts no process;
+3. it opens no socket;
+4. every byte it reads comes from stdin or from a path in its operands.
+
+**An entry lists the options a call may use, and anything else refuses the call.** A list of
+options to reject fails open, because an option nobody thought of reads as harmless and one of them
+makes a walk follow symlinks out of the tree it was pointed at. Spellings are matched whole, so an
+abbreviation of a long option is not that option: deciding what `--recursi` abbreviates is the
+parsing this road exists to avoid. An option that takes a value says so, and its value is skipped
+whether it is attached or is the next word, so it is never counted as an operand. An option is
+listed only where the GNU and the BSD implementation both give it a value or both do not: where one
+makes the value optional, a separate word after it is the value to one and an operand to the other.
+
+**An option written after an operand proves nothing.** GNU reads it as an option, while BSD `head`,
+`tail`, `wc` and `cut`, and GNU with `POSIXLY_CORRECT` set, stop reading options at the first
+operand and open every later word as a file, `--` included. `-` alone is not such a word: both read
+it as an operand wherever it is written. What it names differs instead: GNU and BSD `cut` and `grep`
+read standard input for it, and BSD `head`, `tail` and `wc` open a file called `-`, so for those
+three it is counted as a path.
+
+**`sort` and `uniq` are in the table, and what writes is refused by the entry.** `sort` lists no
+option that names an output file, runs a program or names a file of names (`-o`, `--output`,
+`--compress-program`, `-T`, `--temporary-directory`, `--files0-from`, `--random-source`), and `uniq`
+admits one operand because the second is the file it writes. That operand is counted whatever it is
+spelled, so `uniq - out` is refused. `diff` admits two paths and never `-r`, `-l`, `-X` or
+`--from-file`. `ls`, `stat` and `du` must name a path and exclude the options that follow a link
+(`-L`, `-H`). `cat`, `ls`, `diff` and `stat` report only on the paths they are given, the same
+claim as the other entries. `sort` spills to scratch files under `TMPDIR` holding bytes it was
+given, named by the program rather than by the call. BSD `cat` connects to a Unix socket named as an
+operand, which the table cannot see because it has no file types to look at.
+
+A stage whose program resolves to a file inside the workspace is not read-proven, and neither is one
+whose line named a path rather than a program, one carrying an environment assignment, or one opening
+a file for a stream. The table's entries are claims about the programs a system provides under those
+names and are matched on the name a program resolved to, which identifies no file: so a file called
+`wc` in the tree being inspected would answer as the audited one, and it reaches that answer whether
+the line pointed at it or a name did. `$PATH` decides what a name means, so a project directory on it
+is enough for a file a contributor added to be what an audited name runs, and `PATH_add bin` in a
+project's own `.envrc` puts one there. The workspace test is therefore made against the path the
+driver resolved and will execute rather than against the spelling that reached it: those are two
+values, and only the first says where the file is. An assignment decides what a program loads and
+reads before its own arguments are looked at, and a redirection opens a file the argv does not name,
+so neither is covered by an audit of an option surface. Joining standard error to standard output
+renames a descriptor and opens nothing, so it is not a redirection for this purpose.
+
+A `$PATH` directory outside the workspace is honoured whatever the trust map holds about it, since
+the audited utilities live in one: Homebrew installs to its own prefix and Nix to a store path, and
+neither is a directory anybody wrote a rule about.
+
+A plan running in any directory other than the one the trust map's rules are written against is not
+read-proven, since its operands and the map's rules would be spelled relative to different places.
+A plan with no steps is not read-proven either: the answer to what it read is that there was no
+proof.
+
+The plan's read set is those operand paths, glob-expanded. The output's first label is the meet of
+the labels over the read set and over stdin, which is the ordinary rule for a derived value,
+applied to a process, and is not a relabel and grants nothing.
+
+Where every stage is read-proven and every path in the read set is one the trust map answers for,
+the output is trusted and the planner reads it. Where any stage is not, or any path is outside what
+the trust map covers, the output is untrusted and private, which is the default every other run
+gets.
+
+A path is one the map answers for when the map covers it **and everything beneath it**: a directory
+read as a tree is read whole, so a directory the user refused inside a project they vouched for
+decides the answer about that project. A path with a `..` component is outside what the map answers
+for whatever a rule spelled the same way says, because the map compares names by segment and a
+climbing path names a file through a directory nobody wrote a rule about.
+
+Each path is asked about under every name the map may hold a rule about it by, and answers as the
+weakest of them. A name is reduced to the open directory it lands in before the map sees it, and
+that reduction needs a filesystem ([trust-map.md](../trust-map.md#TRUST-18)), which this road does
+not have: so a file inside the workspace is asked about under the relative name and the full one
+both, and the spelling a line happened to use is not a decision anybody made about the file. A directory the
+project sits in is trusted by an answer about that directory
+([TRUST-9](../trust-map.md#TRUST-9)), so an absolute name answered alone would give a project file
+the label of a directory it is merely reachable through, and a relative name answered alone would
+skip the rule a write through a link out of the project left behind. An operand naming a directory
+that holds the workspace is asked about the project as well, since a line reading that directory
+whole reads every file the project's own rules bear on. Nothing here is resolved, only re-spelled, so
+an operand outside the workspace keeps the name the line gave it and the rule about the directory
+holding it decides. Answering under every name can only cost a question and never grant trust, which
+is what makes it the right form for a road with no filesystem to settle a name with.
+
+**This is the proof road, and it is not the assertion road.** A person vouching for a command is a
+person taking responsibility for it. This is a claim about a program, checked against that program's
+option surface by hand, and nothing a user says extends the table.
+
+**`grep -r` is provable, and that is the point.** Recursion is provable exactly as far as the read
+set names what is walked: with a directory in the operands the label comes from that directory, and
+the single most useful exploration command in a large repository is not opaque. A recursive call
+naming no path is not proven, because what it walks is then the working directory under one
+implementation's convention and stdin under another's, and the difference is the whole of what the
+label would be taken from. `-R` is not proven either: it follows every symlink it meets, so the
+tree it reads is not the tree the read set names.
+
+**`git` is not provable and does not go in the table.** A repository's own config can define an
+alias that runs a command and a pager that runs a command, so `git log` is an interpreter whose
+program is a file in the tree being inspected. It stays on the assertion road, where a person
+vouches for it. Recognising a safe git invocation means reading `.git/config`, which is content, to
+decide routing, and that is the thing that is never allowed. History is read with nobody asked by
+[read_git](read-git.md#GIT-1) instead, which starts no program and reads nothing under `.git` until
+the trust map vouches for all of it.
+
+`sed` and `awk` never enter the table, for the reason they are excluded today: they are
+interpreters, and `awk`'s `system()` reaches the shell this repository excludes.
+
+`verified-by: bravebot_core::pure::a_named_file_is_the_answer_rather_than_a_refusal`
+`verified-by: bravebot_core::pure::a_recursive_search_answers_with_the_trees_it_walks`
+`verified-by: bravebot_core::pure::recursion_naming_no_path_proves_nothing`
+`verified-by: bravebot_core::pure::recursion_that_follows_symlinks_proves_nothing`
+`verified-by: bravebot_core::pure::an_unlisted_option_proves_nothing`
+`verified-by: bravebot_core::pure::an_abbreviated_long_option_proves_nothing`
+`verified-by: bravebot_core::pure::an_option_value_is_never_counted_as_a_path`
+`verified-by: bravebot_core::pure::a_context_option_given_its_value_apart_proves_nothing`
+`verified-by: bravebot_core::pure::an_option_after_an_operand_proves_nothing`
+`verified-by: bravebot_core::pure::an_option_bundled_with_others_is_still_looked_up`
+`verified-by: bravebot_core::pure::an_excluded_option_is_refused`
+`verified-by: bravebot_core::pure::no_option_is_both_listed_and_excluded`
+`verified-by: bravebot_core::pure::a_flag_that_supplies_the_pattern_proves_nothing`
+`verified-by: bravebot_core::pure::a_flag_naming_a_file_of_names_proves_nothing`
+`verified-by: bravebot_core::pure::a_word_past_the_end_of_flags_marker_is_an_operand`
+`verified-by: bravebot_core::pure::a_dash_occupies_an_operands_place`
+`verified-by: bravebot_core::pure::a_lone_dash_is_a_path_where_bsd_opens_a_file_by_that_name`
+`verified-by: bravebot_core::pure::an_operand_a_program_has_no_reading_for_proves_nothing`
+`verified-by: bravebot_core::pure::interpreters_never_qualify_however_harmless_they_look`
+`verified-by: bravebot_core::pure::a_sort_or_uniq_call_that_names_an_output_file_proves_nothing`
+`verified-by: bravebot_core::pure::sort_and_uniq_reading_one_input_answer_with_it`
+`verified-by: bravebot_core::pure::diff_compares_two_paths_and_never_walks_a_tree`
+`verified-by: bravebot_core::pure::a_reporting_program_with_no_path_proves_nothing`
+`verified-by: bravebot_core::pure::a_reporting_program_following_links_or_reading_a_list_proves_nothing`
+`verified-by: bravebot_core::pure::cat_answers_with_the_files_it_reads`
+`verified-by: bravebot_core::policy::a_pipeline_of_sort_uniq_cat_and_ls_over_vouched_paths_does_not_ask`
+`verified-by: bravebot_core::trust::a_subtree_is_trusted_only_when_nothing_beneath_it_is_not`
+`verified-by: bravebot_core::policy::a_line_that_only_reads_vouched_for_paths_comes_back_trusted`
+`verified-by: bravebot_core::policy::a_line_reading_an_unvouched_path_still_asks`
+`verified-by: bravebot_core::policy::a_line_bsd_and_gnu_read_different_files_from_still_asks`
+`verified-by: bravebot_core::policy::a_line_reading_a_refused_file_called_dash_still_asks`
+`verified-by: bravebot_core::policy::a_recursive_search_takes_its_label_from_the_whole_subtree`
+`verified-by: bravebot_core::policy::one_step_nothing_can_account_for_makes_the_whole_line_opaque`
+`verified-by: bravebot_core::policy::an_environment_assignment_leaves_a_step_unproven`
+`verified-by: bravebot_core::policy::a_redirection_leaves_a_step_unproven_and_a_descriptor_rename_does_not`
+`verified-by: bravebot_core::policy::a_program_named_by_path_is_not_proven`
+`verified-by: bravebot_core::policy::a_program_resolving_inside_the_project_is_not_proven`
+`verified-by: bravebot_core::policy::a_line_running_outside_the_project_root_is_not_proven`
+`verified-by: bravebot_core::policy::a_plan_with_no_steps_proves_nothing`
+`verified-by: bravebot_core::policy::a_project_file_named_absolutely_is_answered_by_the_project_rule`
+`verified-by: bravebot_core::policy::a_line_reading_a_directory_holding_the_project_answers_for_the_project`
+`verified-by: bravebot_core::policy::a_line_reading_a_tree_the_map_says_nothing_about_still_asks`
+`verified-by: bravebot_core::policy::a_line_reading_a_vouched_for_tree_above_the_project_does_not_ask`
+`verified-by: bravebot_core::policy::a_climbing_operand_is_untrusted_under_a_root_spelled_with_a_climb`
+
+<a id="CMDLINE-9"></a>
+### CMDLINE-9: a read-proven plan does not prompt
+
+Where every stage of a plan is read-proven under [CMDLINE-8](#CMDLINE-8), the plan's write set is
+empty, and its read set lies inside what the trust map answers for, the line runs without asking.
+
+This is a narrowing of the rule that every run asks. That rule's reason is that `foo --bar` might
+write to disk and nothing here can tell. For an entry in the audited table, with an audited argv,
+something here **can** tell, and the table is the record of having checked. The proof is the only
+thing that may answer the prompt: never a declaration by a stage, never a property inferred from a
+program's name, never anything derived from what a program printed.
+
+A permission rule that says `ask` or `deny` for a stage still decides. Proof removes the default
+prompt; it does not overrule a rule a person wrote.
+
+**Why this clause is the risky one.** It is the only place in this spec where a proof stops a human
+from being asked, and if the table is wrong somewhere then something ran that nobody saw. The
+mitigations are that the table is small, hand-audited per program against its full option list, and
+fails closed on any argv it does not fully recognise. A file name match is not one of them and is not
+sufficient on its own: a name is not a program, so the file the name resolved to has to lie outside
+the workspace as well, and only where the line named a program rather than a path.
+[CMDLINE-8](#CMDLINE-8) stands on its own without this clause and still removes the second round
+trip; what this clause adds is the first prompt, not the readable output.
+
+`verified-by: bravebot_agent::turn::a_line_that_only_reads_vouched_for_files_needs_no_prompt`
+`verified-by: bravebot_core::policy::a_line_that_only_reads_vouched_for_paths_does_not_ask`
+`verified-by: bravebot_core::policy::a_line_reading_an_unvouched_path_still_asks`
+`verified-by: bravebot_core::policy::a_line_bsd_and_gnu_read_different_files_from_still_asks`
+`verified-by: bravebot_core::policy::a_line_reading_a_refused_file_called_dash_still_asks`
+`verified-by: bravebot_core::policy::a_recursive_search_takes_its_label_from_the_whole_subtree`
+`verified-by: bravebot_core::policy::a_path_climbing_out_of_the_project_still_asks`
+`verified-by: bravebot_core::policy::a_line_reading_a_tree_the_map_says_nothing_about_still_asks`
+`verified-by: bravebot_core::policy::a_line_reading_a_vouched_for_tree_above_the_project_does_not_ask`
+`verified-by: bravebot_core::policy::a_read_proven_line_that_also_writes_still_asks`
+`verified-by: bravebot_core::policy::private_input_still_asks_about_a_read_proven_line`
+`verified-by: bravebot_core::policy::an_ask_rule_still_asks_about_a_read_proven_line`
+`verified-by: bravebot_core::policy::a_deny_rule_still_refuses_a_read_proven_line`
+`verified-by: bravebot_core::policy::one_step_nothing_can_account_for_makes_the_whole_line_opaque`
+`verified-by: bravebot_core::policy::an_environment_assignment_leaves_a_step_unproven`
+`verified-by: bravebot_core::policy::a_program_named_by_path_is_not_proven`
+`verified-by: bravebot_core::policy::a_program_resolving_inside_the_project_is_not_proven`
+`verified-by: bravebot_core::policy::a_line_running_outside_the_project_root_is_not_proven`
+
+<a id="CMDLINE-10"></a>
+### CMDLINE-10: output comes back as text whenever the planner may read it
+
+A result the planner is allowed to read is returned in the tool result, in full, up to the bound in
+[CMDLINE-11](#CMDLINE-11). Not as a reference to be fetched by a second call.
+
+That covers output that is trusted by proof under [CMDLINE-8](#CMDLINE-8) and output of a command a
+person vouched for, which is already trusted today and is already returned as text. What changes is
+that the trusted case stops being rare.
+
+Output the planner may not read is quarantined as a reference, and asking to see it is unchanged.
+
+Standard error comes back with standard output, separated and labelled, under the same rule. A run
+that failed put its explanation on stderr, and a planner that cannot see it reports that the command
+worked.
+
+**Why this matters more than it looks.** A reference plus a second call is one extra model round
+trip per command. In the session that motivated this spec, a round trip cost between five and a
+hundred and fifty seconds. A tool that costs two of those to answer `which files mention this
+symbol` is a tool nobody can afford to use, which is why the harness's own guidance had steered the
+planner away from it.
+
+`verified-by: bravebot_agent::turn::a_vouched_commands_output_reaches_the_planner`
+`verified-by: bravebot_agent::turn::a_quarantined_run_says_what_would_make_it_visible`
+`verified-by: bravebot_agent::exec::standard_error_comes_back_labelled_beside_standard_output`
+`verified-by: bravebot_agent::exec::a_background_run_labels_standard_error_as_a_waited_for_one_does`
+`verified-by: bravebot_agent::exec::what_a_background_run_hands_over_incrementally_labels_each_delivery_of_standard_error`
+`verified-by: bravebot_agent::turn::a_finished_jobs_wake_up_labels_its_standard_error`
+`verified-by: bravebot_agent::turn::job_output_labels_standard_error`
+
+<a id="CMDLINE-11"></a>
+### CMDLINE-11: output is bounded, and what was dropped is said
+
+A result returned as text is capped. Past the cap the head and the tail are kept and the middle is
+dropped, with a line in between naming how many bytes and lines went. Head and tail rather than head
+alone, because a build log's verdict is at the end and its first error is near the beginning.
+
+The cap is on what enters the conversation, not on what the command printed. The whole output stays
+available as a reference, so a planner that needs the middle can hand it to a processor or write it
+to a file without running the command again.
+
+The cap is a context-budget decision and belongs beside the other ones: a single tool result must
+never be able to spend a large fraction of the conversation.
+
+`verified-by: bravebot_agent::tools::a_capped_output_keeps_its_head_and_its_tail`
+`verified-by: bravebot_agent::tools::an_output_inside_the_cap_is_left_alone`
+`verified-by: bravebot_agent::tools::a_capped_output_says_how_many_bytes_and_lines_went`
+`verified-by: bravebot_core::policy::content_the_planner_saw_a_sample_of_is_kept_whole`
+`verified-by: bravebot_agent::turn::the_middle_of_a_capped_output_stays_reachable`
+`verified-by: bravebot_agent::turn::the_middle_of_a_capped_job_output_stays_reachable`
+
+<a id="CMDLINE-12"></a>
+### CMDLINE-12: the working directory persists across calls, and shell state does not
+
+A call may name a directory to run in, inside the workspace or inside a directory the user added.
+Absent one, a line runs where the last one ran, and the first runs at the workspace root.
+
+Nothing else carries over. `NAME=value` on one line does not affect the next, because there is no
+shell process between calls to hold it: each stage is spawned fresh with the process environment,
+less this agent's own credentials and with the session's own directory named
+([TRUST-17](../trust-map.md#TRUST-17)). A planner that needs a variable set puts it on the line that
+needs it.
+
+A stage whose program is `cd`, `pushd`, `popd` or `export` is refused when the line is compiled,
+wherever it stands in the line and whether or not the host has a program of that name, because it
+would change nothing for the stages after it. The refusal says that the `directory` argument of the
+call is how a line runs elsewhere. Nothing runs and nobody is asked.
+
+A stage whose program is `ulimit`, `umask`, `unset`, `alias`, `unalias`, `hash` or `wait` is refused
+the same way, in the same positions, whether or not the host has a program of that name. These are
+shell builtins whose effect stays in the shell that runs them. A host may ship a program of the name
+(macOS has `/usr/bin/ulimit`) that runs the builtin in a shell of its own and exits zero, so the
+stage would be planned, approved and run, and change nothing for the stages after it. The refusal
+says so. For `ulimit` and `umask` it says the whole line is written as `sh -c '... ulimit ...'`,
+which is approved as one line. For `alias` and `unalias` it says that an alias defined in one stage
+is not seen by the other stages and that the host shell does not expand aliases in a non-interactive
+script, so the command is written out. For the others it says the whole script goes inside
+`sh -c '...'`. It does not give the `directory` or `NAME=value` advice, which is about `cd` and `export`.
+
+The refusal covers every form of these words, a read such as `ulimit -a` or `umask` with no operand
+included. A host program of that name prints the limits of the shell it starts for itself, not those of
+any other stage, so a read is as misleading as a set, and the answer does not depend on whether the
+host has the program. A limit or a mask is read the way it is set, inside `sh -c`, which is not
+refused. A program that only has such a word as an operand, a longer name, or a path (`./ulimit`)
+is an ordinary program.
+
+**Why the asymmetry.** A directory is a routing field, shown at every prompt and endorsed with the
+plan, so carrying it is visible. An environment that accumulated invisibly across calls would change
+what a later plan does without appearing in that plan.
+
+A directory that is not the workspace root is asked about unless a vouched entry names that exact
+tree, and what the line prints is `(U,priv)` unless one does. [RUN-8](run.md#RUN-8) is where that is
+settled: an entry records the tree the answer was given in, so an answer given about `sub/` answers
+for `sub/` and for no other directory, including the root. The carrying is what this clause grants;
+a standing answer is not.
+
+A directory that no longer exists is refused with a message saying so, a carried one as a named one,
+before the line is compiled and before anyone is asked, and a carried one is reset to the workspace
+root. The directory is checked again immediately before the first stage is spawned, because an
+approval can wait for hours, and a directory removed in that time is reported as removed rather than
+as a program that could not be started.
+
+The person is shown the directory the line runs in, where a symbolic link in the tree led. The
+planner is told the directory in the words it named it with, or in the words of the call that named
+the one it carried, and a `..` that lands in an added directory as the workspace spells it for the
+file tools. That spelling is used in the account of the line, in the origin of what it printed and
+of what a job printed, and in every refusal and failure about the line, including the sentence about
+a carried directory that no longer exists. A link in a tree nobody vouched for chooses the name it
+leads to ([LABEL-3](../labels.md#LABEL-3), [CMDLINE-4](#CMDLINE-4)). The auto mode's classifier is a
+model, and is shown the same spelling ([AUTO-5](../auto-mode.md#AUTO-5)).
+
+The carrying lasts a turn. It is not written into the session record, so the next turn starts at the
+root again. That is short of what this clause describes, and is left to the change that gives a
+session somewhere to keep one ([RUN-9](run.md#RUN-9)).
+
+`verified-by: bravebot_agent::turn::the_working_directory_persists_across_calls`
+`verified-by: bravebot_agent::turn::the_working_directory_can_be_an_added_directory`
+`verified-by: bravebot_agent::turn::a_directory_escaping_the_workspace_is_refused`
+`verified-by: bravebot_agent::turn::a_nonexistent_directory_is_an_error_and_does_not_mutate`
+`verified-by: bravebot_agent::turn::a_directory_that_is_not_a_string_is_refused`
+`verified-by: bravebot_agent::turn::what_is_reported_about_a_line_says_which_directory_it_ran_in`
+`verified-by: bravebot_agent::turn::a_refused_run_directory_does_not_persist`
+`verified-by: bravebot_agent::turn::a_carried_directory_that_was_removed_is_refused_before_asking`
+`verified-by: bravebot_agent::turn::a_carried_directory_is_told_as_typed_and_not_where_a_link_led`
+`verified-by: bravebot_agent::turn::a_carried_directory_that_is_gone_is_told_as_typed_and_not_where_a_link_led`
+`verified-by: bravebot_agent::turn::a_run_refusal_for_a_removed_directory_names_it_as_typed_and_not_where_a_link_led`
+`verified-by: bravebot_agent::turn::a_run_in_a_directory_typed_with_a_climb_is_told_as_the_workspace_spells_it`
+`verified-by: bravebot_agent::turn::a_cd_stage_is_refused_before_asking_and_the_directory_argument_still_works`
+`verified-by: bravebot_agent::turn::a_ulimit_stage_is_refused_before_asking_and_the_sh_c_form_is_put_to_the_person_as_one_line`
+`verified-by: bravebot_agent::cmdline::a_word_that_sets_shell_state_is_refused_wherever_it_stands`
+`verified-by: bravebot_agent::cmdline::a_shell_builtin_is_refused_wherever_it_stands`
+`verified-by: bravebot_agent::cmdline::the_ulimit_refusal_says_to_put_the_whole_line_in_sh_c`
+`verified-by: bravebot_agent::cmdline::the_other_builtin_refusals_say_what_is_true_of_them`
+`verified-by: bravebot_agent::cmdline::a_word_that_only_looks_like_a_shell_builtin_is_not_refused`
+`verified-by: bravebot_agent::turn::a_directory_removed_during_the_approval_is_reported_as_removed`
+`verified-by: bravebot_agent::turn::a_vouched_line_is_asked_about_again_when_a_directory_is_named`
+
+<a id="CMDLINE-13"></a>
+### CMDLINE-13: a call may name its own deadline, under a ceiling
+
+The default is short enough that a hung program is noticed and long enough for an ordinary build
+step. A call may raise it up to a ceiling it cannot exceed.
+
+Neither figure is fixed at what was compiled in. A settings file may name both, and
+[RUN-23](run.md#RUN-23) is what it names and what the two come to together; the planner is told the
+ones in force, since a ceiling it was not told about is one it never asks for. The floor is not among
+them.
+
+Reaching the deadline ends the run rather than failing it, exactly as the fixed limit does today:
+the stages are stopped as [RUN-11](run.md#RUN-11) says, what they printed is collected and returned
+under whatever label it had earned, and the stop is reported as structure so a caller can tell the
+two apart without reading a byte. Collection after a stop stays abandonable, because a stage can
+leave a child holding the write end of the pipe.
+
+Not a safety property. A program that finishes in time is no safer than one that does not.
+
+`verified-by: bravebot_agent::turn::a_run_is_stopped_at_the_deadline_its_call_named`
+`verified-by: bravebot_agent::turn::a_null_deadline_takes_the_default`
+`verified-by: bravebot_agent::turn::a_negative_deadline_is_clamped_to_floor`
+`verified-by: bravebot_agent::tools::run_deadline_is_held_to_bounds_and_defaults_cleanly`
+
+<a id="CMDLINE-14"></a>
+### CMDLINE-14: a call may run in the background, and its finish wakes the turn
+
+A call may say it should not be waited for. It is endorsed the same way, starts the same way, and
+answers immediately with a handle. The turn carries on.
+
+When it exits, the turn is told: the handle, the status, and the output under the label the plan
+earned. A background run that is still going when the turn ends is killed, except in an interactive
+session, where it is left running and is killed when the session ends ([RUN-15](run.md#RUN-15)). A
+job that ended between two turns is told at the next turn's first round.
+
+The output of a background run obeys every other clause here. Backgrounding changes when the planner
+is told, never what it is allowed to read.
+
+**How the turn is told.** The turn asks its jobs between rounds whether any has ended, and puts the
+handle, the exit status and what it printed since the previous look (since the job started, where nobody
+looked before) into the conversation as a message of its own. Where the output is quarantined, the
+account states how many lines of the job's whole output begin in its reference and the number the
+first of them has, in the words every look uses, and lists the
+references of the earlier looks at the job, as a `job_output` look does ([RUN-17](run.md#RUN-17)),
+and a later look at the job lists the account's reference too. Asking is polling and costs nothing: a job still running answers immediately,
+and nothing waits here, because a background job is for the program meant to keep going and a turn
+that waited would wait out a server. The account is given once, by whichever of the two routes got
+there first: a `job_output` call that already said the job had ended is the account, and the look
+between rounds passes over it rather than repeating it with the output gone.
+
+**Why this is a parameter and not the `&` token.** As syntax it would be one more thing the compiler
+has to model and one more thing a reader has to spot in a line. As a parameter it is a field on the
+call, visible in the prompt, and impossible to hide inside an argument.
+
+`verified-by: bravebot_agent::turn::a_background_jobs_finish_reaches_the_turn_without_the_planner_asking`
+`verified-by: bravebot_agent::turn::a_silent_background_jobs_exit_code_reaches_the_turn_by_itself`
+`verified-by: bravebot_agent::turn::what_an_ended_job_printed_is_quarantined_where_nobody_vouched_for_the_line`
+`verified-by: bravebot_agent::turn::what_an_ended_job_printed_is_capped_with_the_whole_of_it_kept`
+`verified-by: bravebot_agent::turn::the_account_of_an_ended_job_after_an_earlier_look_names_its_range_and_that_look`
+`verified-by: bravebot_agent::tools::the_account_of_an_ended_job_continues_the_count_of_the_looks_before_it`
+
+<a id="CMDLINE-15"></a>
+### CMDLINE-15: a program that wants a terminal is refused before it starts
+
+Standard input is empty, as it is today, so a program that reads it gets nothing rather than the
+terminal. Beyond that, invocations known to require interaction are refused at compile time with a
+message naming the alternative: `git rebase -i`, `git add -i`, an editor, a pager without
+`--no-pager`, anything that would open `/dev/tty`. The refusal of an editor names `edit_file` as the
+alternative only where the turn's list holds it ([TOOL-6](tool-surface.md#TOOL-6)).
+
+`git commit` is refused when it supplies no message, because git then opens an editor. A message
+source lets it through: `-m`, `-F`, `-C`, `--message`, `--file`, `--reuse-message` or `--no-edit`. A
+plain `--fixup=<commit>` or `--fixup <commit>` is not refused either, because git writes the
+`fixup! <subject>` message itself. `--fixup=amend:<commit>` and `--fixup=reword:<commit>`, and their
+two-word spellings, open an editor and are refused unless a message source is also given.
+`--squash=<commit>` and a bare `git commit` are refused.
+
+The list is a convenience rather than a guarantee. Something interactive that is not on it hits the
+deadline and returns what it printed, which is the same outcome by a slower road.
+
+`verified-by: bravebot_agent::cmdline::a_program_that_wants_a_terminal_is_refused_before_it_starts`
+`verified-by: bravebot_agent::cmdline::a_line_that_names_the_terminal_device_is_refused`
+`verified-by: bravebot_agent::cmdline::the_same_program_without_the_interactive_part_is_not_refused`
+`verified-by: bravebot_agent::cmdline::the_refusal_of_an_editor_names_edit_file_only_where_the_list_holds_it`
+`verified-by: bravebot_agent::exec::a_stage_that_reads_stdin_is_given_nothing_rather_than_the_terminal`
+
+<a id="CMDLINE-16"></a>
+### CMDLINE-16: the tool's own description tells the planner to filter at the source
+
+The description must say that narrowing a result inside the command is the cheapest thing the
+planner can do, and must give the shapes: `| head -n`, `-l` for names only, `-c` for a count, a line
+range rather than a whole file.
+
+It must not tell the planner to prefer the dedicated read and search tools over a command line for
+exploration. That instruction is in the current description, and it is backwards in a large tree: a
+capped structured search returns thousands of tokens of truncated matches where `grep -rl` returns a
+dozen lines, and the planner following the instruction pays the difference every round.
+
+What the description should say instead is the true thing: use whichever returns less, and a command
+that filters usually returns less.
+
+The description must also say that a `cd` step is refused because it moves nothing for the steps
+after it, and that the `directory` argument is how a line runs elsewhere. It must say that a
+`ulimit`, `umask`, `unset`, `alias`, `unalias`, `hash` or `wait` step is refused because it changes
+nothing for the steps after it, and that a program is run under a limit or a mask by writing the
+whole line as `sh -c '... ulimit ...'`, which is approved as one line.
+
+**Why a clause about wording.** A tool's description is the only instruction the planner reliably
+reads, and an instruction to reach for the structured tools instead measurably steers a session
+into the expensive path. Wording that changes behaviour is behaviour.
+
+`verified-by: bravebot_agent::tools::the_run_description_tells_the_planner_to_filter_at_the_source`
+`verified-by: bravebot_agent::tools::the_run_description_does_not_send_the_planner_to_the_other_tools_instead`
+`verified-by: bravebot_agent::tools::only_run_takes_a_command_line`
+`verified-by: bravebot_agent::tools::the_run_description_says_cd_moves_nothing_and_directory_is_how_a_line_runs_elsewhere`
+`verified-by: bravebot_agent::tools::the_run_description_says_a_limit_or_mask_step_is_refused_and_goes_inside_sh_c`
+
+## Amendments to existing specs
+
+This spec cannot land without these. Each is a real change to a normative clause and none should be
+made quietly.
+
+Each is named by what the clause says rather than by its id, because an id from another file means
+nothing until you have opened that file.
+
+| Spec | The clause | Change |
+|---|---|---|
+| [run.md](run.md) | `run` takes a pipeline of argv stages, never a command string | Amended. The planner's spelling becomes a command line; the *execution path* stays argv-only, which is the half that carries the property. The clause's second paragraph survives verbatim and is the load-bearing one. |
+| [run.md](run.md) | argv is routing and must be endorsed by a person | Amended. Routing is the compiled plan rather than the argv the planner wrote. `(T,pub)` and exact binding are unchanged. |
+| [run.md](run.md) | the table of what output is labelled | Extended. A fourth row: output of a read-proven plan, labelled from its read set. The default is untouched. |
+| [run.md](run.md) | every run asks unless every stage was vouched for | **Narrowed by [CMDLINE-9](#CMDLINE-9).** "There is no read-only category" becomes "there is no *declared* read-only category, and one narrow *proven* one". |
+| [run.md](run.md) | the vouched-for list is not an allowlist | Unchanged and reaffirmed. The audited table is not an allowlist either: it decides a label and a prompt, never whether something may run. Nothing is refused for being absent from it. |
+| [run.md](run.md) | a run has a wall-clock limit, and reaching it ends the run rather than failing it | Superseded by [CMDLINE-13](#CMDLINE-13), which keeps that behaviour and makes the limit per call. |
+| [shell-mode.md](../shell-mode.md) | the planner gets no shell tool, ever | **Amended, and this is the big one.** "The planner gets no shell tool" stands: no shell process is started for anything the planner wrote. What is withdrawn is the reading that also banned the notation. The clause should be restated as *the planner's line is never interpreted*, which is what it was protecting. |
+| [permissions.md](../permissions.md) | every stage of a pipeline is judged on its own | Amended. Stages come from the compiler rather than from an array. Its closing sentence, that there is no shell to do the splitting and so this holds rather than being a matter of parsing carefully, must be replaced with the honest version: the splitting is done once, here, and nothing re-splits afterwards. |
+| [tools/read-output.md](read-output.md) | letting a person release quarantined output | Unchanged, and used less. It remains the route for output no proof and no person has covered. |
+| [trust-map.md](../trust-map.md) | what a write asks, and what it records | Read one way for a redirection, per [CMDLINE-5](#CMDLINE-5). The rows recording a path as trusted do not fire, since an append keeps what the file already held. The question put before the write is the run prompt of [CMDLINE-3](#CMDLINE-3), which shows every destination and is put whatever the map says about them, rather than the map's own question about a path that is about to stop being trusted. |
+
+## What is deliberately not adopted
+
+- **Command substitution and parameter expansion.** [CMDLINE-2](#CMDLINE-2). These are the whole of
+  what makes a shell string unendorsable, and adopting them would give up the property the rest of
+  the spec is built to keep.
+- **A fallback to a real shell when compilation fails.** The single change that voids this spec.
+- **Aliases and profile loading.** A line's meaning must be in the line. Shell mode loads the user's
+  syntax because a person typed it; nothing here does.
+- **Confinement of children.** Out of scope of this spec: what a program may reach is
+  [../sandboxing.md](../sandboxing.md)'s ([SANDBOX-17](../sandboxing.md#SANDBOX-17)).
+- **`git` in the audited table.** [CMDLINE-8](#CMDLINE-8).
+
+## Open questions
+
+- Whether a closed set of harness-supplied variables (workspace root, current directory) should be
+  expanded at compile time. It is the same thing as the planner having written the value, so the
+  objection in [CMDLINE-2](#CMDLINE-2) does not obviously reach it.
+- Whether the read set should extend to a directory the plan walks but does not name, which is what
+  `find . -name x` does. Naming `.` makes the read set the whole workspace, which is correct but
+  coarse.
+- Whether a background run's wake-up should be allowed to interrupt a round in flight or only land
+  between rounds.
+
+## Known costs
+
+- **A compiler is a thing that can be wrong.** It is smaller than a shell and it is the only reader
+  of the line, so a bug is a wrong plan rather than a divergence between two interpreters, but a
+  wrong plan is still shown to a person as if it were right. The mitigation is that the plan, not
+  the line, is what is displayed: a reader endorsing a plan that does not match the line they can
+  see above it will notice.
+- **The audited table is maintenance, and it goes stale towards the prompt.** Every entry is a claim
+  checked against one program's option surface, and option surfaces change with versions and with
+  implementations. An entry lists what it recognises, so a version that adds an option refuses the
+  calls that use it rather than accepting them, and only the options both the GNU and the BSD
+  spelling agree on can be listed at all. An option after an operand is refused for the same reason,
+  so `grep -r TODO src -n` asks where `grep -rn TODO src` does not. The cost is a prompt for a call
+  that would have been fine, which is the right direction and is still work.
+- **A name is refused where it lands in the workspace, and no name is ever positively identified.**
+  The audited utilities are supplied by the operating system and differ by platform, distribution and
+  package manager, so no hash or signature can be pinned for one: an entry is a claim about a program
+  under a name, checked against one implementation's option surface, and what runs is whatever
+  `$PATH` reached. Refusing a resolution inside the workspace closes the route a file in the tree
+  takes to an entry. It leaves the case with no attacker in it: where `grep` means `ugrep`, an
+  implementation with a far larger option surface, the entry describes a different program than the
+  one that runs and an option the two read differently is proven against the wrong audit. Refusing
+  every `$PATH` directory the trust map is silent about would cover more of the category and would
+  also refuse the genuine utilities under the layouts above, which is a prompt on every audited call.
+- **A proof is about paths, and the trust map answers about names.** A symlink inside a vouched-for
+  directory pointing at a file outside it is a name the map covers and bytes it never saw, so a
+  read-proven line reading through one comes back trusted. The table refuses the recursion flag that
+  follows links while walking, which closes the case where the planner never named the link; it does
+  not close a link the planner names. Keying the map on where a path lands is what closes it, and
+  that is a change to every rule the map holds, described under known costs in
+  [trust-map.md](../trust-map.md).
+- **More expressiveness is more that can be approved carelessly.** A one-line plan with eight stages
+  and two redirections is harder to read at a prompt than `git log --oneline -50`. Bounding glob
+  expansion helps; nothing fixes it entirely.

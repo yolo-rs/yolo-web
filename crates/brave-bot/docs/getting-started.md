@@ -1,0 +1,320 @@
+# Getting started
+
+Installing bravebot, running it, and what it asks you before and during work on a repository.
+
+## Install
+
+```sh
+npm install -g @brave/bravebot
+```
+
+npm installs the binary for your platform from its own package, `@brave/bravebot-<platform>-<arch>`,
+and runs no install script. `--omit=optional` leaves that package out, and then `bravebot` exits
+saying the binary is missing. macOS, Linux, and Windows on both x86_64 and arm64 are supported.
+
+On macOS and Linux there is an install script, for a machine with no npm on it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brave/bravebot/main/install.sh | sh
+```
+
+It fetches the newest release for your platform, checks it against the published checksum, and
+puts it in `/usr/local/bin`, asking for sudo only if that directory is not yours to write to.
+`INSTALL_DIR` puts it somewhere else:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brave/bravebot/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+Running the line again is how an install made this way is updated: it remembers where the last
+one went, so a second run replaces that binary rather than leaving two on your PATH.
+
+On Windows there is a PowerShell script, for a machine with no Node on it:
+
+```powershell
+irm https://raw.githubusercontent.com/brave/bravebot/main/install.ps1 | iex
+```
+
+It checks the release against the published checksum and the binary's Authenticode signature, and
+puts `bravebot.exe` in `%LOCALAPPDATA%\Programs\bravebot`. `INSTALL_DIR` puts it somewhere else. It
+adds that directory to the end of your user PATH, and to the PowerShell session it ran in, so
+`bravebot` runs by name. Set `BRAVEBOT_NO_MODIFY_PATH` to anything first and it leaves your PATH
+alone and names the directory to add. Running the line again updates the copy the last run
+installed.
+
+To build from source instead, see [development/README.md](development/README.md).
+
+## Staying current
+
+A session started on a version that has been superseded says so, once, under the trust question,
+and gives the line that updates the copy you are running: the npm command for an npm install and
+the script again for a script install, whichever of the two scripts installed it. A build from source is left alone, since neither line would
+update one.
+
+Nothing about that waits: the notice comes from an answer written down on an earlier launch, and
+the request that refreshes it, at most one a day, runs behind the session and is for the next one.
+A machine that is offline, or a first run with nothing recorded yet, says nothing. An incognito
+session neither records an answer nor asks for one, and a build from source never asks at all.
+
+## Using it
+
+```sh
+bravebot                                  # interactive session
+bravebot "what does src/main.rs do?"      # one-shot
+bravebot "explain this" --file notes.md   # with named context
+bravebot doctor                           # check configuration and confinement
+```
+
+The prompt has the editing keys you would expect, Shift-Enter (or Ctrl-J) for a new line without
+sending, Ctrl-V for pasting including screenshots, Ctrl-G to compose in `$EDITOR`, and Ctrl-T for
+the audit trail. Long pastes and dropped files fold to a marker you can delete. See
+[specs/terminal-input.md](specs/terminal-input.md) for the full set and the terminal quirks behind a
+couple of them.
+
+Type `!` on an empty prompt and the line becomes a command for your own shell, so `! cargo test`
+runs in `$SHELL` with globs and redirection intact. What it prints goes to the model in full, which
+is what lets you follow it with "fix the first failure". See
+[specs/shell-mode.md](specs/shell-mode.md) for what that means for trust.
+
+## Slash commands
+
+A line that is exactly a word beginning with `/` is acted on here rather than sent as a prompt.
+`/model` chooses which model to think with. `/theme` opens a centred panel over the session and
+live-previews as you move; Enter keeps the choice, Escape keeps what you had. `/theme nord`
+applies a named theme without opening the panel. The choice is stored in `~/.bravebot` and applies
+in every directory.
+
+Schemes published for both a light and a dark terminal are one row, such as `gruvbox`, and follow
+whichever background is sensed at startup. Where that guess is wrong, name the half you want:
+`/theme gruvbox-dark` and `/theme gruvbox-light` stay put. Custom themes are JSON files under
+`~/.bravebot/themes/`, and an ink there may be a pair, `{"dark": "#282828", "light": "#fbf1c7"}`,
+to follow the terminal the same way. See
+[specs/commands.md](specs/commands.md) for what makes a line a command, and
+[specs/terminal-transcript.md](specs/terminal-transcript.md) for how themes paint the interface.
+
+Add `--trace` to a one-shot run for the audit trail: which gate checked what, the label every
+value carried, and what was released.
+
+## Language
+
+bravebot reads the interface in your language where a translation for it has shipped, and in
+English otherwise. It takes the first of `BRAVEBOT_LOCALE`, `LC_ALL`, `LC_MESSAGES` and `LANG`
+that is set, so on a machine already set up for French there is nothing to do.
+
+```sh
+bravebot                          # whatever your shell says
+BRAVEBOT_LOCALE=fr bravebot       # this once
+export BRAVEBOT_LOCALE=fr         # from now on
+```
+
+`BRAVEBOT_LOCALE` is there so one program can be in a language the rest of the shell is not,
+which is usually wanted the other way round: an English interface on an otherwise French machine.
+
+`fr-CA` and `fr-BE` are answered by the French catalog where they have none of their own, and a
+language nothing has shipped for reads in English. `LC_ALL=C` asks for no translation at all.
+
+English and French are what ship today. Adding a language is a file, and needs no Rust:
+[crates/i18n/locales/README.md](https://github.com/brave/bravebot/blob/main/crates/i18n/locales/README.md).
+
+What stays in English whatever you set: the names of the slash commands, so `/model` is `/model`
+everywhere; the letters a question is answered with, `y` and `n`; and the audit trail, which is a
+record rather than prose. Nothing the model is sent changes with your language either, so
+switching it changes what you read and never what the agent does.
+
+## Trusted directories
+
+At startup you are asked whether you trust the working directory. **Trust it** and ordinary work
+proceeds without a prompt for every edit. **Decline** and nothing is trusted, so every write is
+shown to you first.
+
+The rules, and every other way a path comes to be trusted, are in
+[specs/trust-map.md](specs/trust-map.md).
+
+## Skills and AGENTS.md
+
+Put standing instructions in `AGENTS.md` and they apply to every task in that directory. Put a
+skill in `~/.bravebot/skills/<name>/SKILL.md` and it is available in every project:
+
+```markdown
+---
+name: commit-style
+description: How commit messages are written here. Use before writing one.
+---
+
+Write the subject in the imperative. Explain why in the body, never what.
+```
+
+Only the name and the description are put in front of the model, which loads the body when the
+task calls for it. Your own `~/.bravebot` is trusted for being yours; a project's `AGENTS.md`
+and `.bravebot/skills` are read through the trust map, so they load when you vouched for the
+directory and are left out when you did not. See [specs/skills.md](specs/skills.md).
+
+## Choosing a model service
+
+There is one thing to set up before the first session, and it is which service answers. A released
+binary arrives with none configured, so rather than open a session with nothing set up to answer it,
+a first run says what to configure and stops.
+
+Configure one of these five. `bravebot doctor` reports what it will use once you have.
+
+Each block below sets a top-level `model` key as well. A block on its own leaves the model in force
+the one the build came with, which is Brave's own, so the first run says the same thing again and
+names the key to set. `/model` in a session picks from every model any configured service offers,
+and remembers what you picked.
+
+### AWS Bedrock, through your own account
+
+Put a `provider` block named `amazon-bedrock` in `~/.bravebot/settings.json`, with the region and
+the models to offer. Models are keyed by the name Bedrock knows them by, which may be an
+inference-profile ARN:
+
+```json
+{
+  "provider": {
+    "amazon-bedrock": {
+      "options": { "region": "us-west-2", "profile": "my-bedrock-sso" },
+      "models": {
+        "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcdef": {
+          "name": "Claude Opus (Bedrock)"
+        }
+      }
+    }
+  },
+  "model": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcdef"
+}
+```
+
+The credential is the AWS chain rather than a token, so nothing here names one. `profile` is
+optional and names a credential profile to sign with; without it the ambient credentials are used.
+A profile configured for SSO is signed in to before work starts, and the sign-in prints a URL and a
+code to type into it.
+
+### OpenRouter, or another OpenAI-compatible gateway
+
+Put a `provider` block named for the gateway, with the environment variable that holds its API key
+and the models to offer:
+
+```json
+{
+  "provider": {
+    "openrouter": {
+      "env": ["OPENROUTER_API_KEY"],
+      "models": { "z-ai/glm-4.6": {} }
+    }
+  },
+  "model": "openrouter/z-ai/glm-4.6"
+}
+```
+
+`openrouter` and `openai` need no endpoint written down, their own being compiled in, and neither
+does `anthropic`, which reaches Claude with an Anthropic API key in Anthropic's own protocol. Any
+other gateway names one in `options.baseURL`, and a gateway naming no models at all is asked what it
+serves. The block is read in the shape another tool already reads, so one copied out of that tool's
+configuration works here unedited.
+
+### A local Ollama, or another gateway that wants no key
+
+Ollama wants no API key, so its block names none. Leaving out both `env` and `options.apiKey` is how
+you say none is needed, and the request then carries no `authorization` header:
+
+```json
+{
+  "provider": {
+    "ollama": {
+      "name": "Ollama (local)",
+      "options": { "baseURL": "http://localhost:11434/v1" }
+    }
+  },
+  "model": "ollama/qwen3-coder:30b"
+}
+```
+
+No `models` key, so Ollama is asked what it has pulled, and `/model` lists what came back.
+`bravebot doctor` says a credential is not needed rather than missing.
+
+You need not write it by hand. With Ollama running and nothing else configured, a first run in a
+terminal shows this block, with the newest of your models that can call tools as `model`, and asks
+whether to write it. A running LM Studio or llama-server is offered the same way, as a block of its
+own. `bravebot import-providers` asks the same at any time.
+
+### A ChatGPT account, if you have one
+
+```sh
+bravebot auth login chatgpt
+```
+
+This prints an address and opens it in a browser, where you sign in to OpenAI. The browser then returns
+to a port bravebot holds open on `127.0.0.1`, and the command waits five minutes for it. The sign-in is
+stored only where OpenAI's reply grants the scope that lets bravebot use the account's tokens. On a machine with no browser, open the printed address
+somewhere else and forward that port. Once the sign-in is stored, `bravebot` started on its own in a
+terminal asks which of the account's models to use and remembers the answer, where nothing serves the
+model in force and no gateway or AWS account is configured. `/model` offers the models the account reaches
+once a session is open, named `chatgpt/<model>`, and `--model chatgpt/<model>`, given with a prompt or a task as in
+`bravebot -i "<prompt>" --model chatgpt/<model>`, names one. A `provider` block named
+`chatgpt` that states an endpoint is a gateway and keeps the name, and the sign-in is refused until
+it is renamed. The design is [specs/chatgpt-sign-in.md](specs/chatgpt-sign-in.md).
+
+### An xAI SuperGrok subscription, if you have one
+
+```sh
+bravebot auth login xai
+```
+
+This prints an address and a code. Open the address on any device, the one you are typing on or a phone, sign in
+to xAI there and enter the code if the page asks for one. Once the sign-in is stored, `bravebot` started on its
+own in a terminal asks which of the account's models to use and remembers the answer, where nothing serves the
+model in force and no gateway or AWS account is configured. `/model` offers the models the account reaches once a
+session is open, named `xai/<model>`, and
+`--model xai/<model>`, given with a prompt or a task as in `bravebot -i "<prompt>" --model xai/<model>`, names
+one. A `provider` block named `xai` is a gateway and keeps the name, and the sign-in is refused until it is
+renamed. The design is [specs/xai-sign-in.md](specs/xai-sign-in.md).
+
+### Brave's premium service, if you have a key for it
+
+```sh
+bravebot auth login brave
+```
+
+This asks for the key in a terminal and shows nothing as you type. It is kept in
+`~/.bravebot/brave-key.json`, readable by your account alone, and sent as a bearer token to Brave's
+premium service and nowhere else. `bravebot auth logout brave` removes it, and `bravebot doctor` says
+whether a key is stored and never prints it.
+
+These models are reached through Brave's AI gateway, which is still in development, so prefer one of
+the other routes for now.
+
+### Pointing it somewhere else entirely
+
+An endpoint of your own is configuration too, and a build pointed at one is not asked to configure
+anything further. See [development/configuration.md](development/configuration.md).
+
+## On a corporate network
+
+Two things a managed network changes, both stated in the environment and both reported by
+`bravebot doctor` under `network`.
+
+**A certificate authority of your own.** A network that inspects TLS presents its own certificate,
+signed by an authority your machine has been given and the released binary has not. Name it the way
+you name it for every other client on the machine:
+
+```sh
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt   # a bundle
+export SSL_CERT_DIR=/etc/ssl/certs                        # or a directory of them
+```
+
+What you name replaces the authorities built into the binary rather than adding to them, so name a
+bundle that holds the public roots as well as yours. Without this, every request fails with
+`invalid peer certificate: UnknownIssuer`.
+
+**A proxy.** `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` are honoured, in upper case or lower, and
+`NO_PROXY` names the hosts that bypass one. A SOCKS proxy is not supported; `doctor` says so rather
+than leaving requests to go direct unannounced. A proxy that inspects TLS reads the bodies of the requests that go through
+it, which for this program means the conversation; it can do that only with an authority you also
+gave the machine above.
+
+```sh
+export HTTPS_PROXY=http://proxy.example.internal:8080
+export NO_PROXY=localhost,127.0.0.1,.example.internal
+```
+
+`bravebot doctor` names the proxy by host and port, never its credential.

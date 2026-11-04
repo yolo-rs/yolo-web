@@ -1,0 +1,1743 @@
+//! Wire types for the Converse API as Bedrock serves it, and the translation to and from the shapes
+//! the rest of this agent speaks.
+//!
+//! The body is the one Bedrock states for every provider it hosts rather than any single provider's
+//! own, so which model a request names decides nothing about how it is built. What a provider
+//! defines for itself travels in the passthrough field the service hands to the model unread.
+//!
+//! The agent's conversation is held in OpenAI-compatible types, because that is what the other
+//! backend speaks. This module converts, in one place, rather than teaching the turn loop two
+//! protocols. The differences that matter:
+//!
+//! - The system prompt is a top-level field, not a message with a role.
+//! - Tool calls and their results are content blocks inside user and assistant turns, not a
+//!   separate role with an id alongside.
+//! - Arguments arrive as a JSON object, not as a string holding one.
+//! - Usage counts `inputTokens` and `outputTokens` rather than prompt and completion.
+//! - A streamed event is named in its frame's headers, not in a field of its own body.
+//!
+//! Nothing here inspects content to make a decision. Text is moved between shapes and handed on with
+//! whatever label it arrived under.
+
+use bravebot_aichat::protocol::{Cached, Effort};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// The stop reason meaning the reply hit the ceiling rather than finishing.
+pub const STOP_REASON_MAX_TOKENS: &str = "max_tokens";
+
+/// The image formats this API takes, and the media type each one arrives as.
+///
+/// An attachment names a media type and the API names a format, so the two are matched here. A
+/// media type absent from both this table and [`DOCUMENT_FORMATS`] is one the service refuses, and
+/// refusing it locally is the same argument that stops an unconfigured tier being guessed at.
+const IMAGE_FORMATS: [(&str, &str); 4] = [
+    ("image/png", "png"),
+    ("image/jpeg", "jpeg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+];
+
+/// The document formats this API takes, matched the same way.
+///
+/// This API sorts an attachment by what it is rather than by its media type, so what it will not
+/// take as a picture it may still take as a document. The agent carries one of these, and a
+/// picture block naming it is refused by the service.
+const DOCUMENT_FORMATS: [(&str, &str); 1] = [("application/pdf", "pdf")];
+
+/// A cache breakpoint: everything in front of it may be reused by the next request.
+///
+/// A block of its own rather than a field on another block, which is the shape this API states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CachePoint {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// How long the service keeps what this point covers, or absent for the service's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<&'static str>,
+}
+
+impl CachePoint {
+    /// The only kind this API offers, and the only one worth asking for: a turn re-sends its whole
+    /// history every round, and rounds are seconds apart.
+    pub fn new() -> Self {
+        Self {
+            kind: "default",
+            ttl: None,
+        }
+    }
+
+    /// The same point asking the service to keep its prefix for `ttl`.
+    pub fn lasting(ttl: bravebot_config::CacheTtl) -> Self {
+        Self {
+            ttl: Some(ttl.wire()),
+            ..Self::new()
+        }
+    }
+}
+
+impl Default for CachePoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One block of the system prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SystemBlock {
+    Text(String),
+    CachePoint(CachePoint),
+}
+
+/// A request to Bedrock.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseRequest {
+    /// The system prompt, hoisted out of the message list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<Vec<SystemBlock>>,
+    pub messages: Vec<ConverseMessage>,
+    pub inference_config: InferenceConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_config: Option<ToolConfig>,
+    /// What the service hands to the model without reading it.
+    ///
+    /// Absent unless somebody asked for a level or the request streams, so a whole-reply request
+    /// nobody asked a level of sends the body it always sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_model_request_fields: Option<serde_json::Map<String, Value>>,
+}
+
+/// The beta that has a Claude model stream a tool's arguments as it writes them.
+///
+/// Without it the service holds each argument back until the model has finished writing it, so a
+/// long file is minutes of silence on a connection that may only go quiet for two. The per-tool
+/// field that says the same thing is not this: this API drops a key it does not define from a
+/// tool's description, measured by a made-up key being answered as readily as that one and the
+/// silence being the same length either way.
+pub const ARGUMENTS_AS_WRITTEN: &str = "fine-grained-tool-streaming-2025-05-14";
+
+/// The parameters every model this API serves takes.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfig {
+    pub max_tokens: u64,
+}
+
+/// The tools a turn is offering, in the wrapper this API states them in.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolConfig {
+    pub tools: Vec<ToolEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolEntry {
+    ToolSpec(ToolSpec),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: ToolSchema,
+}
+
+/// A tool's parameters, which this API states under the notation they are written in.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolSchema {
+    pub json: Value,
+}
+
+/// Serialised only: `role` is a fixed string this crate chooses, never one it reads back.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConverseMessage {
+    pub role: &'static str,
+    pub content: Vec<Block>,
+}
+
+/// One content block on the way out.
+///
+/// Every member of the union names itself, which is what this API does in place of a `type` field.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Block {
+    Text(String),
+    Image(Image),
+    Document(Document),
+    ToolUse(ToolUse),
+    ToolResult(ToolResult),
+    CachePoint(CachePoint),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Image {
+    /// The format this API names, which is a word of its own rather than a media type.
+    ///
+    /// Serialised only, and one of a fixed set this crate chooses from, never a value read back.
+    pub format: &'static str,
+    pub source: AttachmentSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Document {
+    pub format: &'static str,
+    /// What this API calls the document, which it requires and this has to invent.
+    ///
+    /// A data URI carries no filename, so the name is the attachment's position in the turn. It
+    /// reaches the model, so it is this crate's own word and never anything read from the file.
+    pub name: String,
+    pub source: AttachmentSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AttachmentSource {
+    /// The attachment itself, base64 as this API takes it over JSON.
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUse {
+    pub tool_use_id: String,
+    pub name: String,
+    /// Absent where a call takes no arguments. Read as an empty object rather than refused, since a
+    /// block that will not parse is one this drops, which loses the call the model asked for, and
+    /// an empty object is what the same call arriving in pieces over a stream already becomes.
+    #[serde(default = "empty_object")]
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResult {
+    pub tool_use_id: String,
+    /// A list, because this API lets one result carry several pieces. A tool here returns text.
+    pub content: Vec<ToolResultBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolResultBlock {
+    Text(String),
+}
+
+/// The arguments of a call that named none.
+fn empty_object() -> Value {
+    json!({})
+}
+
+/// A complete reply.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConverseResponse {
+    #[serde(default)]
+    pub output: Option<Output>,
+    /// Why the model stopped. `max_tokens` here means the reply was cut off.
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub usage: Option<BedrockUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Output {
+    #[serde(default)]
+    pub message: Option<ReplyMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplyMessage {
+    #[serde(default)]
+    pub content: Vec<ReplyBlock>,
+}
+
+/// One content block on the way back.
+///
+/// Read as whichever member it matches, with anything else kept whole and ignored. The union grows
+/// with what the models this API fronts can produce, and a block naming something unmodelled must
+/// not fail a reply that is otherwise complete.
+///
+/// A block that names a tool call this could not read is its own case rather than one of those.
+/// Ignoring it would answer with the prose beside it and drop a call the model asked for, which
+/// looks to everybody like a model that decided against calling anything.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ReplyBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        #[serde(rename = "toolUse")]
+        tool_use: ToolUse,
+    },
+    UnreadableToolUse {
+        #[serde(rename = "toolUse")]
+        tool_use: Value,
+    },
+    Other(Value),
+}
+
+/// The key a block or delta of the model's reasoning arrives under.
+pub const REASONING: &str = "reasoningContent";
+
+impl ReplyBlock {
+    /// Whether this block names a tool call whose shape this could not read.
+    pub fn is_unreadable_call(&self) -> bool {
+        matches!(self, Self::UnreadableToolUse { .. })
+    }
+
+    /// Whether this block is the model's reasoning, known from its key and nothing in it.
+    pub fn is_reasoning(&self) -> bool {
+        matches!(self, Self::Other(value) if value.get(REASONING).is_some())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Tokens served out of the cache, which this API reports apart from `inputTokens` rather
+    /// than inside it. Counted here so a cached round does not read as a shrinking conversation.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Tokens written into the cache on the way past, reported apart for the same reason.
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
+}
+
+/// One frame of a streamed reply.
+///
+/// Only the events that carry text, a tool call, or a count. The API sends several others
+/// (`messageStart`, `contentBlockStop`) that say nothing this needs.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    ContentBlockStart {
+        index: usize,
+        start: BlockStart,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: Delta,
+    },
+    MessageStop {
+        stop_reason: Option<String>,
+    },
+    /// The counts, which this API sends once at the end rather than across the reply.
+    Metadata {
+        usage: Option<BedrockUsage>,
+    },
+}
+
+/// What a block that has just opened is.
+///
+/// A tool call this could not read is its own case for the same reason it is in a finished reply:
+/// the deltas that follow carry its arguments and nothing else names it, so a start that is read
+/// past leaves those fragments belonging to no call at all.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum BlockStart {
+    ToolUse {
+        #[serde(rename = "toolUse")]
+        tool_use: ToolUseStart,
+    },
+    UnreadableToolUse {
+        #[serde(rename = "toolUse")]
+        tool_use: Value,
+    },
+    Other(Value),
+}
+
+/// A tool call's identity, which arrives before any of its arguments do.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseStart {
+    pub tool_use_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Delta {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        #[serde(rename = "toolUse")]
+        tool_use: ToolUseDelta,
+    },
+    Other(Value),
+}
+
+/// A piece of a tool call's arguments, which arrive as JSON in fragments.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolUseDelta {
+    pub input: String,
+}
+
+/// The event a named frame carries, or nothing for one this does not model.
+///
+/// The name is a frame header rather than a field of the body, which is the framing's business and
+/// not the reply's: a name this does not recognise is skipped, exactly as an unmodelled field is.
+pub fn stream_event(name: &str, payload: &[u8]) -> Option<StreamEvent> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StartBody {
+        #[serde(default)]
+        content_block_index: usize,
+        start: BlockStart,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DeltaBody {
+        #[serde(default)]
+        content_block_index: usize,
+        delta: Delta,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StopBody {
+        #[serde(default)]
+        stop_reason: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct MetadataBody {
+        #[serde(default)]
+        usage: Option<BedrockUsage>,
+    }
+
+    match name {
+        "contentBlockStart" => {
+            let body: StartBody = serde_json::from_slice(payload).ok()?;
+            Some(StreamEvent::ContentBlockStart {
+                index: body.content_block_index,
+                start: body.start,
+            })
+        }
+        "contentBlockDelta" => {
+            let body: DeltaBody = serde_json::from_slice(payload).ok()?;
+            Some(StreamEvent::ContentBlockDelta {
+                index: body.content_block_index,
+                delta: body.delta,
+            })
+        }
+        "messageStop" => {
+            let body: StopBody = serde_json::from_slice(payload).ok()?;
+            Some(StreamEvent::MessageStop {
+                stop_reason: body.stop_reason,
+            })
+        }
+        "metadata" => {
+            let body: MetadataBody = serde_json::from_slice(payload).ok()?;
+            Some(StreamEvent::Metadata { usage: body.usage })
+        }
+        _ => None,
+    }
+}
+
+impl ConverseRequest {
+    /// Cap the reply at what the configuration says this model may write.
+    ///
+    /// A ceiling rather than a target: the model stops here having said whatever it had room for,
+    /// so the figure costs nothing on a reply that was going to be short. What decides it is
+    /// [`bravebot_config::bedrock::Bedrock::output_limit`], and the assumed figure
+    /// [`request_from`] starts from is the one that holds where nothing stated another.
+    pub fn with_ceiling(mut self, ceiling: u64) -> Self {
+        self.inference_config.max_tokens = ceiling;
+        self
+    }
+
+    /// Ask for a particular amount of thinking, or leave the model to its own default.
+    ///
+    /// This API's own parameters have no field for it, so the level goes in the passthrough under
+    /// the name the model reading it gives the field, beside whatever else is there.
+    pub fn with_effort(mut self, effort: Option<Effort>) -> Self {
+        if let Some(effort) = effort {
+            self.passthrough()
+                .insert("output_config".to_string(), json!({ "effort": effort }));
+        }
+        self
+    }
+
+    /// Ask for each tool argument as the model writes it, rather than once it is finished.
+    ///
+    /// In the passthrough beside the level, since neither is a parameter this API defines. The
+    /// service stops checking an argument before sending it on, so what arrives is whatever the
+    /// model wrote, and one that does not parse is the turn loop's to answer as a failed call.
+    pub fn with_arguments_as_written(mut self) -> Self {
+        self.passthrough()
+            .insert("anthropic_beta".to_string(), json!([ARGUMENTS_AS_WRITTEN]));
+        self
+    }
+
+    /// Ask for the model's thinking to be sent as it thinks, rather than kept back.
+    ///
+    /// Says how thinking is shown and never whether the model thinks, which stays the model's own
+    /// default: Claude Opus 5.5 asked nothing sent an empty thinking block after 11 seconds of
+    /// silence, and asked this sent the thinking as it went, the longest gap 7.6 seconds.
+    pub fn with_thinking_shown(mut self) -> Self {
+        self.passthrough()
+            .insert("thinking".to_string(), json!({ "display": "summarized" }));
+        self
+    }
+
+    fn passthrough(&mut self) -> &mut serde_json::Map<String, Value> {
+        self.additional_model_request_fields
+            .get_or_insert_with(serde_json::Map::new)
+    }
+
+    /// The same request without its cache breakpoints.
+    ///
+    /// Prompt caching is not something every model this API fronts offers, and one that does not
+    /// refuses the whole request rather than reading past the breakpoints. They are also the one
+    /// part of a request nobody asked for, so they are what a refusal is worth trying without.
+    pub fn without_breakpoints(mut self) -> Self {
+        if let Some(system) = &mut self.system {
+            system.retain(|block| !matches!(block, SystemBlock::CachePoint(_)));
+        }
+        for message in &mut self.messages {
+            message
+                .content
+                .retain(|block| !matches!(block, Block::CachePoint(_)));
+        }
+        self
+    }
+
+    /// The same request with every breakpoint asking the service to keep its prefix for `ttl`.
+    ///
+    /// Not every model reads a lifetime, and one that does not refuses the request, so this is
+    /// something a refusal is worth trying without before the breakpoints are given up. `None`
+    /// leaves each breakpoint as the service's default.
+    pub fn with_cache_ttl(mut self, ttl: Option<bravebot_config::CacheTtl>) -> Self {
+        let Some(ttl) = ttl else {
+            return self;
+        };
+        let point = CachePoint::lasting(ttl);
+        for block in self.system.iter_mut().flatten() {
+            if let SystemBlock::CachePoint(held) = block {
+                *held = point;
+            }
+        }
+        for message in &mut self.messages {
+            for block in &mut message.content {
+                if let Block::CachePoint(held) = block {
+                    *held = point;
+                }
+            }
+        }
+        self
+    }
+
+    /// The same request without the breakpoint on the end of its conversation, the prompt's kept.
+    ///
+    /// For a request whose conversation is given up once it answers: the breakpoint that rolls to
+    /// the end is worth a cache write because the next request sends everything in front of it
+    /// again, and where there is no next request it is a premium paid for a prefix nothing reads
+    /// back. The prompt is a different prefix, the same bytes every time such a request is made.
+    pub fn without_the_conversation_breakpoint(mut self) -> Self {
+        if let Some(last) = self.messages.last_mut() {
+            last.content
+                .retain(|block| !matches!(block, Block::CachePoint(_)));
+        }
+        self
+    }
+}
+
+/// Build a Bedrock request from the conversation the agent holds.
+///
+/// The message list is the same conversation, restated. System turns are hoisted into the top-level
+/// field, tool results move from their own role into blocks on a user turn, and consecutive turns
+/// that would now share a role are merged, because the API rejects two turns of the same role in a
+/// row. A request offering no tools sends each call and each result as text.
+///
+/// The model is not a parameter: Bedrock names it in the URL path rather than in the body, which is
+/// one of the differences from the other backend.
+pub fn request_from(
+    messages: &[bravebot_aichat::protocol::Message],
+    tools: Option<&[bravebot_aichat::protocol::Tool]>,
+) -> ConverseRequest {
+    // An empty list is no list. This API refuses `tools: []` rather than reading it as a request
+    // to use none, so a turn offering nothing has to omit the field entirely.
+    let tools = tools.filter(|tools| !tools.is_empty());
+    // This API refuses a `toolUse` or `toolResult` block in a request with no `toolConfig`, so the
+    // walk writes a conversation's calls and results as text where no tool is offered.
+    let walked = bravebot_aichat::conversation::walk(&Converse, messages, tools.is_some());
+
+    let mut converted: Vec<ConverseMessage> = walked
+        .turns
+        .into_iter()
+        .map(|turn| ConverseMessage {
+            role: turn.role,
+            content: turn.blocks,
+        })
+        .collect();
+
+    // Two breakpoints, which is what this conversation is shaped like. The prompt and the tool
+    // schemas are the same bytes on every round of every turn, and the messages in front of the
+    // last one are the same bytes they were a round ago: a turn re-sends its whole history each
+    // round, so without these the service reads all of it again every time. One session grew to
+    // a hundred thousand tokens over twenty-seven rounds, and paid for every one of them at full
+    // price, in seconds as much as in money.
+    //
+    // The prefix runs tools, then system, then messages, so the breakpoint on the system prompt
+    // covers the schemas too and the one on the last message covers everything.
+    let system = walked.system.map(|system| {
+        vec![
+            SystemBlock::Text(system),
+            SystemBlock::CachePoint(CachePoint::new()),
+        ]
+    });
+    mark_the_end(&mut converted);
+
+    ConverseRequest {
+        system,
+        messages: converted,
+        inference_config: InferenceConfig {
+            max_tokens: bravebot_config::bedrock::OUTPUT_LIMIT,
+        },
+        tool_config: tools.map(|tools| ToolConfig {
+            tools: tools.iter().map(tool_from).collect(),
+        }),
+        additional_model_request_fields: None,
+    }
+}
+
+/// How Converse names the blocks of a turn, for [`bravebot_aichat::conversation::walk`].
+struct Converse;
+
+impl bravebot_aichat::conversation::Spelling for Converse {
+    type Block = Block;
+
+    fn text(&self, text: &str) -> Block {
+        Block::Text(text.to_string())
+    }
+
+    /// A picture and a document are different members of this API's union and it takes different
+    /// formats for each, so which one a media type names decides which block it becomes.
+    fn attachment(&self, media_type: &str, data: &str, position: usize) -> Option<Block> {
+        if let Some((_, format)) = IMAGE_FORMATS.iter().find(|(known, _)| *known == media_type) {
+            return Some(Block::Image(Image {
+                format,
+                source: AttachmentSource {
+                    bytes: data.to_string(),
+                },
+            }));
+        }
+
+        let (_, format) = DOCUMENT_FORMATS
+            .iter()
+            .find(|(known, _)| *known == media_type)?;
+        Some(Block::Document(Document {
+            format,
+            name: format!("attachment {position}"),
+            source: AttachmentSource {
+                bytes: data.to_string(),
+            },
+        }))
+    }
+
+    fn call(&self, id: &str, name: &str, input: Value) -> Block {
+        Block::ToolUse(ToolUse {
+            tool_use_id: id.to_string(),
+            name: name.to_string(),
+            input,
+        })
+    }
+
+    fn result(&self, id: &str, text: String) -> Block {
+        Block::ToolResult(ToolResult {
+            tool_use_id: id.to_string(),
+            content: vec![ToolResultBlock::Text(text)],
+        })
+    }
+}
+
+/// Put a breakpoint at the end of the conversation.
+///
+/// Rolling rather than fixed: it moves to the end on every request, so each round writes the
+/// round before it into the cache and reads back everything older. A conversation ending in an
+/// image or a tool call is left with the one breakpoint on the system prompt, which costs a cache
+/// write and nothing else.
+fn mark_the_end(messages: &mut [ConverseMessage]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    if matches!(
+        last.content.last(),
+        Some(Block::Text(_) | Block::ToolResult(_))
+    ) {
+        last.content.push(Block::CachePoint(CachePoint::new()));
+    }
+}
+
+fn tool_from(tool: &bravebot_aichat::protocol::Tool) -> ToolEntry {
+    ToolEntry::ToolSpec(ToolSpec {
+        name: tool.function.name.clone(),
+        description: tool.function.description.clone(),
+        input_schema: ToolSchema {
+            json: tool.function.parameters.clone(),
+        },
+    })
+}
+
+/// The text and the calls in a finished reply, in the shapes the agent expects back.
+pub fn parts_of(blocks: &[ReplyBlock]) -> (String, Vec<bravebot_aichat::protocol::ToolCall>) {
+    use bravebot_aichat::protocol::{ToolCall, ToolCallFunction};
+
+    let mut text = String::new();
+    let mut calls = Vec::new();
+
+    for block in blocks {
+        match block {
+            ReplyBlock::Text { text: piece } => text.push_str(piece),
+            ReplyBlock::ToolUse { tool_use } => calls.push(ToolCall {
+                id: Some(tool_use.tool_use_id.clone()),
+                function: ToolCallFunction {
+                    name: tool_use.name.clone(),
+                    // Back to a string, which is how the rest of the agent carries arguments.
+                    arguments: Some(tool_use.input.to_string()),
+                },
+                extra_content: None,
+            }),
+            // Neither reaches here: an unreadable call fails the reply before it is taken apart.
+            ReplyBlock::UnreadableToolUse { .. } | ReplyBlock::Other(_) => {}
+        }
+    }
+
+    (text, calls)
+}
+
+impl From<BedrockUsage> for bravebot_aichat::protocol::Usage {
+    fn from(usage: BedrockUsage) -> Self {
+        Self {
+            // Everything the request carried, whoever read it. This API states `inputTokens`
+            // net of the cache, so a round that hit it reports a fraction of the prompt it
+            // actually sent, and a context gauge fed that figure would show a conversation
+            // shrinking as it grew. What the three add up to is the prompt.
+            prompt_tokens: usage.input_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_write_input_tokens,
+            completion_tokens: usage.output_tokens,
+            // Carried as well as added in. Summed alone they say what the round sent and nothing
+            // about what it cost, and those differ by roughly ten times: a session where every
+            // breakpoint missed reports the same figures as one where every one of them hit.
+            cached: Cached {
+                read_tokens: usage.cache_read_input_tokens,
+                written_tokens: usage.cache_write_input_tokens,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bravebot_aichat::protocol::{
+        ImageUrl, Message, Part, Tool, ToolCallRequest, ToolCallRequestFunction,
+    };
+
+    fn body_of(request: &ConverseRequest) -> Value {
+        serde_json::to_value(request).expect("serialises")
+    }
+
+    /// The tools a turn offers, which is what sends its calls and results in this API's blocks.
+    fn offered() -> Vec<Tool> {
+        vec![Tool::function("read", "Read a file", json!({}))]
+    }
+
+    fn call(id: &str, name: &str, arguments: &str) -> ToolCallRequest {
+        ToolCallRequest {
+            id: id.into(),
+            kind: "function".into(),
+            function: ToolCallRequestFunction {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+            extra_content: None,
+        }
+    }
+
+    /// A system turn is a top-level field here, not a message. Sent as one it would be a user turn
+    /// the model reads as something the person said.
+    #[test]
+    fn a_system_turn_becomes_the_top_level_field() {
+        let request = request_from(
+            &[Message::system("be helpful"), Message::user("hello")],
+            None,
+        );
+        let json = body_of(&request);
+        assert_eq!(json["system"][0]["text"], "be helpful");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, "user");
+    }
+
+    /// The note the agent writes after the first prompt of a session begins with a count. Converse
+    /// lays the blocks of a turn end to end, so a prompt ending in a number and a note beginning
+    /// with one would read as a single number unless the note's block starts on a new paragraph.
+    #[test]
+    fn a_note_after_the_line_a_person_typed_is_a_block_on_a_new_paragraph() {
+        let request = request_from(
+            &[
+                Message::system("be helpful"),
+                Message::user("see issues/1106"),
+                Message::user(
+                    "16 skills, of your own or the project's, are not listed above: a, b.",
+                ),
+            ],
+            None,
+        );
+        let json = body_of(&request);
+        assert_eq!(request.messages.len(), 1);
+        let blocks = json["messages"][0]["content"].as_array().expect("blocks");
+        assert_eq!(blocks[0]["text"], "see issues/1106");
+        let note = blocks[1]["text"].as_str().expect("a text block");
+        assert!(note.starts_with("\n\n16 skills"), "{note:?}");
+    }
+
+    /// Converse refuses a text block with no word in it and takes nothing but an object as a call's
+    /// arguments, and the walk that builds these requests is shared with another service that refuses
+    /// the same. Blank lines another model wrote before a call are no block, and a call recorded with
+    /// `null` or a list is kept with an empty object so the result that answers it still has a call.
+    #[test]
+    fn text_with_no_word_in_it_and_arguments_that_are_not_an_object_are_not_sent_as_written() {
+        let tools = offered();
+        let request = request_from(
+            &[
+                Message::user("go"),
+                Message::assistant_calling(
+                    "\n\n",
+                    vec![call("a", "read", "null"), call("b", "read", "[1]")],
+                ),
+                Message::tool_result("a", "one"),
+                Message::tool_result("b", "two"),
+            ],
+            Some(&tools),
+        );
+        let json = body_of(&request);
+        let assistant = json["messages"][1]["content"].as_array().expect("blocks");
+        assert_eq!(assistant.len(), 2, "{assistant:?}");
+        for block in assistant {
+            assert_eq!(block["toolUse"]["input"], json!({}), "{block}");
+        }
+    }
+
+    /// A build nobody has asked for a level must send the body it always sent, or adding the
+    /// field would change every request to an account that has never seen it.
+    #[test]
+    fn a_request_nobody_asked_a_level_of_carries_no_output_config() {
+        let request = request_from(&[Message::user("hello")], None);
+        assert!(
+            body_of(&request)
+                .get("additionalModelRequestFields")
+                .is_none()
+        );
+    }
+
+    /// This API states the level inside an object of its own, which is not how the other backend
+    /// reads the same choice.
+    #[test]
+    fn a_level_is_sent_inside_the_object_this_api_states() {
+        let request = request_from(&[Message::user("hello")], None).with_effort(Some(Effort::Max));
+        let json = body_of(&request);
+        assert_eq!(
+            json["additionalModelRequestFields"]["output_config"]["effort"],
+            "max"
+        );
+    }
+
+    /// The level, the ask for arguments as they are written and the ask to show thinking share one
+    /// passthrough object, so setting any leaves the others in place. Replaced wholesale, a turn
+    /// given a level loses the ask and its long file is silent again.
+    #[test]
+    fn the_level_and_the_ask_for_arguments_as_written_travel_together() {
+        let tools = vec![Tool::function("write_file", "Write a file", json!({}))];
+        let asked = || request_from(&[Message::user("hello")], Some(&tools));
+        type Setter = fn(ConverseRequest) -> ConverseRequest;
+        let setters: [Setter; 3] = [
+            |r| r.with_effort(Some(Effort::Max)),
+            ConverseRequest::with_arguments_as_written,
+            ConverseRequest::with_thinking_shown,
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let request = order.iter().fold(asked(), |r, &i| setters[i](r));
+            assert_eq!(
+                body_of(&request)["additionalModelRequestFields"],
+                json!({
+                    "output_config": { "effort": "max" },
+                    "anthropic_beta": [ARGUMENTS_AS_WRITTEN],
+                    // How thinking is shown, and no type: whether the model thinks is its own.
+                    "thinking": { "display": "summarized" },
+                }),
+                "set in the order {order:?}"
+            );
+        }
+
+        // No level leaves the ask alone rather than clearing the object it shares.
+        let request = asked().with_arguments_as_written().with_effort(None);
+        assert_eq!(
+            body_of(&request)["additionalModelRequestFields"],
+            json!({ "anthropic_beta": [ARGUMENTS_AS_WRITTEN] })
+        );
+    }
+
+    /// Several system turns accumulate over a session. They are joined in the order they would have
+    /// been read, because a later instruction qualifying an earlier one depends on that order.
+    #[test]
+    fn several_system_turns_are_joined_in_order() {
+        let request = request_from(
+            &[
+                Message::system("first"),
+                Message::system("second"),
+                Message::user("hello"),
+            ],
+            None,
+        );
+        assert_eq!(body_of(&request)["system"][0]["text"], "first\n\nsecond");
+    }
+
+    /// The API refuses two consecutive turns of the same role, and this conversion creates them:
+    /// two tool results in a row are two messages that both become user turns.
+    #[test]
+    fn consecutive_tool_results_merge_into_one_turn() {
+        let request = request_from(
+            &[
+                Message::user("go"),
+                Message::assistant_calling(
+                    "",
+                    vec![call("a", "one", "{}"), call("b", "two", "{}")],
+                ),
+                Message::tool_result("a", "first result"),
+                Message::tool_result("b", "second result"),
+            ],
+            Some(&offered()),
+        );
+        let roles: Vec<&str> = request.messages.iter().map(|m| m.role).collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        let results = request.messages[2]
+            .content
+            .iter()
+            .filter(|block| matches!(block, Block::ToolResult(_)))
+            .count();
+        assert_eq!(results, 2, "both results belong to the one turn");
+    }
+
+    /// A call and the result answering it are matched by id. Losing it would leave the model unable
+    /// to tell which of several calls was answered.
+    #[test]
+    fn a_tool_result_keeps_the_id_of_the_call_it_answers() {
+        let request = request_from(
+            &[Message::tool_result("call-1", "the output")],
+            Some(&offered()),
+        );
+        match &request.messages[0].content[0] {
+            Block::ToolResult(result) => {
+                assert_eq!(result.tool_use_id, "call-1");
+                assert_eq!(
+                    result.content,
+                    vec![ToolResultBlock::Text("the output".to_string())]
+                );
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    /// A result with no id cannot be matched to its call and the API rejects it. Sent as plain text
+    /// it would read as something the user said, which is the one thing it must not become.
+    #[test]
+    fn a_tool_result_without_an_id_is_dropped_rather_than_sent_as_a_user_turn() {
+        let orphan = Message {
+            role: bravebot_aichat::protocol::Role::Tool,
+            content: "output with no call".to_string().into(),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let request = request_from(&[orphan], None);
+        assert!(request.messages.is_empty());
+    }
+
+    /// Arguments are a string in one protocol and an object in the other. Sent as a string the model
+    /// receives a quoted blob where a structure was expected.
+    #[test]
+    fn tool_arguments_cross_from_a_string_to_an_object() {
+        let request = request_from(
+            &[Message::assistant_calling(
+                "",
+                vec![call("a", "read", r#"{"path":"src/lib.rs"}"#)],
+            )],
+            Some(&offered()),
+        );
+        match &request.messages[0].content[0] {
+            Block::ToolUse(call) => assert_eq!(call.input["path"], "src/lib.rs"),
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+    }
+
+    /// A model can emit arguments that will not parse. Dropping the call would leave a conversation
+    /// where the next turn answers something that was never asked, so it is kept and sent empty.
+    #[test]
+    fn unparseable_arguments_become_an_empty_object_rather_than_dropping_the_call() {
+        let request = request_from(
+            &[Message::assistant_calling(
+                "",
+                vec![call("a", "read", "{not json")],
+            )],
+            Some(&offered()),
+        );
+        match &request.messages[0].content[0] {
+            Block::ToolUse(call) => {
+                assert_eq!(call.input, json!({}));
+                assert_eq!(call.tool_use_id, "a");
+            }
+            other => panic!("expected the call to survive, got {other:?}"),
+        }
+    }
+
+    /// An assistant turn that only asked for tools has no text, and the API rejects an empty text
+    /// block.
+    #[test]
+    fn an_assistant_turn_with_no_text_sends_no_text_block() {
+        let request = request_from(
+            &[Message::assistant_calling("", vec![call("a", "one", "{}")])],
+            Some(&offered()),
+        );
+        assert_eq!(request.messages[0].content.len(), 1);
+        assert!(matches!(
+            request.messages[0].content[0],
+            Block::ToolUse { .. }
+        ));
+    }
+
+    /// An attachment arrives as a data URI and crosses as inline base64. The alternative, sending a
+    /// link, asks the service to fetch a URL the conversation chose.
+    #[test]
+    fn an_attached_image_crosses_as_inline_data() {
+        let request = request_from(
+            &[Message::user_parts(vec![
+                Part::Text {
+                    text: "look".into(),
+                },
+                Part::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                },
+            ])],
+            None,
+        );
+        match &request.messages[0].content[1] {
+            Block::Image(image) => {
+                assert_eq!(image.format, "png", "this API names a format, not a type");
+                assert_eq!(image.source.bytes, "AAAA");
+            }
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    /// Anything that is not inline data is dropped rather than turned into a fetch: a URL in a
+    /// conversation is a routing field nobody endorsed.
+    #[test]
+    fn an_image_that_is_not_inline_data_is_dropped() {
+        for url in [
+            "https://example.invalid/x.png",
+            "data:image/png,notbase64",
+            "data:;base64,AAAA",
+            "data:image/png;base64,",
+            "not a url",
+        ] {
+            let request = request_from(
+                &[Message::user_parts(vec![
+                    Part::Text {
+                        text: "look".into(),
+                    },
+                    Part::ImageUrl {
+                        image_url: ImageUrl { url: url.into() },
+                    },
+                ])],
+                None,
+            );
+            assert_eq!(
+                request.messages[0].content.len(),
+                2,
+                "{url} was sent as an image"
+            );
+        }
+    }
+
+    /// This API takes four image formats and refuses the rest, so a media type outside them is
+    /// dropped here rather than failing at the far end for a reason nothing local explained.
+    #[test]
+    fn an_image_in_a_format_this_api_does_not_take_is_dropped() {
+        for media_type in ["image/svg+xml", "image/bmp", "image/PNG"] {
+            let request = request_from(
+                &[Message::user_parts(vec![
+                    Part::Text {
+                        text: "look".into(),
+                    },
+                    Part::ImageUrl {
+                        image_url: ImageUrl {
+                            url: format!("data:{media_type};base64,AAAA"),
+                        },
+                    },
+                ])],
+                None,
+            );
+            assert_eq!(
+                request.messages[0].content.len(),
+                2,
+                "{media_type} was sent as an image"
+            );
+        }
+    }
+
+    /// A picture and a document are different members of this API's union, and it refuses a PDF
+    /// sent as a picture. The agent carries PDFs, so one arriving as a picture part has to cross as
+    /// the document block this API states, or the turn asks about a file the model never received.
+    #[test]
+    fn a_pdf_crosses_as_a_document_rather_than_a_picture() {
+        let request = request_from(
+            &[Message::user_parts(vec![
+                Part::Text {
+                    text: "what does it say".into(),
+                },
+                Part::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:application/pdf;base64,AAAA".into(),
+                    },
+                },
+            ])],
+            None,
+        );
+        match &request.messages[0].content[1] {
+            Block::Document(document) => {
+                assert_eq!(document.format, "pdf");
+                assert_eq!(document.source.bytes, "AAAA");
+                assert!(!document.name.is_empty(), "this API requires a name");
+            }
+            other => panic!("expected a document, got {other:?}"),
+        }
+    }
+
+    /// A turn can be an attachment and nothing else, which is what a processor asked about a file
+    /// sends. Every block dropped leaves an empty turn, and a request whose message list is empty
+    /// is refused outright, so the answer is about a file nobody was shown.
+    #[test]
+    fn a_turn_whose_only_part_is_an_attachment_is_still_a_turn() {
+        for url in [
+            "data:application/pdf;base64,AAAA",
+            "data:image/png;base64,AAAA",
+        ] {
+            let request = request_from(
+                &[Message::user_parts(vec![Part::ImageUrl {
+                    image_url: ImageUrl { url: url.into() },
+                }])],
+                None,
+            );
+            assert_eq!(request.messages.len(), 1, "{url} left no turn at all");
+            assert_eq!(request.messages[0].content.len(), 1, "{url}");
+        }
+    }
+
+    /// Dropping a file without typing anything leaves a part holding no text, and this API refuses
+    /// an empty text block as readily as it refuses an empty turn.
+    #[test]
+    fn a_part_carrying_no_text_sends_no_block() {
+        let request = request_from(
+            &[Message::user_parts(vec![
+                Part::Text {
+                    text: String::new(),
+                },
+                Part::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                },
+            ])],
+            None,
+        );
+        assert_eq!(request.messages[0].content.len(), 1);
+        assert!(matches!(request.messages[0].content[0], Block::Image(_)));
+    }
+
+    /// A tool definition is nested under `function` in one protocol and under a spec of its own
+    /// here, with the schema under a different name again.
+    #[test]
+    fn a_tool_definition_is_flattened() {
+        let tools = vec![Tool::function(
+            "read_file",
+            "Read a file",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let request = request_from(&[Message::user("hi")], Some(&tools));
+        let spec = &body_of(&request)["toolConfig"]["tools"][0]["toolSpec"];
+        assert_eq!(spec["name"], "read_file");
+        assert_eq!(spec["description"], "Read a file");
+        assert_eq!(spec["inputSchema"]["json"]["type"], "object");
+    }
+
+    /// A cached round sent every one of those tokens, whoever ended up reading them.
+    #[test]
+    fn cached_tokens_are_counted_as_the_prompt_they_were() {
+        let usage: bravebot_aichat::protocol::Usage = BedrockUsage {
+            input_tokens: 12,
+            output_tokens: 40,
+            cache_read_input_tokens: 900,
+            cache_write_input_tokens: 88,
+        }
+        .into();
+        assert_eq!(
+            usage.prompt_tokens, 1000,
+            "a cached round read as a smaller prompt than it sent"
+        );
+        assert_eq!(usage.completion_tokens, 40);
+    }
+
+    /// A round served out of the cache and one that read the whole prompt cost about ten times
+    /// different, so a figure that cannot tell them apart cannot say whether caching is working.
+    #[test]
+    fn a_cached_round_is_told_apart_from_one_that_read_the_whole_prompt() {
+        let cached: bravebot_aichat::protocol::Usage = BedrockUsage {
+            input_tokens: 12,
+            output_tokens: 40,
+            cache_read_input_tokens: 900,
+            cache_write_input_tokens: 88,
+        }
+        .into();
+        let fresh: bravebot_aichat::protocol::Usage = BedrockUsage {
+            input_tokens: 1000,
+            output_tokens: 40,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+        }
+        .into();
+
+        assert_eq!(
+            cached.prompt_tokens, fresh.prompt_tokens,
+            "the two rounds sent the same prompt"
+        );
+        assert_ne!(
+            cached, fresh,
+            "a cached round reported exactly what an uncached one did"
+        );
+    }
+
+    /// The prompt and the schemas are the same bytes every round, so the request says so.
+    #[test]
+    fn the_system_prompt_carries_a_breakpoint() {
+        let request = request_from(
+            &[Message::system("be helpful"), Message::user("hello")],
+            None,
+        );
+        let system = request.system.as_deref().expect("a system block");
+        assert_eq!(
+            system.last(),
+            Some(&SystemBlock::CachePoint(CachePoint::new())),
+            "the prefix every round shares was not marked"
+        );
+    }
+
+    /// Rolling, so each round writes the round before it into the cache and reads back the rest.
+    #[test]
+    fn the_last_block_of_the_conversation_carries_a_breakpoint() {
+        let request = request_from(
+            &[
+                Message::user("first"),
+                Message::assistant("an answer"),
+                Message::user("second"),
+            ],
+            None,
+        );
+        assert_eq!(
+            request.messages.last().and_then(|m| m.content.last()),
+            Some(&Block::CachePoint(CachePoint::new())),
+            "the end of the conversation was not marked"
+        );
+        assert!(
+            !request.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, Block::CachePoint(_))),
+            "an earlier turn was marked as well, spending a breakpoint on nothing"
+        );
+    }
+
+    /// A round ends on tool results as often as on words, and that is exactly the prefix the next
+    /// round wants back.
+    #[test]
+    fn a_conversation_ending_in_a_tool_result_is_marked_too() {
+        let request = request_from(
+            &[Message::tool_result("call-1", "the output")],
+            Some(&offered()),
+        );
+        assert_eq!(
+            request.messages[0].content.last(),
+            Some(&Block::CachePoint(CachePoint::new())),
+            "a round ending in a tool result was not marked"
+        );
+    }
+
+    /// The rolling breakpoint is worth a cache write because the next request reads that prefix
+    /// back. A request that gives its conversation up once it answers has no next request, so what
+    /// the write buys is nothing, and it is charged above the tokens it covers. The system prompt is
+    /// the same bytes every time such a request is made and keeps its breakpoint.
+    #[test]
+    fn a_request_giving_up_its_conversation_keeps_the_prompts_breakpoint_alone() {
+        let request = request_from(
+            &[
+                Message::system("summarise what you are shown"),
+                Message::user("first"),
+                Message::assistant("an answer"),
+                Message::user("summarise everything above"),
+            ],
+            None,
+        )
+        .without_the_conversation_breakpoint();
+
+        let system = request.system.as_deref().expect("a system block");
+        assert_eq!(
+            system.last(),
+            Some(&SystemBlock::CachePoint(CachePoint::new())),
+            "the prefix every such request shares lost its breakpoint too"
+        );
+        let body = body_of(&request);
+        assert_eq!(
+            body["messages"][2]["content"]
+                .as_array()
+                .expect("the last message's blocks")
+                .len(),
+            1,
+            "the conversation kept a breakpoint nothing can read back: {body}"
+        );
+        assert_eq!(
+            body["messages"][2]["content"][0]["text"],
+            "summarise everything above"
+        );
+    }
+
+    /// A reply never carries one, so reading one back must not require it.
+    #[test]
+    fn a_reply_without_a_breakpoint_still_parses() {
+        let blocks: Vec<ReplyBlock> =
+            serde_json::from_value(json!([{"text": "hello"}])).expect("parses");
+        assert!(matches!(blocks.first(), Some(ReplyBlock::Text { .. })));
+    }
+
+    /// The reply's text and calls come back in the shapes the turn loop already handles.
+    #[test]
+    fn a_reply_is_read_back_into_text_and_calls() {
+        let blocks: Vec<ReplyBlock> = serde_json::from_value(json!([
+            {"text": "I will read it"},
+            {"toolUse": {"toolUseId": "call-1", "name": "read_file", "input": {"path": "src/lib.rs"}}},
+        ]))
+        .expect("parses");
+
+        let (text, calls) = parts_of(&blocks);
+        assert_eq!(text, "I will read it");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("call-1"));
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(
+            calls[0].function.arguments.as_deref(),
+            Some(r#"{"path":"src/lib.rs"}"#)
+        );
+    }
+
+    /// A call taking no arguments may name none. Read strictly, that block matches no member of
+    /// the union, is kept as an unmodelled one, and the call the model asked for is silently gone.
+    #[test]
+    fn a_reply_calling_a_tool_with_no_arguments_keeps_the_call() {
+        let blocks: Vec<ReplyBlock> = serde_json::from_value(json!([
+            {"toolUse": {"toolUseId": "call-1", "name": "list_files"}},
+        ]))
+        .expect("parses");
+        let (_, calls) = parts_of(&blocks);
+        assert_eq!(calls.len(), 1, "the call was dropped");
+        assert_eq!(calls[0].function.name, "list_files");
+        assert_eq!(
+            calls[0].function.arguments.as_deref(),
+            Some("{}"),
+            "the buffered path disagreed with the streamed one"
+        );
+    }
+
+    /// The union of block kinds grows with what the models this API fronts can produce. One this
+    /// does not model must not fail a reply whose text and calls are all there.
+    #[test]
+    fn a_block_kind_this_does_not_model_leaves_the_rest_of_the_reply_readable() {
+        let blocks: Vec<ReplyBlock> = serde_json::from_value(json!([
+            {"reasoningContent": {"reasoningText": {"text": "thinking"}}},
+            {"text": "the answer"},
+        ]))
+        .expect("parses");
+        assert_eq!(parts_of(&blocks).0, "the answer");
+    }
+
+    /// A block that names a tool call this cannot read is not a block of a kind it does not model.
+    /// Read as one, the call disappears and the reply reads as a model that decided against calling
+    /// anything, which is a turn that quietly does nothing rather than one that says why.
+    #[test]
+    fn a_tool_call_this_cannot_read_is_not_mistaken_for_a_kind_it_does_not_model() {
+        let blocks: Vec<ReplyBlock> = serde_json::from_value(json!([
+            {"text": "I will read it"},
+            {"toolUse": {"id": "call-1", "name": "read_file", "input": {}}},
+        ]))
+        .expect("parses");
+        assert!(
+            blocks.iter().any(ReplyBlock::is_unreadable_call),
+            "a tool call that named its id differently was read past"
+        );
+
+        let modelled: Vec<ReplyBlock> =
+            serde_json::from_value(json!([{"reasoningContent": {"text": "thinking"}}]))
+                .expect("parses");
+        assert!(
+            !modelled.iter().any(ReplyBlock::is_unreadable_call),
+            "a block naming no tool call was reported as an unreadable one"
+        );
+    }
+
+    /// The same in a stream, where it costs more: nothing after the opening event names the call,
+    /// so a start that is read past leaves every fragment of its arguments belonging to nothing.
+    #[test]
+    fn a_streamed_tool_call_this_cannot_read_is_told_apart_too() {
+        let start = stream_event(
+            "contentBlockStart",
+            br#"{"contentBlockIndex":0,"start":{"toolUse":{"id":"a","name":"read"}}}"#,
+        )
+        .expect("decodes");
+        assert!(matches!(
+            start,
+            StreamEvent::ContentBlockStart {
+                start: BlockStart::UnreadableToolUse { .. },
+                ..
+            }
+        ));
+
+        let other = stream_event(
+            "contentBlockStart",
+            br#"{"contentBlockIndex":0,"start":{"reasoningContent":{}}}"#,
+        )
+        .expect("decodes");
+        assert!(matches!(
+            other,
+            StreamEvent::ContentBlockStart {
+                start: BlockStart::Other(_),
+                ..
+            }
+        ));
+    }
+
+    /// A model that does not do prompt caching refuses the whole request rather than reading past
+    /// the breakpoints, so a request has to be expressible without them. Everything else it carries
+    /// was asked for and stays.
+    #[test]
+    fn a_request_without_breakpoints_keeps_everything_that_was_asked_for() {
+        let tools = vec![Tool::function("read_file", "Read a file", json!({}))];
+        let full = request_from(
+            &[
+                Message::system("be helpful"),
+                Message::user("hello"),
+                Message::assistant("hi"),
+                Message::user("again"),
+            ],
+            Some(&tools),
+        )
+        .with_effort(Some(Effort::High));
+
+        let marked = serde_json::to_string(&full).expect("serialises");
+        assert!(
+            marked.contains("cachePoint"),
+            "nothing was marked to begin with"
+        );
+
+        let plain = body_of(&full.without_breakpoints());
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("cachePoint"),
+            "a breakpoint survived: {plain}"
+        );
+        assert_eq!(plain["system"][0]["text"], "be helpful");
+        assert_eq!(plain["system"].as_array().expect("system").len(), 1);
+        assert_eq!(plain["messages"].as_array().expect("messages").len(), 3);
+        assert_eq!(plain["messages"][2]["content"][0]["text"], "again");
+        assert_eq!(
+            plain["toolConfig"]["tools"][0]["toolSpec"]["name"],
+            "read_file"
+        );
+        assert_eq!(
+            plain["additionalModelRequestFields"]["output_config"]["effort"],
+            "high"
+        );
+    }
+
+    /// A reply can arrive as several text blocks, and they are one answer.
+    #[test]
+    fn several_text_blocks_join_into_one_answer() {
+        let blocks: Vec<ReplyBlock> =
+            serde_json::from_value(json!([{"text": "first "}, {"text": "second"}]))
+                .expect("parses");
+        assert_eq!(parts_of(&blocks).0, "first second");
+    }
+
+    /// The two backends count the same thing under different names, and the turn's cost is worked
+    /// out from these.
+    #[test]
+    fn usage_crosses_to_the_shape_the_agent_records() {
+        let usage: bravebot_aichat::protocol::Usage = BedrockUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+        }
+        .into();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total(), 120);
+    }
+
+    /// The body is the one this API states for every provider it hosts. A field only one of them
+    /// defines, sent at the top level, is a request the rest of them refuse.
+    #[test]
+    fn the_request_names_no_provider_of_its_own() {
+        let tools = vec![Tool::function("read_file", "Read a file", json!({}))];
+        let request =
+            request_from(&[Message::user("hi")], Some(&tools)).with_effort(Some(Effort::High));
+        let json = body_of(&request);
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "additionalModelRequestFields",
+                "inferenceConfig",
+                "messages",
+                "toolConfig",
+            ],
+            "a field outside this API's own shape reached the top level"
+        );
+        assert!(
+            json["inferenceConfig"]["maxTokens"].as_u64().unwrap_or(0) > 0,
+            "the reply has no ceiling"
+        );
+    }
+
+    /// A conversation with no tools must omit the field rather than send an empty list, which this
+    /// API refuses outright.
+    #[test]
+    fn no_tools_omits_the_field() {
+        for tools in [None, Some(&[][..])] {
+            let request = request_from(&[Message::user("hi")], tools);
+            assert!(
+                request.tool_config.is_none(),
+                "{tools:?} became a tool list"
+            );
+            let body = serde_json::to_string(&request).expect("serialises");
+            assert!(!body.contains("tool"), "{body}");
+        }
+    }
+
+    /// This API refuses a whole request that holds a call or a result in its own block and names no
+    /// tools, which is how a recap or a summary is asked over an exchange that called them. What the
+    /// calls were and what they returned is most of what such a request is asked about.
+    #[test]
+    fn a_request_offering_no_tools_sends_its_calls_and_results_as_text() {
+        let exchange = [
+            Message::user("fix it"),
+            Message::assistant_calling(
+                "looking",
+                vec![
+                    call("a", "read", r#"{"path":"src/lib.rs"}"#),
+                    call("b", "run", "{}"),
+                ],
+            ),
+            Message::tool_result("a", "fn main() {}"),
+            Message::tool_result("b", "exit 0"),
+            Message::assistant("fixed"),
+            Message::user("recap"),
+        ];
+        for tools in [None, Some(&[][..])] {
+            let request = request_from(&exchange, tools);
+            let body = serde_json::to_string(&request).expect("serialises");
+            for refused in ["toolUse", "toolResult", "toolConfig"] {
+                assert!(!body.contains(refused), "{tools:?} sent {refused}: {body}");
+            }
+            let roles: Vec<&str> = request.messages.iter().map(|m| m.role).collect();
+            assert_eq!(roles, ["user", "assistant", "user", "assistant", "user"]);
+            let text = |index: usize| -> Vec<&str> {
+                request.messages[index]
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                text(1),
+                [
+                    "looking",
+                    r#"[call a: read {"path":"src/lib.rs"}]"#,
+                    "[call b: run {}]"
+                ]
+            );
+            assert_eq!(
+                text(2),
+                [
+                    "[result of call a]\nfn main() {}",
+                    "[result of call b]\nexit 0"
+                ]
+            );
+        }
+    }
+
+    /// Events this code does not model must not fail a turn: the API sends several, and may add more.
+    #[test]
+    fn an_unknown_stream_event_is_ignored_rather_than_failing() {
+        assert!(stream_event("somethingNew", br#"{"detail":{}}"#).is_none());
+        assert!(stream_event("messageStart", br#"{"role":"assistant"}"#).is_none());
+    }
+
+    /// The events that carry a reply have to decode, since a turn is assembled from them.
+    #[test]
+    fn the_events_that_carry_a_reply_decode() {
+        let text = stream_event(
+            "contentBlockDelta",
+            br#"{"contentBlockIndex":0,"delta":{"text":"hi"}}"#,
+        )
+        .expect("decodes");
+        assert!(matches!(
+            text,
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::Text { .. },
+            }
+        ));
+
+        let start = stream_event(
+            "contentBlockStart",
+            br#"{"contentBlockIndex":1,"start":{"toolUse":{"toolUseId":"a","name":"read"}}}"#,
+        )
+        .expect("decodes");
+        match start {
+            StreamEvent::ContentBlockStart {
+                index,
+                start: BlockStart::ToolUse { tool_use },
+            } => {
+                assert_eq!(index, 1);
+                assert_eq!(tool_use.tool_use_id, "a");
+                assert_eq!(tool_use.name, "read");
+            }
+            other => panic!("expected a tool call opening, got {other:?}"),
+        }
+
+        let stop = stream_event("messageStop", br#"{"stopReason":"end_turn"}"#).expect("decodes");
+        match stop {
+            StreamEvent::MessageStop { stop_reason } => {
+                assert_eq!(stop_reason.as_deref(), Some("end_turn"))
+            }
+            other => panic!("expected a stop, got {other:?}"),
+        }
+
+        let counts = stream_event(
+            "metadata",
+            br#"{"usage":{"inputTokens":11,"outputTokens":7,"totalTokens":18}}"#,
+        )
+        .expect("decodes");
+        match counts {
+            StreamEvent::Metadata { usage } => {
+                let usage = usage.expect("usage");
+                assert_eq!(usage.input_tokens, 11);
+                assert_eq!(usage.output_tokens, 7);
+            }
+            other => panic!("expected the counts, got {other:?}"),
+        }
+    }
+
+    /// Tool arguments arrive as a string of JSON in pieces, not as an object, so a delta that
+    /// carried one is read as the fragment it is.
+    #[test]
+    fn a_tool_call_delta_carries_a_fragment_of_its_arguments() {
+        let delta = stream_event(
+            "contentBlockDelta",
+            br#"{"contentBlockIndex":2,"delta":{"toolUse":{"input":"{\"path\""}}}"#,
+        )
+        .expect("decodes");
+        match delta {
+            StreamEvent::ContentBlockDelta {
+                index,
+                delta: Delta::ToolUse { tool_use },
+            } => {
+                assert_eq!(index, 2);
+                assert_eq!(tool_use.input, r#"{"path""#);
+            }
+            other => panic!("expected a tool call fragment, got {other:?}"),
+        }
+    }
+
+    /// A reply with nothing in it must read as one rather than failing to parse, so the turn can
+    /// say so instead of reporting an unexpected response.
+    #[test]
+    fn a_reply_carrying_no_message_still_parses() {
+        let reply: ConverseResponse =
+            serde_json::from_str(r#"{"stopReason":"end_turn"}"#).expect("parses");
+        assert!(reply.output.is_none());
+        assert_eq!(reply.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    /// Every breakpoint carries the lifetime asked for, the prompt's and the conversation's alike,
+    /// and each lifetime is its own word, so a request cannot pass by sending the same one for both.
+    #[test]
+    fn a_chosen_lifetime_is_stated_on_every_breakpoint() {
+        for ttl in bravebot_config::CacheTtl::ALL {
+            let request = request_from(
+                &[Message::system("be helpful"), Message::user("hello")],
+                None,
+            )
+            .with_cache_ttl(Some(ttl));
+            let body = serde_json::to_value(&request).expect("a body");
+            let point = serde_json::json!({"type": "default", "ttl": ttl.wire()});
+            assert_eq!(body["system"][1]["cachePoint"], point, "the prompt");
+            assert_eq!(
+                body["messages"][0]["content"][1]["cachePoint"], point,
+                "the end of the conversation"
+            );
+        }
+    }
+
+    /// Nothing chosen, nothing sent: the request is the one that went before the setting existed.
+    #[test]
+    fn no_lifetime_is_sent_where_none_was_chosen() {
+        let request = request_from(
+            &[Message::system("be helpful"), Message::user("hello")],
+            None,
+        )
+        .with_cache_ttl(None);
+        let body = serde_json::to_string(&request).expect("a body");
+        assert!(
+            body.contains(r#"{"cachePoint":{"type":"default"}}"#),
+            "{body}"
+        );
+        assert!(!body.contains("ttl"), "{body}");
+    }
+}
