@@ -13,7 +13,7 @@ license that can be found in the LICENSE file.
 - [ ] `crates/brave-*` (Adblock-rust, Fingerprinting, Shields)
 - [ ] `crates/deno-*` (V8 Isolates, Core bindings)
 - [ ] `packages/web-cli` & `packages/web-mcp` (Unified Web entrypoints)
-- [ ] `packages/chromium-tracker` (Chromium 157-159, CEF, Depot Tools tracking)
+- [ ] `packages/chromium-tracker` (live Chromium, CEF, and Depot Tools tracking)
 - [ ] `packages/challenge-solver` (Cloudflare Turnstile, reCAPTCHA, Google IPP)
 
 ## Type of Change

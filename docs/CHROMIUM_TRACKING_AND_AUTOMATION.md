@@ -6,20 +6,20 @@ Ce document détaille l'architecture d'automatisation, de tracking en temps rée
 
 ## 1. Vue d'Ensemble & Stratégie 2026
 
-YOLO-Web n'est pas un simple scraper ou un Chromium headless naïf. C'est un navigateur complet conforme aux standards de l'écosystème Chromium 157+ qui associe :
+YOLO-Web is a Rust + Bun browser tooling monorepo that currently combines Servo-derived components, Obscura, Brave libraries, and V8 integrations. It does **not** currently vendor or build Chromium/Blink; Chromium releases and `depot_tools` are tracked as upstream references. A Chromium-class engine requires a separate Chromium checkout and build, or a substantial standards and platform implementation effort.
 
-- **Host Plane** : Bun 1.4.4+ natif en Rust pur + WebKit/JSC pour l'outillage et l'automatisation.
+- **Host Plane** : Bun for tooling and automation.
 - **Guest Browser Plane** : V8 Isolate (`deno_core` / `rusty_v8`) pour l'exécution JavaScript en page.
-- **Rendu & CSS** : Moteur Servo Stylo CSS3 (`crates/servo-*`) & pipeline Obscura CDP.
+- **Rendu & CSS** : Servo-derived Stylo and Obscura rendering components; these are not Blink.
 - **Protection & Anti-Fingerprinting** : Brave Shields (`adblock-rust`, `cookiecrumbler`, `crates/brave-*`).
 - **Tracking Amont en Temps Réel** : Suivi des canaux Chromium (Stable, Beta, Dev, Canary), CEF, Brave, Helium et Google `depot_tools`.
 
 ```mermaid
 flowchart TD
     subgraph Upstream ["Google & Chromium Upstream (2026)"]
-        CFT["Chrome for Testing JSON API (Stable 157, Canary 159)"]
+        CFT["Chrome for Testing JSON API (live channel metadata)"]
         CDASH["ChromiumDash API (Hashes: v8, skia, angle, dawn)"]
-        CEF["CEF Builds Spotify CDN (CEF 156 / 150)"]
+        CEF["CEF Builds Spotify CDN (live release index)"]
         DEPOT["Google depot_tools Gitiles Log"]
         BRAVE["Brave Core Releases & Patches (Chromium 156)"]
         HELIUM["Helium Browser (Ungoogled Chromium 156)"]
@@ -57,9 +57,9 @@ flowchart TD
 
 | Composant                              | Rôle Amont                                    | Mécanisme d'Intégration YOLO-Web                                                                 |
 | :------------------------------------- | :-------------------------------------------- | :----------------------------------------------------------------------------------------------- |
-| **Google Chromium**                    | Moteur de référence Web & V8                  | Suivi continu via Chrome for Testing & ChromiumDash (`milestone 157..159`)                       |
+| **Google Chromium**                    | Moteur de référence Web & V8                  | Suivi live via Chrome for Testing & ChromiumDash; les versions et révisions sont lues depuis les API amont, jamais codées en dur. |
 | **Google depot_tools**                 | Outils de build (`gclient`, `fetch`, `ninja`) | Suivi Gitiles API sur `chromium.googlesource.com/chromium/tools/depot_tools`                     |
-| **CEF (Chromium Embedded Framework)**  | Embedder C++ / C API Chromium                 | Index Spotify CDN (`windows64`, `linux64`, `macosarm64`) & crates `cef-rs` (`tauri-apps/cef-rs`) |
+| **CEF (Chromium Embedded Framework)**  | Embedder C++ / C API Chromium                 | Live Spotify CDN index (`windows64`, `linux64`, `macosarm64`) |
 | **Brave Browser (`brave-core`)**       | Navigateur Chromium privé                     | Reprise des techniques `chromium_src` overrides, adblock-rust, farbling                          |
 | **Helium Browser (`imputnet/helium`)** | Fork Chromium allégé (Ungoogled)              | Tracking des drapeaux de compilation légitimes et suppression de télémétrie                      |
 
@@ -76,6 +76,20 @@ Pour éviter l'"enfer des rebases" lors des mises à jour rapides de Chromium (t
 ---
 
 ## 4. Commandes CLI Unifiées
+
+## 4.1 Building Chromium itself
+
+This repository has no `.gclient`, Chromium `DEPS`, Blink `BUILD.gn`, or Chromium source checkout. The commands below are the upstream workflow reference, not commands that build this Cargo + Bun monorepo. Keep a Chromium checkout in a separate directory and use the matching upstream branch/revision:
+
+```sh
+fetch --no-history chromium
+cd src
+gclient runhooks
+gn gen out/Default
+autoninja -C out/Default chrome
+```
+
+Chromium dependencies are pinned through `DEPS` and managed by `gclient`; do not copy component source snapshots into `crates/` without provenance, license, security review, and a defined update owner. For vendored Chromium dependencies, upstream expects a dedicated `third_party/<name>/` directory with `README.chromium`, `OWNERS`, and source under `src/`. See the official [build instructions](https://chromium.googlesource.com/chromium/src/+/main/docs/linux/build_instructions.md), [dependency management](https://chromium.googlesource.com/chromium/src/+/main/docs/dependencies.md), and [third-party guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/adding_to_third_party.md).
 
 ```bash
 # Vérifier l'état en direct d'upstream Chromium, CEF, Brave, Helium et depot_tools

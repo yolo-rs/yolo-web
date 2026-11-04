@@ -1,0 +1,36 @@
+{
+  "proposals": [
+    {
+      "name": "Temporal",
+      "stage": 3,
+      "champions": ["Philipp Dunkel", "Maggie Johnson-Pint", "Matt Johnson-Pint", "Brian Terlson", "Shane Carr", "Ujjwal Sharma"],
+      "url": "https://github.com/tc39/proposal-temporal",
+      "tags": ["built-in", "dates-and-times"],
+      "notes": "Modern date/time API replacing legacy Date"
+    },
+    {
+      "name": "Decorators",
+      "stage": 3,
+      "champions": ["Daniel Ehrenberg", "Chris Garrett"],
+      "url": "https://github.com/tc39/proposal-decorators",
+      "tags": ["syntax", "metaprogramming"],
+      "notes": "Standardized JS class and method decorator syntax"
+    },
+    {
+      "name": "Type Annotations",
+      "stage": 1,
+      "champions": ["Gil Tayar", "Daniel Rosenwasser", "Romulo Cintra", "Rob Palmer"],
+      "url": "https://github.com/tc39/proposal-type-annotations",
+      "tags": ["syntax", "types"],
+      "notes": "JavaScript with syntax for types that run unchanged as comments"
+    },
+    {
+      "name": "Iterator Helpers",
+      "stage": 4,
+      "champions": ["Yulia Startsev", "Gus Caplan"],
+      "url": "https://github.com/tc39/proposal-iterator-helpers",
+      "tags": ["built-in", "iteration"],
+      "notes": "Map, filter, take, drop helpers on Iterator prototype"
+    }
+  ]
+}

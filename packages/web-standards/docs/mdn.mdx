@@ -1,0 +1,19 @@
+# MDN Web Docs Compatibility (BCD)
+
+The MDN Browser Compatibility Data project standardizes feature support matrices across modern browsers and runtimes.
+
+## Supported Environments
+
+- **Browsers**: Chrome, Firefox, Safari, Edge.
+- **Runtimes**: Node.js, Deno, Bun.
+
+## Schema
+
+```typescript
+import { StandardsLoader } from "@yolo-web/standards";
+
+const loader = new StandardsLoader();
+const bcd = await loader.loadMDNCompat();
+console.log(`Feature: ${bcd.feature}`);
+console.log(`Bun support added in: ${bcd.support.bun?.version_added}`);
+```

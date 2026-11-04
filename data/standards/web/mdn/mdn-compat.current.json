@@ -1,0 +1,37 @@
+{
+  "feature": "javascript.builtins.Array.toSorted",
+  "mdn_url": "https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Array/toSorted",
+  "support": {
+    "chrome": {
+      "version_added": "110"
+    },
+    "chrome_android": {
+      "version_added": "110"
+    },
+    "edge": {
+      "version_added": "110"
+    },
+    "firefox": {
+      "version_added": "115"
+    },
+    "firefox_android": {
+      "version_added": "115"
+    },
+    "safari": {
+      "version_added": "16"
+    },
+    "safari_ios": {
+      "version_added": "16"
+    },
+    "nodejs": {
+      "version_added": "20.0.0"
+    },
+    "deno": {
+      "version_added": "1.31"
+    },
+    "bun": {
+      "version_added": "0.5.0"
+    }
+  },
+  "subfeatures": {}
+}

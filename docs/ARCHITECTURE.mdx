@@ -1,0 +1,128 @@
+# YOLO-Web architecture
+
+This document is the source of truth for repository boundaries and the browser-engine integration plan. It describes what exists separately from what remains planned.
+
+## Product boundary
+
+YOLO-Web is a browser distribution and research monorepo. Its current product includes Bun-hosted developer tools, a Rust workspace rooted in Obscura and Servo-derived components, Vercel Labs' native Rust browser-agent source absorbed as the `yolo-web` page automation CLI, and a CDP service that exposes browser APIs and media to external clients. The human-browser frontend is owned and hosted by `yolo-ui/apps/yolo-browser-workbench`. The Rust workspace does not yet provide one embedded engine across products.
+
+The repository does **not** contain a complete Chromium source tree. `crates/yolo-chromium` is a native Chromium browser shell over the official CEF binary distribution (Chromium 156, downloaded at build time into the git-ignored `.cef/` cache), not a `content/` embedder built from the pinned checkout; see [CEF_ADAPTER_BOUNDARY.mdx](CEF_ADAPTER_BOUNDARY.mdx). A `cdp-client`, V8 isolate, crate catalog, or browser-looking UI is not a Chromium engine. Describe the human-browser UI as a workbench and identify its connected browser from CDP.
+
+## Runtime and engine boundaries
+
+| Area | Owner | Responsibility |
+|---|---|---|
+| Developer and orchestration tools | Bun applications and packages | CLI, MCP, dashboards, benchmark coordination, data preparation |
+| Rust services and libraries | Cargo workspace crates | Browser-adjacent services, policy, automation, research tooling, and separately identified experimental engines |
+| Browser agent | Absorbed `crates/agent-browser` Rust CLI (`yolo-web`) | CDP automation, accessibility snapshots, MCP commands, and session lifecycle; dashboard UI and upstream Node launcher are excluded |
+| Desktop agent | Vercel `agent-desktop` (planned integration) | Native OS accessibility and input through platform adapters; not browser rendering |
+| Web tooling orchestration | Bun applications and packages | Page workflows, extensions, WebMCP, DevTools MCP, and external `curl` execution through `Bun.spawn` |
+| Chromium browser shell | `crates/yolo-chromium` over the official CEF binary distribution (current, Windows x64) | Launcher, CEF bootstrap host, Chrome runtime style with Views, sandbox preserved, smoke receipt `engines/cef.lock.json`; yolo-ui owns windows, menus, and Tauri hosting |
+| Browser process and renderer | Chromium checkout and C++ embedder (planned) | Browser lifecycle, profiles, navigation, permissions, downloads, renderer sandbox, Blink and web platform |
+| Comparison engines | Their own upstream checkouts | Firefox/Gecko/SpiderMonkey, WebKit/JavaScriptCore, and Servo benchmarks |
+
+Do not present Servo, Obscura, Brave components, WebKit/JSC, or V8 bindings as interchangeable browser kernels. Each engine keeps its own source revision, build instructions, supported capabilities, patches, and benchmark results. Shared CDP, WPT, and benchmark tools must report engine-specific coverage rather than imply identical behavior.
+
+YOLO-Web-owned JavaScript uses Bun APIs for orchestration, scripts, and MCP services; the browser-agent executable is Rust.
+
+## Repository ownership
+
+The `@yolo-web/chromium` launcher/CDP/profile package and
+`@yolo-web/chromium-tracker` live in this repository. `yolo-cross` owns generic
+cross compilers and the host toolchain checks used to build browser engines;
+its GN/depot_tools provider does not duplicate the Chromium wrapper or browser
+runtime. Keep CEF and Obscura engine integrations with yolo-web, desktop UI and
+Tauri hosts with yolo-ui, and compiler/build-host tooling with yolo-cross.
+
+```text
+apps/                         runnable products and developer tools
+  human-browser/              Bun CDP API and screenshot service; frontend lives in yolo-ui
+  ai-agent-runner/            Bun automation orchestration
+  yolo-browser-cli/           Rust command-line application (consolidation target)
+crates/                       Rust workspace libraries and upstream-derived crates
+  servo-*/                    upstream-derived HTML/CSS/layout/browser components
+  yolo-chromium/              CEF-based Chromium browser shell over the official binary distribution
+  obscura*/                   experimental Rust/V8 browser and CDP components
+  brave-*/ deno-*/             browser-adjacent and runtime integrations
+packages/                     Bun libraries, CLI, MCP, plugins, and engine tooling
+  cdp-client/ chromium-tracker/ web-cli/ web-mcp/ browser-sdk/
+src/                          YOLO-Web-owned native C/C++ sources, organized by component
+third_party/                  reserved for explicitly reviewed direct third-party code
+vendor/                       existing Cargo-patched source with per-project provenance
+patches/chromium/             ordered, reviewed patches against pinned Chromium revisions
+docs/                         architecture, workflows, references, and research notes
+
+${CHROMIUM_ROOT}/              separate official depot_tools workspace
+  .gclient                     gclient workspace configuration
+  src/                         Chromium Git checkout
+    DEPS                       authoritative Chromium dependency pins
+    third_party/               dependencies resolved by gclient
+    out/<config>/               generated GN/Ninja output
+```
+
+`src/` and the native browser shell are planned boundaries; their presence in this map does not claim that implementation already exists. Vercel `agent-browser`'s pinned Apache-2.0 Rust source is absorbed in `crates/agent-browser`; its Bun skill data is under `packages/agent-browser-skills`; its dashboard and root Node/pnpm launcher are excluded from the product runtime. `agent-desktop` has not yet been integrated. Keep `.c`, `.cc`, `.h`, and related native files directly within component directories under `src/`, using upstream naming conventions. C++ added for Chromium must follow the checked-out Chromium revision's GN and style conventions. Do not create a parallel CMake/Ninja dependency graph for Chromium.
+
+## Product binaries and engine adapters
+
+`yolo` is the top-level product orchestrator and owns the shared command tree and lifecycle for the product binaries. The current upstream-derived page automation executable is `yolo-web`; it owns page, tab, extension, WebMCP, and DevTools-facing browser workflows. Specialized binaries include `yolo-ui` for the native Chromium desktop, `yolo-create-app` for project creation, and dedicated MCP, Azure-server, and headless browser processes. These separate product targets are added only when backed by their real implementations. The existing `yolo-browser` and Obscura bins remain explicit engine/development tools; they are not the top-level orchestrator. Consolidation must route to real implementations and retain upstream licensing; it must not alias a command to an unimplemented placeholder.
+
+Obscura and Servo are first-class Rust engine projects, but the current workspace contains an operational Obscura engine and only selected Servo-derived libraries. Servo's integrated engine and WebRender are excluded today. Chromium's native C++ `content/` embedder is the primary full-browser target; its UI is Chromium Views/WebUI and Skia. Rust provides bounded services and protocol adapters across a versioned FFI/IPC boundary. Blink, V8, Skia, Dawn, and Chromium shared libraries are built and versioned together by the pinned Chromium `DEPS`/GN graph, not linked from unrelated Cargo versions.
+
+Page-level commands go through `yolo` and engine adapters: Chromium-family targets use CDP, Obscura has its native Rust/CDP paths, and Lightpanda is selected as a separate CDP engine when its binary is installed. The desktop agent is the complementary OS-level path for Chromium's window, menus, and other native surfaces; it is not wired into the workspace yet. Bun coordinates extensions, WebMCP, DevTools MCP, and optional external transfer tools such as curl without replacing Chromium's renderer.
+
+Adapters are capability-specific: Chromium-family browsers (including Brave and Edge) use CDP; Firefox Nightly uses WebDriver BiDi; Cloudflare Browser Run is a remote CDP provider; Lightpanda is a separate CDP/BiDi engine; Obscura uses its native Rust APIs/CDP; Servo remains experimental until its embedder is integrated. Playwright and Puppeteer compatibility is a Bun-facing protocol/API layer to be ported in increments, not a promise that each engine implements their complete APIs. Browser GUI and headless products must share profile, download, cache, and runtime-dependency services while keeping each engine's user-data directories isolated by engine, channel, and profile.
+
+The repository path `./src/` is YOLO-Web-owned source. `${CHROMIUM_ROOT}/src` is the upstream Chromium Git checkout. They are different roots with different owners; use the `chromium` workspace root and its official `src/` checkout, and do not put a second Chromium checkout beneath this repository.
+
+The repository's `vendor/` and crate-local `third_party/` directories have separate Cargo or upstream-derived provenance. They are not copies of Chromium's `src/third_party`. Chromium dependencies belong to the checkout managed by `gclient` and its `DEPS`; do not manually mirror them into YOLO-Web.
+
+## Chromium checkout and build
+
+Use Google's `depot_tools`, `fetch`, and `gclient`; keep the workspace root separate from the source repository:
+
+```text
+${CHROMIUM_ROOT}/.gclient
+${CHROMIUM_ROOT}/src/DEPS
+```
+
+`CHROMIUM_ROOT` and `DEPOT_TOOLS_ROOT` are caller-selected locations. No drive, home directory, or absolute checkout path is part of the product configuration. Use a full-history `fetch --git-cache` for research and reproducible comparisons. `gclient sync` resolves the actual dependency tree. GN owns build generation and `autoninja` owns target builds. Keep `out/`, CIPD downloads, profiles, symbols, and user data outside Git.
+
+The Bun engine manager provides status, sync, GN generation, build, and source-lock commands. Its source lock captures the Chromium revision, branch, `DEPS` digest, recursive gclient snapshot, optional GN args, and depot_tools revision without embedding local absolute paths. The lock is evidence; reproducibility also requires the host toolchain, patch series, command line, and build artifacts.
+
+## Cross-platform contract
+
+Windows 11 and Linux x64 are first-class development hosts. Host qualification, MSVC/SDK diagnostics, and Rust cross-compilation tools belong to `yolo-cross`; browser source and engine workflows remain in `yolo-web`. Common Bun and Rust source must not assume a drive letter, shell, package manager, path separator, home directory, or executable suffix. Resolve tools from `PATH`, and accept checkout/cache roots through arguments or environment variables.
+
+The Chromium C++ build uses Chromium's platform support and its pinned toolchain. Use `yolo-cross` for platform diagnostics and Rust target builds; these do not replace Chromium's native host requirements. Do not claim Linux/Windows parity for a browser feature until both hosts have build and runtime evidence.
+
+## Source and patch ownership
+
+- Keep upstream-derived Rust code in its named crate with provenance, license, upstream revision, local patch list, and update owner.
+- Keep YOLO-Web-owned orchestration code in `apps/` or `packages/`; share stable Rust APIs through crates rather than duplicating implementations.
+- Keep Chromium changes as ordered patches under `patches/chromium/<revision-or-milestone>/` until a reproducible patch/overlay workflow exists. Each patch records upstream path and commit, rationale, owner, license, validation, and removal condition.
+- Coordinate Blink, Skia, Dawn, V8, and other dependency changes with Chromium's `DEPS` and upstream roll process. Do not silently mix independent dependency revisions.
+- Never edit or reformat imported upstream trees wholesale to match local preferences. Preserve their licenses, build systems, and exact upstream conventions.
+
+## Research and benchmarks
+
+Every run records engine name, upstream revision/channel, host OS/architecture, toolchain, build configuration, enabled patches, benchmark version, raw results, and artifact locations. Compare Chromium, Firefox Nightly, WebKit/JSC, and Servo only with the same workload and report unsupported APIs and failures. Do not label a source catalog or package install as a built engine.
+
+## Completion gates
+
+1. A pinned, clean Chromium checkout and recursive dependency snapshot are reproducible on Windows 11 and Linux x64.
+2. A native C++ `content/` embedder owns the browser process and preserves Chromium's sandbox and process model.
+3. Rust/Bun integrations use a reviewed, versioned boundary and cannot bypass browser-process security policy.
+4. Patch application, build, test, and removal are automated for each selected Chromium milestone.
+5. Cross-engine benchmark runs preserve revisions, host/toolchain data, raw artifacts, and per-engine capability reports.
+
+See [the rewrite plan](ENGINE_REWRITE_PLAN.md), [the engine manager](BROWSER_ENGINE_MANAGER.md), the [browser build notes](WINDOWS_BROWSER_TOOLCHAIN.md), and [yolo-cross's toolchain guide](https://github.com/yolo-rs/yolo-cross/blob/main/docs/windows-toolchains.md).
+
+## Upstream references
+
+- [Chromium source layout](https://www.chromium.org/developers/how-tos/getting-around-the-chrome-source-code/)
+- [Chromium get-the-code and build instructions](https://chromium.googlesource.com/chromium/src/+/main/docs/get_the_code.md)
+- [Chromium multi-process architecture](https://www.chromium.org/developers/design-documents/multi-process-architecture/)
+- [Chromium `depot_tools`](https://chromium.googlesource.com/chromium/tools/depot_tools/)
+- [Servo Book](https://book.servo.org/)
+- [Firefox Source Docs](https://firefox-source-docs.mozilla.org/)
+- [WebKit documentation](https://docs.webkit.org/)

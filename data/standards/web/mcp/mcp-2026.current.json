@@ -1,0 +1,90 @@
+{
+  "version": "2026.1.0",
+  "protocolVersion": "2026-01-01",
+  "transports": [
+    "stdio",
+    "sse",
+    "websocket",
+    "memory"
+  ],
+  "capabilities": {
+    "server": {
+      "tools": true,
+      "resources": true,
+      "prompts": true,
+      "logging": true,
+      "streaming": true
+    },
+    "client": {
+      "roots": true,
+      "sampling": true,
+      "experimental": {
+        "agentToAgent": true,
+        "sessionPersistence": true
+      }
+    }
+  },
+  "methods": [
+    {
+      "name": "initialize",
+      "kind": "request",
+      "paramsSchema": {
+        "protocolVersion": "string",
+        "capabilities": "ClientCapabilities",
+        "clientInfo": "Implementation"
+      },
+      "resultSchema": {
+        "protocolVersion": "string",
+        "capabilities": "ServerCapabilities",
+        "serverInfo": "Implementation"
+      }
+    },
+    {
+      "name": "tools/list",
+      "kind": "request",
+      "paramsSchema": {},
+      "resultSchema": {
+        "tools": "Tool[]"
+      }
+    },
+    {
+      "name": "tools/call",
+      "kind": "request",
+      "paramsSchema": {
+        "name": "string",
+        "arguments": "object"
+      },
+      "resultSchema": {
+        "content": "ContentItem[]",
+        "isError": "boolean"
+      }
+    },
+    {
+      "name": "resources/list",
+      "kind": "request",
+      "paramsSchema": {},
+      "resultSchema": {
+        "resources": "Resource[]"
+      }
+    },
+    {
+      "name": "resources/read",
+      "kind": "request",
+      "paramsSchema": {
+        "uri": "string"
+      },
+      "resultSchema": {
+        "contents": "ResourceContents[]"
+      }
+    },
+    {
+      "name": "notifications/progress",
+      "kind": "notification",
+      "paramsSchema": {
+        "progressToken": "string",
+        "progress": "number",
+        "total": "number"
+      }
+    }
+  ]
+}

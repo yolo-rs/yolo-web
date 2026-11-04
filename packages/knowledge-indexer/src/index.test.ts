@@ -1,29 +1,45 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { KnowledgeIndexDb, type TargetDomain } from "./index.js";
-import { join } from "node:path";
-import { unlinkSync, existsSync } from "node:fs";
 
-const TEST_DB = join(process.cwd(), "data", "knowledge", "test_indexer.sqlite");
+const tempRoot = (
+  Bun.env.TMPDIR ??
+  Bun.env.TEMP ??
+  Bun.env.TMP ??
+  `${process.cwd()}/.tmp`
+).replace(/[\/]$/, "");
+
+// Unique file names per run: a stale database still held open by another
+// process (EBUSY on Windows) can then never break setup or teardown.
+const RUN_ID = crypto.randomUUID();
+const TEST_DB = `${tempRoot}/yolo-web-test-indexer-${RUN_ID}.sqlite`;
+const TEST_DOCS = `${tempRoot}/yolo-web-test-indexer-${RUN_ID}-docs.md`;
+const TEST_SKILL = `${tempRoot}/yolo-web-test-indexer-${RUN_ID}-skill.md`;
+
+async function removeIfPresent(path: string): Promise<void> {
+  try {
+    await Bun.file(path).delete();
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    // ENOENT: already gone. EBUSY/EPERM: Windows may keep the SQLite -wal/-shm
+    // handles for a moment after close(); the per-run name keeps leftovers harmless.
+    if (code !== "ENOENT" && code !== "EBUSY" && code !== "EPERM") throw error;
+  }
+}
 
 describe("@yolo-web/knowledge-indexer - SQLite DB & RAG Feeder", () => {
   let db: KnowledgeIndexDb;
 
   beforeAll(() => {
-    if (existsSync(TEST_DB)) unlinkSync(TEST_DB);
     db = new KnowledgeIndexDb(TEST_DB);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     db.close();
-    try {
-      if (existsSync(TEST_DB)) unlinkSync(TEST_DB);
-      const wal = `${TEST_DB}-wal`;
-      const shm = `${TEST_DB}-shm`;
-      if (existsSync(wal)) unlinkSync(wal);
-      if (existsSync(shm)) unlinkSync(shm);
-    } catch {
-      // Ignored on Windows if file handle is delayed
-    }
+    await Promise.all(
+      [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`, TEST_DOCS, TEST_SKILL].map(
+        removeIfPresent,
+      ),
+    );
   });
 
   it("inserts verified test knowledge records across the 4 key target domains", () => {
@@ -85,20 +101,14 @@ describe("@yolo-web/knowledge-indexer - SQLite DB & RAG Feeder", () => {
   });
 
   it("exports verified test knowledge to Markdown Docs and Skill references", async () => {
-    const tempDocs = join(process.cwd(), "data", "knowledge", "temp_docs.md");
-    const tempSkill = join(process.cwd(), "data", "knowledge", "temp_skill.md");
+    await db.syncToDocsAndSkill(TEST_DOCS, TEST_SKILL);
+    expect(await Bun.file(TEST_DOCS).exists()).toBe(true);
+    expect(await Bun.file(TEST_SKILL).exists()).toBe(true);
 
-    await db.syncToDocsAndSkill(tempDocs, tempSkill);
-    expect(existsSync(tempDocs)).toBe(true);
-    expect(existsSync(tempSkill)).toBe(true);
-
-    const content = await Bun.file(tempDocs).text();
+    const content = await Bun.file(TEST_DOCS).text();
     expect(content).toContain("## Target: `google.com`");
     expect(content).toContain("## Target: `cloudflare.com`");
     expect(content).toContain("## Target: `chromium.org`");
     expect(content).toContain("## Target: `chromiumos.org`");
-
-    if (existsSync(tempDocs)) unlinkSync(tempDocs);
-    if (existsSync(tempSkill)) unlinkSync(tempSkill);
   });
 });

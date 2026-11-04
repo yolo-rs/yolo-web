@@ -60,5 +60,19 @@ build-aot:
 build-rust:
     cargo build --release -p yolo-browser-cli
 
+# --- Chromium browser shell (crates/yolo-chromium over the official CEF binary distribution) ---
+
+# Build the CEF-based Chromium shell; the first build downloads the pinned CEF distribution into .cef/
+chromium-build:
+    cargo build -p yolo-chromium
+
+# Run the Chromium shell on a URL
+chromium-run url="https://example.com":
+    cargo run -p yolo-chromium -- "--url={{url}}"
+
+# Smoke-run the shell on chrome://version/ and write the engine receipt to engines/cef.lock.json
+chromium-smoke:
+    cargo run -p yolo-chromium -- --smoke --url=chrome://version/ --receipt=engines/cef.lock.json
+
 # Full end-to-end production build
 build: docs build-aot build-rust

@@ -1,0 +1,123 @@
+{
+  "version": "3.0-draft",
+  "coreSpecUrl": "https://webassembly.github.io/spec/core/",
+  "componentModelSpecUrl": "https://github.com/WebAssembly/component-model/blob/main/design/mvp/Explainer.md",
+  "valTypes": [
+    "i32",
+    "i64",
+    "f32",
+    "f64",
+    "v128",
+    "funcref",
+    "externref",
+    "anyref",
+    "eqref",
+    "i31ref",
+    "structref",
+    "arrayref"
+  ],
+  "componentTypes": [
+    "bool",
+    "s8",
+    "u8",
+    "s16",
+    "u16",
+    "s32",
+    "u32",
+    "s64",
+    "u64",
+    "f32",
+    "f64",
+    "char",
+    "string",
+    "list",
+    "record",
+    "variant",
+    "enum",
+    "flags",
+    "tuple",
+    "option",
+    "result",
+    "own",
+    "borrow"
+  ],
+  "sections": [
+    {
+      "id": 0,
+      "name": "custom",
+      "description": "Custom user metadata or debug symbols"
+    },
+    {
+      "id": 1,
+      "name": "type",
+      "description": "Function type signatures"
+    },
+    {
+      "id": 2,
+      "name": "import",
+      "description": "Import declarations"
+    },
+    {
+      "id": 3,
+      "name": "function",
+      "description": "Function type indices"
+    },
+    {
+      "id": 4,
+      "name": "table",
+      "description": "Indirect function call and reference tables"
+    },
+    {
+      "id": 5,
+      "name": "memory",
+      "description": "Linear memory declarations"
+    },
+    {
+      "id": 6,
+      "name": "global",
+      "description": "Global variable definitions"
+    },
+    {
+      "id": 7,
+      "name": "export",
+      "description": "Export declarations"
+    },
+    {
+      "id": 8,
+      "name": "start",
+      "description": "Optional start function index"
+    },
+    {
+      "id": 9,
+      "name": "element",
+      "description": "Table element segment initializers"
+    },
+    {
+      "id": 10,
+      "name": "code",
+      "description": "Function bodies and locals"
+    },
+    {
+      "id": 11,
+      "name": "data",
+      "description": "Linear memory data initializers"
+    },
+    {
+      "id": 12,
+      "name": "data_count",
+      "description": "Count of data segments"
+    }
+  ],
+  "canonicalAbis": [
+    "canon.lift",
+    "canon.lower",
+    "canon.resource.new",
+    "canon.resource.drop",
+    "canon.resource.rep"
+  ],
+  "_fetchedMeta": {
+    "url": "https://raw.githubusercontent.com/WebAssembly/spec/main/interpreter/README.md",
+    "fetchedAt": "2026-11-04T11:44:12.351Z",
+    "bytes": 30698
+  }
+}

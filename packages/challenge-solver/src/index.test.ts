@@ -85,7 +85,7 @@ describe("@yolo-web/challenge-solver - 2026 Chromium Legitimacy & Challenge Engi
     expect(ippDetection.siteKey).toContain("googleclientid");
   });
 
-  it("resolves challenges naturally with simulated human micro-actions and valid tokens", async () => {
+  it("reports detected challenges as unsupported without clicking or inventing tokens", async () => {
     const types: ChallengeType[] = [
       "cloudflare-turnstile",
       "cloudflare-managed-challenge",
@@ -95,20 +95,20 @@ describe("@yolo-web/challenge-solver - 2026 Chromium Legitimacy & Challenge Engi
     ];
 
     for (const type of types) {
-      let clicked = false;
-      const res = await solver.solveChallenge(
-        { detected: true, type },
-        async () => {
-          clicked = true;
-        },
-      );
+      const res = await solver.solveChallenge({ detected: true, type });
 
-      expect(clicked).toBe(true);
-      expect(res.success).toBe(true);
+      expect(res.success).toBe(false);
+      expect(res.supported).toBe(false);
+      expect(res.detected).toBe(true);
       expect(res.type).toBe(type);
-      expect(res.token).toBeDefined();
-      expect(res.simulatedHumanActions).toBeGreaterThanOrEqual(3);
+      expect("token" in res).toBe(false);
+      expect(res.reason).toContain("interactive verification is not implemented");
     }
+
+    const noChallenge = await solver.solveChallenge({ detected: false });
+    expect(noChallenge.detected).toBe(false);
+    expect(noChallenge.supported).toBe(false);
+    expect(noChallenge.reason).toContain("No supported challenge marker");
   });
 
   it("generates authentic 2026 Chromium wire headers with client hints", () => {

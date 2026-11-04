@@ -51,6 +51,15 @@ describe("@yolo-web/cdp-client", () => {
               }),
             );
           };
+          const emit = (method: string, params: Record<string, unknown>) => {
+            ws.send(
+              JSON.stringify({
+                method,
+                params,
+                ...(msg.sessionId ? { sessionId: msg.sessionId } : {}),
+              }),
+            );
+          };
 
           switch (msg.method) {
             case "Target.createTarget":
@@ -59,8 +68,15 @@ describe("@yolo-web/cdp-client", () => {
             case "Target.attachToTarget":
               reply({ sessionId: "session-1" });
               break;
+            case "Target.closeTarget":
+              reply({ success: msg.params?.targetId === "target-1" });
+              break;
             case "Page.navigate":
               reply({ frameId: "frame-1", loaderId: "loader-1" });
+              // A browser follows the navigate response with the lifecycle
+              // events that `navigate({ waitUntil })` awaits.
+              emit("Page.domContentEventFired", { timestamp: 1 });
+              emit("Page.loadEventFired", { timestamp: 2 });
               break;
             case "Runtime.evaluate":
               if (msg.params?.expression === "document.title") {
@@ -140,5 +156,6 @@ describe("@yolo-web/cdp-client", () => {
 
     const nodes = await client.querySelectorAll(".item");
     expect(nodes).toEqual([10, 11, 12]);
+    expect(await client.closeTarget(targetId)).toBe(true);
   });
 });

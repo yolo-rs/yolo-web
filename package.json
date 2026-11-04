@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Unified Chromium-compatible browser monorepo in full Rust (Servo + Obscura + Brave) and Bun for AI agents and humans",
+  "description": "Cross-platform browser research and orchestration monorepo with Rust crates, Bun tools, and upstream engine workflows",
   "repository": {
     "type": "git",
     "url": "https://github.com/yolo-rs/yolo-web.git"
@@ -14,6 +14,8 @@
     "packages/*"
   ],
   "scripts": {
+    "yolo:web": "bun run --cwd packages/web-cli start",
+    "yolo:web:mcp": "bun run --cwd packages/web-mcp start",
     "web": "bun run --cwd packages/web-cli start",
     "web:mcp": "bun run --cwd packages/web-mcp start",
     "dev": "bun run --cwd apps/human-browser dev",
@@ -32,14 +34,47 @@
     "aot:all": "bun run aot:web && bun run aot:web-mcp && bun run aot:human-browser && bun run aot:agent-runner",
     "docs:generate": "bun run scripts/generate-docs.ts",
     "docs:manifest": "bun run scripts/generate-docs.ts",
-    "rust:info": "cargo run -p yolo-browser-cli -- info",
-    "rust:build": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render",
-    "rust:build:lto": "cargo build --profile release-dist -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
-    "rust:build:stealth": "cargo build --release -p obscura-cli -p yolo-browser-cli --bins --features render,stealth",
+    "crawl:chromium-ui": "bun scripts/crawl-chromium-ui.ts",
+    "audit:lighthouse": "bunx lighthouse",
+    "audit:lighthouse:ci": "bunx lhci autorun",
+    "vercel:metrics": "vercel metrics",
+    "rust:web:info": "cargo run -p agent-browser --bin yolo-web -- --help",
+    "rust:web:build:lto": "cargo build --profile release-dist -p agent-browser --bin yolo-web",
+    "rust:web:build": "cargo build --profile release -p agent-browser --bin yolo-web",
+    "chromium:build": "cargo build -p yolo-chromium",
+    "chromium:run": "cargo run -p yolo-chromium -- --url=https://example.com",
+    "chromium:smoke": "cargo run -p yolo-chromium -- --smoke --url=chrome://version/ --remote-debugging-port=9333 --receipt=engines/cef.lock.json",
+    "chromium:dist": "cargo build --release -p yolo-chromium && cargo run --release -p yolo-chromium -- --prepare-runtime --runtime-dir=dist/yolo-chromium",
+    "chromium:lock:check": "bun packages/chromium-tracker/src/cli.ts cef lock",
     "rust:test": "cargo test -p yolo-browser -p obscura-ssrf -p obscura-dom -p euclid -p uluru -p fnv -p servo-svg -p kuchikiki -p bravebot-core -p adblock -p deno_error@0.7.3 -p import_map -p fastwebsockets -p deno_media_type -p deno_unsync -p deno_unsafecell --lib"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.8.2"
+    "@lhci/cli": "^0.16.0",
+    "@types/bun": "^1.4.4",
+    "lighthouse": "^13.6.0",
+    "typescript": "^7.0.2",
+    "vercel": "^65.11.0"
+  },
+  "optionalDependencies": {
+    "@typescript/typescript-aix-ppc64": "7.0.2",
+    "@typescript/typescript-darwin-arm64": "7.0.2",
+    "@typescript/typescript-darwin-x64": "7.0.2",
+    "@typescript/typescript-freebsd-arm64": "7.0.2",
+    "@typescript/typescript-freebsd-x64": "7.0.2",
+    "@typescript/typescript-linux-arm": "7.0.2",
+    "@typescript/typescript-linux-arm64": "7.0.2",
+    "@typescript/typescript-linux-loong64": "7.0.2",
+    "@typescript/typescript-linux-mips64el": "7.0.2",
+    "@typescript/typescript-linux-ppc64": "7.0.2",
+    "@typescript/typescript-linux-riscv64": "7.0.2",
+    "@typescript/typescript-linux-s390x": "7.0.2",
+    "@typescript/typescript-linux-x64": "7.0.2",
+    "@typescript/typescript-netbsd-arm64": "7.0.2",
+    "@typescript/typescript-netbsd-x64": "7.0.2",
+    "@typescript/typescript-openbsd-arm64": "7.0.2",
+    "@typescript/typescript-openbsd-x64": "7.0.2",
+    "@typescript/typescript-sunos-x64": "7.0.2",
+    "@typescript/typescript-win32-arm64": "7.0.2",
+    "@typescript/typescript-win32-x64": "7.0.2"
   }
 }

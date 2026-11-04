@@ -1,0 +1,15 @@
+{
+  "name": "@yolo-web/api-contract",
+  "version": "0.2.0",
+  "description": "Typed Bun HTTP route contracts and OpenAPI 3.1 generation",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "LICENSE-APACHE"],
+  "scripts": {
+    "check": "bun check --no-script",
+    "test": "bun test"
+  }
+}

@@ -1,6 +1,6 @@
-import { LoggingLevel, LoggingLevelSchema } from '@modelcontextprotocol/sdk/types.js';
+import { LoggingLevelSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { LoggingLevel } from '@modelcontextprotocol/sdk/types.js';
 import { Command } from 'commander';
-import tools from './tools/index.js';
 import { parseDelimitedList, parsePort, readBraveApiKeyFromFile } from './utils.js';
 
 function parseToolNameList(value: string | string[] | undefined | null): string[] {
@@ -30,7 +30,7 @@ const state: Configuration & { ready: boolean } = {
   transport: 'stdio',
   port: 8080,
   host: '127.0.0.1',
-  braveApiKey: process.env.BRAVE_API_KEY ?? '',
+  braveApiKey: Bun.env.BRAVE_API_KEY ?? '',
   loggingLevel: 'info',
   ready: false,
   enabledTools: [],
@@ -46,59 +46,55 @@ export function isToolPermittedByUser(toolName: string): boolean {
     : state.disabledTools.includes(toolName) === false;
 }
 
-export function getOptions(): Configuration | false {
+export async function getOptions(): Promise<Configuration | false> {
   const program = new Command()
-    .option('--brave-api-key <string>', 'Brave API key', process.env.BRAVE_API_KEY ?? '')
+    .option('--brave-api-key <string>', 'Brave API key', Bun.env.BRAVE_API_KEY ?? '')
     .option(
       '--brave-api-key-file <string>',
       'Path to file containing Brave API key',
-      process.env.BRAVE_API_KEY_FILE ?? ''
+      Bun.env.BRAVE_API_KEY_FILE ?? ''
     )
-    .option('--logging-level <string>', 'Logging level', process.env.BRAVE_MCP_LOG_LEVEL ?? 'info')
-    .option(
-      '--transport <stdio|http>',
-      'transport type',
-      process.env.BRAVE_MCP_TRANSPORT ?? 'stdio'
-    )
+    .option('--logging-level <string>', 'Logging level', Bun.env.BRAVE_MCP_LOG_LEVEL ?? 'info')
+    .option('--transport <stdio|http>', 'transport type', Bun.env.BRAVE_MCP_TRANSPORT ?? 'stdio')
     .option(
       '--enabled-tools <names...>',
       'tools to enable',
-      process.env.BRAVE_MCP_ENABLED_TOOLS?.trim().split(' ') ?? []
+      Bun.env.BRAVE_MCP_ENABLED_TOOLS?.trim().split(' ') ?? []
     )
     .option(
       '--disabled-tools <names...>',
       'tools to disable',
-      process.env.BRAVE_MCP_DISABLED_TOOLS?.trim().split(' ') ?? []
+      Bun.env.BRAVE_MCP_DISABLED_TOOLS?.trim().split(' ') ?? []
     )
-    .option(
-      '--port <number>',
-      'desired port for HTTP transport',
-      process.env.BRAVE_MCP_PORT ?? '8080'
-    )
+    .option('--port <number>', 'desired port for HTTP transport', Bun.env.BRAVE_MCP_PORT ?? '8080')
     .option(
       '--host <string>',
       'desired host for HTTP transport',
-      process.env.BRAVE_MCP_HOST ?? '127.0.0.1'
+      Bun.env.BRAVE_MCP_HOST ?? '127.0.0.1'
     )
     .option(
       '--allowed-origins <origins...>',
       'allowed Origin header values for HTTP transport (DNS rebinding protection)',
-      process.env.BRAVE_MCP_ALLOWED_ORIGINS ?? ''
+      Bun.env.BRAVE_MCP_ALLOWED_ORIGINS ?? ''
     )
     .option(
       '--allowed-hosts <hosts...>',
       'allowed Host header values for HTTP transport (opt-in DNS rebinding protection)',
-      process.env.BRAVE_MCP_ALLOWED_HOSTS ?? ''
+      Bun.env.BRAVE_MCP_ALLOWED_HOSTS ?? ''
     )
     .option(
       '--stateless <boolean>',
       'whether the server should be stateless',
-      process.env.BRAVE_MCP_STATELESS === 'true' ? true : false
+      Bun.env.BRAVE_MCP_STATELESS === 'true' ? true : false
     )
     .allowUnknownOption()
-    .parse(process.argv);
+    .parse(Bun.argv);
 
   const options = program.opts();
+  // Loaded lazily: every tool imports BraveAPI, which imports this module for its
+  // state, so a static import here would be a cycle that throws (TDZ) whenever a
+  // tool module is imported before the tools barrel.
+  const { default: tools } = await import('./tools/index.js');
   const toolNames = Object.values(tools).map((tool) => tool.name);
 
   // Validate tool inclusion configuration
@@ -139,7 +135,7 @@ export function getOptions(): Configuration | false {
   let braveApiKey = typeof options.braveApiKey === 'string' ? options.braveApiKey.trim() : '';
 
   if (apiKeyFile) {
-    const apiKeyFromFile = readBraveApiKeyFromFile(apiKeyFile);
+    const apiKeyFromFile = await readBraveApiKeyFromFile(apiKeyFile);
     if (!apiKeyFromFile.ok) {
       console.error(`Error: ${apiKeyFromFile.error}`);
       return false;

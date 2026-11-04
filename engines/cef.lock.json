@@ -1,0 +1,65 @@
+{
+  "build": {
+    "cef": {
+      "apiHash": "8f211699a44daedd96ae2a89bbf3a8f2abc229f3",
+      "apiVersion": 15600,
+      "archiveName": "cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_windows64_minimal.tar.bz2",
+      "archiveSha1": "b690e035689ee20ba9d2500ac8953815bc7ed46a",
+      "chromiumVersion": "156.0.8078.80",
+      "commitHash": "cf671c072925b27823a61181152f4f288e8e4306",
+      "commitNumber": 3660,
+      "distributionDir": "C:\\src\\yolo-web\\.cef\\156.0.15\\cef_windows_x86_64",
+      "major": 156,
+      "minor": 0,
+      "patch": 15,
+      "sandboxCompatHash": "3b66cadf26145637",
+      "version": "156.0.15+gcf671c0+chromium-156.0.8078.80"
+    },
+    "cefCrate": "156.3.0+156.0.15",
+    "crateVersion": "0.2.0",
+    "sandbox": true,
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "capturedAt": "2026-11-04T23:01:12Z",
+  "cdp": {
+    "browser": "Chrome/156.0.8078.80",
+    "port": 9333,
+    "protocolVersion": "1.3",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    "v8Version": "15.6.75.27",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/e85fd82d-6868-4902-8932-0ad976b1ec3d"
+  },
+  "engine": "cef",
+  "host": {
+    "arch": "x86_64",
+    "os": "windows",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "runtime": {
+    "apiHashPlatform": "8f211699a44daedd96ae2a89bbf3a8f2abc229f3",
+    "cefVersion": "156.0.15",
+    "chromiumVersion": "156.0.8078.80",
+    "commitHash": "cf671c072925b27823a61181152f4f288e8e4306",
+    "matchesBuild": true,
+    "sandboxCompatHash": "3b66cadf26145637"
+  },
+  "schemaVersion": 1,
+  "shell": {
+    "cachePath": null,
+    "hostExecutable": "yolo-chromium.exe",
+    "remoteDebuggingPort": 9333,
+    "runtimeStyle": "chrome",
+    "sandbox": true,
+    "views": true
+  },
+  "smoke": {
+    "error": null,
+    "exitCode": 0,
+    "finalUrl": "chrome://version/",
+    "httpStatus": 200,
+    "loadMs": 1849,
+    "outcome": "loaded",
+    "title": "About Version",
+    "url": "chrome://version/"
+  }
+}

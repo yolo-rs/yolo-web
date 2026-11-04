@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "sideEffects": false,
-  "description": "Autonomous AI Browser Agent Runner powered by Bun, Servo selectors, Obscura CDP/MCP, and Brave Shields",
+  "description": "Bun-based browser-agent orchestration runner with CDP, selector, and Shields integrations",
   "scripts": {
     "start": "bun src/index.ts",
     "aot": "bun build --compile --bytecode --minify src/index.ts --outfile ../../dist/yolo-agent-runner",

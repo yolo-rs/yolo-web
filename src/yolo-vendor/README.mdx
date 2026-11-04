@@ -1,0 +1,30 @@
+# Local upstream research checkouts
+
+This directory contains shallow, local-only Git checkouts used to compare upstream
+workflows and revisions. The nested repositories are ignored by the YOLO-Web root
+Git repository; this manifest is tracked. Use `git -C <path> rev-parse HEAD` to
+capture the exact revision before relying on a comparison. Do not copy upstream
+source into YOLO-Web without recording its license and provenance.
+
+| Checkout | Upstream branch / revision | Version relationship to local Chromium | Use |
+|---|---|---|---|
+| `electron/` | Electron `main`, `6752821287dd7eae86525b5a63d53a2040cb80a3` | Electron `DEPS` selects Chromium `159.0.8140.0`, three patch builds behind local `159.0.8143.0`; Node `v26.13.0` | Study the Chromium roll and ordered patch queue. Electron's build-tools (`e init/sync/build`) are Node/Yarn-based; borrow workflow ideas, not the toolchain. |
+| `node/` | Node.js `main`, `3b209b2cd7f43a23f45fde746ce01215e82a3d75` | Node `28.0.0`, bundled V8 `15.6.75.33`; Chromium `DEPS` V8 pin resolves to `15.9.85.0` | Study V8 embedder patch and upgrade workflow. Node's V8 has local patches and is not a replacement for Chromium's pinned V8. |
+
+The Chromium checkout itself is external at `${CHROMIUM_ROOT}` and is managed by
+official `depot_tools`/`gclient`; these clones do not own or mutate it. Keep all
+paths relative or derived from environment/configuration so the repository works
+on Windows 11 and Linux x64. Do not create a duplicate `src/cpp` layer: owned C/C++
+components belong directly below the repository's `src/` root.
+
+## Workflow references
+
+- Electron's patch system stores component queues under `patches/` and applies
+  ordered patch lists. Its upstream dependency graph is in `DEPS`.
+- Node documents builds in [`BUILDING.md`](https://github.com/nodejs/node/blob/main/BUILDING.md)
+  and V8 upgrades in [`Maintaining V8`](https://github.com/nodejs/node/blob/main/doc/contributing/maintaining/maintaining-V8.md).
+- Chromium's `DEPS` and `gclient` remain the source of truth for the product's
+  V8, Skia, Blink, and other third-party revisions.
+
+Clones were shallow and no dependencies, hooks, or builds were run. Update this
+manifest whenever their local HEAD changes.

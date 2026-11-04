@@ -1,10 +1,8 @@
-import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { isLoopbackHostname } from '../utils.js';
 
 // 403 with a JSON-RPC error and no id, per the MCP Streamable HTTP spec.
-const sendForbidden = (res: Response, message: string): void => {
-  res.status(403).json({ jsonrpc: '2.0', error: { code: -32600, message }, id: null });
-};
+const forbiddenResponse = (message: string): Response =>
+  Response.json({ jsonrpc: '2.0', error: { code: -32600, message }, id: null }, { status: 403 });
 
 const stripBrackets = (hostname: string): string => hostname.replace(/^\[|\]$/g, '').toLowerCase();
 
@@ -97,7 +95,7 @@ const isHostAllowed = (hostHeader: string, allowedHosts: Set<string>): boolean =
   return isLoopbackHostname(host) || allowedHosts.has(host);
 };
 
-// Builds Express middleware that guards against DNS rebinding:
+// Builds a Web Request guard for Bun.serve that prevents DNS rebinding:
 // - Origin is always validated. A request with no Origin header passes through
 //   (non-browser MCP clients omit it), but any present Origin must be loopback
 //   or explicitly allow-listed.
@@ -106,33 +104,31 @@ const isHostAllowed = (hostHeader: string, allowedHosts: Set<string>): boolean =
 export const createDnsRebindingGuard = (options: {
   allowedOrigins: string[];
   allowedHosts: string[];
-}): RequestHandler => {
+}): ((request: Request) => Response | undefined) => {
   const allowedOrigins = toNormalizedSet(options.allowedOrigins, canonicalizeOrigin);
   const allowedHosts = toNormalizedSet(options.allowedHosts, normalizeHost);
   const enforceHost = allowedHosts.size > 0;
 
-  return (req: Request, res: Response, next: NextFunction) => {
-    const origin = req.headers.origin;
+  return (request: Request) => {
+    const origin = request.headers.get('origin');
 
     if (origin !== undefined) {
       // Origin may be undefined (non-browser MCP clients omit it), but any
       // present Origin must be validated.
       if (typeof origin !== 'string' || !isOriginAllowed(origin, allowedOrigins)) {
-        sendForbidden(res, 'Forbidden: invalid Origin');
-        return;
+        return forbiddenResponse('Forbidden: invalid Origin');
       }
     }
 
     if (enforceHost) {
       // Host is validated only when allowedHosts is configured (opt-in), so
       // reverse-proxy / custom-domain deployments are unaffected by default.
-      const host = req.headers.host;
+      const host = request.headers.get('host');
       if (typeof host !== 'string' || !isHostAllowed(host, allowedHosts)) {
-        sendForbidden(res, 'Forbidden: invalid Host');
-        return;
+        return forbiddenResponse('Forbidden: invalid Host');
       }
     }
 
-    next();
+    return undefined;
   };
 };

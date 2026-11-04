@@ -1,5 +1,7 @@
 # Bun (WebKit/JSC) + Chromium V8 Dual-Runtime Architecture (`crates/BUN_WEBKIT_V8_ARCHITECTURE.md`)
 
+> **Status: aspirational architecture specification, not an implementation inventory.** This repository uses upstream Bun as a tool/runtime and `deno_core`/V8 crates for JavaScript execution. It does not contain the Bun source tree described below, a WebKit/JSC checkout, Blink, or a Chromium build. The guest runtime alone does not provide Chromium-equivalent web rendering or Web APIs; current rendering is provided by Servo-derived and Obscura components. Verify all component availability in the Cargo workspace and source tree before treating the catalog or performance statements below as implemented facts.
+
 This specification defines the **Dual-Runtime JavaScript & Web Engine Architecture** of the `yolo-web` monorepo (`https://github.com/yolo-rs/yolo-web`), establishing a strict, zero-leak boundary between two 100% Rust-centric execution planes:
 
 1. **Plane 1 — Host, Tooling, Servers, Bundler, AoT & Agent Orchestration (`100% Native Bun` — `yolo-rs/bun` + `yolo-rs/WebKit`)**:

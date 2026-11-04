@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TC39 ECMAScript Proposals Schema",
+  "description": "Schema definition for tracking TC39 ECMAScript proposals and stage transitions",
+  "type": "object",
+  "properties": {
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "stage", "champions", "url"],
+        "properties": {
+          "name": { "type": "string" },
+          "stage": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "champions": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "url": { "type": "string", "format": "uri" },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  },
+  "required": ["proposals"]
+}

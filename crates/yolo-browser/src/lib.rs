@@ -19,6 +19,17 @@ pub use obscura_mcp as mcp;
 pub use obscura_net as net;
 pub use obscura_render as render;
 pub use obscura_ssrf as ssrf;
+/// Typed browser and web-platform standards registry bundled with YOLO-Web.
+pub use yolo_web_standards as standards;
+
+/// Optional metadata bridge to the versioned yolo-zig native ABI.
+///
+/// Enable the `zig-ffi` feature and set `YOLO_ZIG_LIB_DIR` to the directory
+/// containing the target-specific library built by the yolo-zig workspace.
+#[cfg(feature = "zig-ffi")]
+pub mod zig_ffi {
+    pub use yolo_zig_ffi::{ABI_VERSION, Error, RuntimeInfo, runtime_info};
+}
 
 /// Re-exported Servo engine crates consolidated into the monorepo.
 pub mod servo {
@@ -247,6 +258,18 @@ impl YoloBrowserSession {
     /// Validates whether a target URL passes Obscura's SSRF protection gate and Brave Shields.
     pub fn validate_url(&self, raw_url: &str) -> Result<url::Url, String> {
         let parsed = url::Url::parse(raw_url).map_err(|e| e.to_string())?;
+        match parsed.scheme() {
+            "http" | "https" | "data" => {}
+            "about" if parsed.as_str() == "about:blank" => return Ok(parsed),
+            scheme => return Err(format!("URL scheme '{scheme}' is not allowed by browser navigation policy")),
+        }
+
+        // `data:` documents have no network destination. Their payload is
+        // parsed by the document pipeline and must not be treated as a host.
+        if parsed.scheme() == "data" {
+            return Ok(parsed);
+        }
+
         if !self.allow_private_network {
             if let Some(host) = parsed.host_str() {
                 if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -289,10 +312,10 @@ pub fn engine_info() -> MonorepoEngineInfo {
         organization: "yolo-rs",
         repository: "https://github.com/yolo-rs/yolo-web",
         version: env!("CARGO_PKG_VERSION"),
-        js_toolchain: "bun v1.4.4+ (full rust ~200 crates + webkit/jsc + cranelift aot, zero nodejs)",
-        host_runtime_plane: "yolo-rs/bun (Full Rust + C++ WebKit/JavaScriptCore + Riptide GC + Cranelift AoT)",
-        guest_browser_plane: "yolo-rs/v8 + yolo-rs/rusty_v8 + yolo-rs/deno_core (Chromium V8 Isolate per Tab)",
-        optimization_profile: "Cargo LTO=fat, codegen-units=1, opt-level=3, panic=unwind + Bun AoT (--compile --bytecode --minify --trim)",
+        js_toolchain: "Bun (repo scripts) + deno_core/V8 (Rust page runtime)",
+        host_runtime_plane: "Bun runs tooling and application scripts; WebKit/JSC is not vendored in this workspace",
+        guest_browser_plane: "deno_core/V8 is integrated through Obscura; rendering and Web APIs are provided by Rust components, not Chromium/Blink",
+        optimization_profile: "Cargo workspace release profile and package-specific Bun build scripts; no single combined Bun/Cargo AOT profile",
         obscura_crates: vec![
             "obscura",
             "obscura-browser",
@@ -411,6 +434,10 @@ mod tests {
         let session = YoloBrowserSession::new(EngineMode::AiAgent, YoloViewport::default());
         assert!(session.validate_url("https://example.com/path").is_ok());
         assert!(session.validate_url("http://127.0.0.1:8080/admin").is_err());
+        assert!(session.validate_url("file:///etc/passwd").is_err());
+        assert!(session.validate_url("javascript:alert(1)").is_err());
+        assert!(session.validate_url("about:blank").is_ok());
+        assert!(session.validate_url("data:text/html,<p>ok</p>").is_ok());
     }
 
     #[test]

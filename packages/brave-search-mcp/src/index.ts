@@ -3,11 +3,10 @@ import { getOptions } from './config.js';
 import { stdioServer, httpServer } from './protocols/index.js';
 
 async function main() {
-  const options = getOptions();
+  const options = await getOptions();
 
   if (!options) {
-    console.error('Invalid configuration');
-    process.exit(1);
+    throw new Error('Invalid configuration');
   }
 
   // default to stdio server unless http is explicitly requested
@@ -21,5 +20,5 @@ async function main() {
 
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  throw error;
 });

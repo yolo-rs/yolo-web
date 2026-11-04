@@ -1,0 +1,57 @@
+# Browser engine component alignment
+
+This matrix separates components that run inside the Chromium checkout from standalone engines, Rust bindings, and benchmark backends. Revision data below is read from the current checkout/catalog on 2026-11-04; recheck it before each roll.
+
+## Current Chromium base
+
+The official `${CHROMIUM_ROOT}/src` checkout is Chromium `159.0.8143.0`, Git HEAD `4c7244a405d326e284710231ff609168dceb9044`. `DEPS` pins V8 at `5e87028bfc70418a771866d836f3605b481c8c30` and Skia at `d65f91e3bd779b74bbbd7dc3d60229438fb32350`. The recursive `gclient sync --nohooks` completed successfully (exit code 0). `gclient revinfo --actual --output-json -` also succeeds for the public checkout and returns the active dependency revisions. The optional `--snapshot` mode separately fails while trying to pin absent private `src/agents/internal`; the source-lock collector now uses the successful actual-revision JSON mode.
+
+## Component map
+
+| Component | Current source/configuration | Relationship to Chromium 159 | YOLO-Web direction |
+|---|---|---|---|
+| Blink Canvas, Skia, V8 | `${CHROMIUM_ROOT}/src/third_party/blink`, `src/third_party/skia`, `src/v8` from Chromium `DEPS` | Same revision and GN dependency graph as the browser build | Use these for the Chromium product. Do not substitute a second Skia/V8 checkout under Cargo. |
+| Obscura JavaScript runtime | `deno_core = 0.412`; local `crates/deno-core/core` declares `v8 = 150.4.0` | Independently built Rust V8 binding/runtime; not linked to the Chromium `DEPS` V8 commit | Keep as a separate automation/runtime experiment until a versioned bridge to Chromium's V8 is built and validated. |
+| Obscura paint | `tiny-skia`, `cosmic-text`, `swash`, and `resvg` in `crates/obscura-render` | Rust CPU raster path; not Blink Canvas2D or Chromium Skia | Keep for standalone rendering and differential benchmarks. Do not claim Chromium canvas parity. |
+| Node.js development checkout | `src/yolo-vendor/node`, Node `28.0.0`, V8 `15.6.75.33` | Chromium `DEPS` selects V8 `15.9.85.0`; same V8 major, three minor revisions apart, with Node-local patches | Use as an embedder and V8 maintenance reference only. Chromium's pinned V8 remains authoritative for the browser product. |
+| Electron development checkout | `src/yolo-vendor/electron`, Electron `main` commit `6752821287dd7eae86525b5a63d53a2040cb80a3` | Electron `DEPS` selects Chromium `159.0.8140.0`, three patch builds behind local m159; Node `v26.13.0` | Closest downstream patch workflow reference. Study its ordered patch queues and GN/depot_tools integration; keep Electron's Node/Yarn build-tools out of YOLO-Web's Bun toolchain. |
+| Servo Canvas | upstream-derived `servo-canvas`, WebRender/Vello interfaces | Servo's own layout/paint stack | Keep as the Servo comparison target, pinned independently. |
+| Rust Skia bindings | Community `rust-skia` / `skia-safe`; upstream reports its current branch at Chrome m157 | Two milestones behind the local m159 Skia pin; its build support syncs/builds its own Skia tree and may download prebuilt binaries | Do not add it to Chromium's runtime graph at this pin. Revisit when a branch is based on the exact Chromium Skia commit and can link that same build. |
+| CEF distribution | `cef` Rust crate `156.3.0`, consumed by `crates/yolo-chromium`; pinned CEF `156.0.15+gcf671c0+chromium-156.0.8078.80` binary distribution | A separate CEF build/distribution of Chromium `156.0.8078.80`, not the local Chromium 159 browser | Ship the shell on the pinned binary distribution and record it in `engines/cef.lock.json` (see the [CEF adapter boundary](CEF_ADAPTER_BOUNDARY.mdx)). A CEF build from the Chromium 159 worktree through `automate-git.py` is future work; do not present the m156 shell as the m159 checkout. |
+| Brave patches | Brave `brave-core` branch `cr159` declares Chromium tag `159.0.8142.0` | Closest located downstream patch series: same milestone and one Chromium patch build behind local `159.0.8143.0` | Reuse the ordered patch/rebase workflow as research input. Preserve its source and license notices; do not run Brave's Node/Pnpm build workflow as YOLO-Web tooling. |
+| Helium patches | Helium `main` declares Chromium `156.0.8078.79` | Three milestones behind local m159 | Keep as a separate patch/feature reference until Helium publishes an m159 branch or its patch set is explicitly rebased and verified. |
+
+The [official Chromium build instructions](https://chromium.googlesource.com/chromium/src/+/main/docs/get_the_code.md) make `DEPS` and `gclient` the source of truth for Chromium's third-party revisions. The [Chromium multi-process design](https://www.chromium.org/developers/design-documents/multi-process-architecture/) remains the security boundary: Bun and Rust integrations do not replace Blink's renderer or bypass the browser/renderer sandbox.
+
+## CEF and Rust bindings
+
+CEF's official [branch/build guide](https://github.com/chromiumembedded/cef/blob/master/docs/branches_and_building.md) says its `master` follows Chromium master and is for development, while numbered release branches track individual Chromium milestones. Its [`automate-git.py` workflow](https://github.com/chromiumembedded/cef/blob/master/docs/chromium_update.md) downloads a separate depot_tools/Chromium/CEF workspace and maintains a patch series. A CEF binary therefore does not reuse `${CHROMIUM_ROOT}/src` merely because the milestone matches.
+
+The community [`tauri-apps/cef-rs`](https://github.com/tauri-apps/cef-rs) bindings are the Rust dependency of `crates/yolo-chromium`. The published `cef` package includes `cef-dll-sys` and versioned CEF API bindings; the pinned release `156.3.0` targets Chromium 156, and its build script downloads CEF's own binary distribution into the git-ignored `.cef/` cache. No CEF 159 binding or artifact matching the local checkout exists yet. Keep CEF's platform-specific runtime distribution separate from the Chromium source build.
+
+## Electron and Node references
+
+The local-only shallow clones and their exact revisions are recorded in
+[`src/yolo-vendor/README.mdx`](../src/yolo-vendor/README.mdx). Electron `main` is
+the closest downstream Chromium patch series found for this checkout. Node `main`
+is useful for V8 embedding and upgrade practice, but its bundled V8 is behind the
+Chromium `DEPS` pin and has Node-specific patches. Neither checkout is a component
+of the Chromium build graph.
+
+## Skia and Canvas
+
+Chromium's product Canvas path is Blink plus the Skia revision selected by the Chromium checkout's `DEPS`. The [`rust-skia` project](https://github.com/rust-skia/rust-skia) is useful for Rust experiments, but its branch is independently versioned and its build machinery may sync dependencies or download binary archives. Pinning `skia-safe` alone does not make it ABI-compatible with Chromium's Skia library.
+
+Keep the existing `tiny-skia` Obscura renderer and Servo Canvas as named comparison implementations. A later `skia-safe` adapter must be built against the exact `DEPS` Skia revision and GN configuration, have a narrow C ABI boundary, and pass image/conformance comparison on Windows 11 and Linux x64 before any product renderer switches to it.
+
+## Downstream patch reuse
+
+Brave publishes explicit Chromium version-upgrade and patching workflows: [version upgrades](https://github.com/brave/brave-core/blob/master/docs/chromium_version_upgrade.md) and [patching Chromium source](https://github.com/brave/brave-core/blob/master/docs/patching_and_chromium_src.md). Helium publishes its current Chromium base in [`chromium_version.txt`](https://github.com/imputnet/helium/blob/main/chromium_version.txt). These are provenance and rebase references, not drop-in patches. For each imported patch, record its source branch/commit, Chromium base, local conflicts, license, owner, validation, and removal condition under [`patches/chromium/`](../patches/chromium/README.mdx).
+
+## Update procedure
+
+1. The official Chromium `gclient sync --nohooks` is complete for the public configuration. Capture `git rev-parse HEAD`, `chrome/VERSION`, `DEPS`, and `gclient revinfo --actual --output-json -`. Keep `--snapshot` out of the public source-lock path while it attempts absent private DEPS entries.
+2. Read the V8 and Skia pins from that `DEPS`, not from a separate Cargo package or an engine version label.
+3. Compare Electron, CEF, Brave, Helium, Node/V8, and Rust binding revisions to that exact checkout. Record exact commits and milestone/build numbers.
+4. Rebase one downstream patch family at a time and keep its native build/test workflow separate from Bun's repository workflow.
+5. Do not claim consolidation complete until the same Chromium build passes with the selected patches and the CEF/engine benchmarks report their independent binary/source versions.

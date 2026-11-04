@@ -1,0 +1,47 @@
+# YOLO-Web style guide
+
+This guide defines local conventions and points each language back to its upstream source of truth. It does not override Chromium, Servo, WebKit, Bun, or imported crate conventions inside their upstream-owned trees.
+
+## Repository-wide rules
+
+- Keep changes focused and preserve the owning project's license, provenance, directory layout, and update mechanism.
+- Prefer official upstream names and paths (`.gclient`, `src/`, `DEPS`, GN targets, `third_party/`). Avoid local aliases that make upstream instructions harder to follow.
+- Keep host paths configurable. Use explicit CLI arguments or environment variables such as `CHROMIUM_ROOT`; never commit a developer's absolute checkout path.
+- Do not check in build outputs, downloaded dependencies, profile data, credentials, or generated machine-specific state.
+- New documentation uses MDX under `docs/` and relative links. Label implementation status as current, planned, or unsupported.
+
+## Rust
+
+- Follow the [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html) and `rustfmt` for YOLO-Web-owned Rust code; follow the upstream style in imported crates.
+- Use `UpperCamelCase` for types and traits, `snake_case` for functions and modules, and `SCREAMING_SNAKE_CASE` for constants.
+- Return typed errors at library boundaries. Avoid panics in normal control flow; document any invariant that justifies `expect` or `unwrap`.
+- Keep `unsafe` blocks small and explain the safety invariant adjacent to each block.
+- Use Cargo workspace dependencies and package-scoped incremental commands. Preserve `[profile.release] panic = "unwind"` while V8 FFI code relies on `catch_unwind`.
+- For crates that instantiate V8 isolates, use process-isolated test execution such as `cargo nextest` for multi-test suites.
+
+## Bun, TypeScript, and JavaScript
+
+- Use Bun for repository scripts, applications, package management, builds, and tests. Do not add Node.js, npm, pnpm, yarn, or a second JavaScript runtime to YOLO-Web-owned tooling.
+- Use `Bun.serve` for HTTP/WebSocket/SSE servers and `Bun.spawn` for subprocesses. Prefer Bun APIs such as `Bun.file`, `Bun.Glob`, and `bun:sqlite` where they cover the need.
+- Use `bun:test` for tests. Keep scripts and package commands runnable with Bun on Windows 11 and Linux x64.
+- Keep external process arguments separate from shell text. Do not interpolate user input into a shell command.
+- Keep browser page contexts isolated from host environment variables, filesystem paths, process handles, and credentials.
+- Follow the repository TypeScript configuration and existing package formatting. Add types at exported boundaries and use `unknown` when data is untrusted.
+
+## C++ and Chromium
+
+- Follow the [Chromium C++ style guide](https://chromium.googlesource.com/chromium/src/+/main/styleguide/c%2B%2B/c%2B%2B.md) for Chromium integration code and the exact checkout's GN conventions.
+- Use Chromium-owned abstractions and allowed language features. Do not introduce raw ownership, a second build system, or libraries outside the pinned dependency graph without review.
+- Preserve browser/renderer process separation, sandbox defaults, Mojo contracts, and the ownership model of Chromium objects.
+- Keep C++ browser integration separate from Rust policy and Bun orchestration behind a reviewed, versioned interface.
+
+## Documentation and review
+
+- Write MDX that distinguishes facts, local decisions, and planned work. Cite official sources for upstream behavior and version-sensitive requirements.
+- Keep platform-specific steps in a file named for that platform; shared docs should remain host-neutral.
+- A Chromium patch includes the target upstream revision, patch order, rationale, owner, license/provenance, validation evidence, and removal condition.
+- Benchmark results record engine revision, host OS/architecture, toolchain, build configuration, patch set, workload, and raw artifact location.
+
+## Validation commands
+
+Run only the checks scoped to the changed component and host. Typical commands are `bun check`, `bun test <path>`, `cargo fmt --check`, `cargo check -p <crate>`, and the pinned Chromium workflow (`gn gen`, `autoninja`). Do not run a full Chromium build to validate a documentation-only change.

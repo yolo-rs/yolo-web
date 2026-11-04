@@ -67,6 +67,14 @@ describe("@yolo-web/browser-sdk", () => {
                 ...(msg.sessionId ? { sessionId: msg.sessionId } : {}),
               }),
             );
+          const emit = (method: string, params: Record<string, unknown>) =>
+            ws.send(
+              JSON.stringify({
+                method,
+                params,
+                ...(msg.sessionId ? { sessionId: msg.sessionId } : {}),
+              }),
+            );
 
           switch (msg.method) {
             case "Target.createTarget":
@@ -77,6 +85,10 @@ describe("@yolo-web/browser-sdk", () => {
               break;
             case "Page.navigate":
               reply({ frameId: "frame-sdk-1" });
+              // A browser follows the navigate response with the lifecycle
+              // events that `navigate({ waitUntil })` awaits.
+              emit("Page.domContentEventFired", { timestamp: 1 });
+              emit("Page.loadEventFired", { timestamp: 2 });
               break;
             case "Runtime.evaluate":
               if (msg.params?.expression === "document.title") {

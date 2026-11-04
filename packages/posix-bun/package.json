@@ -1,0 +1,9 @@
+{
+  "name": "@yolo-web/posix-bun",
+  "version": "0.1.2",
+  "description": "Integrated POSIX.1-2024 and GNU compatibility helpers for Bun, sourced from yolo-zig",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts"
+}

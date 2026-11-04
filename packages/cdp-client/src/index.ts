@@ -94,7 +94,32 @@ export class YoloCdpClient implements AsyncDisposable {
   }
 
   static async connect(options: YoloCdpClientOptions): Promise<YoloCdpClient> {
-    const client = new YoloCdpClient(options);
+    let endpoint = options.endpoint;
+    if (!/^wss?:\/\//i.test(endpoint)) {
+      const httpUrl = normalizeCdpHttpUrl(endpoint);
+      const response = await fetch(`${httpUrl}/json/version`, {
+        headers: options.token
+          ? { Authorization: `Bearer ${options.token}` }
+          : {},
+        signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+      });
+      if (!response.ok) {
+        throw new Error(
+          `CDP version endpoint returned HTTP ${response.status}: ${httpUrl}/json/version`,
+        );
+      }
+      const info = (await response.json()) as Partial<CdpVersionInfo>;
+      if (
+        typeof info.webSocketDebuggerUrl !== "string" ||
+        !/^wss?:\/\//i.test(info.webSocketDebuggerUrl)
+      ) {
+        throw new Error(
+          `CDP version endpoint did not provide a valid webSocketDebuggerUrl: ${httpUrl}/json/version`,
+        );
+      }
+      endpoint = info.webSocketDebuggerUrl;
+    }
+    const client = new YoloCdpClient({ ...options, endpoint });
     await client.open();
     return client;
   }
@@ -302,6 +327,14 @@ export class YoloCdpClient implements AsyncDisposable {
     return targetId;
   }
 
+  async closeTarget(targetId: string): Promise<boolean> {
+    const { success } = await this.send<{ success: boolean }>(
+      "Target.closeTarget",
+      { targetId },
+    );
+    return success;
+  }
+
   async attachToTarget(targetId: string, flatten = true): Promise<string> {
     const { sessionId } = await this.send<{ sessionId: string }>(
       "Target.attachToTarget",
@@ -315,10 +348,69 @@ export class YoloCdpClient implements AsyncDisposable {
     url: string,
     options?: { waitUntil?: "load" | "domcontentloaded" | "networkidle0" },
   ): Promise<NavigateResult> {
-    return this.send<NavigateResult>("Page.navigate", {
-      url,
-      ...(options?.waitUntil ? { waitUntil: options.waitUntil } : {}),
+    const waitUntil = options?.waitUntil ?? "domcontentloaded";
+    const unsubscribers: Array<() => void> = [];
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    const lifecycle = new Promise<void>((resolve) => {
+      // Page lifecycle events are only delivered once the Page domain is enabled.
+      void this.send("Page.enable").catch(() => undefined);
+      if (waitUntil === "networkidle0") {
+        void this.send("Network.enable").catch(() => undefined);
+        const inflight = new Set<string>();
+        let loaded = false;
+        const scheduleQuiet = () => {
+          if (loaded && inflight.size === 0) {
+            if (quietTimer) clearTimeout(quietTimer);
+            quietTimer = setTimeout(resolve, 500);
+          } else if (quietTimer) {
+            clearTimeout(quietTimer);
+            quietTimer = undefined;
+          }
+        };
+        unsubscribers.push(
+          this.on("Network.requestWillBeSent", (params) => {
+            if (typeof params.requestId === "string")
+              inflight.add(params.requestId);
+            scheduleQuiet();
+          }),
+        );
+        for (const event of [
+          "Network.loadingFinished",
+          "Network.loadingFailed",
+        ]) {
+          unsubscribers.push(
+            this.on(event, (params) => {
+              if (typeof params.requestId === "string")
+                inflight.delete(params.requestId);
+              scheduleQuiet();
+            }),
+          );
+        }
+        unsubscribers.push(
+          this.on("Page.loadEventFired", () => {
+            loaded = true;
+            scheduleQuiet();
+          }),
+        );
+      } else {
+        const event =
+          waitUntil === "load"
+            ? "Page.loadEventFired"
+            : "Page.domContentEventFired";
+        unsubscribers.push(this.on(event, () => resolve()));
+      }
+      timeout = setTimeout(resolve, this.timeoutMs);
     });
+    try {
+      const result = await this.send<NavigateResult>("Page.navigate", { url });
+      if (!result.errorText) await lifecycle;
+      return result;
+    } finally {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+      if (timeout) clearTimeout(timeout);
+      if (quietTimer) clearTimeout(quietTimer);
+    }
   }
 
   async evaluate<T = unknown>(

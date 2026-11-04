@@ -1,0 +1,31 @@
+# Chromium browser and ChromeOS UI catalog
+
+YOLO-Web inventories the official UI source from a synced Chromium checkout with a Bun crawler. It records relative paths, file sizes, extensions, build revision, and source counts; Chromium source itself remains in its upstream checkout so its licenses, OWNERS rules, GN targets, and update history stay intact.
+
+## Crawl the checkout
+
+Set `CHROMIUM_SRC` to a synced `chromium/src` directory and run:
+
+```powershell
+$env:CHROMIUM_SRC = 'D:\src\chromium\src'
+bun run crawl:chromium-ui
+```
+
+The default output is [`../engines/chromium-ui-crawl.json`](../engines/chromium-ui-crawl.json). Set `CHROMIUM_UI_CRAWL_OUTPUT` to write it elsewhere. The crawler omits generated/build/cache trees (`.git`, `out`, `gen`, `node_modules`, `target`, `.cache`) and does not store the local checkout path.
+
+## Scope
+
+| Group | Upstream source roots |
+| --- | --- |
+| Chromium browser Views and native UI | `chrome/browser/ui`, `ui/views`, `ui/color` |
+| Chromium WebUI | `chrome/browser/resources`, `ui/webui`, `components/webui` |
+| ChromeOS Ash UI | `ash`, `chrome/browser/ash`, ChromeOS and Ash subtrees under `chrome/browser/resources` |
+| ChromeOS shared UI and platform services | `chromeos`, `ui/chromeos` |
+
+The first crawl used Chromium revision `4c7244a405d326e284710231ff609168dceb9044` and found **54,618 files (about 446 MB)** across the scoped trees: 16,915 browser UI/Views files, 8,489 WebUI files, 19,495 Ash UI files, and 9,719 shared ChromeOS files. The JSON inventory is revision-specific; rerun after `gclient sync` to refresh it.
+
+## Reuse policy
+
+This catalog is an index, not a source-code mirror. To reuse Chromium UI implementation, depend on the upstream target or copy only a clearly scoped component with its Chromium BSD license, attribution, OWNERS review, and GN/dependency metadata. YOLO-Web-authored interfaces use Bun TSX or Rust RSX; the Chromium preset in yolo-ui supplies the transferable Views/WebUI visual tokens without importing Chromium's Lit/Polymer implementation wholesale.
+
+The crawler entry point is [`../scripts/crawl-chromium-ui.ts`](../scripts/crawl-chromium-ui.ts). It reads the checkout only and writes one generated inventory.

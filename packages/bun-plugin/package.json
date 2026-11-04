@@ -1,0 +1,10 @@
+{
+  "name": "@yolo-web/bun-plugin",
+  "version": "0.2.0",
+  "description": "Small Bun-native virtual-module plugin contract for YOLO-Web packages",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -1,0 +1,43 @@
+[package]
+name = "yolo-chromium"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Upstream Chromium browser shell for YOLO-Web: a Rust control plane over the official CEF (Chromium Embedded Framework) binary distribution"
+build = "build.rs"
+
+[lib]
+name = "yolo_chromium"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "yolo-chromium"
+path = "src/main.rs"
+
+[features]
+default = ["sandbox"]
+# Keep Chromium's renderer/GPU/utility sandbox enabled. On Windows the shell
+# then runs as a DLL loaded by CEF's (unsigned, distribution-provided) bootstrap
+# executable; see README.md.
+sandbox = ["cef/sandbox", "cef-dll-sys/sandbox"]
+
+[dependencies]
+cef = { version = "156.3.0", default-features = false, features = ["resources"] }
+# Direct dependency so this crate's build script receives the resolved CEF
+# distribution directory (DEP_CEF_DLL_WRAPPER_CEF_DIR) from the sys crate.
+cef-dll-sys = { version = "156.3.0", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,13 @@
+{
+  "name": "@yolo-web/web-crawler",
+  "version": "0.1.0",
+  "description": "Polite, bounded web crawler with provenance-first JSON records for YOLO-Web",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "check": "bun check",
+    "test": "bun test"
+  }
+}

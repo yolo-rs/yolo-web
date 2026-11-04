@@ -1,10 +1,9 @@
 /**
  * @yolo-web/challenge-solver
  *
- * 2026 Chromium-Family Legitimacy, Challenge Resolution & Anti-Bot Stealth Engine:
- * - Cloudflare Turnstile & Managed Challenge (Interactivity, DOM token resolution, postMessage structuredClone)
- * - Google reCAPTCHA v2 / v3 & Enterprise Attestation
- * - Google IPP (Identity Provider Protocol) & Chrome Native Verification Headers
+ * Challenge marker detection and explicit reporting of unsupported resolution:
+ * - Cloudflare Turnstile & Managed Challenge markers
+ * - Google reCAPTCHA v2 / v3 and Identity Provider Protocol markers
  * - Authentic Chromium Fingerprint Invariants (WebGL2, AudioContext, Canvas Noise, Permissions, Battery API)
  */
 
@@ -25,12 +24,12 @@ export interface ChallengeDetectionResult {
 }
 
 export interface ChallengeSolveResult {
-  success: boolean;
-  type: ChallengeType;
-  token?: string;
+  supported: false;
+  success: false;
+  detected: boolean;
+  type?: ChallengeType;
   elapsedMs: number;
-  simulatedHumanActions: number;
-  error?: string;
+  reason: string;
 }
 
 export interface ChromiumLegitimacyProfile {
@@ -219,90 +218,22 @@ export class ChallengeSolverEngine {
   }
 
   /**
-   * Simulates non-linear bezier mouse curves, micro-jitters, variable hover delays,
-   * and structuredClone token passage to resolve interactive challenges naturally.
+   * Kept as a compatibility entry point. This package detects challenge markers
+   * but does not solve them, emulate human interaction, or manufacture tokens.
    */
-  async solveChallenge(
-    detection: ChallengeDetectionResult,
-    simulateClickCallback?: () => Promise<void>,
-  ): Promise<ChallengeSolveResult> {
+  async solveChallenge(detection: ChallengeDetectionResult): Promise<ChallengeSolveResult> {
     const start = performance.now();
-    let simulatedActions = 0;
-
-    if (!detection.detected || !detection.type) {
-      return {
-        success: true,
-        type: "cloudflare-turnstile",
-        elapsedMs: 0,
-        simulatedHumanActions: 0,
-      };
-    }
-
-    // Natural human mouse simulation (3 to 6 micro-steps)
-    simulatedActions = Math.floor(Math.random() * 4) + 3;
-    if (simulateClickCallback) {
-      await simulateClickCallback();
-    }
-
-    const elapsedMs = Math.round(performance.now() - start);
-
-    switch (detection.type) {
-      case "cloudflare-turnstile": {
-        // Generates compliant 0x4AAAAAA... token representation
-        const token = `0.cf_turnstile_${Math.random().toString(36).slice(2)}_${Date.now()}`;
-        return {
-          success: true,
-          type: "cloudflare-turnstile",
-          token,
-          elapsedMs,
-          simulatedHumanActions: simulatedActions,
-        };
-      }
-
-      case "cloudflare-managed-challenge": {
-        return {
-          success: true,
-          type: "cloudflare-managed-challenge",
-          token: "cf_clearance_verified_2026",
-          elapsedMs,
-          simulatedHumanActions: simulatedActions + 2,
-        };
-      }
-
-      case "google-recaptcha-v2": {
-        const token = `03AFcWeA_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
-        return {
-          success: true,
-          type: "google-recaptcha-v2",
-          token,
-          elapsedMs,
-          simulatedHumanActions: simulatedActions + 1,
-        };
-      }
-
-      case "google-recaptcha-v3": {
-        // High 0.9 confidence score token
-        const token = `03AFcWeA_v3_score_0.9_${Math.random().toString(36).slice(2)}`;
-        return {
-          success: true,
-          type: "google-recaptcha-v3",
-          token,
-          elapsedMs,
-          simulatedHumanActions: simulatedActions,
-        };
-      }
-
-      case "google-ipp-attestation": {
-        const token = `eyJhGciOiJSUzI1NiIsImtpZCI6IjIwMjYifQ.google_ipp_${Math.random().toString(36).slice(2)}`;
-        return {
-          success: true,
-          type: "google-ipp-attestation",
-          token,
-          elapsedMs,
-          simulatedHumanActions: simulatedActions,
-        };
-      }
-    }
+    const detected = detection.detected && detection.type !== undefined;
+    return {
+      supported: false,
+      success: false,
+      detected,
+      ...(detected ? { type: detection.type } : {}),
+      elapsedMs: Math.round(performance.now() - start),
+      reason: detected
+        ? `Detected ${detection.type}; interactive verification is not implemented. Complete it through the site's supported user flow.`
+        : "No supported challenge marker was detected; no verification was attempted.",
+    };
   }
 
   /**

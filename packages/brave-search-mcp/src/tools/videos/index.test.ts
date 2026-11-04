@@ -1,5 +1,5 @@
-import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { describe, it } from 'bun:test';
+import { assert } from '../../testUtils/assert.js';
 import { useTestClient } from '../../testUtils/mcpTestHarness.js';
 import { name } from './index.js';
 

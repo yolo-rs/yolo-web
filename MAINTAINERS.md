@@ -48,7 +48,7 @@ F: packages/marketplace-server/
 F: packages/yolo-universal-mcp/
 F: plugins/
 
-YOLO STANDARDS & HARDWARE SCHEMAS (`yolo-standards`)
+YOLO STANDARDS & HARDWARE SCHEMAS (`yolo-web-standards`, data from the upstream `yolo-standards` workspace)
 M: YOLO Standards & POSIX Team <standards@yolo-rs.org>
 S: Supported
 F: schemas/
