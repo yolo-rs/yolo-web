@@ -5,6 +5,7 @@ peer = true
 [test]
 coverage = false
 timeout = 15000
+path-ignore-patterns = ["crates/**"]
 
 [run]
 bun = true
