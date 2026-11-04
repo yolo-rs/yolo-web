@@ -123,3 +123,4 @@ The engine is strictly partitioned into two operational planes:
 - [Servo Stylo & Euclid Reference](./references/servo-stylo-geometry.md)
 - [Dual-Runtime Bun + V8 Specification](./references/dual-runtime-bun-v8.md)
 - [2026 Scraper, Crawler & Performance Blueprint](./references/ultimate-2026-stack.md)
+- [Verified Targets Knowledge Base (Google, Cloudflare, Chromium, ChromiumOS)](./references/verified-targets-knowledge.md)

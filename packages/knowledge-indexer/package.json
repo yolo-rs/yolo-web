@@ -1,0 +1,23 @@
+{
+  "name": "@yolo-web/knowledge-indexer",
+  "version": "0.1.0",
+  "description": "Recursive test knowledge aggregator, SQLite database, RAG vector index, docs & skill feeder for YOLO-Web",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check",
+    "fmt": "bun fmt",
+    "lint": "bun lint"
+  },
+  "dependencies": {
+    "@yolo-web/brave-shields": "workspace:*",
+    "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/shared": "workspace:*"
+  }
+}

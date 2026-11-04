@@ -75,6 +75,16 @@
         "@yolo-web/shared": "workspace:*",
       },
     },
+    "packages/knowledge-indexer": {
+      "name": "@yolo-web/knowledge-indexer",
+      "version": "0.1.0",
+      "dependencies": {
+        "@yolo-web/brave-shields": "workspace:*",
+        "@yolo-web/browser-sdk": "workspace:*",
+        "@yolo-web/servo-bridge": "workspace:*",
+        "@yolo-web/shared": "workspace:*",
+      },
+    },
     "packages/mcp-client": {
       "name": "@yolo-web/mcp-client",
       "version": "0.1.0",
@@ -152,6 +162,8 @@
     "@yolo-web/cdp-client": ["@yolo-web/cdp-client@workspace:packages/cdp-client"],
 
     "@yolo-web/human-browser": ["@yolo-web/human-browser@workspace:apps/human-browser"],
+
+    "@yolo-web/knowledge-indexer": ["@yolo-web/knowledge-indexer@workspace:packages/knowledge-indexer"],
 
     "@yolo-web/mcp-client": ["@yolo-web/mcp-client@workspace:packages/mcp-client"],
 
