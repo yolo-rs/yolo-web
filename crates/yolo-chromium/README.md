@@ -104,6 +104,41 @@ switch is passed to Chromium unchanged.
 | `--smoke-hold-ms=<n>`                               | Keep the page open `n` ms after it loaded so external probes can observe it. The launcher sets `1500` automatically when `--smoke` and `--remote-debugging-port` are both given; the DevTools probe result is recorded under `cdp` in the receipt. |
 | `--receipt=<path>`                                  | Receipt path, for example `engines/cef.lock.json`.                                                  |
 
+## Themes and managed policies
+
+Chromium's own Google/Material defaults stay in place unless a theme is selected.
+`--theme=<preset|file.json>` applies a brand preset through CEF's Views theme
+color API (`CefWindow::SetThemeColor`, ids from `include/cef_color_ids.h`) to
+every top-level and popup window; presets are `neutral` (no override), `m3`,
+`fluent`, `apple`, `omarchy`, `hyprland`, and `aphrody`. A JSON file maps token
+keys (`frameActive`, `toolbar`, `toolbarText`, `locationBarBackground`,
+`newTabPageBackground`, `windowBackground`, and the others listed in
+`src/theme.rs`) to `#RRGGBB` or `#AARRGGBB` strings and may name a `base`
+preset to start from. Page content is never restyled; only the browser UI is.
+
+Search engine, new tab, homepage, and startup pages are configured as managed
+Chromium policies, which is the mechanism Chromium itself uses for enterprise
+defaults. The shell sets `chrome_policy_id` to
+`SOFTWARE\Policies\YOLO-Web\Chromium` (override with `--policy-id`, disable
+with `--no-policies`), and on Windows the launcher writes the user-level key
+`HKCU\SOFTWARE\Policies\YOLO-Web\Chromium` with `reg.exe` before the host
+starts:
+
+| Launcher switch                                           | Policies written                                                                 |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `--search-engine=aphrody` (or `google`, `duckduckgo`, `brave`, a URL) | `DefaultSearchProviderEnabled`, `...Name`, `...Keyword`, `...SearchURL` (`https://aphrody.com/search?q={searchTerms}`) |
+| `--new-tab-url=<url>`                                     | `NewTabPageLocation`                                                             |
+| `--homepage=<url>`                                        | `HomepageLocation`, `HomepageIsNewTabPage=0`, `ShowHomeButton=1`                  |
+| `--startup-urls=<a,b>`                                    | `RestoreOnStartup=4`, `RestoreOnStartupURLs`                                     |
+| `--reset-policies`                                        | deletes the key first                                                            |
+
+The values persist for the Windows user until `--reset-policies` is run; they
+are visible in the browser at `chrome://policy`. On Linux the same policies are
+read from JSON files under the `chrome_policy_id` directory
+(`/etc/yolo-web/chromium/policies/managed/*.json`), which the launcher does not
+write. MV3 extensions load with Chromium's own `--load-extension=<dir>` switch;
+see `packages/chrome-extension-yolo` for the Bun-built YOLO-Web extension.
+
 ## Runtime model (Windows)
 
 1. `cargo build -p yolo-chromium` produces the launcher executable and the

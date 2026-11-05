@@ -17,7 +17,7 @@ pub use ast::Expression;
 use ast::QName;
 use context::EvaluationCtx;
 use markup5ever::{LocalName, Namespace, Prefix};
-pub use parser::{Error as ParserError, parse};
+pub use parser::{parse, Error as ParserError};
 pub use value::{NodeSet, Value};
 
 pub trait Dom {
@@ -132,11 +132,11 @@ pub fn evaluate_parsed_xpath<D: Dom>(
 
             log::debug!("Evaluated XPath: {value:?}");
             Ok(value)
-        },
+        }
         Err(error) => {
             log::debug!("Unable to evaluate XPath: {error:?}");
             Err(error)
-        },
+        }
     }
 }
 
@@ -179,8 +179,8 @@ fn is_valid_start(c: char) -> bool {
 
 /// <https://www.w3.org/TR/xml/#NT-NameChar>
 fn is_valid_continuation(c: char) -> bool {
-    is_valid_start(c) ||
-        matches!(c,
+    is_valid_start(c)
+        || matches!(c,
             '-' |
             '.' |
             '0'..='9' |
@@ -194,7 +194,7 @@ fn is_valid_continuation(c: char) -> bool {
 mod dummy_implementation {
     use std::{cmp, iter};
 
-    use markup5ever::{LocalName, ns};
+    use markup5ever::{ns, LocalName};
 
     use super::*;
 

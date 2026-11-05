@@ -11,7 +11,7 @@ use std::cmp::{self, Ord};
 use std::collections::BinaryHeap;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, after, never};
+use crossbeam_channel::{after, never, Receiver};
 use malloc_size_of_derive::MallocSizeOf;
 
 /// A callback to pass to the [`TimerScheduler`] to be called when the timer is
@@ -121,7 +121,7 @@ impl TimerScheduler {
         loop {
             match self.queue.peek() {
                 // Dispatch the event if its due time is past.
-                Some(event) if event.for_time <= now => {},
+                Some(event) if event.for_time <= now => {}
                 // Otherwise, we're done dispatching events.
                 _ => break,
             }

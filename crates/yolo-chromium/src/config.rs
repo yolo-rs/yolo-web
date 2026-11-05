@@ -13,6 +13,12 @@ pub const DEFAULT_SMOKE_URL: &str = "chrome://version/";
 pub const DEFAULT_SMOKE_TIMEOUT_MS: i64 = 30_000;
 /// Default `--window-size`.
 pub const DEFAULT_WINDOW_SIZE: (i32, i32) = (1280, 800);
+/// Default `chrome_policy_id`: registry key on Windows, directory on Linux.
+pub const DEFAULT_POLICY_ID: &str = if cfg!(windows) {
+    r"SOFTWARE\Policies\YOLO-Web\Chromium"
+} else {
+    "/etc/yolo-web/chromium/policies"
+};
 
 /// Initial top-level window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +57,10 @@ pub struct ShellConfig {
     pub log_severity: Option<String>,
     pub locale: Option<String>,
     pub no_sandbox: bool,
+    /// `--theme=<preset|path.json>`; `None` keeps Chromium defaults.
+    pub theme: Option<String>,
+    /// Registry key (Windows) or directory (Linux) read for managed policies.
+    pub policy_id: Option<String>,
     pub smoke: Option<SmokeConfig>,
 }
 
@@ -109,6 +119,12 @@ impl ShellConfig {
             log_severity: value("log-severity"),
             locale: value("lang"),
             no_sandbox: has("no-sandbox"),
+            theme: value("theme"),
+            policy_id: if has("no-policies") {
+                None
+            } else {
+                Some(value("policy-id").unwrap_or_else(|| DEFAULT_POLICY_ID.to_string()))
+            },
             smoke,
         }
     }

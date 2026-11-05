@@ -13,6 +13,8 @@ path = "lib.rs"
 [features]
 gecko = ["thin-vec/gecko-ffi"]
 servo = ["string_cache"]
+# YOLO-Web: `url::Host` and `url::Url` impls, ported from servo/servo components/malloc_size_of.
+url = ["dep:url"]
 
 [dependencies]
 app_units = "0.7"
@@ -26,4 +28,5 @@ smallbitvec = "2.3.0"
 smallvec = "1.13"
 string_cache = { version = "0.11", optional = true }
 thin-vec = { version = "0.2.13" }
+url = { version = "2", optional = true }
 void = "1.0.2"

@@ -86,6 +86,9 @@ fn build_settings(config: &ShellConfig) -> Settings {
     if let Some(locale) = &config.locale {
         settings.locale = CefString::from(locale.as_str());
     }
+    if let Some(policy_id) = &config.policy_id {
+        settings.chrome_policy_id = CefString::from(policy_id.as_str());
+    }
     settings
 }
 

@@ -15,6 +15,7 @@ use crate::{
     config::{InitialShowState, ShellConfig},
     engine_info,
     receipt::{self, Receipt, ShellInfo, SmokeError, SmokeResult},
+    theme::{self, Theme},
     version,
 };
 
@@ -62,6 +63,7 @@ impl Actions {
 /// Browser-process state owned by the shell.
 pub struct ShellState {
     config: ShellConfig,
+    theme: Theme,
     browsers: Vec<Browser>,
     exit_code: i32,
     smoke_started: Option<Instant>,
@@ -75,8 +77,20 @@ pub struct ShellState {
 impl ShellState {
     /// Creates the shared state for one browser process.
     pub fn new(config: ShellConfig) -> Shared {
+        let theme = match config.theme.as_deref().map(theme::resolve) {
+            Some(Ok(theme)) => {
+                eprintln!("yolo-chromium: theme {}", theme.name);
+                theme
+            }
+            Some(Err(error)) => {
+                eprintln!("yolo-chromium: {error}; keeping Chromium defaults");
+                Theme::default()
+            }
+            None => Theme::default(),
+        };
         Arc::new(Mutex::new(Self {
             config,
+            theme,
             browsers: Vec::new(),
             exit_code: EXIT_OK,
             smoke_started: None,
@@ -97,6 +111,10 @@ impl ShellState {
 
     pub fn browser_count(&self) -> usize {
         self.browsers.len()
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     fn runtime_style(&self) -> RuntimeStyle {
@@ -298,7 +316,7 @@ fn cef_string(value: Option<&CefString>) -> String {
 
 /// Creates a browser window for `url`. Must run on the CEF UI thread.
 pub fn create_browser_window(state: &Shared, url: &str) {
-    let (runtime_style, use_views, show_state, size) = {
+    let (runtime_style, use_views, show_state, size, theme) = {
         let guard = lock(state);
         (
             guard.runtime_style(),
@@ -308,6 +326,7 @@ pub fn create_browser_window(state: &Shared, url: &str) {
                 width: guard.config.window_size.0,
                 height: guard.config.window_size.1,
             },
+            guard.theme.clone(),
         )
     };
     let mut client = YoloClient::new(state.clone());
@@ -324,8 +343,13 @@ pub fn create_browser_window(state: &Shared, url: &str) {
             None,
             Some(&mut delegate),
         );
-        let mut window_delegate =
-            YoloWindowDelegate::new(RefCell::new(browser_view), runtime_style, show_state, size);
+        let mut window_delegate = YoloWindowDelegate::new(
+            RefCell::new(browser_view),
+            runtime_style,
+            show_state,
+            size,
+            theme,
+        );
         window_create_top_level(Some(&mut window_delegate));
     } else {
         let window_info = WindowInfo {
@@ -552,6 +576,7 @@ wrap_window_delegate! {
         runtime_style: RuntimeStyle,
         initial_show_state: ShowState,
         preferred_size: Size,
+        theme: Theme,
     }
 
     impl ViewDelegate {
@@ -571,8 +596,19 @@ wrap_window_delegate! {
             let mut view = View::from(browser_view);
             window.add_child_view(Some(&mut view));
             window.set_title(Some(&CefString::from(WINDOW_TITLE)));
+            if apply_theme_colors(window, &self.theme) {
+                window.theme_changed();
+            }
             if self.initial_show_state != ShowState::HIDDEN {
                 window.show();
+            }
+        }
+
+        fn on_theme_colors_changed(&self, window: Option<&mut Window>, _chrome_theme: i32) {
+            // Re-apply the brand colors over the native or Chrome theme that
+            // just changed (CEF triggers OnThemeChanged itself afterwards).
+            if let Some(window) = window {
+                apply_theme_colors(window, &self.theme);
             }
         }
 
@@ -630,18 +666,22 @@ wrap_browser_view_delegate! {
             popup_browser_view: Option<&mut BrowserView>,
             _is_devtools: i32,
         ) -> i32 {
-            let size = {
+            let (size, theme) = {
                 let guard = lock(&self.state);
-                Size {
-                    width: guard.config.window_size.0,
-                    height: guard.config.window_size.1,
-                }
+                (
+                    Size {
+                        width: guard.config.window_size.0,
+                        height: guard.config.window_size.1,
+                    },
+                    guard.theme.clone(),
+                )
             };
             let mut window_delegate = YoloWindowDelegate::new(
                 RefCell::new(popup_browser_view.cloned()),
                 self.runtime_style,
                 ShowState::NORMAL,
                 size,
+                theme,
             );
             window_create_top_level(Some(&mut window_delegate));
             1
@@ -651,4 +691,13 @@ wrap_browser_view_delegate! {
             self.runtime_style
         }
     }
+}
+
+/// Applies every color of `theme` to `window`. Returns whether any color was
+/// set, in which case the caller should trigger `theme_changed` once.
+fn apply_theme_colors(window: &Window, theme: &Theme) -> bool {
+    for (token, color) in &theme.colors {
+        window.set_theme_color(token.color_id(), *color);
+    }
+    !theme.colors.is_empty()
 }

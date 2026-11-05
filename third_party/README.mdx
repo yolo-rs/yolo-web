@@ -1,0 +1,27 @@
+# Third-party source policy
+
+This directory contains only pinned non-Rust/non-Bun source references and binaries that YOLO-Web invokes or links through FFI. Rust crates and Bun packages selected for integration belong directly under `crates/`, `packages/`, or `apps/`. Each retained source needs a revision, license, local patch list, integration status, and update/removal plan in [`sources.lock.json`](sources.lock.json).
+
+## Vercel agent-browser
+
+The Apache-2.0 Rust CLI source is integrated at `crates/agent-browser`; the agent skill is under `.agents/skills/`, and runtime skill data are under `packages/agent-browser-skills/`. The upstream Next dashboard and Node/pnpm launchers are excluded from the browser distribution. The CLI does not generate or embed placeholder UI assets.
+
+## Chromium boundary
+
+Chromium source and Chromium's `src/third_party` belong in the separate official depot_tools checkout and are populated from its pinned `DEPS` file by `gclient sync`. Do not copy that dependency tree here. Coordinate Blink, V8, Skia, Dawn, and other Chromium rolls through the official checkout.
+
+## Exported reference snapshots
+
+These native source references were exported from shallow Git checkouts at the exact commits in `sources.lock.json`. No upstream install, build, or test workflow was run.
+
+| Snapshot | License | Upstream revision | Integration |
+| --- | --- | --- | --- |
+| `curl-source/` | curl license; preserve per-file SPDX notices | `43f39f9c7849caffeb31b8c17999afd4ca96e526` | Reference for curl CLI and libcurl; no source linking. |
+| `wget2-source/` | GPL-3.0-or-later CLI; LGPL-3.0-or-later libwget | `9f7eb3ccedd290f49d807fa064125ad9dc4b38ec` | Reference only; no source linking. |
+| `lightpanda-browser-source/` | AGPL-3.0-only | `3a8c88bbd1b84d4e1613f5954330f1f4f50404a3` | Source-level reference only; never link or bundle its binary. |
+
+`curl/COPYING` uses the curl license, while `curl/LICENSES` records other incorporated code licenses. GNU Wget2's CLI and libwget have different copyleft terms; keep the matching `COPYING` and `COPYING.LESSER` notices together.
+
+## Refreshing pinned sources
+
+Review upstream changes and licenses before updating a pin. Inspect the desired commit, update its SHA and archive size in `sources.lock.json`, and export only that reviewed revision into its archive path. Review the diff and preserve the recorded license and integration boundary. No automated updater may overwrite local patches or run upstream install/build scripts.

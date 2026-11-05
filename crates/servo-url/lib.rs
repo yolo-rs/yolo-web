@@ -109,12 +109,12 @@ impl ServoUrl {
     /// <https://url.spec.whatwg.org/#special-scheme>
     pub fn is_special_scheme(&self) -> bool {
         let scheme = self.scheme();
-        scheme == "ftp" ||
-            scheme == "file" ||
-            scheme == "http" ||
-            scheme == "https" ||
-            scheme == "ws" ||
-            scheme == "wss"
+        scheme == "ftp"
+            || scheme == "file"
+            || scheme == "http"
+            || scheme == "https"
+            || scheme == "ws"
+            || scheme == "wss"
     }
 
     /// <https://url.spec.whatwg.org/#url-equivalence>
@@ -217,7 +217,7 @@ impl ServoUrl {
                 }
 
                 st
-            },
+            }
             "file" => {
                 // The only useful part in a `file` URL is usually only the last
                 // few components
@@ -228,7 +228,7 @@ impl ServoUrl {
                     None | Some(0) => path,
                     Some(i) => &path[i + 1..],
                 }
-            },
+            }
             _ => self.as_str(),
         }
     }

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "name": "agent-browser",
+      "upstream": "https://github.com/vercel-labs/agent-browser.git",
+      "revision": "6682da310c75bed8af340b39cc10b7f71bded155",
+      "path": "crates/agent-browser",
+      "artifactType": "integrated-upstream-source",
+      "versioned": true,
+      "license": "Apache-2.0",
+      "licenseFiles": [
+        "crates/agent-browser/LICENSE",
+        "crates/agent-browser/src/native/a11y/LICENSE-axe-core.txt",
+        "crates/agent-browser/src/native/a11y/LICENSE-axe-core-THIRD-PARTY.txt"
+      ],
+      "scope": "workspace-member",
+      "runtime": "Rust page-automation CLI integrated into the YOLO-Web workspace as yolo-web; Bun coordinates higher-level workflows.",
+      "localPatches": [
+        "Cargo workspace integration, yolo-web binary name, and shared workspace dependency versions",
+        "removed dashboard asset embedding and its UI dependency graph",
+        "image decoding restricted to JPEG/PNG",
+        "CDP/WebSocket API migrated to tokio-tungstenite 0.26"
+      ],
+      "integration": "Apache-2.0 Rust source is integrated at crates/agent-browser and builds as yolo-web, a specialized page automation executable. The top-level yolo orchestrator is a separate product target. Skill data live under packages/agent-browser-skills; dashboard and Node/pnpm launcher are excluded.",
+      "owner": "YOLO-Web maintainers",
+      "removalPlan": "Remove this source integration and lock entry if the browser agent is replaced."
+    },
+    {
+      "name": "curl",
+      "upstream": "https://github.com/curl/curl.git",
+      "revision": "43f39f9c7849caffeb31b8c17999afd4ca96e526",
+      "path": "third_party/curl-source",
+      "artifactType": "versioned-source-archive",
+      "versioned": true,
+      "archiveBytes": 21872640,
+      "license": "curl",
+      "licenseFiles": [
+        "COPYING",
+        "LICENSES/curl.txt",
+        "REUSE.toml"
+      ],
+      "scope": "reference-only",
+      "runtime": "Native C application and libcurl; upstream build uses its supported CMake/Autotools workflows. Source files may carry additional SPDX licenses; preserve all SPDX notices and LICENSES entries.",
+      "localPatches": [],
+      "integration": "Reference for curl CLI and libcurl behavior. Use the installed curl executable through Bun.spawn where an external transfer tool is needed; do not link this source snapshot into the Bun application.",
+      "owner": "YOLO-Web maintainers",
+      "removalPlan": "Remove the exported source directory and this lock entry if curl CLI/libcurl reference is no longer needed."
+    },
+    {
+      "name": "wget2",
+      "upstream": "https://github.com/gnuwget/wget2.git",
+      "revision": "9f7eb3ccedd290f49d807fa064125ad9dc4b38ec",
+      "path": "third_party/wget2-source",
+      "artifactType": "versioned-source-archive",
+      "versioned": true,
+      "archiveBytes": 17950720,
+      "license": [
+        "GPL-3.0-or-later",
+        "LGPL-3.0-or-later"
+      ],
+      "licenseFiles": [
+        "COPYING",
+        "COPYING.LESSER"
+      ],
+      "scope": "reference-only",
+      "runtime": "Native C application plus libwget; Wget2 CLI is GPL-3.0-or-later and libwget is LGPL-3.0-or-later. Upstream build uses native build tooling; no YOLO-Web binary link.",
+      "localPatches": [],
+      "integration": "Reference for recursive transfer, mirror, and libwget APIs. Invoke a separately installed wget2 only through an explicit Bun.spawn integration; do not link or bundle this snapshot.",
+      "owner": "YOLO-Web maintainers",
+      "removalPlan": "Remove the exported source directory and this lock entry if no Wget2 CLI/libwget research remains."
+    },
+    {
+      "name": "lightpanda-browser",
+      "upstream": "https://github.com/lightpanda-io/browser.git",
+      "revision": "3a8c88bbd1b84d4e1613f5954330f1f4f50404a3",
+      "path": "third_party/lightpanda-browser-source",
+      "artifactType": "versioned-source-archive",
+      "versioned": true,
+      "archiveBytes": 21585920,
+      "license": "AGPL-3.0-only",
+      "licenseFiles": [
+        "LICENSE",
+        "LICENSING.md"
+      ],
+      "scope": "reference-only-no-binary-link",
+      "runtime": "Native Zig browser implementation and upstream Zig build. AGPL-3.0-only source is retained for source-level study only; do not link, bundle, or redistribute a derived binary as part of YOLO-Web.",
+      "localPatches": [],
+      "integration": "Compare CDP, DOM, JavaScript runtime, and headless browsing architecture at source level. No build integration, binary linking, or runtime dependency.",
+      "owner": "YOLO-Web maintainers",
+      "removalPlan": "Remove this reference snapshot and lock entry if source-level comparisons are no longer required."
+    }
+  ],
+  "notVendored": [
+    {
+      "name": "vercel-agent-skills",
+      "upstream": "https://github.com/vercel-labs/agent-skills.git",
+      "inspectedRevision": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "reason": "No root license file was present at the inspected revision; do not copy or redistribute repository contents without clarified licensing. Install selected skills through the skill installer with upstream attribution."
+    },
+    {
+      "name": "chromium-source-and-third-party",
+      "upstream": "https://chromium.googlesource.com/chromium/src.git",
+      "reason": "Managed in the separate depot_tools checkout from Chromium DEPS; a second copy would be large, redundant, and drift from the official source graph."
+    }
+  ]
+}

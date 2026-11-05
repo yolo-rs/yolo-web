@@ -175,11 +175,11 @@ impl<'a> Tokenizer<'a> {
             '0'..='9' => {
                 let number = self.consume_numeric_literal();
                 Ok(Token::Literal(number))
-            },
+            }
             '\'' | '"' => {
                 let string = self.consume_string_literal()?;
                 Ok(Token::Literal(LiteralToken::String(string)))
-            },
+            }
             '.' => {
                 // This is tricky: A period can either be
                 // the parent node (".."), a numeric literal (".123") or
@@ -189,13 +189,13 @@ impl<'a> Tokenizer<'a> {
                     Some('.') => {
                         self.remaining = &self.remaining[2..];
                         Ok(Token::ParentNode)
-                    },
+                    }
                     _ => {
                         self.remaining = &self.remaining[1..];
                         Ok(Token::SelfNode)
-                    },
+                    }
                 }
-            },
+            }
             '/' => {
                 if self.remaining.chars().nth(1).is_some_and(|c| c == '/') {
                     self.remaining = &self.remaining[2..];
@@ -204,35 +204,35 @@ impl<'a> Tokenizer<'a> {
                     self.remaining = &self.remaining[1..];
                     Ok(Token::Parent)
                 }
-            },
+            }
             '-' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::Operator(OperatorToken::Subtract))
-            },
+            }
             '(' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::OpeningParenthesis)
-            },
+            }
             ')' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::ClosingParenthesis)
-            },
+            }
             '[' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::OpeningBracket)
-            },
+            }
             ']' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::ClosingBracket)
-            },
+            }
             ',' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::Comma)
-            },
+            }
             '@' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::AtSign)
-            },
+            }
             '<' => {
                 self.remaining = &self.remaining[1..];
                 if self.remaining.starts_with('=') {
@@ -241,7 +241,7 @@ impl<'a> Tokenizer<'a> {
                 } else {
                     Ok(Token::Operator(OperatorToken::LessThan))
                 }
-            },
+            }
             '>' => {
                 self.remaining = &self.remaining[1..];
                 if self.remaining.starts_with('=') {
@@ -250,7 +250,7 @@ impl<'a> Tokenizer<'a> {
                 } else {
                     Ok(Token::Operator(OperatorToken::GreaterThan))
                 }
-            },
+            }
             '!' => {
                 if self.remaining.starts_with("!=") {
                     self.remaining = &self.remaining[2..];
@@ -258,23 +258,23 @@ impl<'a> Tokenizer<'a> {
                 } else {
                     Err(Error::IllegalCharacter)
                 }
-            },
+            }
             '=' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::Operator(OperatorToken::Equal))
-            },
+            }
             '|' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::Union)
-            },
+            }
             '+' => {
                 self.remaining = &self.remaining[1..];
                 Ok(Token::Operator(OperatorToken::Add))
-            },
+            }
             other => {
                 log::debug!("Illegal character: {other:?}");
                 Err(Error::IllegalCharacter)
-            },
+            }
         }
     }
 
@@ -359,7 +359,7 @@ fn match_operator_name(operator_name: &str) -> Result<OperatorToken, Error> {
         _ => {
             log::debug!("Expected Operator, found {operator_name:?}");
             return Err(Error::ExpectedOperator);
-        },
+        }
     };
 
     Ok(operator)
@@ -372,10 +372,10 @@ impl OperatorToken {
             Self::Or => 0,
             Self::And => 1,
             Self::Equal | Self::NotEqual => 2,
-            Self::LessThan |
-            Self::LessThanOrEqual |
-            Self::GreaterThan |
-            Self::GreaterThanOrEqual => 3,
+            Self::LessThan
+            | Self::LessThanOrEqual
+            | Self::GreaterThan
+            | Self::GreaterThanOrEqual => 3,
             Self::Add | Self::Subtract => 4,
             Self::Multiply | Self::Divide | Self::Modulo => 5,
         }
@@ -386,15 +386,15 @@ impl<'a> Token<'a> {
     pub(crate) fn is_start_of_location_step(&self) -> bool {
         matches!(
             self,
-            Self::AxisIdentifier(_) |
-                Self::AtSign |
-                Self::ParentNode |
-                Self::SelfNode |
-                Self::CName(_) |
-                Self::CommentTest |
-                Self::NodeTest |
-                Self::ProcessingInstructionTest |
-                Self::TextTest
+            Self::AxisIdentifier(_)
+                | Self::AtSign
+                | Self::ParentNode
+                | Self::SelfNode
+                | Self::CName(_)
+                | Self::CommentTest
+                | Self::NodeTest
+                | Self::ProcessingInstructionTest
+                | Self::TextTest
         )
     }
 
@@ -402,13 +402,13 @@ impl<'a> Token<'a> {
     fn followed_by_operator(&self) -> bool {
         matches!(
             self,
-            Self::Literal(_) |
-                Self::CName(_) |
-                Self::VariableReference(_) |
-                Self::ParentNode |
-                Self::SelfNode |
-                Self::ClosingBracket |
-                Self::ClosingParenthesis
+            Self::Literal(_)
+                | Self::CName(_)
+                | Self::VariableReference(_)
+                | Self::ParentNode
+                | Self::SelfNode
+                | Self::ClosingBracket
+                | Self::ClosingParenthesis
         )
     }
 }

@@ -17,6 +17,7 @@ pub mod engine_info;
 pub mod entry;
 pub mod receipt;
 pub mod shell;
+pub mod theme;
 pub mod version;
 
 pub use entry::{run, run_in_process};

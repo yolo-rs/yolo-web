@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::engine_info;
 
 pub mod devtools;
+pub mod policy;
 pub mod runtime;
 
 /// Exit code when the launcher itself fails (bad arguments, missing files).
@@ -45,6 +46,13 @@ Shell switches (forwarded to the host):
   --smoke-timeout-ms=<n>      Smoke timeout (default 30000)
   --smoke-hold-ms=<n>         Keep the page open n ms after load (default 1500 with a DevTools port)
   --receipt=<path>            Receipt file for --smoke (e.g. engines/cef.lock.json)
+  --theme=<preset|file.json>  Brand theme: neutral (Chromium default), m3, fluent, apple, omarchy, hyprland, aphrody
+  --policy-id=<key> --no-policies   Managed policy source (default HKCU key from POLICY_KEY)
+
+Managed policies written by the launcher (Windows registry, HKCU):
+  --search-engine=aphrody|google|duckduckgo|brave|<url>   Default search provider
+  --new-tab-url=<url> --homepage=<url> --startup-urls=<a,b>
+  --reset-policies            Delete the policy key first
 
 Any other switch is passed to Chromium unchanged.
 ";
@@ -93,6 +101,16 @@ pub struct LauncherOptions {
     pub remote_debugging_port: Option<u16>,
     /// `--receipt` path (absolute) forwarded to the host.
     pub receipt: Option<PathBuf>,
+    /// `--search-engine`, applied as a managed policy before the host starts.
+    pub search_engine: Option<String>,
+    /// `--new-tab-url`, applied as a managed policy.
+    pub new_tab_url: Option<String>,
+    /// `--homepage`, applied as a managed policy.
+    pub homepage: Option<String>,
+    /// `--startup-urls=a,b`, applied as a managed policy.
+    pub startup_urls: Vec<String>,
+    /// `--reset-policies`: delete the managed policy key before starting.
+    pub reset_policies: bool,
     /// Switches forwarded to the host, with file paths made absolute.
     pub forwarded: Vec<String>,
 }
@@ -112,6 +130,11 @@ impl Default for LauncherOptions {
             smoke_hold_ms: None,
             remote_debugging_port: None,
             receipt: None,
+            search_engine: None,
+            new_tab_url: None,
+            homepage: None,
+            startup_urls: Vec::new(),
+            reset_policies: false,
             forwarded: Vec::new(),
         }
     }
@@ -157,6 +180,18 @@ pub fn parse_args(args: &[String], cwd: &Path) -> Result<LauncherOptions, String
                 options.smoke_hold_ms = Some(parse_u64(name, required(name, value)?)?);
                 options.forwarded.push(arg.clone());
             }
+            "--search-engine" => options.search_engine = Some(required(name, value)?.to_string()),
+            "--new-tab-url" => options.new_tab_url = Some(required(name, value)?.to_string()),
+            "--homepage" => options.homepage = Some(required(name, value)?.to_string()),
+            "--startup-urls" => {
+                options.startup_urls = required(name, value)?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            "--reset-policies" => options.reset_policies = true,
             "--remote-debugging-port" => {
                 let port = parse_u64(name, required(name, value)?)?;
                 options.remote_debugging_port = u16::try_from(port).ok().filter(|port| *port > 0);
@@ -264,6 +299,8 @@ fn launch(options: &LauncherOptions) -> Result<i32, String> {
         .clone()
         .unwrap_or_else(|| exe_dir.join("yolo-chromium-runtime"));
 
+    apply_policies(options)?;
+
     let layout = runtime::prepare(&cef_dir, &client_dll, &runtime_dir, options.host)?;
     if options.prepare_only {
         println!("{}", layout.dir.display());
@@ -331,8 +368,32 @@ fn launch(options: &LauncherOptions) -> Result<i32, String> {
     }
 }
 
+/// Writes the managed policies derived from the launcher switches.
+fn apply_policies(options: &LauncherOptions) -> Result<(), String> {
+    if options.reset_policies {
+        policy::reset()?;
+        eprintln!("yolo-chromium: managed policies reset ({})", policy::POLICY_KEY);
+    }
+    let set = policy::PolicySet::from_options(
+        options.search_engine.as_deref(),
+        options.new_tab_url.as_deref(),
+        options.homepage.as_deref(),
+        &options.startup_urls,
+    );
+    if set.is_empty() {
+        return Ok(());
+    }
+    let written = policy::apply(&set)?;
+    eprintln!(
+        "yolo-chromium: {written} managed policy value(s) written under {}",
+        policy::POLICY_KEY
+    );
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 fn launch(options: &LauncherOptions) -> Result<i32, String> {
+    apply_policies(options)?;
     if options.prepare_only {
         return Err("--prepare-runtime is only meaningful on Windows".to_string());
     }

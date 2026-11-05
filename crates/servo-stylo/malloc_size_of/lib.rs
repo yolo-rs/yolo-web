@@ -861,3 +861,38 @@ impl<T: MallocSizeOf> MallocSizeOf for parking_lot::RwLock<T> {
         self.read().size_of(ops)
     }
 }
+
+// The impls below are not part of upstream stylo. They are ported from servo/servo
+// `components/malloc_size_of` (`servo-malloc-size-of`), the Servo-side layer that the
+// vendored `servo-timers` and `servo-url` crates derive `MallocSizeOf` against upstream.
+// This workspace aliases `malloc_size_of` directly to this crate, so the `std` impls and
+// the feature-gated `url` impls live here instead.
+
+malloc_size_of_is_0!(std::time::Duration);
+malloc_size_of_is_0!(std::time::Instant);
+malloc_size_of_is_0!(std::time::SystemTime);
+
+impl<T: MallocSizeOf> MallocSizeOf for std::collections::BinaryHeap<T> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.iter().map(|element| element.size_of(ops)).sum()
+    }
+}
+
+#[cfg(feature = "url")]
+impl MallocSizeOf for url::Host {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        match *self {
+            url::Host::Domain(ref s) => s.size_of(ops),
+            _ => 0,
+        }
+    }
+}
+
+#[cfg(feature = "url")]
+impl MallocSizeOf for url::Url {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        // TODO: This is an estimate, but a real size should be calculated in `rust-url` once
+        // it has support for `malloc_size_of`.
+        self.to_string().size_of(ops)
+    }
+}

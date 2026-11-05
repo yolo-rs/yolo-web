@@ -46,12 +46,12 @@ pub fn encode_as_url_query_string<'a>(
                         .expect("string size would overflow `usize`"),
                 );
                 string = &string[consumed..];
-            },
+            }
             (EncoderResult::Unmappable(character), consumed) => {
                 use std::io::Write;
                 write!(&mut output, "%26%23{}%3B", character as u32).unwrap();
                 string = &string[consumed..];
-            },
+            }
         };
     }
 

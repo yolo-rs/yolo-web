@@ -4,12 +4,12 @@
 
 use markup5ever::{LocalName, Namespace, Prefix, QualName};
 
-use crate::NamespaceResolver;
 use crate::ast::{
     Axis, BinaryOperator, CoreFunction, Expression, FilterExpression, KindTest, Literal,
     LocationStepExpression, NodeTest, PathExpression, PredicateListExpression,
 };
-use crate::tokenizer::{Error as TokenizerError, LiteralToken, OperatorToken, Token, tokenize};
+use crate::tokenizer::{tokenize, Error as TokenizerError, LiteralToken, OperatorToken, Token};
+use crate::NamespaceResolver;
 
 #[derive(Clone, Debug)]
 pub enum Error {
@@ -248,15 +248,15 @@ where
                             predicate_list: PredicateListExpression { predicates: vec![] },
                         }));
                     true
-                },
+                }
                 Token::Parent => {
                     self.advance(1);
                     false
-                },
+                }
                 _ => {
                     // The path expression ends here.
                     return Ok(Expression::Path(path_expression));
-                },
+                }
             };
 
             let step_expression = self.parse_step_expression(cx)?;
@@ -277,7 +277,7 @@ where
             Token::FunctionCall(name) => {
                 self.advance(1);
                 self.parse_function_call(cx, name)?
-            },
+            }
             Token::OpeningParenthesis => {
                 self.advance(1);
                 let expression = self.parse_expression(cx)?;
@@ -286,16 +286,16 @@ where
                     return Err(Error::ExpectedClosingParenthesis);
                 }
                 expression
-            },
+            }
             Token::Literal(literal) => {
                 self.advance(1);
                 Expression::Literal(literal.into())
-            },
+            }
             Token::VariableReference(_) => {
                 // TODO: Gecko does *something* here. Is it observable?
                 // https://searchfox.org/firefox-main/rev/054e2b072785984455b3b59acad9444ba1eeffb4/dom/xslt/xpath/txExprParser.cpp#349
                 return Err(Error::CannotUseVariables);
-            },
+            }
             _ => self.parse_step_expression(cx)?,
         };
 
@@ -336,27 +336,27 @@ where
                     _ => {
                         log::debug!("Unknown XPath axis name: {axis_name:?}");
                         return Err(Error::UnknownAxis);
-                    },
+                    }
                 };
-            },
+            }
             Token::AtSign => {
                 // This is a shorthand for the attribute axis
                 self.advance(1);
                 axis = Axis::Attribute;
-            },
+            }
             Token::ParentNode => {
                 self.advance(1);
                 axis = Axis::Parent;
                 node_test = Some(NodeTest::Kind(KindTest::Node));
-            },
+            }
             Token::SelfNode => {
                 self.advance(1);
                 axis = Axis::Self_;
                 node_test = Some(NodeTest::Kind(KindTest::Node));
-            },
+            }
             _ => {
                 axis = Axis::Child;
-            },
+            }
         }
 
         let node_test = if let Some(node_test) = node_test {
@@ -403,11 +403,11 @@ where
             Token::CommentTest => {
                 self.advance(1);
                 KindTest::Comment
-            },
+            }
             Token::NodeTest => {
                 self.advance(1);
                 KindTest::Node
-            },
+            }
             Token::ProcessingInstructionTest => {
                 self.advance(1);
                 let name = if let Token::Literal(LiteralToken::String(name)) =
@@ -419,14 +419,14 @@ where
                     None
                 };
                 KindTest::PI(name.map(String::from))
-            },
+            }
             Token::TextTest => {
                 self.advance(1);
                 KindTest::Text
-            },
+            }
             _ => {
                 return Err(Error::ExpectedNodeTest);
-            },
+            }
         };
 
         if !self.advance_if_current_token_equals(Token::ClosingParenthesis) {
@@ -513,14 +513,14 @@ where
                     args.push(argument);
                 }
                 CoreFunction::Concat(args)
-            },
+            }
             "starts-with" => CoreFunction::StartsWith(
                 Box::new(arguments.next(cx)?),
                 Box::new(arguments.next(cx)?),
             ),
             "contains" => {
                 CoreFunction::Contains(Box::new(arguments.next(cx)?), Box::new(arguments.next(cx)?))
-            },
+            }
             "substring-before" => CoreFunction::SubstringBefore(
                 Box::new(arguments.next(cx)?),
                 Box::new(arguments.next(cx)?),
@@ -537,7 +537,7 @@ where
             "string-length" => CoreFunction::StringLength(arguments.maybe_next(cx)?.map(Box::new)),
             "normalize-space" => {
                 CoreFunction::NormalizeSpace(arguments.maybe_next(cx)?.map(Box::new))
-            },
+            }
             "translate" => CoreFunction::Translate(
                 Box::new(arguments.next(cx)?),
                 Box::new(arguments.next(cx)?),
@@ -608,7 +608,7 @@ impl<'a> From<LiteralToken<'a>> for Literal {
 // Test functions to verify the parsers:
 #[cfg(test)]
 mod tests {
-    use markup5ever::{LocalName, QualName, local_name, namespace_prefix, ns};
+    use markup5ever::{local_name, namespace_prefix, ns, LocalName, QualName};
 
     use super::*;
     use crate::NamespaceResolver;
@@ -651,7 +651,7 @@ mod tests {
             match parse(&mut (), input, Some(DummyNamespaceResolver), true) {
                 Ok(result) => {
                     assert_eq!(result, expected, "{:?} was parsed incorrectly", input);
-                },
+                }
                 Err(e) => panic!("Failed to parse '{}': {:?}", input, e),
             }
         }
@@ -805,7 +805,7 @@ mod tests {
             match parse(&mut (), input, Some(DummyNamespaceResolver), true) {
                 Ok(result) => {
                     assert_eq!(result, expected, "{:?} was parsed incorrectly", input);
-                },
+                }
                 Err(e) => panic!("Failed to parse '{}': {:?}", input, e),
             }
         }
@@ -837,7 +837,7 @@ mod tests {
         match parse(&mut (), test_case, Some(DummyNamespaceResolver), true) {
             Ok(result) => {
                 assert_eq!(result, expected, "{:?} was parsed incorrectly", test_case);
-            },
+            }
             Err(e) => panic!("Failed to parse '{}': {:?}", test_case, e),
         }
     }

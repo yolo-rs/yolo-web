@@ -64,10 +64,9 @@ impl<N: Node> NodeSet<N> {
 
     /// Assume that this set is sorted, without actually sorting it.
     pub(crate) fn assume_sorted(&mut self, cx: &mut N::Context) {
-        debug_assert!(
-            self.nodes
-                .is_sorted_by(|a, b| a.compare_tree_order(cx, b).is_le())
-        );
+        debug_assert!(self
+            .nodes
+            .is_sorted_by(|a, b| a.compare_tree_order(cx, b).is_le()));
         self.is_sorted = true;
     }
 
@@ -174,23 +173,23 @@ impl<N: Node> Value<N> {
                 let right_strings: HashSet<String> =
                     right_nodes.iter().map(|node| node.text_content()).collect();
                 !left_strings.is_disjoint(&right_strings)
-            },
-            (&Value::NodeSet(ref nodes), &Value::Number(val)) |
-            (&Value::Number(val), &Value::NodeSet(ref nodes)) => {
+            }
+            (&Value::NodeSet(ref nodes), &Value::Number(val))
+            | (&Value::Number(val), &Value::NodeSet(ref nodes)) => {
                 let numbers = num_vals(nodes);
                 numbers.contains(&val)
-            },
-            (&Value::NodeSet(ref nodes), &Value::String(ref string)) |
-            (&Value::String(ref string), &Value::NodeSet(ref nodes)) => nodes
+            }
+            (&Value::NodeSet(ref nodes), &Value::String(ref string))
+            | (&Value::String(ref string), &Value::NodeSet(ref nodes)) => nodes
                 .iter()
                 .map(|node| node.text_content())
                 .any(|text_content| &text_content == string),
             (&Value::Boolean(_), _) | (_, &Value::Boolean(_)) => {
                 self.convert_to_boolean() == other.convert_to_boolean()
-            },
+            }
             (&Value::Number(_), _) | (_, &Value::Number(_)) => {
                 self.convert_to_number(cx) == other.convert_to_number(cx)
-            },
+            }
             _ => self.convert_to_string(cx) == other.convert_to_string(cx),
         }
     }
@@ -214,7 +213,7 @@ impl<N: Node> Value<N> {
                 } else {
                     0.0
                 }
-            },
+            }
             Value::Number(number) => *number,
             Value::String(string) => parse_number_from_string(string),
             Value::NodeSet(_) => parse_number_from_string(&self.convert_to_string(cx)),
@@ -238,7 +237,7 @@ impl<N: Node> Value<N> {
                 } else {
                     number.to_string()
                 }
-            },
+            }
             Value::String(string) => string.to_owned(),
             Value::NodeSet(nodes) => nodes
                 .first(cx)
@@ -308,18 +307,14 @@ mod tests {
         let cx = &mut ();
         assert_eq!(Value::String("42.123".into()).convert_to_number(cx), 42.123);
         assert_eq!(Value::String(" 42\n".into()).convert_to_number(cx), 42.);
-        assert!(
-            Value::String("totally-invalid".into())
-                .convert_to_number(cx)
-                .is_nan()
-        );
+        assert!(Value::String("totally-invalid".into())
+            .convert_to_number(cx)
+            .is_nan());
 
         // U+2004 is non-ascii whitespace, which should be rejected
-        assert!(
-            Value::String("\u{2004}42".into())
-                .convert_to_number(cx)
-                .is_nan()
-        );
+        assert!(Value::String("\u{2004}42".into())
+            .convert_to_number(cx)
+            .is_nan());
     }
 
     #[test]

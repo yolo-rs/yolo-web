@@ -191,10 +191,10 @@ impl ImmutableOrigin {
             // * origin’s host is "localhost" or "localhost."
             // * origin’s host ends with ".localhost" or ".localhost."
             // then return "Potentially Trustworthy".
-            if let Host::Domain(domain) = host &&
-                (domain == "localhost" || domain.ends_with(".localhost"))
-            {
-                return true;
+            if let Host::Domain(domain) = host {
+                if domain == "localhost" || domain.ends_with(".localhost") {
+                    return true;
+                }
             }
         }
 
@@ -208,7 +208,7 @@ impl ImmutableOrigin {
             ImmutableOrigin::Opaque(_) => Cow::Borrowed("null"),
             ImmutableOrigin::Tuple(..) => {
                 Cow::Owned(self.clone().into_url_origin().ascii_serialization())
-            },
+            }
         }
     }
 }
@@ -272,7 +272,7 @@ impl MutableOrigin {
     }
 
     pub fn snapshot(&self) -> OriginSnapshot {
-        OriginSnapshot(self.0.0.clone(), self.0.1.borrow().clone())
+        OriginSnapshot(self.0 .0.clone(), self.0 .1.borrow().clone())
     }
 
     pub fn new(origin: ImmutableOrigin) -> MutableOrigin {
@@ -306,8 +306,8 @@ impl MutableOrigin {
     pub fn same_origin_domain(&self, other: &MutableOrigin) -> bool {
         if let Some(ref self_domain) = *(self.0).1.borrow() {
             if let Some(ref other_domain) = *(other.0).1.borrow() {
-                self_domain == other_domain &&
-                    self.immutable().scheme() == other.immutable().scheme()
+                self_domain == other_domain
+                    && self.immutable().scheme() == other.immutable().scheme()
             } else {
                 false
             }

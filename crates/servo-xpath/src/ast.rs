@@ -99,7 +99,10 @@ pub(crate) enum Axis {
 
 #[derive(Clone, Debug, MallocSizeOf, PartialEq)]
 pub(crate) enum NodeTest {
-    Name(QualName),
+    Name(
+        #[ignore_malloc_size_of = "interned string_cache atoms; upstream Servo measures them as 0"]
+        QualName,
+    ),
     Wildcard,
     Kind(KindTest),
 }

@@ -148,7 +148,7 @@ markup5ever = "0.39"
 xml5ever = { path = "crates/servo-xml5ever" }
 web_atoms = { path = "crates/servo-web-atoms" }
 selectors = "0.26"
-servo_arc = "0.4"
+servo_arc = { path = "crates/servo-stylo/servo_arc" }
 cssparser = "0.34"
 euclid = { path = "crates/servo-euclid" }
 smallvec = { version = "1.15", features = ["serde", "union"] }

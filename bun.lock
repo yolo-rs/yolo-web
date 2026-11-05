@@ -122,6 +122,10 @@
         "@yolo-web/servo-bridge": "workspace:*",
       },
     },
+    "packages/chrome-extension-yolo": {
+      "name": "@yolo-web/chrome-extension-yolo",
+      "version": "0.2.0",
+    },
     "packages/chromium": {
       "name": "@yolo-web/chromium",
       "version": "0.2.0",
@@ -742,6 +746,8 @@
     "@yolo-web/cdp-client": ["@yolo-web/cdp-client@workspace:packages/cdp-client"],
 
     "@yolo-web/challenge-solver": ["@yolo-web/challenge-solver@workspace:packages/challenge-solver"],
+
+    "@yolo-web/chrome-extension-yolo": ["@yolo-web/chrome-extension-yolo@workspace:packages/chrome-extension-yolo"],
 
     "@yolo-web/chromium": ["@yolo-web/chromium@workspace:packages/chromium"],
 

@@ -4,7 +4,7 @@
 
 use std::iter;
 
-use markup5ever::{QualName, local_name, ns};
+use markup5ever::{local_name, ns, QualName};
 
 use crate::ast::{
     Axis, BinaryOperator, Expression, FilterExpression, KindTest, Literal, LocationStepExpression,
@@ -35,12 +35,12 @@ impl Expression {
                 let left_bool = left.evaluate(cx, context)?.convert_to_boolean();
                 let v = left_bool && right.evaluate(cx, context)?.convert_to_boolean();
                 Ok(Value::Boolean(v))
-            },
+            }
             Expression::Binary(left, BinaryOperator::Or, right) => {
                 let left_bool = left.evaluate(cx, context)?.convert_to_boolean();
                 let v = left_bool || right.evaluate(cx, context)?.convert_to_boolean();
                 Ok(Value::Boolean(v))
-            },
+            }
             Expression::Binary(left, binary_operator, right) => {
                 let left_value = left.evaluate(cx, context)?;
                 let right_value = right.evaluate(cx, context)?;
@@ -48,32 +48,32 @@ impl Expression {
                 let value = match binary_operator {
                     BinaryOperator::Equal => (left_value.partial_eq(cx, &right_value)).into(),
                     BinaryOperator::NotEqual => (!left_value.partial_eq(cx, &right_value)).into(),
-                    BinaryOperator::LessThan => (left_value.convert_to_number(cx) <
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::LessThan => (left_value.convert_to_number(cx)
+                        < right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::GreaterThan => (left_value.convert_to_number(cx) >
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::GreaterThan => (left_value.convert_to_number(cx)
+                        > right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::LessThanOrEqual => (left_value.convert_to_number(cx) <=
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::LessThanOrEqual => (left_value.convert_to_number(cx)
+                        <= right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::GreaterThanOrEqual => (left_value.convert_to_number(cx) >=
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::GreaterThanOrEqual => (left_value.convert_to_number(cx)
+                        >= right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::Add => (left_value.convert_to_number(cx) +
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::Add => (left_value.convert_to_number(cx)
+                        + right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::Subtract => (left_value.convert_to_number(cx) -
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::Subtract => (left_value.convert_to_number(cx)
+                        - right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::Multiply => (left_value.convert_to_number(cx) *
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::Multiply => (left_value.convert_to_number(cx)
+                        * right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::Divide => (left_value.convert_to_number(cx) /
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::Divide => (left_value.convert_to_number(cx)
+                        / right_value.convert_to_number(cx))
                     .into(),
-                    BinaryOperator::Modulo => (left_value.convert_to_number(cx) %
-                        right_value.convert_to_number(cx))
+                    BinaryOperator::Modulo => (left_value.convert_to_number(cx)
+                        % right_value.convert_to_number(cx))
                     .into(),
                     BinaryOperator::Union => {
                         let as_nodes = |cx: &mut D::Context, e: &Expression| {
@@ -85,20 +85,20 @@ impl Expression {
                         left_nodes.extend(right_nodes);
                         left_nodes.sort(cx);
                         Value::NodeSet(left_nodes)
-                    },
+                    }
                     _ => unreachable!("And/Or were handled above"),
                 };
 
                 Ok(value)
-            },
+            }
             Expression::Negate(expr) => {
                 let value = -expr.evaluate(cx, context)?.convert_to_number(cx);
                 Ok(value.into())
-            },
+            }
             Expression::Path(path_expr) => path_expr.evaluate(cx, context),
             Expression::LocationStep(location_step_expression) => {
                 location_step_expression.evaluate(cx, context)
-            },
+            }
             Expression::Filter(filter_expression) => filter_expression.evaluate(cx, context),
             Expression::Literal(literal) => Ok(literal.evaluate::<D>()),
             Expression::Function(function) => function.evaluate(cx, context),
@@ -106,7 +106,7 @@ impl Expression {
                 let mut result = NodeSet::default();
                 result.push(context.context_node.clone());
                 Ok(Value::NodeSet(result))
-            },
+            }
             Expression::Variable(_) => Err(Error::CannotUseVariables),
         }
     }
@@ -147,10 +147,10 @@ impl PathExpression {
                     (_, Value::NodeSet(nodes)) => {
                         // as long as we evaluate to nodesets, keep going
                         next_nodes.extend(nodes);
-                    },
+                    }
                     (false, value) => {
                         return Ok(value);
-                    },
+                    }
                     (true, value) => {
                         log::debug!(
                             "Expected nodeset from step evaluation, got: {:?} node: {:?}, step: {:?}",
@@ -159,7 +159,7 @@ impl PathExpression {
                             step_expression
                         );
                         return Ok(value);
-                    },
+                    }
                 }
             }
             current_nodes = next_nodes;
@@ -223,7 +223,7 @@ fn apply_node_test<D: Dom>(test: &NodeTest, node: &D::Node) -> Result<bool, Erro
             } else {
                 false
             }
-        },
+        }
         NodeTest::Wildcard => node.as_element().is_some() || node.as_attribute().is_some(),
         NodeTest::Kind(kind) => match kind {
             KindTest::PI(target) => {
@@ -233,14 +233,14 @@ fn apply_node_test<D: Dom>(test: &NodeTest, node: &D::Node) -> Result<bool, Erro
                             if target_name == &node_target_name.to_string() =>
                         {
                             true
-                        },
+                        }
                         (Some(_), _) => false,
                         (None, _) => true,
                     }
                 } else {
                     false
                 }
-            },
+            }
             KindTest::Comment => node.is_comment(),
             KindTest::Text => node.is_text(),
             KindTest::Node => true,
@@ -276,7 +276,7 @@ impl LocationStepExpression {
                 } else {
                     Default::default()
                 }
-            },
+            }
             Axis::Self_ => iter::once(context.context_node.clone()).collect(),
             Axis::DescendantOrSelf => context.context_node.traverse_preorder().collect(),
             Axis::AncestorOrSelf => context.context_node.inclusive_ancestors().collect(),
@@ -305,14 +305,14 @@ impl LocationStepExpression {
         // Enforce tree order between nodes in the list
         if matches!(
             self.axis,
-            Axis::Child |
-                Axis::Descendant |
-                Axis::Parent |
-                Axis::Following |
-                Axis::FollowingSibling |
-                Axis::Attribute |
-                Axis::Self_ |
-                Axis::DescendantOrSelf
+            Axis::Child
+                | Axis::Descendant
+                | Axis::Parent
+                | Axis::Following
+                | Axis::FollowingSibling
+                | Axis::Attribute
+                | Axis::Self_
+                | Axis::DescendantOrSelf
         ) {
             // The elements on these axis values are already in tree order
             filtered_nodes.assume_sorted(cx);
