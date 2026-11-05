@@ -161,7 +161,7 @@ export async function launchBrowser(
   const logPath = Bun.env.YOLO_AGENT_BROWSER_LOG;
   const sink = logPath ? Bun.file(logPath) : "ignore";
   const proc = Bun.spawn([executable, ...args], {
-    stdout: sink,
+    stdout: logPath ? "ignore" : sink,
     stderr: sink,
     stdin: "ignore",
   });
