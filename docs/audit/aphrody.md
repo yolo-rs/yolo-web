@@ -5,6 +5,8 @@ Limits: GET only, 2 concurrent, 250 ms gap, no login. The sitemap has 3 URLs (/,
 
 Handoff owner: yolo-ui-aa (taking it after audit). Owning repo: not located. `git grep "Celestial Calm"` found nothing in yolo-ui, auto, yolo-os, yolo-bun, yolo-ai, yolo-vps, yolo-hub, yolo-web, so patches below are named by page, not by file.
 
+Cross-check: REA report `C:/src/yolo-re/docs/audits/rea-2026-11-05.md` (yolo-re 1b9b800), section `## aphrody.com` (findings AP-1 to AP-4). Not copied here.
+
 ## Scores (Lighthouse lab)
 
 | Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms | Console errors |
@@ -36,12 +38,14 @@ INP is not measurable in lab.
 
 | # | Severity | Finding | Evidence | Proposed patch |
 |---|---|---|---|---|
-| 1 | Medium | `/status` has `<meta http-equiv="refresh" content="120">` (Lighthouse meta-refresh fail), no meta description, no canonical, no og tags; a11y 88 (td-has-header fail), SEO 92 | Lighthouse, crawl | Replace the meta refresh with script polling; add description and canonical; add header cells in the status table (status page template) |
-| 2 | Low | Home a11y 98: `heading-order`, `label-content-name-mismatch` fail | Lighthouse | Fix heading levels; make accessible names contain the visible text (home template) |
-| 3 | Low | Home best-practices 96: `image-aspect-ratio` fails; 2 images without width/height | Lighthouse, crawl | Set width/height matching the intrinsic ratio on the home images |
-| 4 | Low | Permissions-Policy absent; HSTS without `preload` | headers | nginx: `add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;` and optionally `; preload` on HSTS |
-| 5 | Low | `<title>` and og:title use the entity `&bull;` in the source. Browsers render a bullet; some scrapers show it raw | raw HTML | Use a literal middle dot or a pipe |
-| 6 | Info | Copy heuristic flagged "Companion Companion" on /; source text is "Shared Companion" then "Companion Aphrody Pet" in adjacent elements: false positive | page text | None |
+| 1 | High | Public `/status` (linked from the home page) exposes internal operations data: CI gate results with commit SHAs and repository file paths, shell/lint/type-check error text, service delivery state and release identifiers. Values deliberately not reproduced here. REA finding AP-1 lists further internals | `GET /status` (200, text only, read once) | Remove the link from the home page and require authentication or an IP allow-list for `/status` at the nginx level; publish only a coarse up/down indicator publicly; consider rotating anything that looks like an internal address or path |
+| 2 | Medium | `/status` has `<meta http-equiv="refresh" content="120">` (Lighthouse meta-refresh fail), no meta description, no canonical, no og tags; a11y 88 (td-has-header fail), SEO 92 | Lighthouse, crawl | Replace the meta refresh with script polling; add description and canonical; add header cells in the status table (status page template) |
+| 3 | Low | Home a11y 98: `heading-order`, `label-content-name-mismatch` fail | Lighthouse | Fix heading levels; make accessible names contain the visible text (home template) |
+| 4 | Low | Home best-practices 96: `image-aspect-ratio` fails; 2 images without width/height | Lighthouse, crawl | Set width/height matching the intrinsic ratio on the home images |
+| 5 | Low | Permissions-Policy absent; HSTS without `preload` | headers | nginx: `add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;` and optionally `; preload` on HSTS |
+| 6 | Low | `<title>` and og:title use the entity `&bull;` in the source. Browsers render a bullet; some scrapers show it raw | raw HTML | Use a literal middle dot or a pipe |
+| 7 | Medium | `GET /boot.js` returns 404; REA (AP-2) traces it to `import("/boot.js")` in `site.js`, so the desktop (WebOS) mode silently fails. Status confirmed by one GET; the import was not re-read by this audit | curl | Ship `boot.js` or remove the import (page template) |
+| 8 | Info | Copy heuristic flagged "Companion Companion" on /; source text is "Shared Companion" then "Companion Aphrody Pet" in adjacent elements: false positive | page text | None |
 
 ## Fact check
 

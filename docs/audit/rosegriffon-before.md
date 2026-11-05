@@ -7,6 +7,8 @@ Limits: GET only, 2 concurrent, 250 ms gap, robots honoured, 101 pages crawled (
 
 Handoff owner: rosegriffon-4a. Owning repo: `C:\src\rosegriffon` (apps `rg-website`, `azalee-web`). An "after" pass will be requested later; rerun the same command with `--name rosegriffon-after`.
 
+Cross-check: REA report `C:/src/yolo-re/docs/audits/rea-2026-11-05.md` (yolo-re 1b9b800), section `## rosegriffon.fr`. Not copied here.
+
 ## Scores (Lighthouse lab)
 
 | Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms | Console errors |

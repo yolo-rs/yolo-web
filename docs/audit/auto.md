@@ -5,6 +5,8 @@ Limits: GET only, 2 concurrent, 250 ms gap, no login. The home is a client-rende
 
 Handoff owner: yolo-ui-aa. Owning repo: `C:\src\auto` (HEAD 227a509 at audit time).
 
+Cross-check: REA report `C:/src/yolo-re/docs/audits/rea-2026-11-05.md` (yolo-re 1b9b800), section `## auto.aphrody.com`. Not copied here.
+
 ## Scores (Lighthouse lab)
 
 | Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms | Console errors |

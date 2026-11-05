@@ -5,6 +5,8 @@ Limits: GET only, 2 concurrent, 250 ms gap, no login, robots honoured. 61 pages 
 
 Handoff owner: sheron-24. Owning repo: `C:\src\shenron` (HEAD 02d10ef3 at audit time; `apps/site`).
 
+Cross-check: REA report `C:/src/yolo-re/docs/audits/rea-2026-11-05.md` (yolo-re 1b9b800), section `## dragonballfr.com (Shenron)`. Not copied here.
+
 ## Scores (Lighthouse lab)
 
 | Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms | Console errors |

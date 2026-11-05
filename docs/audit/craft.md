@@ -5,6 +5,8 @@ Limits: GET only, 2 concurrent, 250 ms gap, no login, 15 pages crawled (every si
 
 Handoff owner: yolo-ui-aa. Owning repo of the landing page was not located in `C:\src` (searched yolo-ui, auto, yolo-web for the home description). The per-studio shells are `C:\src\yolo-ui\apps\<name>-web\web\index.html` (verified for effectcraft-web); the in-app Craft route in `C:\src\auto\apps\web\src\craft.ts` is a different deployment.
 
+Cross-check: REA report `C:/src/yolo-re/docs/audits/rea-2026-11-05.md` (yolo-re 1b9b800), section `## craft.aphrody.app`. Not copied here.
+
 ## Scores (Lighthouse lab)
 
 | Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms |
