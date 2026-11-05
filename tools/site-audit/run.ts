@@ -8,6 +8,7 @@
 // robots.txt honoured for crawling. Lighthouse drives a real browser, so a single page load can
 // open more than 2 connections; runs are sequential and the number of pages is capped.
 //
+// --name <n> overrides the output basename (e.g. rosegriffon-before).
 // Lighthouse: set SITE_AUDIT_LH to the launcher command (default "bun x lighthouse") and
 // CHROME_PATH to a Chrome/Chromium binary. SITE_AUDIT_CHROME_FLAGS overrides the chrome flags.
 // The crawl design (sitemap seeds, entity decoding, manual redirect chains, robots longest-match)
@@ -39,7 +40,7 @@ const flag = (k: string) => argv.includes(k);
 const opt = (k: string, d: string) => (argv.includes(k) ? argv[argv.indexOf(k) + 1]! : d);
 const target = argv.find(a => !a.startsWith("--") && argv[argv.indexOf(a) - 1]?.startsWith("--") !== true) ?? "";
 const known = SITES[target];
-const siteName = known ? target : target.replace(/^https?:\/\//, "").replace(/[^\w.-]+/g, "_");
+const siteName = opt("--name", known ? target : target.replace(/^https?:\/\//, "").replace(/[^\w.-]+/g, "_"));
 const ORIGIN = (known?.origin ?? target).replace(/\/$/, "");
 const HOST = new URL(ORIGIN).host;
 const OUT = opt("--out", "docs/audit");
@@ -55,7 +56,7 @@ if (!target || argv.includes("--help")) {
   console.log(`usage: bun tools/site-audit/run.ts <${Object.keys(SITES).join("|")}|https://url>`);
   process.exit(target ? 0 : 2);
 }
-if (siteName === "rosegriffon" && !flag("--allow-rosegriffon")) {
+if (target === "rosegriffon" && !flag("--allow-rosegriffon")) {
   console.error("rosegriffon.fr is blocked until its owner (rosegriffon-4a) confirms the deploy; pass --allow-rosegriffon to override.");
   process.exit(3);
 }

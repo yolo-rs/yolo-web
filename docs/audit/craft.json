@@ -1,0 +1,986 @@
+{
+  "site": "craft",
+  "origin": "https://craft.aphrody.app",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T09:53:55.882Z",
+  "durationS": 212,
+  "limits": {
+    "maxPages": 60,
+    "depth": 2,
+    "linkChecks": 150,
+    "assetChecks": 120,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [],
+    "sitemaps": [
+      "https://craft.aphrody.app/sitemap.xml"
+    ],
+    "body": "User-agent: *\nAllow: /\n\nSitemap: https://craft.aphrody.app/sitemap.xml\n"
+  },
+  "sitemap": {
+    "url": "https://craft.aphrody.app/sitemap.xml",
+    "status": 200,
+    "urls": 15
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://craft.aphrody.app/",
+        "status": 301,
+        "location": "https://craft.aphrody.app/"
+      },
+      {
+        "url": "https://craft.aphrody.app/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://craft.aphrody.app/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": "same-origin",
+    "cache-control": "no-cache",
+    "content-encoding": "zstd",
+    "server": "cloudflare",
+    "cf-cache-status": "DYNAMIC"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.app",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Oct 11 22:55:52 2026 GMT",
+    "notAfter": "Jan  9 23:55:50 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 15,
+    "statuses": {
+      "200": 15
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 57,
+    "assetTargets": 57
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": [
+        "https://craft.aphrody.app/photo/",
+        "https://craft.aphrody.app/vector/",
+        "https://craft.aphrody.app/film/",
+        "https://craft.aphrody.app/design/",
+        "https://craft.aphrody.app/fig/",
+        "https://craft.aphrody.app/sound/",
+        "https://craft.aphrody.app/cad/",
+        "https://craft.aphrody.app/word/",
+        "https://craft.aphrody.app/deck/",
+        "https://craft.aphrody.app/grid/",
+        "https://craft.aphrody.app/pdf/",
+        "https://craft.aphrody.app/art/"
+      ]
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": [
+        "https://craft.aphrody.app/photo/",
+        "https://craft.aphrody.app/vector/",
+        "https://craft.aphrody.app/design/",
+        "https://craft.aphrody.app/fig/",
+        "https://craft.aphrody.app/effect/",
+        "https://craft.aphrody.app/light/",
+        "https://craft.aphrody.app/sound/",
+        "https://craft.aphrody.app/cad/",
+        "https://craft.aphrody.app/word/",
+        "https://craft.aphrody.app/deck/",
+        "https://craft.aphrody.app/grid/",
+        "https://craft.aphrody.app/pdf/",
+        "https://craft.aphrody.app/art/"
+      ]
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://craft.aphrody.app/photo/",
+        "https://craft.aphrody.app/vector/",
+        "https://craft.aphrody.app/film/",
+        "https://craft.aphrody.app/design/",
+        "https://craft.aphrody.app/fig/",
+        "https://craft.aphrody.app/effect/",
+        "https://craft.aphrody.app/light/",
+        "https://craft.aphrody.app/sound/",
+        "https://craft.aphrody.app/cad/",
+        "https://craft.aphrody.app/word/",
+        "https://craft.aphrody.app/deck/",
+        "https://craft.aphrody.app/grid/",
+        "https://craft.aphrody.app/pdf/",
+        "https://craft.aphrody.app/art/"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://craft.aphrody.app/photo/",
+        "https://craft.aphrody.app/vector/",
+        "https://craft.aphrody.app/film/",
+        "https://craft.aphrody.app/design/",
+        "https://craft.aphrody.app/fig/",
+        "https://craft.aphrody.app/effect/",
+        "https://craft.aphrody.app/light/",
+        "https://craft.aphrody.app/sound/",
+        "https://craft.aphrody.app/cad/",
+        "https://craft.aphrody.app/word/",
+        "https://craft.aphrody.app/deck/",
+        "https://craft.aphrody.app/grid/",
+        "https://craft.aphrody.app/pdf/",
+        "https://craft.aphrody.app/art/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [
+    {
+      "url": "https://craft.aphrody.app/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 95,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 2887.147,
+      "cls": 0,
+      "tbt": 39.999999999999886,
+      "fcp": 1018.147,
+      "si": 2236.379458215999,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "label-content-name-mismatch (0)",
+        "cache-insight (0)",
+        "image-delivery-insight (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)",
+        "max-potential-fid (67)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/",
+      "form": "desktop",
+      "ok": true,
+      "perf": 99,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 830.2384999999999,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 276.2385,
+      "si": 398.96393817197486,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "label-content-name-mismatch (0)",
+        "network-dependency-tree-insight (0)",
+        "cache-insight (50)",
+        "image-delivery-insight (50)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/effect/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 60,
+      "a11y": 87,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 845.029,
+      "cls": 0,
+      "tbt": 7078,
+      "fcp": 845.029,
+      "si": 22426.698718804982,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "speed-index (0)",
+        "total-blocking-time (0)",
+        "max-potential-fid (0)",
+        "interactive (0)",
+        "mainthread-work-breakdown (0)",
+        "bootup-time (0)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/film/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 60,
+      "a11y": 87,
+      "bp": 100,
+      "seo": 91,
+      "lcp": 864.5895,
+      "cls": 0,
+      "tbt": 4204,
+      "fcp": 864.5895,
+      "si": 22449.6478004079,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "speed-index (0)",
+        "max-potential-fid (0)",
+        "interactive (0)",
+        "mainthread-work-breakdown (0)",
+        "bootup-time (0)",
+        "valid-source-maps (0)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/art/",
+      "form": "mobile",
+      "ok": true,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": []
+    },
+    {
+      "url": "https://craft.aphrody.app/light/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 60,
+      "a11y": 92,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 882.326,
+      "cls": 0,
+      "tbt": 24294,
+      "fcp": 882.326,
+      "si": 44363.648679179794,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "speed-index (0)",
+        "total-blocking-time (0)",
+        "max-potential-fid (0)",
+        "interactive (0)",
+        "mainthread-work-breakdown (0)",
+        "bootup-time (0)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/sound/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 60,
+      "a11y": 92,
+      "bp": 100,
+      "seo": 91,
+      "lcp": 833.4475,
+      "cls": 0,
+      "tbt": 18193,
+      "fcp": 833.4475,
+      "si": 11969.328447558015,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "total-blocking-time (0)",
+        "max-potential-fid (0)",
+        "interactive (0)",
+        "mainthread-work-breakdown (0)",
+        "bootup-time (0)",
+        "valid-source-maps (0)"
+      ]
+    },
+    {
+      "url": "https://craft.aphrody.app/cad/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 61,
+      "a11y": 92,
+      "bp": 100,
+      "seo": 91,
+      "lcp": 825.2645,
+      "cls": 0,
+      "tbt": 2646,
+      "fcp": 825.2645,
+      "si": 17384.683157745265,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "speed-index (0)",
+        "max-potential-fid (0)",
+        "interactive (0)",
+        "mainthread-work-breakdown (0)",
+        "bootup-time (0)",
+        "valid-source-maps (0)"
+      ]
+    }
+  ],
+  "lighthouseNote": "",
+  "pages": [
+    {
+      "url": "https://craft.aphrody.app/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 315,
+      "htmlBytes": 18582,
+      "lang": "en",
+      "title": "Craft by Aphrody: creative and productivity studios in your browser",
+      "description": "Craft by Aphrody: fourteen focused creative and productivity studios (image, vector, video, audio, layout, CAD, documents, slides, spreadsheets, PDF) that open directly in your browser.",
+      "canonical": "https://craft.aphrody.app/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:type": "website",
+        "og:site_name": "Craft by Aphrody",
+        "og:locale": "en_US",
+        "og:url": "https://craft.aphrody.app/",
+        "og:title": "Craft: a space for your next idea",
+        "og:description": "Craft by Aphrody: fourteen focused creative and productivity studios (image, vector, video, audio, layout, CAD, documents, slides, spreadsheets, PDF) that open directly in your browser.",
+        "og:image": "https://craft.aphrody.app/og.png",
+        "og:image:type": "image/png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:image:alt": "Craft by Aphrody, with previews of the PhotoCraft, FilmCraft and WordCraft studios"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [],
+      "jsonLd": 1,
+      "links": [
+        "https://craft.aphrody.app/",
+        "https://craft.aphrody.app/photo/",
+        "https://craft.aphrody.app/vector/",
+        "https://craft.aphrody.app/film/",
+        "https://craft.aphrody.app/design/",
+        "https://craft.aphrody.app/fig/",
+        "https://craft.aphrody.app/effect/",
+        "https://craft.aphrody.app/light/",
+        "https://craft.aphrody.app/sound/",
+        "https://craft.aphrody.app/cad/",
+        "https://craft.aphrody.app/word/",
+        "https://craft.aphrody.app/deck/",
+        "https://craft.aphrody.app/grid/",
+        "https://craft.aphrody.app/pdf/",
+        "https://craft.aphrody.app/art/"
+      ],
+      "assets": [
+        "https://craft.aphrody.app/favicon.ico",
+        "https://craft.aphrody.app/icon-192.png",
+        "https://craft.aphrody.app/apple-touch-icon.png",
+        "https://craft.aphrody.app/site.webmanifest",
+        "https://craft.aphrody.app/craft.css",
+        "https://craft.aphrody.app/craft.js",
+        "https://craft.aphrody.app/aphrody-icon.png",
+        "https://craft.aphrody.app/previews/photo.jpg",
+        "https://craft.aphrody.app/previews/vector.jpg",
+        "https://craft.aphrody.app/previews/film.jpg",
+        "https://craft.aphrody.app/previews/design.jpg",
+        "https://craft.aphrody.app/previews/fig.jpg",
+        "https://craft.aphrody.app/previews/effect.jpg",
+        "https://craft.aphrody.app/previews/light.jpg",
+        "https://craft.aphrody.app/previews/sound.jpg",
+        "https://craft.aphrody.app/previews/cad.jpg",
+        "https://craft.aphrody.app/previews/word.jpg",
+        "https://craft.aphrody.app/previews/deck.jpg",
+        "https://craft.aphrody.app/previews/grid.jpg",
+        "https://craft.aphrody.app/previews/pdf.jpg"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/photo/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/photo/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/photo/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 272,
+      "htmlBytes": 1740,
+      "lang": "en",
+      "title": "Aphrody / Bun · Images",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [
+        "https://craft.aphrody.app/photo/"
+      ],
+      "assets": [
+        "https://craft.aphrody.app/photo/theme.css",
+        "https://craft.aphrody.app/photo/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/vector/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/vector/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/vector/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 342,
+      "htmlBytes": 776,
+      "lang": "en",
+      "title": "Aphrody / Bun · Vectors",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/vector/theme.css",
+        "https://craft.aphrody.app/vector/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/film/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/film/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/film/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 335,
+      "htmlBytes": 6097,
+      "lang": "en",
+      "title": "Aphrody / Bun · Video",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/film/aphrody-icon.png",
+        "https://craft.aphrody.app/film/theme.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/design/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/design/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/design/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 306,
+      "htmlBytes": 773,
+      "lang": "en",
+      "title": "Aphrody / Bun · Layout",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/design/theme.css",
+        "https://craft.aphrody.app/design/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/fig/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/fig/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/fig/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 302,
+      "htmlBytes": 792,
+      "lang": "en",
+      "title": "Aphrody / Bun · Interface Design",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/fig/theme.css",
+        "https://craft.aphrody.app/fig/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/effect/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/effect/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/effect/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 296,
+      "htmlBytes": 6297,
+      "lang": "en",
+      "title": "Aphrody / Bun · Compositing",
+      "description": "Aphrody / Bun · Compositing studio for motion graphics and visual effects",
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/effect/aphrody-icon.png",
+        "https://craft.aphrody.app/effect/manifest.webmanifest",
+        "https://craft.aphrody.app/effect/icon-256.png",
+        "https://craft.aphrody.app/effect/theme.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/light/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/light/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/light/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 291,
+      "htmlBytes": 2199,
+      "lang": "en",
+      "title": "Aphrody / Bun · Photo Processing",
+      "description": "Aphrody / Bun Photo Processing: open-source photo library and raw developer, running in your browser (WASM).",
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/light/theme.css",
+        "https://craft.aphrody.app/light/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/sound/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/sound/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/sound/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 297,
+      "htmlBytes": 1986,
+      "lang": "en",
+      "title": "Aphrody / Bun · Audio",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/sound/theme.css",
+        "https://craft.aphrody.app/sound/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/cad/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/cad/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/cad/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 300,
+      "htmlBytes": 767,
+      "lang": "en",
+      "title": "Aphrody / Bun · Drafting",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/cad/theme.css",
+        "https://craft.aphrody.app/cad/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/word/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/word/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/word/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 301,
+      "htmlBytes": 775,
+      "lang": "en",
+      "title": "Aphrody / Bun · Documents",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/word/theme.css",
+        "https://craft.aphrody.app/word/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/deck/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/deck/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/deck/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 313,
+      "htmlBytes": 766,
+      "lang": "en",
+      "title": "Aphrody / Bun · Slides",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/deck/theme.css",
+        "https://craft.aphrody.app/deck/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/grid/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/grid/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/grid/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 331,
+      "htmlBytes": 766,
+      "lang": "en",
+      "title": "Aphrody / Bun · Tables",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/grid/theme.css",
+        "https://craft.aphrody.app/grid/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/pdf/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/pdf/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/pdf/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 269,
+      "htmlBytes": 532,
+      "lang": "en",
+      "title": "Aphrody / Bun · PDF",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://craft.aphrody.app/pdf/theme.css",
+        "https://craft.aphrody.app/pdf/aphrody-icon.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://craft.aphrody.app/art/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://craft.aphrody.app/art/",
+      "hops": [
+        {
+          "url": "https://craft.aphrody.app/art/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 299,
+      "htmlBytes": 2319,
+      "lang": "en",
+      "title": "Aphrody / Bun · Generation Studio",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://www.googletagmanager.com/gtag/js?id=G-Y4Y8KMLPQ7",
+        "https://craft.aphrody.app/art/artcraft-icon.svg",
+        "https://craft.aphrody.app/art/favicon.ico",
+        "https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@300..800&display=swap",
+        "https://craft.aphrody.app/art/assets/CreateAudio-wfex3tqs.css",
+        "https://craft.aphrody.app/art/assets/TextToImage-5t1d6ypv.css",
+        "https://craft.aphrody.app/art/assets/index-4fd12rcv.css",
+        "https://craft.aphrody.app/art/assets/index-hkw4tsv6.css",
+        "https://craft.aphrody.app/art/assets/index-jgb296qb.css",
+        "https://craft.aphrody.app/art/assets/index-jnkjg6r0.css",
+        "https://craft.aphrody.app/art/assets/index-06922at1.js"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

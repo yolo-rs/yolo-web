@@ -1,0 +1,63 @@
+# craft.aphrody.app audit
+
+Measured 2026-11-05 09:50-09:54 UTC from bunos (Ubuntu, Chrome for Testing 157 headless shell, Lighthouse via `bun`). Tool: `bun tools/site-audit/run.ts craft`. Raw data: [craft.json](craft.json), tables: [craft.measured.md](craft.measured.md).
+Limits: GET only, 2 concurrent, 250 ms gap, no login, 15 pages crawled (every sitemap URL), 57 own-host assets checked. INP is not measurable in lab; TBT is reported instead.
+
+Handoff owner: yolo-ui-aa. Owning repo of the landing page was not located in `C:\src` (searched yolo-ui, auto, yolo-web for the home description). The per-studio shells are `C:\src\yolo-ui\apps\<name>-web\web\index.html` (verified for effectcraft-web); the in-app Craft route in `C:\src\auto\apps\web\src\craft.ts` is a different deployment.
+
+## Scores (Lighthouse lab)
+
+| Form | Page | Perf | A11y | BP | SEO | LCP s | CLS | TBT ms |
+|---|---|---|---|---|---|---|---|---|
+| mobile | / | 95 | 100 | 100 | 100 | 2.9 | 0.000 | 40 |
+| desktop | / | 99 | 100 | 100 | 100 | 0.8 | 0.000 | 0 |
+| mobile | /effect/ | 60 | 87 | 100 | 100 | 0.8 | 0.000 | 7078 |
+| mobile | /film/ | 60 | 87 | 100 | 91 | 0.9 | 0.000 | 4204 |
+| mobile | /light/ | 60 | 92 | 100 | 100 | 0.9 | 0.000 | 24294 |
+| mobile | /sound/ | 60 | 92 | 100 | 91 | 0.8 | 0.000 | 18193 |
+| mobile | /cad/ | 61 | 92 | 100 | 91 | 0.8 | 0.000 | 2646 |
+| mobile | /art/ | Lighthouse run failed (no result produced) | | | | | | |
+
+Studio pages are WebGPU/WASM apps. Headless Chrome has no GPU here (`--disable-gpu`), so the very high TBT on studio pages is probably software-rendering cost and not representative of a real GPU browser. This was not verified with a GPU.
+
+## Routes, redirects, TLS
+
+| Item | Result |
+|---|---|
+| / | 200 |
+| /robots.txt | 200, no Disallow rules |
+| /sitemap.xml | 200, 15 URLs (home + 14 studios), all 200 |
+| /favicon.ico | 200 |
+| /.well-known/security.txt | 404 |
+| unknown path | 404 |
+| http:// | 301 to https://craft.aphrody.app/ (1 hop) |
+| TLS | TLS 1.3, cert CN=aphrody.app, issuer Google Trust Services WE1, valid 2026-10-11 to 2027-01-09, verify OK |
+| Broken internal links / own-host assets | 0 / 0 (of 57 checked) |
+| Console errors (Lighthouse) | 0 on all measured pages |
+
+## Findings
+
+| # | Severity | Finding | Evidence | Proposed patch |
+|---|---|---|---|---|
+| 1 | Medium | Studio pages (14 of 14 sub-pages) have no `<link rel=canonical>`, no Open Graph/Twitter tags | crawl: canonical missing 14/15, og:title/og:image missing 14/15 | Add canonical + og tags to each `C:\src\yolo-ui\apps\<name>-web\web\index.html` (the home already has them) |
+| 2 | Medium | 12 of 15 pages have no meta description (Lighthouse SEO 91 on /film/, /sound/, /cad/) | crawl; LH `meta-description` | Add `<meta name="description">` in each studio `index.html`; /effect/ already has one |
+| 3 | Medium | Home sends no Content-Security-Policy, Permissions-Policy or COOP | header probe on `GET /` | Reuse the CSP already defined in `C:\src\auto\apps\web\src\craft.ts` (`CSP` const, allows `wasm-unsafe-eval`) at the craft edge (Cloudflare Transform Rule or `_headers`), plus `Permissions-Policy` |
+| 4 | Low | 13 of 15 pages have no `<h1>` (only / and /film/ have one) | crawl h1Count | Add a visible or visually hidden `<h1>` in each studio shell |
+| 5 | Low | Brand inconsistency: home title "Craft by Aphrody: ..." and og:title "Craft: a space for your next idea"; studio titles "Aphrody / Bun · Images" | crawl titles | Pick one brand; change `<title>` in each studio `index.html` |
+| 6 | Low | Home label-content-name-mismatch (a11y 0) and cache-insight 0 (`cache-control: no-cache` on all responses) | Lighthouse | Make visible link text match `aria-label`; add long-cache headers for hashed static assets |
+| 7 | Low | /effect/ and /film/ a11y 87 | Lighthouse | Inspect Lighthouse a11y failures (raw report not stored; rerun with the tool) |
+| 8 | Info | `/art/` Lighthouse run produced no result | tool log | Rerun; possibly page crash or timeout in headless without GPU. Not diagnosed |
+| 9 | Info | No `security.txt` | 404 | Add `/.well-known/security.txt` (aphrody.com already serves one) |
+
+## Fact check
+
+| Claim | Source | Result |
+|---|---|---|
+| "fourteen focused creative and productivity studios" (home meta description) | live sitemap | Match: 14 studio URLs. |
+| Same claim vs aphrody.com "Four signature creative powerhouses" | see [aphrody.md](aphrody.md) | Inconsistent across sites (4 vs 14). |
+| "image, vector, video, audio, layout, CAD, documents, slides, spreadsheets, PDF" | page titles | Present (Images, Vectors, Video, Audio, Layout, Drafting, Documents, Slides, Tables, PDF); extra studios: Interface Design, Compositing, Photo Processing, Generation Studio. |
+| yolo-ui README "13 creative workbenches" (`C:\src\yolo-ui\README.md` line 54) vs 14 live studios | README | Different concepts (workbenches in `yolo-craft` vs deployed studios); the numbers are not reconcilable from the sources read. |
+
+## Handoff
+
+Owner yolo-ui-aa. Re-run: `bun tools/site-audit/run.ts craft` (set `SITE_AUDIT_LH` and `CHROME_PATH` for Lighthouse).
