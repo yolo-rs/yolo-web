@@ -21,3 +21,7 @@ out/
 /.cef/
 /.servo/
 /.aot/
+
+# replica reference screenshots: never shipped
+docs/replica/*/screens/
+docs/replica/*/clone-screens/

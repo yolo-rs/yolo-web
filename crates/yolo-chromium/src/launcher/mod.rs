@@ -372,7 +372,10 @@ fn launch(options: &LauncherOptions) -> Result<i32, String> {
 fn apply_policies(options: &LauncherOptions) -> Result<(), String> {
     if options.reset_policies {
         policy::reset()?;
-        eprintln!("yolo-chromium: managed policies reset ({})", policy::POLICY_KEY);
+        eprintln!(
+            "yolo-chromium: managed policies reset ({})",
+            policy::POLICY_KEY
+        );
     }
     let set = policy::PolicySet::from_options(
         options.search_engine.as_deref(),

@@ -28,6 +28,7 @@ pub fn run(main_args: &MainArgs, command_line: &CommandLine, sandbox_info: *mut 
 
     let config = ShellConfig::from_command_line(command_line);
     let settings = build_settings(&config);
+    let is_smoke = config.smoke.is_some();
     let state = ShellState::new(config);
     let mut app = YoloApp::new(state.clone());
 
@@ -50,13 +51,28 @@ pub fn run(main_args: &MainArgs, command_line: &CommandLine, sandbox_info: *mut 
     }
 
     run_message_loop();
-    shutdown();
-
-    state
+    let exit_code = state
         .lock()
         .map(|guard| guard.exit_code())
-        .unwrap_or(EXIT_INIT_FAILED)
+        .unwrap_or(EXIT_INIT_FAILED);
+    if is_smoke {
+        // Browsers that Chrome creates on its own (extension pages, a new tab
+        // opened without this client) can keep `cef_shutdown` waiting forever.
+        // A smoke run has already written its receipt, so bound the shutdown.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(SHUTDOWN_GRACE_MS));
+            eprintln!(
+                "yolo-chromium: cef_shutdown still running after {SHUTDOWN_GRACE_MS} ms; exiting"
+            );
+            std::process::exit(exit_code);
+        });
+    }
+    shutdown();
+    exit_code
 }
+
+/// Upper bound for `cef_shutdown` in smoke runs.
+const SHUTDOWN_GRACE_MS: u64 = 5_000;
 
 fn build_settings(config: &ShellConfig) -> Settings {
     let mut settings = Settings {

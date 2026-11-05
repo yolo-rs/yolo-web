@@ -417,14 +417,14 @@ Add a reference to your local build in `claude_desktop_config.json`:
 
 The Inspector requires Node 22.19 or newer.
 
-**STDIO** — the Inspector launches the server itself, so one terminal is enough:
+**STDIO**, the Inspector launches the server itself, so one terminal is enough:
 
 ```bash
 npm run build
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
-**HTTP** — the Inspector connects to a URL, so the server must already be listening:
+**HTTP**, the Inspector connects to a URL, so the server must already be listening:
 
 ```bash
 # terminal 1

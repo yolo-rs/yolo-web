@@ -1,0 +1,24 @@
+feature,area,priority,original,clone,notes
+Hero search box with focus ring and clear button,search,must,yes,yes,S01/S04 clone: search-box.tsx; 3 px primary focus boundary; clear button; 40 px targets
+Live suggestions with bolded completion and keyboard nav,search,must,yes,partial,S02 ARIA 1.2 combobox with listbox; typed part regular and completion bold; Up/Down/Enter/Escape/Tab; local ranker (search history + shortcuts + most visited + optional history) under 1 ms for 500 candidates; configurable OpenSearch endpoint with 400 ms budget and 5 min backoff. Partial: no live completion service exists (aphrody.com/suggest answered 404 without CORS on 2026-11-05) so queries never typed before get no completions
+Submit to YOLO Search results,search,must,yes,partial,S03 submits to the configurable template (default https://aphrody.com/search?q={searchTerms}) or navigates when the text is an address. Partial: aphrody.com/search answered 404 on 2026-11-05; the results page is the yolo-hub build
+Voice input,search,could,yes,no,not built; Web Speech API in Chrome sends audio to a Google service
+Search by image,search,could,yes,no,not built; needs a YOLO image index
+AI answer mode,search,should,yes,no,aphrody.com results page and yolo-hub backend; out of this build target
+Action chips under the box,search,could,yes,no,not built
+Results verticals tabs,results,should,yes,no,S03 aphrody.com results page; out of this build target
+Result item with favicon breadcrumb title snippet,results,must,yes,no,S03 aphrody.com results page; out of this build target
+Knowledge panel,results,could,yes,no,needs entity data; out of this build target
+Shortcut tiles my shortcuts or most visited,ntp,must,yes,yes,F03 both modes; chrome.topSites; favicons from the browser cache (_favicon); monogram fallback; max 10
+Add edit remove shortcut with undo toast,ntp,must,yes,yes,S06 dialog with validation (http/https only; duplicates; sync quota); undo toast 10 s paused on hover and focus; most visited removal hides the site with undo and Restore in the panel
+Drag to reorder shortcuts,ntp,should,yes,yes,HTML drag and drop in my shortcuts mode plus Move left / Move right in the tile menu (WCAG 2.5.7 single-pointer alternative); position announced
+Resume browsing card,ntp,should,yes,yes,Opened today card; optional history permission requested from the card; needs-access / loading skeleton / empty / filled states; hide from the card or the panel
+Customize side panel,ntp,must,yes,yes,S05 modal dialog docked right; theme presets; color seed; light/dark; background; shortcuts toggle and mode; cards toggle; footer toggle; search and suggestion URLs; clear search history; persisted in chrome.storage.sync
+Background image from open wallpaper library,ntp,should,yes,partial,user-picked PNG/JPEG/WebP/AVIF/GIF up to 8 MB stored in IndexedDB; no wallpaper library (no licensed collection bundled)
+Color seed and follow device theme,ntp,must,yes,yes,HCT port of yolo-tokens / material-color-utilities (tonal spot); 8 seed swatches plus any color; Device / Light / Dark
+Footer toggle,ntp,could,yes,yes,footer shows the search host; toggle in the panel
+Theme parity with yolo-chromium --theme presets,ntp,must,no,yes,8 presets; the 6 brand presets use the exact five theme.rs colors (unit test parses theme.rs)
+Dark and light with AA contrast,ntp,must,yes,yes,290 text and boundary pairs pass AA in contrast.py; 74-seed sweep in bun test
+Google wordmark doodles and logos,brand,skip,yes,skip,not ours; original Aphrody mark instead
+Google index ranking and knowledge graph,engine,skip,yes,skip,YOLO Search engine in yolo-hub
+Drive Gmail account cards,ntp,skip,yes,skip,requires Google account services

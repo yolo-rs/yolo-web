@@ -184,17 +184,29 @@ pub fn preset(name: &str) -> Option<Theme> {
             colors: BTreeMap::new(),
         },
         // Material 3 baseline (light): primary #6750A4, surface #FEF7FF.
-        "m3" | "material" => palette("m3", 0xFFE8DEF8, 0xFFFEF7FF, 0xFFF3EDF7, 0xFF1D1B20, 0xFF6750A4),
+        "m3" | "material" => palette(
+            "m3", 0xFFE8DEF8, 0xFFFEF7FF, 0xFFF3EDF7, 0xFF1D1B20, 0xFF6750A4,
+        ),
         // Windows 11 Fluent (light): mica-like surfaces, accent #0067C0.
-        "fluent" | "winui" => palette("fluent", 0xFFEDEDED, 0xFFF9F9F9, 0xFFFFFFFF, 0xFF1A1A1A, 0xFF0067C0),
+        "fluent" | "winui" => palette(
+            "fluent", 0xFFEDEDED, 0xFFF9F9F9, 0xFFFFFFFF, 0xFF1A1A1A, 0xFF0067C0,
+        ),
         // macOS-style light chrome, accent #007AFF.
-        "apple" | "macos" => palette("apple", 0xFFE7E7E7, 0xFFF6F6F6, 0xFFFFFFFF, 0xFF1D1D1F, 0xFF007AFF),
+        "apple" | "macos" => palette(
+            "apple", 0xFFE7E7E7, 0xFFF6F6F6, 0xFFFFFFFF, 0xFF1D1D1F, 0xFF007AFF,
+        ),
         // Omarchy dark (Tokyo Night family), accent #7AA2F7.
-        "omarchy" => palette("omarchy", 0xFF16161E, 0xFF1A1B26, 0xFF24283B, 0xFFC0CAF5, 0xFF7AA2F7),
+        "omarchy" => palette(
+            "omarchy", 0xFF16161E, 0xFF1A1B26, 0xFF24283B, 0xFFC0CAF5, 0xFF7AA2F7,
+        ),
         // Hyprland dark (Catppuccin Mocha family), accent #89B4FA.
-        "hyprland" => palette("hyprland", 0xFF11111B, 0xFF1E1E2E, 0xFF313244, 0xFFCDD6F4, 0xFF89B4FA),
+        "hyprland" => palette(
+            "hyprland", 0xFF11111B, 0xFF1E1E2E, 0xFF313244, 0xFFCDD6F4, 0xFF89B4FA,
+        ),
         // Aphrody brand: deep violet surfaces with a gold accent.
-        "aphrody" => palette("aphrody", 0xFF140A22, 0xFF1C0F2B, 0xFF2A1B3F, 0xFFF4ECFF, 0xFFF2C14E),
+        "aphrody" => palette(
+            "aphrody", 0xFF140A22, 0xFF1C0F2B, 0xFF2A1B3F, 0xFFF4ECFF, 0xFFF2C14E,
+        ),
         _ => return None,
     })
 }
@@ -224,7 +236,9 @@ pub fn parse_json(text: &str, origin: &str) -> Result<Theme, String> {
         .as_object()
         .ok_or_else(|| format!("{origin}: theme must be a JSON object"))?;
     let mut theme = match object.get("base").and_then(|base| base.as_str()) {
-        Some(base) => preset(base).ok_or_else(|| format!("{origin}: unknown base preset {base:?}"))?,
+        Some(base) => {
+            preset(base).ok_or_else(|| format!("{origin}: unknown base preset {base:?}"))?
+        }
         None => Theme::default(),
     };
     theme.name = object
@@ -236,7 +250,8 @@ pub fn parse_json(text: &str, origin: &str) -> Result<Theme, String> {
         if key == "base" || key == "name" {
             continue;
         }
-        let token = Token::from_key(key).ok_or_else(|| format!("{origin}: unknown token {key:?}"))?;
+        let token =
+            Token::from_key(key).ok_or_else(|| format!("{origin}: unknown token {key:?}"))?;
         let color = raw
             .as_str()
             .and_then(parse_color)
@@ -250,7 +265,9 @@ pub fn parse_json(text: &str, origin: &str) -> Result<Theme, String> {
 pub fn parse_color(text: &str) -> Option<u32> {
     let hex = text.trim().trim_start_matches('#');
     match hex.len() {
-        6 => u32::from_str_radix(hex, 16).ok().map(|rgb| 0xFF00_0000 | rgb),
+        6 => u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|rgb| 0xFF00_0000 | rgb),
         8 => u32::from_str_radix(hex, 16).ok(),
         _ => None,
     }
@@ -315,6 +332,11 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), Token::ALL.len());
-        assert_eq!(Token::Toolbar.color_id(), 1590);
+        // Numeric ids shift with platform-specific entries in cef_color_ids.h,
+        // so compare against the generated enum instead of a literal.
+        assert_eq!(
+            Token::Toolbar.color_id(),
+            ColorId::CEF_ColorToolbar as i32
+        );
     }
 }

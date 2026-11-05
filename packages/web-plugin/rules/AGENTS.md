@@ -1,4 +1,4 @@
-# AGENTS.md — Unified Web Brain (`web`)
+# AGENTS.md, Unified Web Brain (`web`)
 
 Guidance for AI agents operating inside the **YOLO-Web** monorepo using the unified **`web`** plugin, CLI, and MCP server.
 
@@ -14,7 +14,7 @@ Guidance for AI agents operating inside the **YOLO-Web** monorepo using the unif
    - Use `web servo <selector>` for Stylo CSS selector specificity and XPath translation.
    - Use `web info` to inspect runtime status.
 
-2. **100% Upstream Bun — Zero Node.js, Zero Zig**:
+2. **100% Upstream Bun: Zero Node.js, Zero Zig**:
    - Upstream Bun v1.4.4+ is **Full Rust (~200 crates in `src/*`) + C++ WebKit/JavaScriptCore + Cranelift AoT compiler (`src/aot`)**. It contains **ZERO Zig** in late 2026.
    - Never run or recommend `node`, `npm`, `npx`, `yarn`, `pnpm`, or `package-lock.json`.
    - Always use `bun <file>`, `bun test`, `bun check`, `bun fmt`, `bun lint`, `bun install`, `bun build --compile`.

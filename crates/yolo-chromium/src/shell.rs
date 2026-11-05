@@ -29,6 +29,8 @@ pub const EXIT_LOAD_ERROR: i32 = 2;
 pub const EXIT_TIMEOUT: i32 = 3;
 
 const WINDOW_TITLE: &str = "YOLO-Web Chromium";
+/// Grace period between closing the shell's browsers and forcing the quit.
+const QUIT_FALLBACK_MS: i64 = 3_000;
 
 /// Shared browser-process state.
 pub type Shared = Arc<Mutex<ShellState>>;
@@ -41,6 +43,22 @@ struct Actions {
     quit: bool,
     /// Post a `SmokeHoldTask` after this many milliseconds.
     hold_ms: Option<i64>,
+    /// Post a `QuitFallbackTask` after this many milliseconds, so the shell
+    /// still exits when Chrome-owned browsers (extension pages, tabs opened
+    /// without this client) keep the window open.
+    quit_fallback_ms: Option<i64>,
+}
+
+/// Set once `quit_message_loop` has been called.
+static QUIT_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Calls `quit_message_loop` at most once.
+fn quit_once() -> bool {
+    if QUIT_REQUESTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    quit_message_loop();
+    true
 }
 
 impl Actions {
@@ -54,8 +72,12 @@ impl Actions {
                 host.close_browser(self.force_close.into());
             }
         }
+        if let Some(delay_ms) = self.quit_fallback_ms {
+            let mut task = QuitFallbackTask::new(delay_ms);
+            post_delayed_task(ThreadId::UI, Some(&mut task), delay_ms.max(1));
+        }
         if self.quit {
-            quit_message_loop();
+            quit_once();
         }
     }
 }
@@ -300,6 +322,7 @@ impl ShellState {
             force_close: true,
             quit: self.browsers.is_empty(),
             hold_ms: None,
+            quit_fallback_ms: Some(QUIT_FALLBACK_MS),
         }
     }
 }
@@ -553,6 +576,23 @@ wrap_task! {
         fn execute(&self) {
             let actions = lock(&self.state).on_smoke_timeout();
             actions.run(&self.state);
+        }
+    }
+}
+
+wrap_task! {
+    struct QuitFallbackTask {
+        delay_ms: i64,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            if quit_once() {
+                eprintln!(
+                    "yolo-chromium: browsers still open {} ms after smoke finished; quitting",
+                    self.delay_ms
+                );
+            }
         }
     }
 }

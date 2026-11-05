@@ -61,7 +61,10 @@ impl PolicySet {
         if !startup_urls.is_empty() {
             // 4 = open a list of URLs.
             set.push("RestoreOnStartup", PolicyValue::Dword(4));
-            set.push("RestoreOnStartupURLs", PolicyValue::List(startup_urls.to_vec()));
+            set.push(
+                "RestoreOnStartupURLs",
+                PolicyValue::List(startup_urls.to_vec()),
+            );
         }
         set
     }
@@ -226,9 +229,11 @@ mod tests {
     fn aphrody_search_engine_policy() {
         let set = PolicySet::from_options(Some("aphrody"), Some("https://aphrody.com/"), None, &[]);
         assert_eq!(set.entries.len(), 5);
-        assert!(set.entries.iter().any(|(name, value)| name
-            == "DefaultSearchProviderSearchURL"
-            && *value == PolicyValue::String(APHRODY_SEARCH_URL.into())));
+        assert!(set
+            .entries
+            .iter()
+            .any(|(name, value)| name == "DefaultSearchProviderSearchURL"
+                && *value == PolicyValue::String(APHRODY_SEARCH_URL.into())));
         let commands = set.reg_commands();
         assert_eq!(commands.len(), 5);
         assert!(commands

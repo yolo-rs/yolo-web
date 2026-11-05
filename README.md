@@ -6,15 +6,15 @@ The canonical ownership map is [ARCHITECTURE.mdx](docs/ARCHITECTURE.mdx), with l
 
 ## Current workspace
 
-- `apps/human-browser` — Bun CDP service for navigation, JavaScript evaluation, status, and screenshot streaming. Its UI is `apps/yolo-browser-workbench` in yolo-ui.
-- `apps/ai-agent-runner` — browser-agent runner.
-- `packages/cdp-client` — Bun WebSocket/HTTP client for CDP.
-- `packages/web-cli` and `packages/web-mcp` — browser tooling CLI and MCP server.
-- `packages/chromium-tracker` — Chromium release tracking and the initial browser engine catalog.
-- `crates/yolo-chromium` — CEF-based Chromium browser shell: launcher, bootstrap host, Chrome-style Views window, and smoke receipt; see [crates/yolo-chromium/README.md](crates/yolo-chromium/README.md).
-- `crates/servo-*` — Rust components derived from Servo; feature coverage varies by crate.
-- `crates/obscura-*` — Rust/V8 browser experiments and protocol/runtime components.
-- `crates/brave-*`, `crates/deno-*` — browser-adjacent libraries and runtime integrations.
+- `apps/human-browser`: Bun CDP service for navigation, JavaScript evaluation, status, and screenshot streaming. Its UI is `apps/yolo-browser-workbench` in yolo-ui.
+- `apps/ai-agent-runner`: browser-agent runner.
+- `packages/cdp-client`: Bun WebSocket/HTTP client for CDP.
+- `packages/web-cli` and `packages/web-mcp`: browser tooling CLI and MCP server.
+- `packages/chromium-tracker`: Chromium release tracking and the initial browser engine catalog.
+- `crates/yolo-chromium`: CEF-based Chromium browser shell (launcher, bootstrap host, Chrome-style Views window, and smoke receipt), see [crates/yolo-chromium/README.md](crates/yolo-chromium/README.md).
+- `crates/servo-*`: Rust components derived from Servo; feature coverage varies by crate.
+- `crates/obscura-*`: Rust/V8 browser experiments and protocol/runtime components.
+- `crates/brave-*`, `crates/deno-*`: browser-adjacent libraries and runtime integrations.
 
 The directory names and dependency manifests describe the code present; they do not claim that upstream browser projects have been merged into this repository. Chromium's Blink, V8, Skia, Dawn, `content/`, `chrome/`, `third_party/`, GN build graph, and `DEPS` checkout are not vendored here today. The CEF distribution that `yolo-chromium` runs is downloaded into the git-ignored `.cef/` cache at build time; it is not vendored either.
 
