@@ -192,7 +192,7 @@ chrome.runtime.onConnect.addListener((port: Port & { name: string }) => {
   if (port.name !== "sidepanel") return;
   ports.add(port);
   port.onDisconnect.addListener(() => ports.delete(port));
-  port.onMessage.addListener(async (message) => {
+  const onPortMessage = async (message: Record<string, any>) => {
     try {
       switch (message.type) {
         case "run":
@@ -240,6 +240,11 @@ chrome.runtime.onConnect.addListener((port: Port & { name: string }) => {
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  };
+  port.onMessage.addListener((message) => {
+    onPortMessage(message).catch((error) =>
+      console.error("sidepanel port handler failed", error),
+    );
   });
 });
 
@@ -325,10 +330,12 @@ chrome.runtime.onStartup.addListener(
 );
 void ensureOffscreen().catch(() => undefined);
 void chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
-secrets().then((s) => {
-  const level = s.autonomy;
-  if (level) void setAutonomy(level).catch(() => undefined);
-});
+void secrets()
+  .then((s) => {
+    const level = s.autonomy;
+    if (level) void setAutonomy(level).catch(() => undefined);
+  })
+  .catch((error) => console.error("autonomy bootstrap failed", error));
 
 // Test hook for the launcher / smoke checks.
 (globalThis as { __yoloAgent?: unknown }).__yoloAgent = {

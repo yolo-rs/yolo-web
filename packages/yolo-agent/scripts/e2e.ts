@@ -32,7 +32,7 @@ for (const mode of modes) {
       modeReports.push(await runScenario(mode, { executable }));
     } catch (error) {
       console.error(
-        `${mode} run ${i + 1}: ${error instanceof Error ? error.message : error}`,
+        `${mode} run ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exitCode = 1;
     }

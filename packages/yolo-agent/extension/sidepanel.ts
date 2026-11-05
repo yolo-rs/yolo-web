@@ -155,7 +155,7 @@ autonomy.addEventListener("change", () => {
   }
   port.postMessage({ type: "autonomy", level: autonomy.value });
 });
-save.addEventListener("click", async () => {
+const saveSettings = async () => {
   const session: Record<string, unknown> = { nhitlOptIn: nhitl.checked };
   if (apiKey.value) session.apiKey = apiKey.value;
   if (bridgeUrl.value) session.bridgeUrl = bridgeUrl.value;
@@ -166,6 +166,9 @@ save.addEventListener("click", async () => {
   bridgeToken.value = "";
   line("Settings saved (secrets stay in session memory).");
   port.postMessage({ type: "state" });
+};
+save.addEventListener("click", () => {
+  saveSettings().catch((error) => line(`Save failed: ${String(error)}`));
 });
 
 port.onMessage.addListener((message: Record<string, any>) => {

@@ -26,7 +26,7 @@ async function connect(): Promise<void> {
   ws.addEventListener("open", () => {
     backoff = 500;
   });
-  ws.addEventListener("message", async (event) => {
+  const onMessage = async (event: MessageEvent) => {
     const message = JSON.parse(String(event.data)) as Record<string, any>;
     switch (message.type) {
       case "call": {
@@ -61,6 +61,11 @@ async function connect(): Promise<void> {
       default:
         break;
     }
+  };
+  ws.addEventListener("message", (event) => {
+    onMessage(event).catch((error) =>
+      console.error("offscreen message handler failed", error),
+    );
   });
   ws.addEventListener("close", () => {
     if (socket !== ws) return;

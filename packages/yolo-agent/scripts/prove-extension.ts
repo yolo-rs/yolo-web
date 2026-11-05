@@ -125,7 +125,7 @@ try {
     ],
     { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
   );
-  (async () => {
+  void (async () => {
     const decoder = new TextDecoder();
     let buffer = "";
     for await (const chunk of cli!.stderr as ReadableStream<Uint8Array>) {
@@ -134,7 +134,9 @@ try {
       buffer = lines.pop() ?? "";
       for (const line of lines) stderrLines.push(line);
     }
-  })();
+  })().catch((error) => {
+    stderrLines.push(`stderr reader failed: ${String(error)}`);
+  });
 
   const info = await step("bridge up and extension provisioned", async () => {
     const deadline = Date.now() + 90_000;

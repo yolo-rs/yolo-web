@@ -138,7 +138,7 @@ async function resolveExtensionDir(
   return undefined;
 }
 
-interface Runtime {
+export interface Runtime {
   backend: ToolBackend;
   session: AgentSession;
   launched?: LaunchedBrowser;
@@ -152,7 +152,7 @@ interface Runtime {
   close(): Promise<void>;
 }
 
-async function setup(flags: Flags): Promise<Runtime> {
+export async function setup(flags: Flags): Promise<Runtime> {
   const nhitl = flags.nhitl === true;
   const autonomy = resolveAutonomy(flags.autonomy as Autonomy | undefined, {
     nhitlOptIn: nhitl,
@@ -288,7 +288,7 @@ async function serve(flags: Flags): Promise<void> {
       log(`extension ${target.extensionId} provisioned`);
     } catch (error) {
       log(
-        `extension provisioning skipped: ${error instanceof Error ? error.message : error}`,
+        `extension provisioning skipped: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
