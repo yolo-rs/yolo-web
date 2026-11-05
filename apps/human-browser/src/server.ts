@@ -55,6 +55,35 @@ export function sanitizeUrlWithBraveShields(rawUrl: string): {
   }
 }
 
+const multipartEncoder = new TextEncoder();
+
+/**
+ * Builds one multipart/x-mixed-replace part from a base64 JPEG, decoding the
+ * base64 directly into the final buffer (no intermediate binary copy).
+ */
+export function buildMultipartFrame(base64Frame: string): Uint8Array {
+  const padding = base64Frame.endsWith("==")
+    ? 2
+    : base64Frame.endsWith("=")
+      ? 1
+      : 0;
+  const byteLength = (base64Frame.length / 4) * 3 - padding;
+  const header = multipartEncoder.encode(
+    `--yolo-frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${byteLength}\r\n\r\n`,
+  );
+  const frame = new Uint8Array(header.byteLength + byteLength + 2);
+  frame.set(header, 0);
+  const { written } = frame
+    .subarray(header.byteLength, header.byteLength + byteLength)
+    .setFromBase64(base64Frame);
+  if (written !== byteLength) {
+    throw new Error("Malformed base64 screenshot frame");
+  }
+  frame[header.byteLength + byteLength] = 0x0d;
+  frame[header.byteLength + byteLength + 1] = 0x0a;
+  return frame;
+}
+
 export function validateBrowserNavigationUrl(rawUrl: string): URL | null {
   try {
     const url = new URL(rawUrl);
@@ -112,11 +141,12 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
             return;
           screenshotInFlight = true;
           try {
-            const frame = await cdp.captureScreenshot({
-              format: "jpeg",
-              quality: 65,
-            });
-            broadcastFrame(Buffer.from(frame).toString("base64"));
+            broadcastFrame(
+              await cdp.captureScreenshotBase64({
+                format: "jpeg",
+                quality: 65,
+              }),
+            );
           } catch (error) {
             cdpError = error instanceof Error ? error.message : String(error);
           } finally {
@@ -146,19 +176,8 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
         sseClients.delete(controller);
       }
     }
-    const binaryFrame = Uint8Array.from(atob(base64Frame), (character) =>
-      character.charCodeAt(0),
-    );
-    const header = encoder.encode(
-      `--yolo-frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${binaryFrame.byteLength}\r\n\r\n`,
-    );
-    const trailer = encoder.encode("\r\n");
-    const frame = new Uint8Array(
-      header.byteLength + binaryFrame.byteLength + trailer.byteLength,
-    );
-    frame.set(header, 0);
-    frame.set(binaryFrame, header.byteLength);
-    frame.set(trailer, header.byteLength + binaryFrame.byteLength);
+    if (frameClients.size === 0) return;
+    const frame = buildMultipartFrame(base64Frame);
     for (const controller of frameClients) {
       try {
         controller.enqueue(frame);
@@ -365,6 +384,12 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
 }
 
 if (import.meta.main) {
+  if (Bun.argv.includes("--help") || Bun.argv.includes("-h")) {
+    console.log(
+      "Usage: yolo-human-browser [cdpPort] [httpPort]\n\nEnvironment: YOLO_CDP_PORT, YOLO_HTTP_PORT",
+    );
+    process.exit(0);
+  }
   const cdpPort = Number(Bun.argv[2] ?? process.env.YOLO_CDP_PORT ?? 9222);
   const httpPort = Number(Bun.argv[3] ?? process.env.YOLO_HTTP_PORT ?? 8080);
   const { server } = startHumanBrowserServer({

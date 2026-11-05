@@ -31,6 +31,7 @@
     "aot:web-mcp": "bun build --compile --bytecode --minify packages/web-mcp/src/index.ts --outfile dist/web-mcp",
     "aot:human-browser": "bun build --compile --bytecode --minify apps/human-browser/src/server.ts --outfile dist/yolo-human-browser",
     "aot:agent-runner": "bun build --compile --bytecode --minify apps/ai-agent-runner/src/index.ts --outfile dist/yolo-agent-runner",
+    "aot:report": "bun scripts/aot-report.ts",
     "aot:all": "bun run aot:web && bun run aot:web-mcp && bun run aot:human-browser && bun run aot:agent-runner",
     "docs:generate": "bun run scripts/generate-docs.ts",
     "docs:manifest": "bun run scripts/generate-docs.ts",
