@@ -35,5 +35,5 @@ test("ServoWebDriver drives a W3C WebDriver server", async () => {
   await driver.close();
   await expect(driver.title()).rejects.toThrow("closed");
   expect(seen).toContain("DELETE /session/s1");
-  server.stop(true);
+  void server.stop(true);
 });

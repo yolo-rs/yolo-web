@@ -57,13 +57,13 @@ describe("web-mcp JSON-RPC protocol (mcp-native)", () => {
       stdout: "pipe",
       stderr: "ignore",
     });
-    proc.stdin.write(
+    void proc.stdin.write(
       `${JSON.stringify(call(1, "initialize", { protocolVersion: "2025-06-18" }))}\n`,
     );
-    proc.stdin.write(
+    void proc.stdin.write(
       `${JSON.stringify(call(2, "tools/call", { name: "servo_css_specificity", arguments: { selector: "li" } }))}\n`,
     );
-    proc.stdin.end();
+    void proc.stdin.end();
     const lines = (await new Response(proc.stdout).text())
       .trim()
       .split("\n")

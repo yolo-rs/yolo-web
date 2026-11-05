@@ -123,7 +123,7 @@ describe("@yolo-web/browser-sdk", () => {
   });
 
   afterAll(() => {
-    mockServer.stop(true);
+    void mockServer.stop(true);
   });
 
   test("automates page via CDP + MCP and supports Human Co-Pilot handoff", async () => {

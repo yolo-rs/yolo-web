@@ -378,7 +378,7 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
       browserTargetId = null;
       browserSessionId = null;
       browserVersion = null;
-      server.stop(true);
+      void server.stop(true);
     },
   };
 }

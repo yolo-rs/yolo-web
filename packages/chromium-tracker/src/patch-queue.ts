@@ -117,7 +117,7 @@ export async function validateQueue(
   if (meta.schema !== 1)
     findings.push({
       level: "error",
-      message: `unsupported schema ${meta.schema}`,
+      message: `unsupported schema ${String((meta as { schema: unknown }).schema)}`,
     });
   if (!meta.owner)
     findings.push({ level: "error", message: "queue owner is required" });

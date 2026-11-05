@@ -200,7 +200,7 @@ describe("@yolo-web/human-browser CDP service", () => {
     } finally {
       await workbench.stop();
       expect(methods).toContain("Target.closeTarget");
-      cdpServer.stop(true);
+      void cdpServer.stop(true);
     }
   });
 });

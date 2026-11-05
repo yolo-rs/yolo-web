@@ -91,7 +91,7 @@ async function login(): Promise<void> {
       clearTimeout(timeout);
     }
   } finally {
-    server.stop(true);
+    void server.stop(true);
   }
 }
 

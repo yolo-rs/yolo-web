@@ -104,7 +104,7 @@ export class YoloMcpClient implements AsyncDisposable {
       throw new Error("MCP stdio process stdin is not writable");
     }
 
-    this.proc.stdin.write(`${JSON.stringify(payload)}\n`);
+    void this.proc.stdin.write(`${JSON.stringify(payload)}\n`);
     await this.proc.stdin.flush();
 
     if (!this.stdoutReader) {

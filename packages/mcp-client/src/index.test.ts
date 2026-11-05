@@ -154,7 +154,7 @@ describe("@yolo-web/mcp-client", () => {
   });
 
   afterAll(() => {
-    mockMcpServer.stop(true);
+    void mockMcpServer.stop(true);
   });
 
   test("executes MCP tools over HTTP JSON-RPC", async () => {

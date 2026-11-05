@@ -207,8 +207,8 @@ export class McpServer {
     write: (line: string) => void = (() => {
       const w = Bun.stdout.writer();
       return (line: string) => {
-        w.write(line);
-        w.flush();
+        void w.write(line);
+        void w.flush();
       };
     })(),
   ): Promise<void> {

@@ -251,7 +251,7 @@ export class Command {
   ): this {
     const tokens = opts.from === "user" ? [...argv] : argv.slice(2);
     try {
-      this.run(tokens);
+      void this.run(tokens);
     } catch (error) {
       if (this._exitOverride || !(error instanceof CliError)) throw error;
       console.error(`error: ${error.message}`);

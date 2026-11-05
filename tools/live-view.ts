@@ -193,7 +193,7 @@ export async function startLiveViewServer(options?: {
         }
       }
       wsClients.clear();
-      server.stop(true);
+      void server.stop(true);
     },
   };
 }

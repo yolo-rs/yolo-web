@@ -73,7 +73,9 @@ const server = Bun.serve<{ role: string }>({
       else if (m.type === "control")
         send(workers, m); // {type:"control", cmd:"pause"|"resume"}
       else if (m.type === "status")
-        status().then((s) => ws.send(JSON.stringify({ type: "status", ...s })));
+        void status().then((s) =>
+          ws.send(JSON.stringify({ type: "status", ...s })),
+        );
     },
   },
 });

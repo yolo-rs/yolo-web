@@ -114,7 +114,7 @@ describe("@yolo-web/cdp-client", () => {
   });
 
   afterAll(() => {
-    mockServer.stop(true);
+    void mockServer.stop(true);
   });
 
   test("queries version, targets, navigates, evaluates, captures media, and disposes cleanly", async () => {

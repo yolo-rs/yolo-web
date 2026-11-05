@@ -60,7 +60,7 @@ afterAll(async () => {
       break;
     } catch (error) {
       if (attempt >= 40) {
-        console.warn(`could not remove ${work}: ${error}`);
+        console.warn(`could not remove ${work}: ${String(error)}`);
         break;
       }
       await Bun.sleep(250);

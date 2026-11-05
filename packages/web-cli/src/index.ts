@@ -563,7 +563,7 @@ export function createWebCli(): Command {
         );
         await proc.exited;
       } catch (e) {
-        console.error(`[web serve] Subprocess exited: ${e}`);
+        console.error(`[web serve] Subprocess exited: ${String(e)}`);
       }
     });
 
