@@ -36,6 +36,10 @@ const HEADLESS_FRAME_RATE: i32 = 30;
 const HEADLESS_BACKGROUND: u32 = 0xFFFF_FFFF;
 /// Grace period between closing the shell's browsers and forcing the quit.
 const QUIT_FALLBACK_MS: i64 = 3_000;
+/// Attempts to reload a `chrome-extension://` page that failed to load.
+const EXTENSION_RETRIES: u32 = 40;
+/// Delay between those attempts.
+const EXTENSION_RETRY_DELAY_MS: i64 = 250;
 
 /// Shared browser-process state.
 pub type Shared = Arc<Mutex<ShellState>>;
@@ -99,6 +103,12 @@ pub struct ShellState {
     smoke_pending: Option<(String, i32)>,
     last_title: String,
     last_url: String,
+    /// `chrome-extension://` page whose navigation waits for the extension
+    /// loaded by `--load-extension` to be registered (see
+    /// `defer_extension_url`).
+    deferred_url: Option<String>,
+    /// Retries left for a failed `chrome-extension://` navigation.
+    extension_retries: u32,
 }
 
 impl ShellState {
@@ -125,6 +135,8 @@ impl ShellState {
             smoke_pending: None,
             last_title: String::new(),
             last_url: String::new(),
+            deferred_url: None,
+            extension_retries: EXTENSION_RETRIES,
         }))
     }
 
@@ -193,6 +205,39 @@ impl ShellState {
         } else {
             format!("{title} - {WINDOW_TITLE}")
         }
+    }
+
+    /// Extensions passed with `--load-extension` register asynchronously after
+    /// the browser context initializes, so a browser created straight at
+    /// `chrome-extension://<id>/page.html` can lose the race and fail with
+    /// an error page. Such a URL is parked here and the browser starts at
+    /// `about:blank`; the first blank load then navigates to it.
+    fn defer_extension_url(&mut self, url: &str) -> String {
+        if is_extension_url(url) && self.deferred_url.is_none() {
+            self.deferred_url = Some(url.to_string());
+            self.extension_retries = EXTENSION_RETRIES;
+            return "about:blank".to_string();
+        }
+        url.to_string()
+    }
+
+    /// Takes the parked extension URL once the blank page has loaded.
+    fn take_deferred_url(&mut self, loaded_url: &str) -> Option<String> {
+        if loaded_url.starts_with("about:blank") {
+            self.deferred_url.take()
+        } else {
+            None
+        }
+    }
+
+    /// Consumes one retry for a failed extension page; `true` when the
+    /// navigation should be attempted again.
+    fn take_extension_retry(&mut self, failed_url: &str) -> bool {
+        if !is_extension_url(failed_url) || self.extension_retries == 0 {
+            return false;
+        }
+        self.extension_retries -= 1;
+        true
     }
 
     fn on_address_change(&mut self, url: &str) {
@@ -343,8 +388,14 @@ fn cef_string(value: Option<&CefString>) -> String {
     value.map(CefString::to_string).unwrap_or_default()
 }
 
+fn is_extension_url(url: &str) -> bool {
+    url.starts_with("chrome-extension://")
+}
+
 /// Creates a browser window for `url`. Must run on the CEF UI thread.
 pub fn create_browser_window(state: &Shared, url: &str) {
+    let url = lock(state).defer_extension_url(url);
+    let url = url.as_str();
     if lock(state).config.windowless {
         create_windowless_browser(state, url);
         return;
@@ -677,6 +728,13 @@ wrap_load_handler! {
                 return;
             }
             let url = CefString::from(&frame.url()).to_string();
+            let deferred = lock(&self.state).take_deferred_url(&url);
+            if let Some(target) = deferred {
+                // The browser started at about:blank; the extension is
+                // registered by now, so go to the page that was asked for.
+                frame.load_url(Some(&CefString::from(target.as_str())));
+                return;
+            }
             let patch_dir = lock(&self.state).config.webui_patch_dir.clone();
             if let Some(script) = patch_dir
                 .as_deref()
@@ -696,7 +754,7 @@ wrap_load_handler! {
 
         fn on_load_error(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             frame: Option<&mut Frame>,
             error_code: Errorcode,
             error_text: Option<&CefString>,
@@ -709,6 +767,15 @@ wrap_load_handler! {
             let code = sys::cef_errorcode_t::from(error_code);
             if code == sys::cef_errorcode_t::ERR_ABORTED {
                 return;
+            }
+            let failed = cef_string(failed_url);
+            if lock(&self.state).take_extension_retry(&failed) {
+                // Extension still registering: try the same page again.
+                if let Some(browser) = browser.cloned() {
+                    let mut task = ReloadExtensionTask::new(browser, failed);
+                    post_delayed_task(ThreadId::UI, Some(&mut task), EXTENSION_RETRY_DELAY_MS);
+                    return;
+                }
             }
             let actions = lock(&self.state).on_main_frame_error(
                 code as i32,
@@ -729,6 +796,21 @@ wrap_task! {
         fn execute(&self) {
             let actions = lock(&self.state).on_smoke_timeout();
             actions.run(&self.state);
+        }
+    }
+}
+
+wrap_task! {
+    struct ReloadExtensionTask {
+        browser: Browser,
+        url: String,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            if let Some(frame) = self.browser.main_frame() {
+                frame.load_url(Some(&CefString::from(self.url.as_str())));
+            }
         }
     }
 }
