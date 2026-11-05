@@ -1,0 +1,468 @@
+{
+  "site": "aphrody",
+  "origin": "https://aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T09:58:03.185Z",
+  "durationS": 66,
+  "limits": {
+    "maxPages": 60,
+    "depth": 2,
+    "linkChecks": 150,
+    "assetChecks": 120,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [
+      "/api/sessions",
+      "/privacy/clear"
+    ],
+    "sitemaps": [
+      "https://aphrody.com/sitemap.xml"
+    ],
+    "body": "# aphrody.com: every public page may be indexed, by search engines and by AI crawlers alike.\nUser-agent: *\nAllow: /\nDisallow: /api/sessions\nDisallow: /privacy/clear\n\nSitemap: https://aphrody.com/sitemap.xml\n"
+  },
+  "sitemap": {
+    "url": "https://aphrody.com/sitemap.xml",
+    "status": 200,
+    "urls": 3
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://aphrody.com/",
+        "status": 301,
+        "location": "https://aphrody.com/"
+      },
+      {
+        "url": "https://aphrody.com/",
+        "status": 200
+      }
+    ]
+  },
+  "www": [
+    {
+      "url": "https://www.aphrody.com/",
+      "status": 301,
+      "location": "https://aphrody.com/"
+    },
+    {
+      "url": "https://aphrody.com/",
+      "status": 200
+    }
+  ],
+  "homeRedirects": [
+    {
+      "url": "https://aphrody.com/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "content-security-policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": null,
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-site",
+    "cache-control": "no-cache",
+    "content-encoding": "br",
+    "server": "nginx",
+    "cf-cache-status": null
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Let's Encrypt, CN=YE1",
+    "notBefore": "Oct 24 10:11:43 2026 GMT",
+    "notAfter": "Jan 22 10:11:42 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 4,
+    "statuses": {
+      "200": 4
+    },
+    "linkChecked": 3,
+    "linkTargets": 3,
+    "assetChecked": 13,
+    "assetTargets": 13
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": [
+        "https://aphrody.com/status"
+      ]
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://aphrody.com/status"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://aphrody.com/status"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": [
+        "https://aphrody.com/"
+      ]
+    }
+  ],
+  "lighthouse": [
+    {
+      "url": "https://aphrody.com/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 99,
+      "a11y": 98,
+      "bp": 96,
+      "seo": 100,
+      "lcp": 996.0575,
+      "cls": 0,
+      "tbt": 95.99999999999989,
+      "fcp": 996.0575,
+      "si": 2221.651804496508,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "image-aspect-ratio (0)",
+        "mainthread-work-breakdown (0)",
+        "heading-order (0)",
+        "label-content-name-mismatch (0)",
+        "network-dependency-tree-insight (0)",
+        "unsized-images (50)"
+      ]
+    },
+    {
+      "url": "https://aphrody.com/",
+      "form": "desktop",
+      "ok": true,
+      "perf": 100,
+      "a11y": 98,
+      "bp": 96,
+      "seo": 100,
+      "lcp": 275.3555,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 275.3555,
+      "si": 640.0296273622638,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "image-aspect-ratio (0)",
+        "heading-order (0)",
+        "label-content-name-mismatch (0)",
+        "network-dependency-tree-insight (0)",
+        "unsized-images (50)",
+        "unminified-css (50)"
+      ]
+    },
+    {
+      "url": "https://aphrody.com/status",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 88,
+      "bp": 100,
+      "seo": 92,
+      "lcp": 833.748,
+      "cls": 0,
+      "tbt": 2.5,
+      "fcp": 833.748,
+      "si": 833.748,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "meta-refresh (0)",
+        "td-has-header (0)",
+        "meta-description (0)",
+        "unsized-images (50)",
+        "image-delivery-insight (50)"
+      ]
+    },
+    {
+      "url": "https://aphrody.com/privacy",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 835.281,
+      "cls": 0.03102092926775614,
+      "tbt": 9,
+      "fcp": 835.281,
+      "si": 835.281,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "network-dependency-tree-insight (0)",
+        "unminified-css (50)",
+        "unminified-javascript (50)",
+        "cache-insight (50)",
+        "render-blocking-insight (50)"
+      ]
+    }
+  ],
+  "lighthouseNote": "",
+  "pages": [
+    {
+      "url": "https://aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://aphrody.com/",
+      "hops": [
+        {
+          "url": "https://aphrody.com/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html; charset=utf-8",
+      "ms": 266,
+      "htmlBytes": 45640,
+      "lang": "en",
+      "title": "Aphrody &bull; The Calm, Divine Operating System",
+      "description": "Aphrody is a calm, divine operating system designed for focus and sublime creative expression. Experience the fluid creative canvas of WordCraft, DeckCraft, GridCraft, and VectorCraft, ambient Gemini multimodal intelligence, and the sovereign spirit of Byron Love.",
+      "canonical": "https://aphrody.com/",
+      "robotsMeta": "index, follow, max-image-preview:large",
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:type": "website",
+        "og:site_name": "Aphrody",
+        "og:locale": "en_US",
+        "og:url": "https://aphrody.com/",
+        "og:title": "Aphrody &bull; The Calm, Divine Operating System",
+        "og:description": "The calm, divine operating system. Fluid creative canvas, ambient Gemini multimodal intelligence, and Byron Love.",
+        "og:image": "https://aphrody.com/og.png",
+        "og:image:type": "image/png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:image:alt": "Aphrody: The Calm, Divine Operating System"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [],
+      "jsonLd": 1,
+      "links": [
+        "https://aphrody.com/",
+        "https://aphrody.com/privacy",
+        "https://aphrody.com/status",
+        "https://aphrody.com/llms.txt",
+        "https://aphrody.com/manifest.webmanifest",
+        "https://aphrody.com/byron.png",
+        "https://aphrody.com/byron.webp",
+        "https://github.com/aphrody-labs"
+      ],
+      "assets": [
+        "https://aphrody.com/favicon.ico",
+        "https://aphrody.com/favicon.svg",
+        "https://aphrody.com/apple-touch-icon.png",
+        "https://aphrody.com/manifest.webmanifest",
+        "https://aphrody.com/site.css",
+        "https://aphrody.com/byron.webp",
+        "https://aphrody.com/byron.png",
+        "https://aphrody.com/pet-idle.webp",
+        "https://aphrody.com/site.js"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 2,
+      "copy": [
+        {
+          "kind": "garbled-double",
+          "match": "Companion Companion"
+        }
+      ]
+    },
+    {
+      "url": "https://aphrody.com/privacy",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://aphrody.com/privacy",
+      "hops": [
+        {
+          "url": "https://aphrody.com/privacy",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html; charset=utf-8",
+      "ms": 262,
+      "htmlBytes": 3405,
+      "lang": "en",
+      "title": "Privacy and storage · Aphrody",
+      "description": "What aphrody.com stores in your browser, why, and how to inspect or clear it.",
+      "canonical": "https://aphrody.com/privacy",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:type": "website",
+        "og:site_name": "Aphrody",
+        "og:title": "Privacy and storage",
+        "og:description": "What aphrody.com stores in your browser, why, and how to inspect or clear it.",
+        "og:url": "https://aphrody.com/privacy",
+        "og:image": "https://aphrody.com/og.png?title=Privacy+and+storage"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [
+        "https://aphrody.com/"
+      ],
+      "assets": [
+        "https://aphrody.com/favicon.svg",
+        "https://aphrody.com/manifest.webmanifest",
+        "https://aphrody.com/site.css",
+        "https://aphrody.com/site.js"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://aphrody.com/status",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://aphrody.com/status",
+      "hops": [
+        {
+          "url": "https://aphrody.com/status",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 287,
+      "htmlBytes": 15183,
+      "lang": "en",
+      "title": "Bun OS status",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://aphrody.com/status/nightly/2026-11-05T0231/01-desktop.png",
+        "https://aphrody.com/status/nightly/2026-11-05T0231/02-linux-and-web.png",
+        "https://aphrody.com/status/nightly/2026-11-05T0231/03-android-window.png",
+        "https://aphrody.com/status/nightly/2026-11-05T0231/04-fdroid-window.png"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 4,
+      "copy": []
+    },
+    {
+      "url": "https://aphrody.com/manifest.webmanifest",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://aphrody.com/manifest.webmanifest",
+      "hops": [
+        {
+          "url": "https://aphrody.com/manifest.webmanifest",
+          "status": 200
+        }
+      ],
+      "contentType": "application/manifest+json",
+      "ms": 263,
+      "htmlBytes": 0,
+      "lang": null,
+      "title": "",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": false,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

@@ -1,0 +1,332 @@
+{
+  "site": "auto",
+  "origin": "https://auto.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T09:57:28.292Z",
+  "durationS": 35,
+  "limits": {
+    "maxPages": 60,
+    "depth": 2,
+    "linkChecks": 150,
+    "assetChecks": 120,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [],
+    "sitemaps": [],
+    "body": "# As a condition of accessing this website, you agree to abide by the following\n# content signals:\n\n# (a)  If a content-signal = yes, you may collect content for the corresponding\n#      use.\n# (b)  If a content-signal = no, you may not collect content for the\n#      corresponding use.\n# (c)  If the website operator does not include a content signal for a\n#      corresponding use, the website operator neither grants nor restricts\n#      permission via content signal with respect to the corresponding use.\n\n# The content signals and their meanings are:\n\n# search:   building a search index and providing search results (e.g., returning\n#           hyperlinks and short excerpts from your website's contents). Search does not\n#           include providing AI-generated search summaries.\n# ai-input: inputting content into one or more AI models (e.g., retrieval\n#           augmented generation, grounding, or other real-time taking of content for\n#           generative AI search answers).\n# ai-train: training or fine-tuning AI models.\n\n# ANY RESTRICTIONS EXPRESSED VIA CONTENT SIGNALS ARE EXPRESS RESERVATIONS OF\n# RIGHTS UNDER ARTICLE 4 OF THE EUROPEAN UNION DIRECTIVE 2019/790 ON COPYRIGHT\n# AND RELATED RIGHTS IN THE DIGITAL SINGLE MARKET.\n"
+  },
+  "sitemap": {
+    "url": "https://auto.aphrody.com/sitemap.xml",
+    "status": 404,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://auto.aphrody.com/",
+        "status": 301,
+        "location": "https://auto.aphrody.com/"
+      },
+      {
+        "url": "https://auto.aphrody.com/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://auto.aphrody.com/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": null,
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": "no-cache",
+    "content-encoding": "zstd",
+    "server": "cloudflare",
+    "cf-cache-status": "DYNAMIC"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Let's Encrypt, CN=YE2",
+    "notBefore": "Oct 11 23:27:52 2026 GMT",
+    "notAfter": "Jan  9 23:27:51 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 3,
+    "statuses": {
+      "200": 2,
+      "405": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 2,
+    "assetTargets": 2
+  },
+  "brokenLinks": [
+    {
+      "url": "https://auto.aphrody.com/mcp",
+      "status": 405,
+      "from": "(crawl frontier)",
+      "error": ""
+    }
+  ],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": [
+        "https://auto.aphrody.com/"
+      ]
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://auto.aphrody.com/"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://auto.aphrody.com/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [
+    {
+      "url": "https://auto.aphrody.com/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 59,
+      "a11y": 97,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 6305.915,
+      "cls": 0,
+      "tbt": 198,
+      "fcp": 6103.415,
+      "si": 6103.415,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "color-contrast (0)",
+        "unused-css-rules (0)",
+        "unused-javascript (0)",
+        "forced-reflow-insight (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (0)"
+      ]
+    },
+    {
+      "url": "https://auto.aphrody.com/",
+      "form": "desktop",
+      "ok": true,
+      "perf": 94,
+      "a11y": 97,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 1434.652,
+      "cls": 0.0007132422924607449,
+      "tbt": 46,
+      "fcp": 954.652,
+      "si": 954.652,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "color-contrast (0)",
+        "unused-css-rules (0)",
+        "unused-javascript (0)",
+        "forced-reflow-insight (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (0)"
+      ]
+    }
+  ],
+  "lighthouseNote": "",
+  "pages": [
+    {
+      "url": "https://auto.aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://auto.aphrody.com/",
+      "hops": [
+        {
+          "url": "https://auto.aphrody.com/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html;charset=utf-8",
+      "ms": 333,
+      "htmlBytes": 2291,
+      "lang": "fr",
+      "title": "auto · Devis, factures et suivi de chantiers pour le BTP",
+      "description": "auto accompagne les artisans et petites entreprises du BTP : devis, factures, achats fournisseurs, chantiers et recherche de documents, au bureau comme sur le terrain.",
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {
+        "og:title": "auto · Du chantier au bureau, tout se retrouve",
+        "og:description": "Devis, factures, achats et documents : gardez le fil de vos chantiers, au même endroit. Découvrez les écrans réels d’auto et commencez dans votre navigateur."
+      },
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://auto.aphrody.com/chunk-8p9wtwr7.css",
+        "https://auto.aphrody.com/chunk-rjfavyrx.js"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://auto.aphrody.com/health",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://auto.aphrody.com/health",
+      "hops": [
+        {
+          "url": "https://auto.aphrody.com/health",
+          "status": 200
+        }
+      ],
+      "contentType": "application/json;charset=utf-8",
+      "ms": 319,
+      "htmlBytes": 0,
+      "lang": null,
+      "title": "",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": false,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://auto.aphrody.com/mcp",
+      "depth": 1,
+      "status": 405,
+      "finalUrl": "https://auto.aphrody.com/mcp",
+      "hops": [
+        {
+          "url": "https://auto.aphrody.com/mcp",
+          "status": 405
+        }
+      ],
+      "contentType": "",
+      "ms": 344,
+      "htmlBytes": 0,
+      "lang": null,
+      "title": "",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": false,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}
