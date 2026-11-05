@@ -341,17 +341,41 @@ try {
     const r = await call("browser_screenshot", {});
     const image = r.content.find((c) => c.type === "image");
     if (!image?.data) throw new Error("no image content");
-    const png = Buffer.from(image.data, "base64");
-    const isPng = png
+    const bytes = Buffer.from(image.data, "base64");
+    const isPng = bytes
       .subarray(0, 8)
       .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-    if (!isPng) throw new Error(`not a PNG (mime ${image.mimeType})`);
+    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+    if (!isPng && !isJpeg)
+      throw new Error(`not PNG or JPEG (mime ${image.mimeType})`);
+    let width = 0;
+    let height = 0;
+    if (isPng) {
+      width = bytes.readUInt32BE(16);
+      height = bytes.readUInt32BE(20);
+    } else {
+      // Walk JPEG segments to the first start-of-frame marker.
+      for (let at = 2; at + 9 < bytes.length;) {
+        const marker = bytes[at + 1] as number;
+        if (
+          marker >= 0xc0 &&
+          marker <= 0xcf &&
+          ![0xc4, 0xc8, 0xcc].includes(marker)
+        ) {
+          height = bytes.readUInt16BE(at + 5);
+          width = bytes.readUInt16BE(at + 7);
+          break;
+        }
+        at += 2 + bytes.readUInt16BE(at + 2);
+      }
+    }
+    if (!width || !height) throw new Error("could not read image dimensions");
     return {
       mimeType: image.mimeType,
-      bytes: png.length,
-      width: png.readUInt32BE(16),
-      height: png.readUInt32BE(20),
-      sha256: createHash("sha256").update(png).digest("hex"),
+      bytes: bytes.length,
+      width,
+      height,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
     };
   });
   await step(
