@@ -2,7 +2,6 @@
 import type { BunPlugin, PluginBuilder } from "bun";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
 export type ModuleTarget = string | URL;
 
@@ -13,8 +12,8 @@ export interface BunPluginSpec {
 }
 
 function targetPath(target: ModuleTarget): string {
-  if (target instanceof URL) return fileURLToPath(target);
-  return target.startsWith("file:") ? fileURLToPath(target) : target;
+  if (target instanceof URL) return Bun.fileURLToPath(target);
+  return target.startsWith("file:") ? Bun.fileURLToPath(target) : target;
 }
 
 function forwarder(path: string): string {

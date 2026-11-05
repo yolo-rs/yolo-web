@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { randomBytes } from "node:crypto";
 import { CodeChallengeMethod } from "google-auth-library";
 import { GOOGLE_SCOPES, googleApi, googlePaths, oauthClient, saveOAuthToken } from "./api.ts";
 import { syncAgentHome } from "./drive-sync.ts";
@@ -7,7 +6,7 @@ import { syncTrainedArtifacts } from "./drive-model-sync.ts";
 
 async function login(): Promise<void> {
   const client = await oauthClient(false);
-  const state = randomBytes(24).toString("hex");
+  const state = crypto.getRandomValues(new Uint8Array(24)).toHex();
   const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;

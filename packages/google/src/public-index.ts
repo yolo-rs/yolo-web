@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /* oxlint-disable no-control-regex -- Index inputs reject raw control characters. */
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, parse, resolve, sep } from "node:path";
 
@@ -41,7 +40,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 const MAX_SNAPSHOT = 4 * 1024 * 1024;
 const MAX_CACHE = 128;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
-const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
+const sha256 = (value: Uint8Array | string) => new Bun.CryptoHasher("sha256").update(value).digest("hex");
 const bytes = (value: string) => Buffer.byteLength(value, "utf8");
 function reject(): never {
   throw new Error("Public index unavailable");

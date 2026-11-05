@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 /* eslint-disable no-await-in-loop -- Seven native documents and their evidence are reconciled sequentially. */
-import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { googleHome } from "./client.ts";
@@ -37,7 +36,7 @@ function required(name: string): string {
   return value;
 }
 function digest(data: string): string {
-  return createHash("sha256").update(data).digest("hex");
+  return new Bun.CryptoHasher("sha256").update(data).digest("hex");
 }
 /** A reviewed snapshot must still describe the current remote content when promoted. */
 export function reviewedSnapshotHashes(snapshot: string, remoteHash: string) {

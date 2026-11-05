@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /* eslint-disable no-await-in-loop -- Resumable chunks and state transitions must execute sequentially. */
 /** Resumable, upload-only backup of protected dbfr training artifacts. */
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { chmod, mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { googleHome } from "./client.ts";
@@ -59,9 +57,9 @@ async function artifacts(root: string, prefix: string): Promise<Artifact[]> {
   return found;
 }
 async function digests(path: string): Promise<{ sha256: string; md5: string }> {
-  const sha = createHash("sha256"),
-    md5 = createHash("md5");
-  for await (const chunk of createReadStream(path)) {
+  const sha = new Bun.CryptoHasher("sha256"),
+    md5 = new Bun.CryptoHasher("md5");
+  for await (const chunk of Bun.file(path).stream()) {
     sha.update(chunk);
     md5.update(chunk);
   }
