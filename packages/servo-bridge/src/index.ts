@@ -615,7 +615,7 @@ export const SERVO_CONSOLIDATED_CRATES: readonly ServoCrateEntry[] = [
     stars: 36100,
     category: "core-engine",
     purpose:
-      "Full parallel W3C browser engine (constellation, layout, script, net, paint, webgpu, webxr)",
+      "Full parallel W3C browser engine snapshot (constellation, layout, script, net, paint, webgpu, webxr); duplicated components live in the crates/servo-* workspace crates",
   },
   {
     id: "servo-webrender",

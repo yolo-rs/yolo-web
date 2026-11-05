@@ -1909,13 +1909,6 @@
     },
     {
       "title": "README",
-      "path": "crates/servo-engine/components/hyper_serde/README.md",
-      "category": "crates",
-      "sizeBytes": 1194,
-      "lastModified": "2026-11-04T09:55:40.532Z"
-    },
-    {
-      "title": "README",
       "path": "crates/servo-engine/components/script_bindings/third_party/ply/README.md",
       "category": "crates",
       "sizeBytes": 8998,

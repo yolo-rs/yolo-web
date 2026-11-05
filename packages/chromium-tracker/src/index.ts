@@ -453,7 +453,7 @@ export class ChromiumTrackingEngine {
         name: "Servo Stylo CSS & Euclid Geometry Accelerator",
         description:
           "Provides parallel CSS selector matching and sub-pixel DOM bounds calculation",
-        upstreamFile: "crates/servo-engine/src/lib.rs",
+        upstreamFile: "crates/servo-engine/components/servo/lib.rs",
         patchStrategy: "cxx_subclass",
         status: "proposal",
       },
