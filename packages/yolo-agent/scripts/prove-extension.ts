@@ -281,6 +281,27 @@ try {
     return (r.result.tools as { name: string }[]).map((t) => t.name);
   });
 
+  await step(
+    "offscreen document connected the extension to the bridge",
+    async () => {
+      const deadline = Date.now() + 30_000;
+      let last = "";
+      while (Date.now() < deadline) {
+        const response = await rpc("tools/call", {
+          name: "browser_observe",
+          arguments: {},
+        });
+        last = JSON.stringify(response.result?.content ?? response.error).slice(
+          0,
+          200,
+        );
+        if (!last.includes("not connected"))
+          return { waitedMs: 30_000 - (deadline - Date.now()) };
+        await sleep(250);
+      }
+      throw new Error(`still not connected: ${last}`);
+    },
+  );
   await step("browser_navigate (fixture home)", async () => {
     const r = await call("browser_navigate", { url: `${fixture.url}/` });
     return text(r).slice(0, 600);
