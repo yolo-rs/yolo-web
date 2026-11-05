@@ -4690,6 +4690,7 @@ mod tests {
 
         // Keep sending requests so idle is never reached
         tokio::spawn(async move {
+            #[allow(clippy::for_unbounded_range)]
             for i in 0u64.. {
                 let _ = tx.send(cdp_event(
                     "Network.requestWillBeSent",
@@ -4760,6 +4761,7 @@ mod tests {
         let manager = test_manager(Vec::new()).await;
         let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
         tokio::spawn(async move {
+            #[allow(clippy::for_unbounded_range)]
             for i in 0u64.. {
                 let _ = tx.send(cdp_event(
                     "Network.requestWillBeSent",

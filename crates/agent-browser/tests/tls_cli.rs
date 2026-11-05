@@ -301,7 +301,7 @@ fn read_trust_changes_rotate_and_clear_without_browser_or_daemon_restart() {
     read(&session, &b.url(), &[], false);
     std::fs::write(&ca, fixtures().ca_b).unwrap();
     read(&session, &b.url(), &[], true);
-    let same = session.ca("equivalent.pem", &format!("{0}{0}", fixtures().ca_b));
+    let same = session.ca("equivalent.pem", format!("{0}{0}", fixtures().ca_b));
     read(
         &session,
         &b.url(),
@@ -343,7 +343,7 @@ fn read_trust_survives_a_daemon_restart_until_close() {
 #[test]
 fn trust_preserves_hostname_and_expiry_validation() {
     let a = TlsServer::a();
-    let expired = TlsServer::new(&fixtures().expired, &fixtures().server_a.1);
+    let expired = TlsServer::new(fixtures().expired, fixtures().server_a.1);
     let session = Session::new();
     let ca = session.ca("ca.pem", fixtures().ca_a);
     read(

@@ -11133,6 +11133,7 @@ async fn e2e_recording_cursor_stays_aligned_during_drag() {
     let mut measured = 0;
     let mut worst = 0;
     let mut positions = std::collections::HashSet::new();
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for bytes in output.stdout.chunks_exact(640 * 80 * 3) {
         let frame = image::RgbImage::from_raw(640, 80, bytes.to_vec()).unwrap();
         let line = (0..640).find(|&x| {
