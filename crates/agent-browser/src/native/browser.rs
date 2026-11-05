@@ -3859,7 +3859,9 @@ mod tests {
                                 };
                                 json!({"id": command["id"], "result": result})
                             };
-                            ws.send(Message::Text(response.to_string())).await.unwrap();
+                            ws.send(Message::Text(response.to_string().into()))
+                                .await
+                                .unwrap();
                         }
                         Some(Ok(Message::Close(_))) => break,
                         Some(Ok(_)) => {}
@@ -4851,7 +4853,7 @@ mod tests {
                     "id": id,
                     "result": { "result": { "type": "boolean", "value": false } }
                 });
-                let _ = ws.send(Message::Text(reply.to_string())).await;
+                let _ = ws.send(Message::Text(reply.to_string().into())).await;
                 // Stay connected without a load event so the wait must expire.
                 sleep(Duration::from_secs(5)).await;
             }
@@ -4967,7 +4969,7 @@ mod tests {
                     _ => Some(respond(json!({}))),
                 };
                 if let Some(r) = reply {
-                    let _ = tx.send(Message::Text(r)).await;
+                    let _ = tx.send(Message::Text(r.into())).await;
                 }
             }
         });
@@ -5091,7 +5093,7 @@ mod tests {
                     _ => Some(respond(json!({}))),
                 };
                 if let Some(r) = reply {
-                    let _ = tx.send(Message::Text(r)).await;
+                    let _ = tx.send(Message::Text(r.into())).await;
                 }
             }
         });
@@ -5218,7 +5220,7 @@ mod tests {
                     _ => Some(respond(json!({}))),
                 };
                 if let Some(r) = reply {
-                    let _ = tx.send(Message::Text(r)).await;
+                    let _ = tx.send(Message::Text(r.into())).await;
                 }
             }
         });
@@ -5413,7 +5415,7 @@ mod tests {
                     _ => Some(respond(json!({}))),
                 };
                 if let Some(r) = reply {
-                    let _ = tx.send(Message::Text(r)).await;
+                    let _ = tx.send(Message::Text(r.into())).await;
                 }
             }
         });

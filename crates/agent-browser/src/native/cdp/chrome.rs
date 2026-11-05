@@ -2970,7 +2970,7 @@ exec sleep 60
                     r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/147"}}}}"#,
                     id
                 );
-                ws.send(WsMsg::Text(reply)).await.unwrap();
+                ws.send(WsMsg::Text(reply.into())).await.unwrap();
             }
             let _ = ws.close(None).await;
         });
@@ -3010,7 +3010,7 @@ exec sleep 60
                     r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/148"}}}}"#,
                     id
                 );
-                ws.send(WsMsg::Text(reply)).await.unwrap();
+                ws.send(WsMsg::Text(reply.into())).await.unwrap();
             }
             let _ = ws.close(None).await;
         });

@@ -710,7 +710,9 @@ mod tests {
                 } else {
                     response["result"] = json!({ "identifier": "1" });
                 }
-                ws.send(Message::Text(response.to_string())).await.unwrap();
+                ws.send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
             }
         });
 

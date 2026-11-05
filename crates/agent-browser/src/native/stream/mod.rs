@@ -870,10 +870,9 @@ mod tests {
         server.broadcast_screencast_frame("bbb", &meta);
         expect_no_frame(&mut ws, 200).await;
 
-        ws.send(Message::Text(format!(
-            r#"{{"type":"ack","seq":{}}}"#,
-            wire_seq
-        )))
+        ws.send(Message::Text(
+            format!(r#"{{"type":"ack","seq":{}}}"#, wire_seq).into(),
+        ))
         .await
         .expect("send ack");
         let second = next_frame(&mut ws).await;
@@ -1010,9 +1009,11 @@ mod tests {
         .expect("server start");
 
         let mut ws = connect_client(server.port()).await;
-        ws.send(Message::Text(r#"{"type":"config","maxFps":1}"#.to_string()))
-            .await
-            .expect("send config");
+        ws.send(Message::Text(
+            r#"{"type":"config","maxFps":1}"#.to_string().into(),
+        ))
+        .await
+        .expect("send config");
         // Let the reader task apply the config before frames start flowing.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -1069,7 +1070,7 @@ mod tests {
 
         let mut ws = connect_client(server.port()).await;
         ws.send(Message::Text(
-            r#"{"type":"config","pacing":"ack"}"#.to_string(),
+            r#"{"type":"config","pacing":"ack"}"#.to_string().into(),
         ))
         .await
         .expect("send config");
@@ -1086,9 +1087,11 @@ mod tests {
 
         // Acknowledging releases exactly one frame, and it is the newest, not
         // the next in order.
-        ws.send(Message::Text(r#"{"type":"ack","seq":1}"#.to_string()))
-            .await
-            .expect("send ack");
+        ws.send(Message::Text(
+            r#"{"type":"ack","seq":1}"#.to_string().into(),
+        ))
+        .await
+        .expect("send ack");
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("seq").and_then(|v| v.as_u64()), Some(3));
 
@@ -1119,9 +1122,11 @@ mod tests {
         server.broadcast_frame(r#"{"type":"frame","seq":3,"data":"three"}"#);
         expect_no_frame(&mut ws, 300).await;
 
-        ws.send(Message::Text(r#"{"type":"ack","seq":1}"#.to_string()))
-            .await
-            .expect("send ack");
+        ws.send(Message::Text(
+            r#"{"type":"ack","seq":1}"#.to_string().into(),
+        ))
+        .await
+        .expect("send ack");
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("seq").and_then(|v| v.as_u64()), Some(3));
 
@@ -1144,13 +1149,15 @@ mod tests {
 
         let mut ws = connect_client(server.port()).await;
         ws.send(Message::Text(
-            r#"{"type":"config","pacing":"ack"}"#.to_string(),
+            r#"{"type":"config","pacing":"ack"}"#.to_string().into(),
         ))
         .await
         .expect("send config");
-        ws.send(Message::Text(r#"{"type":"ack","seq":9999999}"#.to_string()))
-            .await
-            .expect("send premature ack");
+        ws.send(Message::Text(
+            r#"{"type":"ack","seq":9999999}"#.to_string().into(),
+        ))
+        .await
+        .expect("send premature ack");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Delivery continues: each frame is covered by the watermark already
@@ -1182,7 +1189,7 @@ mod tests {
 
         let mut ws = connect_client(server.port()).await;
         ws.send(Message::Text(
-            r#"{"type":"config","pacing":"ack"}"#.to_string(),
+            r#"{"type":"config","pacing":"ack"}"#.to_string().into(),
         ))
         .await
         .expect("send config");
@@ -1196,7 +1203,7 @@ mod tests {
         expect_no_frame(&mut ws, 200).await;
 
         ws.send(Message::Text(
-            r#"{"type":"config","pacing":"push"}"#.to_string(),
+            r#"{"type":"config","pacing":"push"}"#.to_string().into(),
         ))
         .await
         .expect("send config");
@@ -1277,7 +1284,7 @@ mod tests {
             r#"{"type":"config","pacing":"push"}"#,
             r#"{"type":"config","maxFps":0}"#,
         ] {
-            ws.send(Message::Text(msg.to_string()))
+            ws.send(Message::Text(msg.to_string().into()))
                 .await
                 .expect("send config");
         }
@@ -1337,9 +1344,11 @@ mod tests {
         .expect("server start");
 
         let mut ws = connect_client(server.port()).await;
-        ws.send(Message::Text(r#"{"type":"config","maxFps":1}"#.to_string()))
-            .await
-            .expect("send config");
+        ws.send(Message::Text(
+            r#"{"type":"config","maxFps":1}"#.to_string().into(),
+        ))
+        .await
+        .expect("send config");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // First frame is immediate and arms next_allowed = now + 1s (1 fps).
@@ -1354,9 +1363,11 @@ mod tests {
 
         // Loosen to uncapped, then send a frame. It must not wait out the
         // stale 1 fps deadline.
-        ws.send(Message::Text(r#"{"type":"config","maxFps":0}"#.to_string()))
-            .await
-            .expect("send config uncapped");
+        ws.send(Message::Text(
+            r#"{"type":"config","maxFps":0}"#.to_string().into(),
+        ))
+        .await
+        .expect("send config uncapped");
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let t0 = std::time::Instant::now();

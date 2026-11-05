@@ -483,7 +483,7 @@ mod tests {
                     r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/136"}}}}"#,
                     id
                 );
-                ws.send(Message::Text(reply)).await.unwrap();
+                ws.send(Message::Text(reply.into())).await.unwrap();
             }
             let _ = ws.close(None).await;
         });

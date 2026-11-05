@@ -670,7 +670,7 @@ mod tests {
                                         let Some(event) = event else {
                                             break;
                                         };
-                                        tx.send(Message::Text(event.to_string())).await.unwrap();
+                                        tx.send(Message::Text(event.to_string().into())).await.unwrap();
                                     }
                                 }
                             }
@@ -685,13 +685,13 @@ mod tests {
                                 .await
                                 .expect("test should inject an event while screencast stops")
                                 .expect("test event channel should stay open");
-                                tx.send(Message::Text(event.to_string())).await.unwrap();
+                                tx.send(Message::Text(event.to_string().into())).await.unwrap();
                             }
                             json!({})
                         } else {
                             json!({})
                         };
-                        tx.send(Message::Text(json!({ "id": id, "result": result }).to_string()))
+                        tx.send(Message::Text(json!({ "id": id, "result": result }).to_string().into()))
                             .await
                             .unwrap();
                     }
@@ -699,7 +699,7 @@ mod tests {
                         let Some(event) = event else {
                             break;
                         };
-                        tx.send(Message::Text(event.to_string())).await.unwrap();
+                        tx.send(Message::Text(event.to_string().into())).await.unwrap();
                     }
                 }
             }
@@ -760,11 +760,11 @@ mod tests {
                             tx.send(Message::Text(json!({
                                 "id": id,
                                 "result": { "frameTree": { "frame": { "id": frame_id } } }
-                            }).to_string()))
+                            }).to_string().into()))
                             .await
                             .unwrap();
                         } else {
-                            tx.send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                            tx.send(Message::Text(json!({ "id": id, "result": {} }).to_string().into()))
                                 .await
                                 .unwrap();
                         }
@@ -773,7 +773,7 @@ mod tests {
                         let Some(event) = event else {
                             break;
                         };
-                        tx.send(Message::Text(event.to_string())).await.unwrap();
+                        tx.send(Message::Text(event.to_string().into())).await.unwrap();
                     }
                 }
             }
@@ -800,9 +800,11 @@ mod tests {
                         let method = command["method"].as_str().unwrap();
                         if method != "Page.getFrameTree" {
                             let id = command["id"].as_u64().unwrap();
-                            tx.send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
-                                .await
-                                .unwrap();
+                            tx.send(Message::Text(
+                                json!({ "id": id, "result": {} }).to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
                         }
                     }
                     Message::Ping(payload) => {

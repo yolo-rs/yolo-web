@@ -1410,7 +1410,7 @@ async fn test_obscura_e2e_unlaunchable_binary_does_not_attach_to_inherited_cdp()
                         let response = json!({"id": command["id"], "error": {
                             "code": -32000, "message": "controlled CDP endpoint must not be used by Obscura verification"
                         }});
-                        let _ = ws.send(Message::Text(response.to_string())).await;
+                        let _ = ws.send(Message::Text(response.to_string().into())).await;
                     }
                     Message::Close(_) => break,
                     _ => {}
@@ -10273,7 +10273,7 @@ async fn e2e_stream_click_is_not_queued_behind_a_mouse_sweep() {
             "x": 100 + (i % 400), "y": 100 + (i % 300),
             "button": "none", "clickCount": 0
         });
-        ws.send(Message::Text(mv.to_string()))
+        ws.send(Message::Text(mv.to_string().into()))
             .await
             .expect("mouse move should be accepted by the stream socket");
     }
@@ -10286,7 +10286,7 @@ async fn e2e_stream_click_is_not_queued_behind_a_mouse_sweep() {
             "type": "input_mouse", "eventType": event,
             "x": 200, "y": 200, "button": "left", "clickCount": 1
         });
-        ws.send(Message::Text(click.to_string()))
+        ws.send(Message::Text(click.to_string().into()))
             .await
             .expect("click should be accepted by the stream socket");
     }

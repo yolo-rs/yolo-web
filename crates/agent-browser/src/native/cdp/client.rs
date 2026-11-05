@@ -789,13 +789,13 @@ mod tests {
             let first_id = serde_json::from_str::<Value>(&first).unwrap()["id"]
                 .as_u64()
                 .unwrap();
-            ws.send(Message::Text(format!(
-                r#"{{"id":{first_id},"result":{{"value":"\ud800"}}}}"#
-            )))
+            ws.send(Message::Text(
+                format!(r#"{{"id":{first_id},"result":{{"value":"\ud800"}}}}"#).into(),
+            ))
             .await
             .unwrap();
             ws.send(Message::Text(
-                r#"{"method":"Fetch.requestPaused","params":{"requestId":"r1","request":{"url":"https://example.test/\udfff"}},"sessionId":"s1"}"#.to_string(),
+                r#"{"method":"Fetch.requestPaused","params":{"requestId":"r1","request":{"url":"https://example.test/\udfff"}},"sessionId":"s1"}"#.to_string().into(),
             ))
             .await
             .unwrap();
@@ -805,7 +805,9 @@ mod tests {
                 .as_u64()
                 .unwrap();
             ws.send(Message::Text(
-                json!({"id": second_id, "result": {"value": "ok"}}).to_string(),
+                json!({"id": second_id, "result": {"value": "ok"}})
+                    .to_string()
+                    .into(),
             ))
             .await
             .unwrap();
@@ -856,9 +858,9 @@ mod tests {
             let first_id = serde_json::from_str::<Value>(&first).unwrap()["id"]
                 .as_u64()
                 .unwrap();
-            ws.send(Message::Text(format!(
-                r#"{{"id":{first_id},"result":{{"value":"\ud800"}},"method":42}}"#
-            )))
+            ws.send(Message::Text(
+                format!(r#"{{"id":{first_id},"result":{{"value":"\ud800"}},"method":42}}"#).into(),
+            ))
             .await
             .unwrap();
 
@@ -866,13 +868,15 @@ mod tests {
             let second_id = serde_json::from_str::<Value>(&second).unwrap()["id"]
                 .as_u64()
                 .unwrap();
-            ws.send(Message::Text(format!(
-                r#"{{"result":{{"id":{second_id},"value":"\ud800"}},"method":42}}"#
-            )))
+            ws.send(Message::Text(
+                format!(r#"{{"result":{{"id":{second_id},"value":"\ud800"}},"method":42}}"#).into(),
+            ))
             .await
             .unwrap();
             ws.send(Message::Text(
-                json!({"id": second_id, "result": {"value": "still-open"}}).to_string(),
+                json!({"id": second_id, "result": {"value": "still-open"}})
+                    .to_string()
+                    .into(),
             ))
             .await
             .unwrap();
@@ -1081,11 +1085,9 @@ mod tests {
         let request = format!("wss://127.0.0.1:{port}")
             .into_client_request()
             .unwrap();
-        let config = WebSocketConfig {
-            max_message_size: None,
-            max_frame_size: None,
-            ..Default::default()
-        };
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = None;
+        config.max_frame_size = None;
         let client =
             CdpClient::connect_request(request, config, Some(Connector::Rustls(client_config)))
                 .await
@@ -1180,7 +1182,9 @@ mod tests {
                 if let Some(sid) = session {
                     msg["sessionId"] = serde_json::json!(sid);
                 }
-                ws.send(Message::Text(msg.to_string())).await.unwrap();
+                ws.send(Message::Text(msg.to_string().into()))
+                    .await
+                    .unwrap();
             }
             // Keep the connection open until the client is done reading.
             let _ = ws.next().await;
@@ -1237,7 +1241,9 @@ mod tests {
                     "Network.dataReceived"
                 };
                 let msg = serde_json::json!({ "method": method, "params": { "n": i } });
-                ws.send(Message::Text(msg.to_string())).await.unwrap();
+                ws.send(Message::Text(msg.to_string().into()))
+                    .await
+                    .unwrap();
             }
             let _ = ws.next().await;
         });

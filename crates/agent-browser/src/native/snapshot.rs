@@ -40,7 +40,9 @@ mod document_identity_regressions {
                     _ => json!({}),
                 };
                 ws.send(tokio_tungstenite::tungstenite::Message::Text(
-                    json!({"id": request["id"], "result": result}).to_string(),
+                    json!({"id": request["id"], "result": result})
+                        .to_string()
+                        .into(),
                 ))
                 .await
                 .unwrap();

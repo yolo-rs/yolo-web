@@ -14762,7 +14762,9 @@ mod tests {
                         }
                         other => panic!("Unexpected command: {other}"),
                     };
-                    ws.send(Message::Text(response.to_string())).await.unwrap();
+                    ws.send(Message::Text(response.to_string().into()))
+                        .await
+                        .unwrap();
                 }
                 (attempts, releases)
             });
@@ -17327,7 +17329,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 ));
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 ws.send(Message::Text(
-                    json!({ "id": command["id"], "result": {} }).to_string(),
+                    json!({ "id": command["id"], "result": {} })
+                        .to_string()
+                        .into(),
                 ))
                 .await
                 .unwrap();
