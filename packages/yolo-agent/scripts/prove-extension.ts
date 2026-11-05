@@ -302,6 +302,12 @@ try {
       throw new Error(`still not connected: ${last}`);
     },
   );
+  // The only page is the extension's own new tab, which chrome.debugger cannot
+  // attach to, so the agent opens a tab for the work page first.
+  await step("browser_tabs new (open a work tab)", async () => {
+    const r = await call("browser_tabs", { op: "new", url: "about:blank" });
+    return text(r).slice(0, 400);
+  });
   await step("browser_navigate (fixture home)", async () => {
     const r = await call("browser_navigate", { url: `${fixture.url}/` });
     return text(r).slice(0, 600);
