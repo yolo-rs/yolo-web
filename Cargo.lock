@@ -152,6 +152,7 @@ dependencies = [
  "hmac",
  "image",
  "libc",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-native-certs",
