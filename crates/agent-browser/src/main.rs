@@ -2880,6 +2880,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reason: upstream monorepo file agent-browser.schema.json (and docs/public/schema.json) is not present in this repo"]
     fn test_published_schemas_define_pin_tab_boolean() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2901,6 +2902,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reason: upstream monorepo file agent-browser.schema.json (and docs/public/schema.json) is not present in this repo"]
     fn test_published_schemas_define_matching_ca_cert_string() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2927,6 +2929,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reason: upstream monorepo file agent-browser.schema.json (and docs/public/schema.json) is not present in this repo"]
     fn test_published_schemas_define_matching_no_webmcp_boolean() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

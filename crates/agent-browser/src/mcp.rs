@@ -5148,7 +5148,7 @@ mod tests {
     #[test]
     fn mcp_tool_catalog_snapshot_is_current() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../packages/@agent-browser/sandbox/mcp-tools.json");
+            .join("tests/fixtures/mcp-tools.json");
         let expected = format!(
             "{}\n",
             serde_json::to_string_pretty(&tool_catalog()).unwrap()
@@ -5159,7 +5159,7 @@ mod tests {
         let actual = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(
             actual == expected,
-            "{} is out of date. Run `pnpm mcp-tools:sync`.",
+            "{} is out of date. Regenerate with AGENT_BROWSER_UPDATE_MCP_TOOLS=1 cargo test -p agent-browser mcp_tool_catalog_snapshot_is_current.",
             path.display()
         );
     }
