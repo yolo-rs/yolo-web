@@ -42,7 +42,7 @@ Mobile page weight after (second standalone run, 15 requests): 872,407 B transfe
 
 | # | Severity | Finding | Evidence |
 |---|---|---|---|
-| 1 | High | No sitemap: `/sitemap.xml` 404; robots.txt lists a sitemap URL that returns 404 | crawl |
+| 1 | High | No sitemap: `/sitemap.xml` 404; robots.txt has no Sitemap line | crawl |
 | 2 | High | Mobile LCP 4.8 s: hero image is a CSS background (`.btp-heros:before`), discovered late, no `fetchpriority`/preload; HTML still only holds a no-JS fallback (2,744 B), h1 appears after JS | lcp-discovery-insight, crawl |
 | 3 | Medium | Material Symbols woff2 373,905 B on `/` (43% of the transferred bytes); subset to the icons used or load on demand | network-requests |
 | 4 | Medium | No CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy on HTML | headers |
