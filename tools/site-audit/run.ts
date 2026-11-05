@@ -2,7 +2,7 @@
 // Replayable, read-only site audit: crawl + headers + TLS + Lighthouse (mobile and desktop).
 //
 //   bun tools/site-audit/run.ts <site|url> [--out docs/audit] [--max-pages 60] [--depth 2]
-//        [--lh-heavy 5] [--lh-sitemap 2] [--lh-desktop-all] [--no-lh] [--allow-rosegriffon]
+//        [--lh-heavy 5] [--lh-sitemap 2] [--lh-urls u1,u2,...] [--lh-desktop-all] [--no-lh] [--allow-rosegriffon]
 //
 // Politeness: GET only, no login, no cookies, max 2 concurrent requests per host plus a gap,
 // robots.txt honoured for crawling. Lighthouse drives a real browser, so a single page load can
@@ -402,10 +402,12 @@ else if (home.status === 0 || home.status >= 400) lhNote = `not run: homepage st
 else {
   const heavy = list.filter(p => p.status === 200 && p.contentType.includes("html") && p.url !== home.url).sort((a, b) => b.htmlBytes - a.htmlBytes).slice(0, LH_HEAVY).map(p => p.url);
   const smp = sample(smOwn, LH_SITEMAP + 2).filter(u => !heavy.includes(u) && u !== home.url && u !== home.finalUrl).slice(0, LH_SITEMAP);
-  const targets: Array<{ url: string; forms: Array<"mobile" | "desktop"> }> = [
+  let targets: Array<{ url: string; forms: Array<"mobile" | "desktop"> }> = [
     { url: home.finalUrl, forms: ["mobile", "desktop"] },
     ...[...heavy, ...smp].map(url => ({ url, forms: flag("--lh-desktop-all") ? (["mobile", "desktop"] as const).slice() : (["mobile"] as Array<"mobile">) })),
   ];
+  // --lh-urls a,b,c pins the Lighthouse sample (home first, mobile and desktop; others mobile) for before/after comparisons.
+  if (opt("--lh-urls", "")) targets = opt("--lh-urls", "").split(",").map((url, i) => ({ url, forms: i === 0 ? ["mobile", "desktop"] : ["mobile"] }));
   const tmp = `${OUT}/.tmp-${siteName}`;
   await Bun.write(`${tmp}/.keep`, "");
   const lhCmd = (process.env.SITE_AUDIT_LH ?? "bun x lighthouse").split(" ");
