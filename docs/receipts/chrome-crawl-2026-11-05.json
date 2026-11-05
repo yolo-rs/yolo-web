@@ -1,0 +1,1062 @@
+{
+  "schemaVersion": 1,
+  "kind": "chrome-crawl",
+  "capturedAt": "2026-11-05T07:08:13.535Z",
+  "engine": "yolo-chromium (CEF 156.0.15)",
+  "mode": "--headless (Chromium headless, Chrome runtime style)",
+  "host": "windows x86_64",
+  "chromiumVersion": "156.0.8078.80",
+  "browser": "Chrome/156.0.8078.80",
+  "crawler": "packages/obscura-chrome crawl",
+  "output": "dist/chrome-crawl/156.0.8078.80/ (not committed)",
+  "source": "chrome://chrome-urls/",
+  "debugPages": "clicked",
+  "listed": 199,
+  "denied": [
+    "chrome://badcastcrash/",
+    "chrome://blink-oom/",
+    "chrome://blink-oom/worker/",
+    "chrome://crash/",
+    "chrome://crash/browser/heap-overflow/",
+    "chrome://crash/browser/heap-underflow/",
+    "chrome://crash/browser/member-dereference-after-free/",
+    "chrome://crash/browser/use-after-free/",
+    "chrome://crash/cfg/",
+    "chrome://crash/gpu/heap-overflow/",
+    "chrome://crash/gpu/heap-underflow/",
+    "chrome://crash/gpu/member-dereference-after-free/",
+    "chrome://crash/gpu/use-after-free/",
+    "chrome://crash/renderer/heap-overflow/",
+    "chrome://crash/renderer/heap-underflow/",
+    "chrome://crash/renderer/member-dereference-after-free/",
+    "chrome://crash/renderer/use-after-free/",
+    "chrome://crash/rust/",
+    "chrome://crashdump/",
+    "chrome://gpuclean/",
+    "chrome://gpucrash/",
+    "chrome://gpuhang/",
+    "chrome://hang/",
+    "chrome://heapcorruptioncrash/",
+    "chrome://inducebrowsercrashforrealz/",
+    "chrome://inducebrowserdcheckforrealz/",
+    "chrome://inducebrowserheapcorruption/",
+    "chrome://kill/",
+    "chrome://memory-exhaust/",
+    "chrome://memory-pressure-critical/",
+    "chrome://memory-pressure-moderate/",
+    "chrome://quit/",
+    "chrome://restart/",
+    "chrome://shorthang/",
+    "chrome://uithreadhang/",
+    "chrome://v8-oom/",
+    "chrome://webuijserror/"
+  ],
+  "crawled": 162,
+  "loaded": 131,
+  "failed": 31,
+  "pages": [
+    {
+      "url": "chrome://access-code-cast/",
+      "status": "error",
+      "title": "chrome://access-code-cast/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://accessibility/",
+      "status": "loaded",
+      "title": "Accessibility Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://actor-internals/",
+      "status": "loaded",
+      "title": "Actor Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://actor-overlay/",
+      "status": "error",
+      "title": "chrome://actor-overlay/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://app-service-internals/",
+      "status": "loaded",
+      "title": "App Service Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://app-settings/",
+      "status": "error",
+      "title": "chrome://app-settings/",
+      "errorText": "net::ERR_BLOCKED_BY_CLIENT",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://apps/",
+      "status": "loaded",
+      "title": "Apps",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://autofill-internals/",
+      "status": "loaded",
+      "title": "Autofill Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://autofill-ml-internals/",
+      "status": "loaded",
+      "title": "Autofill ML Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://batch-upload/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://blob-internals/",
+      "status": "loaded",
+      "title": "Blob Storage Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://bluetooth-internals/",
+      "status": "loaded",
+      "title": "Bluetooth Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://bookmarks-side-panel.top-chrome/",
+      "status": "loaded",
+      "title": "Bookmarks",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://bookmarks/",
+      "status": "loaded",
+      "title": "Bookmarks",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://browser-actuator-internals/",
+      "status": "error",
+      "title": "chrome://browser-actuator-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://browser-switch/",
+      "status": "loaded",
+      "title": "Legacy Browser Support",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://certificate-manager/",
+      "status": "loaded",
+      "title": "Certificate Manager",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://chrome-signin/",
+      "status": "error",
+      "title": "chrome://chrome-signin/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://chrome-urls/",
+      "status": "loaded",
+      "title": "Chrome URLs",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://color-pipeline-internals/",
+      "status": "loaded",
+      "title": "Theme Colors Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://comments-side-panel.top-chrome/",
+      "status": "error",
+      "title": "chrome://comments-side-panel.top-chrome/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://commerce-internals/",
+      "status": "loaded",
+      "title": "Commerce Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://components/",
+      "status": "loaded",
+      "title": "Components",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://conflicts/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://connection-help/",
+      "status": "loaded",
+      "title": "Connection Help",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://connection-monitoring-detected/",
+      "status": "loaded",
+      "title": "Monitoring Detected",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://connectors-internals/",
+      "status": "loaded",
+      "title": "Connectors Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://constrained-test/",
+      "status": "error",
+      "title": "chrome://constrained-test/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://content-settings/",
+      "status": "loaded",
+      "title": "Content Settings",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://context-hub/",
+      "status": "loaded",
+      "title": "Context Hub",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://contextual-cueing-internals/",
+      "status": "error",
+      "title": "chrome://contextual-cueing-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://contextual-tasks/",
+      "status": "error",
+      "title": "chrome://contextual-tasks/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://crashes/",
+      "status": "loaded",
+      "title": "Crashes",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://credits/",
+      "status": "loaded",
+      "title": "Credits",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://critical-actions-internals/",
+      "status": "loaded",
+      "title": "Critical Actions Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://cross-device-signin-qr-bubble/",
+      "status": "error",
+      "title": "chrome://cross-device-signin-qr-bubble/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://customize-chrome-side-panel.top-chrome/",
+      "status": "loaded",
+      "title": "Customize Chromium",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://data-sharing-internals/",
+      "status": "loaded",
+      "title": "Data Sharing Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://debug-webuis-disabled/",
+      "status": "loaded",
+      "title": "Internal debugging pages are currently disabled.",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://default-browser-modal/",
+      "status": "loaded",
+      "title": "Default Browser Modal",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://default-browser/",
+      "status": "loaded",
+      "title": "Set Chromium as your default browser",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://device-log/",
+      "status": "loaded",
+      "title": "Device Log",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://dino/",
+      "status": "error",
+      "title": "chrome://dino/ - Dino game, press space to play",
+      "errorText": "net::ERR_INTERNET_DISCONNECTED",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://discards/",
+      "status": "loaded",
+      "title": "Discards",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://download-internals/",
+      "status": "loaded",
+      "title": "Download Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://downloads/",
+      "status": "loaded",
+      "title": "Download history",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://drive-picker-host/",
+      "status": "error",
+      "title": "chrome://drive-picker-host/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://extensions-internals/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://extensions-zero-state/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://extensions/",
+      "status": "loaded",
+      "title": "Extensions",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://family-link-user-internals/",
+      "status": "loaded",
+      "title": "Family Link User Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://feature-showcase/",
+      "status": "error",
+      "title": "chrome://feature-showcase/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://feedback/",
+      "status": "loaded",
+      "title": "Feedback",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://flags/",
+      "status": "loaded",
+      "title": "Experiments",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://gcm-internals/",
+      "status": "loaded",
+      "title": "GCM Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://glic-experimental-opt-in/",
+      "status": "error",
+      "title": "chrome://glic-experimental-opt-in/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://glic/",
+      "status": "loaded",
+      "title": "Gemini in Chrome",
+      "consoleErrors": 1
+    },
+    {
+      "url": "chrome://gpu/",
+      "status": "loaded",
+      "title": "GPU Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://histograms/",
+      "status": "loaded",
+      "title": "Histograms",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://history-clusters-internals/",
+      "status": "loaded",
+      "title": "History Clusters Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://history-clusters-side-panel.top-chrome/",
+      "status": "loaded",
+      "title": "By group",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://history-side-panel.top-chrome/",
+      "status": "loaded",
+      "title": "History",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://history-sync-optin/",
+      "status": "browser-exited",
+      "title": "",
+      "errorText": "timeout",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://history/",
+      "status": "loaded",
+      "title": "History",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://indexeddb-internals/",
+      "status": "loaded",
+      "title": "IndexedDB",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://indigo-internals/",
+      "status": "error",
+      "title": "chrome://indigo-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://infobar-internals/",
+      "status": "loaded",
+      "title": "InfoBar Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://inspect/",
+      "status": "loaded",
+      "title": "Inspect with Chrome Developer Tools",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://internals/",
+      "status": "error",
+      "title": "chrome://internals/",
+      "errorText": "net::ERR_FAILED",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://interstitials/",
+      "status": "loaded",
+      "title": "Interstitials",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://intro/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://iwa-dev/",
+      "status": "error",
+      "title": "chrome://iwa-dev/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://license/",
+      "status": "loaded",
+      "title": "CEF License",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://local-state/",
+      "status": "loaded",
+      "title": "Local State Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://location-internals/",
+      "status": "loaded",
+      "title": "Location Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://managed-user-profile-notice/",
+      "status": "loaded",
+      "title": "Welcome to your new profile",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://management/",
+      "status": "loaded",
+      "title": "Settings - Management",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://media-engagement/",
+      "status": "loaded",
+      "title": "Media Engagement",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://media-internals/",
+      "status": "loaded",
+      "title": "Media Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://media-router-internals/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://metrics-internals/",
+      "status": "loaded",
+      "title": "Metrics Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://multistep-filter-internals/",
+      "status": "error",
+      "title": "chrome://multistep-filter-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://net-export/",
+      "status": "loaded",
+      "title": "Network Log Export",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://net-internals/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://network-errors/",
+      "status": "loaded",
+      "title": "Network errors",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://new-tab-page-third-party/",
+      "status": "loaded",
+      "title": "New Tab",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://new-tab-page/",
+      "status": "loaded",
+      "title": "New Tab",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://newtab-footer/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://newtab/",
+      "status": "loaded",
+      "title": "New Tab",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://notebooks-internals/",
+      "status": "loaded",
+      "title": "Notebooks Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://ntp-tiles-internals/",
+      "status": "loaded",
+      "title": "NTP Tiles Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://omnibox-everywhere.top-chrome/",
+      "status": "error",
+      "title": "chrome://omnibox-everywhere.top-chrome/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://omnibox-popup.top-chrome/",
+      "status": "loaded",
+      "title": "Omnibox Popup",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://omnibox/",
+      "status": "loaded",
+      "title": "Omnibox Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://on-device-internals/",
+      "status": "loaded",
+      "title": "On-device Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://on-device-translation-internals/",
+      "status": "loaded",
+      "title": "On Device Translation Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://optimization-guide-internals/",
+      "status": "loaded",
+      "title": "Optimization Guide Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://organizer-panel.top-chrome/",
+      "status": "loaded",
+      "title": "Organizer",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://page-action-internals/",
+      "status": "loaded",
+      "title": "Page Action Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://password-manager-internals/",
+      "status": "loaded",
+      "title": "Password Manager Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://password-manager/",
+      "status": "loaded",
+      "title": "Password Manager",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://policy/",
+      "status": "loaded",
+      "title": "Policies",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://predictors/",
+      "status": "loaded",
+      "title": "Predictors",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://prefs-internals/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://print/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://private-ai-internals/",
+      "status": "error",
+      "title": "chrome://private-ai-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://process-internals/",
+      "status": "loaded",
+      "title": "Process Model Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://profile-customization/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://profile-internals/",
+      "status": "loaded",
+      "title": "Profile Internals Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://profile-picker/",
+      "status": "loaded",
+      "title": "Welcome to Chromium profiles",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://quota-internals/",
+      "status": "loaded",
+      "title": "Quota Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://read-later.top-chrome/",
+      "status": "loaded",
+      "title": "Reading list",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://regional-capabilities-internals/",
+      "status": "loaded",
+      "title": "Regional Capabilities Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://reset-password/",
+      "status": "loaded",
+      "title": "Reset Password",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://resources/css/text_defaults_md.css/",
+      "status": "error",
+      "title": "chrome://resources/css/text_defaults_md.css/",
+      "errorText": "net::ERR_FAILED",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://safe-browsing/",
+      "status": "loaded",
+      "title": "Safe Browsing",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://sandbox/",
+      "status": "loaded",
+      "title": "Sandbox Status",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://saved-tab-groups-unsupported/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://search-engine-choice/",
+      "status": "error",
+      "title": "chrome://search-engine-choice/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://segmentation-internals/",
+      "status": "loaded",
+      "title": "Segmentation Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://serviceworker-internals/",
+      "status": "loaded",
+      "title": "chrome://serviceworker-internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://settings/",
+      "status": "loaded",
+      "title": "Settings",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://shopping-insights-side-panel.top-chrome/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://signin-dice-web-intercept.top-chrome/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://signin-email-confirmation/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 1
+    },
+    {
+      "url": "chrome://signin-error/",
+      "status": "error",
+      "title": "chrome://signin-error/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://signin-internals/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://signout-confirmation/",
+      "status": "browser-exited",
+      "title": "",
+      "errorText": "timeout",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://site-engagement/",
+      "status": "loaded",
+      "title": "Site Engagement",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://skills/",
+      "status": "loaded",
+      "title": "Skills",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://subresource-filter-internals/",
+      "status": "loaded",
+      "title": "Subresource Filter Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://suggest-internals/",
+      "status": "loaded",
+      "title": "Suggest Debug Tool",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://support-tool/",
+      "status": "loaded",
+      "title": "Support Tool",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://sync-confirmation/",
+      "status": "loaded",
+      "title": "Turn on sync",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://sync-internals/",
+      "status": "loaded",
+      "title": "Sync Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://system/",
+      "status": "loaded",
+      "title": "About System",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://tab-group-home/",
+      "status": "error",
+      "title": "chrome://tab-group-home/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://tab-search.top-chrome/",
+      "status": "loaded",
+      "title": "Tab Search",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://tab-strip-internals/",
+      "status": "loaded",
+      "title": "DebugUI TabStrip",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://tabs-from-other-devices.top-chrome/",
+      "status": "error",
+      "title": "chrome://tabs-from-other-devices.top-chrome/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://terms/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://traces-internals/",
+      "status": "loaded",
+      "title": "Local Traces Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://traces/",
+      "status": "loaded",
+      "title": "Local Traces Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://tracing/",
+      "status": "loaded",
+      "title": "chrome://tracing",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://translate-internals/",
+      "status": "loaded",
+      "title": "Translate Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://ukm/",
+      "status": "loaded",
+      "title": "UKM Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://updater/",
+      "status": "loaded",
+      "title": "Updater",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://usb-internals/",
+      "status": "loaded",
+      "title": "USB Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://user-actions/",
+      "status": "loaded",
+      "title": "User Actions Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://user-education-internals/",
+      "status": "loaded",
+      "title": "User Education Debug Page",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://version/",
+      "status": "loaded",
+      "title": "About Version",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://view-cert/",
+      "status": "loaded",
+      "title": "",
+      "consoleErrors": 1
+    },
+    {
+      "url": "chrome://watermark/",
+      "status": "loaded",
+      "title": "Watermark Customization",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://web-app-internals/",
+      "status": "loaded",
+      "title": "Web App Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webnn-internals/",
+      "status": "loaded",
+      "title": "WebNN Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webrtc-internals/",
+      "status": "loaded",
+      "title": "WebRTC Internals",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webrtc-logs/",
+      "status": "loaded",
+      "title": "WebRTC logs",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webui-browser/",
+      "status": "error",
+      "title": "chrome://webui-browser/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webui-gallery/",
+      "status": "loaded",
+      "title": "WebUI gallery",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webui-toolbar.top-chrome/",
+      "status": "error",
+      "title": "chrome://webui-toolbar.top-chrome/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://webxr-internals/",
+      "status": "error",
+      "title": "chrome://webxr-internals/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    },
+    {
+      "url": "chrome://whats-new/",
+      "status": "error",
+      "title": "chrome://whats-new/",
+      "errorText": "net::ERR_INVALID_URL",
+      "consoleErrors": 0
+    }
+  ]
+}

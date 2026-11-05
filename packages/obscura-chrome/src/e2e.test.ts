@@ -46,16 +46,19 @@ afterAll(async () => {
   await session?.close().catch(() => undefined);
   await browser?.stop();
   if (Bun.env.OBSCURA_CHROME_E2E_KEEP) return;
-  try {
-    // Chromium sub-processes can hold profile files for a moment after exit.
-    rmSync(work, {
-      recursive: true,
-      force: true,
-      maxRetries: 20,
-      retryDelay: 250,
-    });
-  } catch (error) {
-    console.warn(`could not remove ${work}: ${error}`);
+  // Chromium sub-processes can hold profile files for a moment after the
+  // launcher exits.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(work, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (attempt >= 40) {
+        console.warn(`could not remove ${work}: ${error}`);
+        break;
+      }
+      await Bun.sleep(250);
+    }
   }
 }, 30_000);
 
