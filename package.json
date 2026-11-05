@@ -36,9 +36,9 @@
     "docs:generate": "bun run scripts/generate-docs.ts",
     "docs:manifest": "bun run scripts/generate-docs.ts",
     "crawl:chromium-ui": "bun scripts/crawl-chromium-ui.ts",
-    "audit:lighthouse": "bunx lighthouse",
-    "audit:lighthouse:ci": "bunx lhci autorun",
-    "vercel:metrics": "vercel metrics",
+    "audit:lighthouse": "bunx lighthouse@13.6.0",
+    "audit:lighthouse:ci": "bunx --package @lhci/cli@0.16.0 lhci autorun",
+    "vercel:metrics": "bunx vercel@65.11.0 metrics",
     "rust:web:info": "cargo run -p agent-browser --bin yolo-web -- --help",
     "rust:web:build:lto": "cargo build --profile release-dist -p agent-browser --bin yolo-web",
     "rust:web:build": "cargo build --profile release -p agent-browser --bin yolo-web",
@@ -50,11 +50,8 @@
     "rust:test": "cargo test -p yolo-browser -p obscura-ssrf -p obscura-dom -p euclid -p uluru -p fnv -p servo-svg -p kuchikiki -p bravebot-core -p adblock -p deno_error@0.7.3 -p import_map -p fastwebsockets -p deno_media_type -p deno_unsync -p deno_unsafecell --lib"
   },
   "devDependencies": {
-    "@lhci/cli": "^0.16.0",
     "@types/bun": "^1.4.4",
-    "lighthouse": "^13.6.0",
-    "typescript": "^7.0.2",
-    "vercel": "^65.11.0"
+    "typescript": "^7.0.2"
   },
   "optionalDependencies": {
     "@typescript/typescript-aix-ppc64": "7.0.2",
