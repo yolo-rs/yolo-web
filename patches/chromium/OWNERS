@@ -1,0 +1,3 @@
+set noparent
+# Patches against the pinned Chromium checkout need a Chromium-aware reviewer.
+contact@aphrody.com

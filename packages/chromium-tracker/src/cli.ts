@@ -28,6 +28,15 @@ import {
   syncChromiumWorkspace,
 } from "./chromium-workflow";
 import { runUpstreamTool } from "./upstream-tools";
+import {
+  applyQueue,
+  checkQueue,
+  chromiumSourceDir,
+  listQueues,
+  loadQueue,
+  revertQueue,
+  validateQueue,
+} from "./patch-queue";
 
 const tracker = new ChromiumTrackingEngine();
 const command = process.argv[2] || "status";
@@ -46,6 +55,10 @@ const CEF_PLATFORMS: CefPlatform[] = [
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
 async function main() {
+  if (command === "queue") {
+    await patchQueue(process.argv.slice(3));
+    return;
+  }
   if (command === "engines") {
     await engines(process.argv.slice(3));
     return;
@@ -85,9 +98,70 @@ async function main() {
     console.log(JSON.stringify(dt, null, 2));
   } else {
     console.log(
-      `Usage: bun run packages/chromium-tracker/src/cli.ts [status|patches|channels|cef [--platform <id>]|cef lock [path] [--online] [--platform <id>] [--cargo <Cargo.toml>] [--strict] [--json]|depot-tools|engines]`,
+      `Usage: bun run packages/chromium-tracker/src/cli.ts [status|patches|queue <list|validate|check|apply|revert> [name] [--chromium-root <dir>] [--json]|channels|cef [--platform <id>]|cef lock [path] [--online] [--platform <id>] [--cargo <Cargo.toml>] [--strict] [--json]|depot-tools|engines]`,
     );
   }
+}
+
+/**
+ * `queue list|validate|check|apply|revert [name] [--chromium-root <dir>] [--json]`
+ * Operates on ordered patch queues under `patches/chromium/<name>/`.
+ * `check` is read-only (throwaway index); `apply`/`revert` modify the checkout.
+ */
+async function patchQueue(args: string[]) {
+  const usage = "Usage: queue <list|validate|check|apply|revert> [name] [--chromium-root <dir>] [--json]";
+  const action = args.shift();
+  let name: string | undefined;
+  let root = process.env.CHROMIUM_ROOT;
+  let json = false;
+  while (args.length > 0) {
+    const arg = args.shift()!;
+    if (arg === "--json") json = true;
+    else if (arg === "--chromium-root") root = args.shift();
+    else if (arg.startsWith("--")) throw new Error(`Unknown option ${arg}. ${usage}`);
+    else name = arg;
+  }
+  const patchesRoot = join(REPO_ROOT, "patches", "chromium");
+  const names = name ? [name] : await listQueues(patchesRoot);
+  if (action === "list") {
+    for (const n of names) {
+      const q = await loadQueue(join(patchesRoot, n));
+      console.log(`${n}\t${q.series.length} patches\tbase${q.meta.base.chromiumRevision.slice(0, 12)}`);
+    }
+    return;
+  }
+  if (!action || !["validate", "check", "apply", "revert"].includes(action)) throw new Error(usage);
+  let failed = false;
+  for (const n of names) {
+    const q = await loadQueue(join(patchesRoot, n));
+    const findings = await validateQueue(q);
+    if (findings.some((f) => f.level === "error")) failed = true;
+    if (action === "validate") {
+      if (json) console.log(JSON.stringify({ queue: n, findings }, null, 2));
+      else for (const f of findings) console.log(`${n}: ${f.level}: ${f.patch ?? ""} ${f.message}`);
+      continue;
+    }
+    if (findings.some((f) => f.level === "error")) throw new Error(`${n}: fix validation errors first`);
+    if (!root) throw new Error(`Pass --chromium-root or set CHROMIUM_ROOT. ${usage}`);
+    const src = chromiumSourceDir(root);
+    if (action === "check") {
+      const { head, results } = await checkQueue(q, src);
+      if (results.some((r) => !r.ok)) failed = true;
+      if (json) console.log(JSON.stringify({ queue: n, head, base: q.meta.base.chromiumRevision, results }, null, 2));
+      else {
+        console.log(`${n}: HEAD ${head.slice(0, 12)} (queue base ${q.meta.base.chromiumRevision.slice(0, 12)})`);
+        for (const r of results) {
+          const detail = r.detail ? `\n       ${r.detail.split("\n")[0]}` : "";
+          console.log(`  ${r.ok ? "ok  " : "FAIL"} ${r.patch}${detail}`);
+        }
+      }
+    } else if (action === "apply") {
+      console.log((await applyQueue(q, src)).map((p) => `applied ${p}`).join("\n"));
+    } else {
+      console.log((await revertQueue(q, src)).map((p) => `reverted ${p}`).join("\n"));
+    }
+  }
+  if (failed) process.exitCode = 1;
 }
 
 function isCefPlatform(value: string): value is CefPlatform {

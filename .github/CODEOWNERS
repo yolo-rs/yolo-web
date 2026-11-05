@@ -1,0 +1,3 @@
+# Mirrors Chromium-format OWNERS files; keep both in sync.
+*                 @aphrody-dev
+/patches/chromium/ @aphrody-dev

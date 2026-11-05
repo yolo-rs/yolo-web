@@ -1,7 +1,24 @@
 # Chromium patch queue
 
-This directory defines the location for ordered YOLO-Web patches against an explicitly pinned Chromium revision. No product patch queue is implemented here yet.
+This directory defines the location for ordered YOLO-Web patches against an explicitly pinned Chromium revision. The queue tooling is implemented; no product queue is committed yet.
 
 Use one subdirectory per selected branch or milestone. Each patch must identify the upstream path and base commit, rationale, owner, license/provenance, build or test evidence, and removal condition. Keep patch order deterministic and verify apply/revert against a clean checkout. Do not commit generated Chromium dependencies or edit the `DEPS` graph outside an intentional upstream roll.
 
 Chromium source remains in the separate `${CHROMIUM_ROOT}/src` checkout. See [the architecture](../../docs/ARCHITECTURE.mdx) and [the rewrite plan](../../docs/ENGINE_REWRITE_PLAN.md).
+
+## Queue layout and tooling
+
+One directory per queue, quilt-style:
+
+- `series`: ordered patch paths, one per line (`#` comments allowed).
+- `series.json`: `{ schema: 1, queue, owner, base: { chromiumRevision }, patches: [{ path, upstream, upstreamRevision, upstreamPath, license, rationale, removal }] }`; `chromiumRevision` is a 40-hex commit.
+- Patches are unified diffs relative to `${CHROMIUM_ROOT}/src`.
+
+```sh
+bun packages/chromium-tracker/src/cli.ts queue list
+bun packages/chromium-tracker/src/cli.ts queue validate [name] [--json]
+bun packages/chromium-tracker/src/cli.ts queue check [name] --chromium-root <dir>   # read-only, throwaway Git index
+bun packages/chromium-tracker/src/cli.ts queue apply|revert <name> --chromium-root <dir>  # modifies the checkout
+```
+
+`apply` refuses to run when files touched by the queue have local changes.
