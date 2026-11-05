@@ -1,0 +1,18 @@
+{
+  "name": "@yolo-web/obscura-chrome",
+  "version": "0.1.0",
+  "description": "Crawl and edit chrome:// WebUI pages of a headless yolo-chromium (CEF) over CDP",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "obscura-chrome": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check",
+    "crawl": "bun run src/cli.ts crawl"
+  },
+  "dependencies": {
+    "@yolo-web/cdp-client": "workspace:*"
+  }
+}

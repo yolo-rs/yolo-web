@@ -187,6 +187,16 @@
         "@modelcontextprotocol/sdk": "^1.32.2",
       },
     },
+    "packages/obscura-chrome": {
+      "name": "@yolo-web/obscura-chrome",
+      "version": "0.1.0",
+      "bin": {
+        "obscura-chrome": "src/cli.ts",
+      },
+      "dependencies": {
+        "@yolo-web/cdp-client": "workspace:*",
+      },
+    },
     "packages/posix-bun": {
       "name": "@yolo-web/posix-bun",
       "version": "0.1.2",
@@ -255,6 +265,13 @@
     "packages/web-standards": {
       "name": "@yolo-web/standards",
       "version": "0.2.0",
+    },
+    "packages/yolo-agent": {
+      "name": "@yolo-web/yolo-agent",
+      "version": "0.1.0",
+      "bin": {
+        "yolo-agent": "./src/cli.ts",
+      },
     },
   },
   "packages": {
@@ -348,6 +365,8 @@
 
     "@yolo-web/mcp-native": ["@yolo-web/mcp-native@workspace:packages/mcp-native"],
 
+    "@yolo-web/obscura-chrome": ["@yolo-web/obscura-chrome@workspace:packages/obscura-chrome"],
+
     "@yolo-web/posix-bun": ["@yolo-web/posix-bun@workspace:packages/posix-bun"],
 
     "@yolo-web/servo-bridge": ["@yolo-web/servo-bridge@workspace:packages/servo-bridge"],
@@ -363,6 +382,8 @@
     "@yolo-web/web-crawler": ["@yolo-web/web-crawler@workspace:packages/web-crawler"],
 
     "@yolo-web/web-mcp": ["@yolo-web/web-mcp@workspace:packages/web-mcp"],
+
+    "@yolo-web/yolo-agent": ["@yolo-web/yolo-agent@workspace:packages/yolo-agent"],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 

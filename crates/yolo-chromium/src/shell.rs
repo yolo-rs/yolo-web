@@ -469,6 +469,13 @@ wrap_browser_process_handler! {
             }
         }
 
+        fn default_client(&self) -> Option<Client> {
+            // Chrome-style browsers that Chromium creates itself (new tabs,
+            // DevTools Target.createTarget) get the shell's handlers too, so
+            // --webui-patch-dir and the shutdown bookkeeping cover them.
+            Some(YoloClient::new(self.state.clone()))
+        }
+
         fn on_already_running_app_relaunch(
             &self,
             command_line: Option<&mut CommandLine>,

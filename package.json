@@ -36,6 +36,8 @@
     "docs:generate": "bun run scripts/generate-docs.ts",
     "docs:manifest": "bun run scripts/generate-docs.ts",
     "crawl:chromium-ui": "bun scripts/crawl-chromium-ui.ts",
+    "obscura:chrome": "bun packages/obscura-chrome/src/cli.ts",
+    "obscura:chrome-crawl": "bun packages/obscura-chrome/src/cli.ts crawl",
     "audit:lighthouse": "bunx lighthouse@13.6.0",
     "audit:lighthouse:ci": "bunx --package @lhci/cli@0.16.0 lhci autorun",
     "vercel:metrics": "bunx vercel@65.11.0 metrics",
