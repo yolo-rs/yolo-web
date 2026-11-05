@@ -407,6 +407,7 @@ else {
     ...[...heavy, ...smp].map(url => ({ url, forms: flag("--lh-desktop-all") ? (["mobile", "desktop"] as const).slice() : (["mobile"] as Array<"mobile">) })),
   ];
   const tmp = `${OUT}/.tmp-${siteName}`;
+  await Bun.write(`${tmp}/.keep`, "");
   const lhCmd = (process.env.SITE_AUDIT_LH ?? "bun x lighthouse").split(" ");
   const chromeFlags = process.env.SITE_AUDIT_CHROME_FLAGS ?? "--headless=new --no-sandbox --disable-gpu";
   for (const t of targets) for (const form of t.forms) {
