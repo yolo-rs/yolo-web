@@ -1,0 +1,1022 @@
+{
+ "site": "auto-after-r3",
+ "origin": "https://auto.aphrody.com",
+ "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+ "startedAt": "2026-11-05T13:15:08.231Z",
+ "durationS": 103,
+ "limits": {
+  "maxPages": 60,
+  "depth": 2,
+  "linkChecks": 150,
+  "assetChecks": 120,
+  "concurrency": 2,
+  "gapMs": 250,
+  "method": "GET"
+ },
+ "robots": {
+  "status": 200,
+  "disallow": [],
+  "sitemaps": [
+   "https://auto.aphrody.com/sitemap.xml"
+  ],
+  "body": "User-agent: *\nAllow: /\n\nSitemap: https://auto.aphrody.com/sitemap.xml\n"
+ },
+ "sitemap": {
+  "url": "https://auto.aphrody.com/sitemap.xml",
+  "status": 200,
+  "urls": 5
+ },
+ "probes": {
+  "/robots.txt": {
+   "status": 200,
+   "redirects": 0
+  },
+  "/sitemap.xml": {
+   "status": 200,
+   "redirects": 0
+  },
+  "/favicon.ico": {
+   "status": 200,
+   "redirects": 0
+  },
+  "/.well-known/security.txt": {
+   "status": 200,
+   "redirects": 0
+  },
+  "/__audit-404-probe__": {
+   "status": 404,
+   "redirects": 0
+  }
+ },
+ "http": {
+  "hops": [
+   {
+    "url": "http://auto.aphrody.com/",
+    "status": 301,
+    "location": "https://auto.aphrody.com/"
+   },
+   {
+    "url": "https://auto.aphrody.com/",
+    "status": 200
+   }
+  ]
+ },
+ "www": null,
+ "homeRedirects": [
+  {
+   "url": "https://auto.aphrody.com/",
+   "status": 200
+  }
+ ],
+ "headers": {
+  "strict-transport-security": "max-age=63072000",
+  "content-security-policy": "default-src 'self'; script-src 'self' 'sha256-zmzonbyyu7QhzodjfuegZhbcQUB4VviCmnQWdAqKe/s=' 'sha256-jfk8K4m0w+fGJSscwMBhyEdZ3FBFjq0ZiMV1O49RtrY='; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' https:; frame-src 'self' blob:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; style-src 'self' 'unsafe-inline'; report-uri /csp-rapport; report-to csp",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
+  "cross-origin-opener-policy": null,
+  "cross-origin-resource-policy": null,
+  "cache-control": "no-cache",
+  "content-encoding": "zstd",
+  "server": "cloudflare",
+  "cf-cache-status": "DYNAMIC"
+ },
+ "tls": {
+  "protocol": "TLSv1.3",
+  "cipher": null,
+  "verify": "0 (ok)",
+  "subject": "CN=aphrody.com",
+  "issuer": "C=US, O=Let's Encrypt, CN=YE2",
+  "notBefore": "Oct 11 23:27:52 2026 GMT",
+  "notAfter": "Jan  9 23:27:51 2027 GMT",
+  "san": null
+ },
+ "crawl": {
+  "pages": 11,
+  "statuses": {
+   "200": 10,
+   "405": 1
+  },
+  "linkChecked": 4,
+  "linkTargets": 4,
+  "assetChecked": 17,
+  "assetTargets": 17
+ },
+ "brokenLinks": [
+  {
+   "url": "https://auto.aphrody.com/mcp",
+   "status": 405,
+   "from": "(crawl frontier)",
+   "error": ""
+  }
+ ],
+ "badAssets": [],
+ "checks": [
+  {
+   "name": "missing <title>",
+   "urls": []
+  },
+  {
+   "name": "duplicate-looking title (equal to home)",
+   "urls": []
+  },
+  {
+   "name": "title > 70 chars",
+   "urls": []
+  },
+  {
+   "name": "missing meta description",
+   "urls": [
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/app"
+   ]
+  },
+  {
+   "name": "h1 count != 1",
+   "urls": [
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/app"
+   ]
+  },
+  {
+   "name": "missing canonical",
+   "urls": [
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/app"
+   ]
+  },
+  {
+   "name": "canonical differs from final URL",
+   "urls": []
+  },
+  {
+   "name": "missing html lang",
+   "urls": []
+  },
+  {
+   "name": "missing viewport meta",
+   "urls": []
+  },
+  {
+   "name": "missing og:title/og:image",
+   "urls": [
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/app"
+   ]
+  },
+  {
+   "name": "noindex",
+   "urls": [
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/app"
+   ]
+  },
+  {
+   "name": "mixed content",
+   "urls": []
+  },
+  {
+   "name": "images without alt attribute",
+   "urls": []
+  },
+  {
+   "name": "copy heuristics hit",
+   "urls": []
+  }
+ ],
+ "lighthouse": [
+  {
+   "url": "https://auto.aphrody.com/",
+   "form": "mobile",
+   "ok": true,
+   "perf": 99,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 1844.1575,
+   "cls": 0,
+   "tbt": 80,
+   "fcp": 1092.1575,
+   "si": 2394.280729095446,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "image-delivery-insight (0)",
+    "network-dependency-tree-insight (0)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/",
+   "form": "desktop",
+   "ok": true,
+   "perf": 100,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 438.952,
+   "cls": 0.0004985665181253532,
+   "tbt": 0,
+   "fcp": 319.952,
+   "si": 386.640993388473,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "network-dependency-tree-insight (0)",
+    "image-delivery-insight (50)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/tarifs",
+   "form": "mobile",
+   "ok": true,
+   "perf": 100,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 867.31,
+   "cls": 0.0009890925457601615,
+   "tbt": 0,
+   "fcp": 867.31,
+   "si": 867.31,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "network-dependency-tree-insight (0)",
+    "render-blocking-insight (50)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/confidentialite",
+   "form": "mobile",
+   "ok": true,
+   "perf": 100,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 995.228,
+   "cls": 0.012502988027128887,
+   "tbt": 7,
+   "fcp": 995.228,
+   "si": 995.228,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "network-dependency-tree-insight (0)",
+    "render-blocking-insight (0)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/mentions-legales",
+   "form": "mobile",
+   "ok": true,
+   "perf": 97,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 866.137,
+   "cls": 0.100020946067038,
+   "tbt": 0,
+   "fcp": 866.137,
+   "si": 866.137,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "layout-shifts (0)",
+    "cls-culprits-insight (0)",
+    "network-dependency-tree-insight (0)",
+    "render-blocking-insight (50)",
+    "cumulative-layout-shift (89)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/telechargements",
+   "form": "mobile",
+   "ok": true,
+   "perf": 100,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 100,
+   "lcp": 882.187,
+   "cls": 0.036751776004453354,
+   "tbt": 0,
+   "fcp": 882.187,
+   "si": 882.187,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "network-dependency-tree-insight (0)",
+    "render-blocking-insight (50)"
+   ]
+  },
+  {
+   "url": "https://auto.aphrody.com/app/connexion",
+   "form": "mobile",
+   "ok": true,
+   "perf": 100,
+   "a11y": 100,
+   "bp": 100,
+   "seo": 54,
+   "lcp": 936.437,
+   "cls": 0.05899871481014509,
+   "tbt": 12,
+   "fcp": 936.437,
+   "si": 936.437,
+   "consoleErrors": 0,
+   "consoleSample": [],
+   "fails": [
+    "unused-css-rules (0)",
+    "meta-description (0)",
+    "is-crawlable (0)",
+    "network-dependency-tree-insight (0)",
+    "render-blocking-insight (0)",
+    "unused-javascript (50)"
+   ]
+  }
+ ],
+ "lighthouseNote": "",
+ "pages": [
+  {
+   "url": "https://auto.aphrody.com/",
+   "depth": 0,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 381,
+   "htmlBytes": 111675,
+   "lang": "fr",
+   "title": "auto · Devis, factures et suivi de chantiers pour le BTP",
+   "description": "auto accompagne les artisans et petites entreprises du BTP : devis, factures, achats fournisseurs, chantiers et recherche de documents, au bureau comme sur le terrain.",
+   "canonical": "https://auto.aphrody.com/",
+   "robotsMeta": null,
+   "viewport": true,
+   "h1Count": 1,
+   "og": {
+    "og:title": "auto · Devis, factures et suivi de chantiers pour le BTP",
+    "og:description": "Devis, factures, achats et documents : gardez le fil de vos chantiers, au même endroit. Découvrez les écrans réels d’auto et commencez dans votre navigateur.",
+    "og:type": "website",
+    "og:site_name": "auto",
+    "og:locale": "fr_FR",
+    "og:url": "https://auto.aphrody.com/",
+    "og:image": "https://auto.aphrody.com/img/og-auto.jpg",
+    "og:image:width": "1200",
+    "og:image:height": "629",
+    "og:image:alt": "Le dossier d’un chantier dans auto : ventes, achats et suivi."
+   },
+   "twitterCard": "summary_large_image",
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [
+    "https://auto.aphrody.com/",
+    "https://auto.aphrody.com/telechargements",
+    "https://auto.aphrody.com/tarifs",
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/img/btp-analytique.webp",
+    "https://auto.aphrody.com/img/btp-devis-editeur.webp",
+    "https://auto.aphrody.com/img/btp-achats.webp",
+    "https://auto.aphrody.com/img/btp-recherche.webp",
+    "https://auto.aphrody.com/mentions-legales",
+    "https://auto.aphrody.com/confidentialite"
+   ],
+   "assets": [
+    "https://auto.aphrody.com/accueil-ilots-qzayn35r.js",
+    "https://auto.aphrody.com/img/v/btp-plan-1536-594fd23776.webp",
+    "https://auto.aphrody.com/img/v/btp-analytique-1600-e04775395b.webp",
+    "https://auto.aphrody.com/media/lancement-btp.mp4",
+    "https://auto.aphrody.com/img/v/btp-devis-editeur-1600-6185a7e988.webp",
+    "https://auto.aphrody.com/img/v/btp-achats-1600-9fd9c6202e.webp",
+    "https://auto.aphrody.com/img/v/btp-recherche-1600-f8632724bc.webp",
+    "https://auto.aphrody.com/img/v/btp-tableau-1600-b83e7f5fd0.webp",
+    "https://auto.aphrody.com/img/v/btp-mobile-430-cba7536996.webp"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/tarifs",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/tarifs",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/tarifs",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 303,
+   "htmlBytes": 11439,
+   "lang": "fr",
+   "title": "Tarifs · auto",
+   "description": "Tarifs d'auto : Gratuit 0 €, Pro 14 € HT par mois avec 30 jours d'essai, Business 39 € HT par mois.",
+   "canonical": "https://auto.aphrody.com/tarifs",
+   "robotsMeta": null,
+   "viewport": true,
+   "h1Count": 1,
+   "og": {
+    "og:type": "website",
+    "og:site_name": "auto",
+    "og:locale": "fr_FR",
+    "og:url": "https://auto.aphrody.com/tarifs",
+    "og:title": "Tarifs · auto",
+    "og:image": "https://auto.aphrody.com/img/og-auto.jpg",
+    "og:image:width": "1200",
+    "og:image:height": "629",
+    "og:image:alt": "Le dossier d’un chantier dans auto : ventes, achats et suivi."
+   },
+   "twitterCard": "summary_large_image",
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [
+    "https://auto.aphrody.com/tarifs",
+    "https://auto.aphrody.com/",
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/mentions-legales",
+    "https://auto.aphrody.com/confidentialite"
+   ],
+   "assets": [
+    "https://auto.aphrody.com/chunk-8bbhppfv.css",
+    "https://auto.aphrody.com/chunk-qnp9cbbq.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/telechargements",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/telechargements",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/telechargements",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 335,
+   "htmlBytes": 4679,
+   "lang": "fr",
+   "title": "Téléchargements et mises à jour · auto",
+   "description": "Télécharger Auto pour ordinateur et Android, consulter les versions et vérifier les empreintes des fichiers.",
+   "canonical": "https://auto.aphrody.com/telechargements",
+   "robotsMeta": null,
+   "viewport": true,
+   "h1Count": 1,
+   "og": {
+    "og:type": "website",
+    "og:site_name": "auto",
+    "og:locale": "fr_FR",
+    "og:url": "https://auto.aphrody.com/telechargements",
+    "og:title": "Téléchargements et mises à jour · auto",
+    "og:image": "https://auto.aphrody.com/img/og-auto.jpg",
+    "og:image:width": "1200",
+    "og:image:height": "629",
+    "og:image:alt": "Le dossier d’un chantier dans auto : ventes, achats et suivi."
+   },
+   "twitterCard": "summary_large_image",
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [
+    "https://auto.aphrody.com/telechargements",
+    "https://auto.aphrody.com/",
+    "https://auto.aphrody.com/tarifs",
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app",
+    "https://auto.aphrody.com/api/distributions",
+    "https://auto.aphrody.com/confidentialite",
+    "https://auto.aphrody.com/mentions-legales"
+   ],
+   "assets": [
+    "https://auto.aphrody.com/chunk-8znezpvk.css",
+    "https://auto.aphrody.com/chunk-v20sb3ee.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/mentions-legales",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/mentions-legales",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/mentions-legales",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 304,
+   "htmlBytes": 5519,
+   "lang": "fr",
+   "title": "Mentions légales · auto",
+   "description": "Mentions légales d’auto : éditeur du service, hébergeur, données personnelles hébergées dans l’Union européenne et cookies.",
+   "canonical": "https://auto.aphrody.com/mentions-legales",
+   "robotsMeta": null,
+   "viewport": true,
+   "h1Count": 1,
+   "og": {
+    "og:type": "website",
+    "og:site_name": "auto",
+    "og:locale": "fr_FR",
+    "og:url": "https://auto.aphrody.com/mentions-legales",
+    "og:title": "Mentions légales · auto",
+    "og:image": "https://auto.aphrody.com/img/og-auto.jpg",
+    "og:image:width": "1200",
+    "og:image:height": "629",
+    "og:image:alt": "Le dossier d’un chantier dans auto : ventes, achats et suivi."
+   },
+   "twitterCard": "summary_large_image",
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [
+    "https://auto.aphrody.com/mentions-legales",
+    "https://auto.aphrody.com/",
+    "https://auto.aphrody.com/tarifs",
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/confidentialite"
+   ],
+   "assets": [
+    "https://auto.aphrody.com/chunk-8bbhppfv.css",
+    "https://auto.aphrody.com/chunk-gyzfwv7s.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/confidentialite",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/confidentialite",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/confidentialite",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 301,
+   "htmlBytes": 9350,
+   "lang": "fr",
+   "title": "Politique de confidentialité · auto",
+   "description": "Politique de confidentialité d’auto : données traitées, finalités et durées de conservation, destinataires, sécurité, cookies et exercice de vos droits RGPD.",
+   "canonical": "https://auto.aphrody.com/confidentialite",
+   "robotsMeta": null,
+   "viewport": true,
+   "h1Count": 1,
+   "og": {
+    "og:type": "website",
+    "og:site_name": "auto",
+    "og:locale": "fr_FR",
+    "og:url": "https://auto.aphrody.com/confidentialite",
+    "og:title": "Politique de confidentialité · auto",
+    "og:image": "https://auto.aphrody.com/img/og-auto.jpg",
+    "og:image:width": "1200",
+    "og:image:height": "629",
+    "og:image:alt": "Le dossier d’un chantier dans auto : ventes, achats et suivi."
+   },
+   "twitterCard": "summary_large_image",
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [
+    "https://auto.aphrody.com/confidentialite",
+    "https://auto.aphrody.com/",
+    "https://auto.aphrody.com/tarifs",
+    "https://auto.aphrody.com/app/connexion",
+    "https://auto.aphrody.com/app/inscription",
+    "https://auto.aphrody.com/mentions-legales"
+   ],
+   "assets": [
+    "https://auto.aphrody.com/chunk-8bbhppfv.css",
+    "https://auto.aphrody.com/chunk-gh4ya443.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/health",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/health",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/health",
+     "status": 200
+    }
+   ],
+   "contentType": "application/json;charset=utf-8",
+   "ms": 291,
+   "htmlBytes": 0,
+   "lang": null,
+   "title": "",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": null,
+   "viewport": false,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/mcp",
+   "depth": 1,
+   "status": 405,
+   "finalUrl": "https://auto.aphrody.com/mcp",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/mcp",
+     "status": 405
+    }
+   ],
+   "contentType": "",
+   "ms": 289,
+   "htmlBytes": 0,
+   "lang": null,
+   "title": "",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": null,
+   "viewport": false,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/app/connexion",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/app/connexion",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/app/connexion",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 302,
+   "htmlBytes": 1563,
+   "lang": "fr",
+   "title": "auto",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": "noindex",
+   "viewport": true,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [
+    "https://auto.aphrody.com/chunk-mfe1v7r0.css",
+    "https://auto.aphrody.com/chunk-rdha25f1.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/app/inscription",
+   "depth": 1,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/app/inscription",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/app/inscription",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 292,
+   "htmlBytes": 1563,
+   "lang": "fr",
+   "title": "auto",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": "noindex",
+   "viewport": true,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [
+    "https://auto.aphrody.com/chunk-mfe1v7r0.css",
+    "https://auto.aphrody.com/chunk-rdha25f1.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/app",
+   "depth": 2,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/app",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/app",
+     "status": 200
+    }
+   ],
+   "contentType": "text/html;charset=utf-8",
+   "ms": 335,
+   "htmlBytes": 1563,
+   "lang": "fr",
+   "title": "auto",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": "noindex",
+   "viewport": true,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [
+    "https://auto.aphrody.com/chunk-mfe1v7r0.css",
+    "https://auto.aphrody.com/chunk-rdha25f1.js"
+   ],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  },
+  {
+   "url": "https://auto.aphrody.com/api/distributions",
+   "depth": 2,
+   "status": 200,
+   "finalUrl": "https://auto.aphrody.com/api/distributions",
+   "hops": [
+    {
+     "url": "https://auto.aphrody.com/api/distributions",
+     "status": 200
+    }
+   ],
+   "contentType": "application/json;charset=utf-8",
+   "ms": 338,
+   "htmlBytes": 0,
+   "lang": null,
+   "title": "",
+   "description": null,
+   "canonical": null,
+   "robotsMeta": null,
+   "viewport": false,
+   "h1Count": 0,
+   "og": {},
+   "twitterCard": null,
+   "hreflang": [],
+   "jsonLd": 0,
+   "links": [],
+   "assets": [],
+   "mixed": [],
+   "imgNoAlt": 0,
+   "imgNoDims": 0,
+   "copy": []
+  }
+ ],
+ "extra": {
+  "note": "Collected on bunos with puppeteer-core 25.16 (bun) + Chrome for Testing 157.0.8103.38 headless shell, GET only; requests to /csp-rapport were aborted client-side (none were attempted).",
+  "health": {
+   "ok": true,
+   "version": "20261105T130952Z-ff8cf73f",
+   "commit": "08c51d26d925bb20b29a7a776f0ad059acfe968e"
+  },
+  "home": {
+   "htmlIdentityBytes": 111675,
+   "htmlTransferredZstd": 22148,
+   "h1InRawHtml": 1,
+   "inlineStyleBytes": 72591,
+   "linkedStylesheets": 0,
+   "scripts": [
+    "inline 236 B (hashed)",
+    "inline 284 B (hashed)",
+    "/accueil-ilots-qzayn35r.js module 1656 B raw / 1245 B transferred"
+   ],
+   "poster": "/img/v/btp-analytique-1600-a3630c07b5.avif (40327 B, image/avif, immutable 31536000)"
+  },
+  "lighthouseStandalone": {
+   "/": {
+    "perf": 100,
+    "a11y": 100,
+    "bp": 100,
+    "seo": 100,
+    "lcpS": 1.3,
+    "tbtMs": 10,
+    "cls": 0,
+    "requests": 14,
+    "transferred": 225781
+   },
+   "/app/connexion": {
+    "perf": 100,
+    "a11y": 100,
+    "bp": 100,
+    "seo": 54,
+    "lcpS": 0.9,
+    "tbtMs": 20,
+    "cls": 0.059,
+    "requests": 11,
+    "transferred": 214580
+   }
+  },
+  "appChunk": {
+   "url": "/chunk-rdha25f1.js",
+   "transferred": 127951,
+   "raw": 384551,
+   "dynamicImports": 26
+  },
+  "interaction": {
+   "console": [],
+   "pageerrors": [],
+   "blockedReports": [],
+   "violations": [],
+   "tab": [
+    {
+     "step": "initial",
+     "sel": "chantiers:true/ti0 devis:false/ti-1 achats:false/ti-1 documents:false/ti-1",
+     "focus": "BODY",
+     "panels": "VHHH"
+    },
+    {
+     "step": "focus #onglet-chantiers",
+     "sel": "chantiers:true/ti0 devis:false/ti-1 achats:false/ti-1 documents:false/ti-1",
+     "focus": "onglet-chantiers",
+     "panels": "VHHH"
+    },
+    {
+     "step": "press ArrowRight",
+     "sel": "chantiers:false/ti-1 devis:true/ti0 achats:false/ti-1 documents:false/ti-1",
+     "focus": "onglet-devis",
+     "panels": "HVHH"
+    },
+    {
+     "step": "press ArrowRight",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:true/ti0 documents:false/ti-1",
+     "focus": "onglet-achats",
+     "panels": "HHVH"
+    },
+    {
+     "step": "press ArrowLeft",
+     "sel": "chantiers:false/ti-1 devis:true/ti0 achats:false/ti-1 documents:false/ti-1",
+     "focus": "onglet-devis",
+     "panels": "HVHH"
+    },
+    {
+     "step": "press End",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:false/ti-1 documents:true/ti0",
+     "focus": "onglet-documents",
+     "panels": "HHHV"
+    },
+    {
+     "step": "press ArrowRight",
+     "sel": "chantiers:true/ti0 devis:false/ti-1 achats:false/ti-1 documents:false/ti-1",
+     "focus": "onglet-chantiers",
+     "panels": "VHHH"
+    },
+    {
+     "step": "press Home",
+     "sel": "chantiers:true/ti0 devis:false/ti-1 achats:false/ti-1 documents:false/ti-1",
+     "focus": "onglet-chantiers",
+     "panels": "VHHH"
+    },
+    {
+     "step": "press ArrowLeft",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:false/ti-1 documents:true/ti0",
+     "focus": "onglet-documents",
+     "panels": "HHHV"
+    },
+    {
+     "step": "click #onglet-achats",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:true/ti0 documents:false/ti-1",
+     "focus": "onglet-achats",
+     "panels": "HHVH"
+    },
+    {
+     "step": "press ArrowRight after click",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:false/ti-1 documents:true/ti0",
+     "focus": "onglet-documents",
+     "panels": "HHHV"
+    },
+    {
+     "step": "press Tab",
+     "sel": "chantiers:false/ti-1 devis:false/ti-1 achats:false/ti-1 documents:true/ti0",
+     "focus": "panneau-documents",
+     "panels": "HHHV"
+    }
+   ],
+   "theme": [
+    {
+     "step": "initial",
+     "dataTheme": null,
+     "cls": "",
+     "bg": "rgb(255, 255, 255)",
+     "ls": null
+    },
+    {
+     "step": "other tab sets auto-theme=sombre",
+     "dataTheme": "sombre",
+     "cls": "dark",
+     "bg": "rgb(16, 43, 37)",
+     "ls": "sombre"
+    },
+    {
+     "step": "other tab sets auto-theme=clair",
+     "dataTheme": "clair",
+     "cls": "light",
+     "bg": "rgb(255, 255, 255)",
+     "ls": "clair"
+    },
+    {
+     "step": "other tab removes key",
+     "dataTheme": null,
+     "cls": "",
+     "bg": "rgb(255, 255, 255)",
+     "ls": null
+    },
+    {
+     "step": "reload with auto-theme=sombre (pre-paint script)",
+     "dataTheme": "sombre",
+     "cls": "dark",
+     "bg": "rgb(16, 43, 37)",
+     "ls": "sombre"
+    }
+   ],
+   "film": [
+    {
+     "step": "after load",
+     "video": true,
+     "paused": true,
+     "controls": false,
+     "err": null,
+     "readyState": 0,
+     "voile": true,
+     "lancer": true,
+     "capture": false,
+     "poster": "/img/v/btp-analytique-1600-a3630c07b5.avif"
+    },
+    {
+     "step": "after click .btp-film-lancer",
+     "video": true,
+     "paused": false,
+     "controls": true,
+     "err": null,
+     "readyState": 4,
+     "voile": false,
+     "lancer": false,
+     "capture": false,
+     "poster": "/img/v/btp-analytique-1600-a3630c07b5.avif"
+    },
+    {
+     "canPlayType": {
+      "mp4": "probably",
+      "webm": "maybe"
+     }
+    }
+   ]
+  },
+  "cspViolationsPerPage": "0 securitypolicyviolation events and 0 console messages on /, /tarifs, /telechargements, /mentions-legales, /confidentialite, /app/connexion, /app/inscription"
+ }
+}
