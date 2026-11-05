@@ -15,12 +15,16 @@ const BIN: &str = env!("CARGO_BIN_EXE_yolo-web");
 
 /// Certificates minted once per test process, so no key material is committed.
 struct Fixtures {
-    ca_a: String,
-    ca_b: String,
-    server_a: (String, String),
-    server_b: (String, String),
-    expired: String,
-    install: (String, String),
+    ca_a: &'static str,
+    ca_b: &'static str,
+    server_a: (&'static str, &'static str),
+    server_b: (&'static str, &'static str),
+    expired: &'static str,
+    install: (&'static str, &'static str),
+}
+
+fn leak(pem: String) -> &'static str {
+    Box::leak(pem.into_boxed_str())
 }
 
 fn fixtures() -> &'static Fixtures {
@@ -66,12 +70,12 @@ fn fixtures() -> &'static Fixtures {
             .self_signed(&install_key)
             .unwrap();
         Fixtures {
-            ca_a: ca_a.pem(),
-            ca_b: ca_b.pem(),
-            server_a: (server_a.pem(), key_a.serialize_pem()),
-            server_b: (server_b.pem(), key_b.serialize_pem()),
-            expired: expired.pem(),
-            install: (install.pem(), install_key.serialize_pem()),
+            ca_a: leak(ca_a.pem()),
+            ca_b: leak(ca_b.pem()),
+            server_a: (leak(server_a.pem()), leak(key_a.serialize_pem())),
+            server_b: (leak(server_b.pem()), leak(key_b.serialize_pem())),
+            expired: leak(expired.pem()),
+            install: (leak(install.pem()), leak(install_key.serialize_pem())),
         }
     })
 }
