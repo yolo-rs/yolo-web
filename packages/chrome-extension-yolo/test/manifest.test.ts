@@ -31,6 +31,8 @@ interface Manifest {
   optional_permissions?: string[];
   host_permissions?: string[];
   content_security_policy?: { extension_pages?: string };
+  side_panel?: { default_path?: string };
+  content_scripts?: { js?: string[]; world?: string }[];
 }
 
 const manifest = (await Bun.file(MANIFEST_PATH).json()) as Manifest;
@@ -49,7 +51,8 @@ describe("manifest.json", () => {
     expect(manifest.description?.length ?? 0).toBeGreaterThan(0);
     expect(manifest.description?.length ?? 0).toBeLessThanOrEqual(132);
     expect(manifest.background?.service_worker).toBe("service-worker.js");
-    expect(manifest.action?.default_popup).toBe("popup.html");
+    // No popup: the toolbar button opens the agent side panel.
+    expect(manifest.action?.default_popup).toBeUndefined();
     expect(manifest.chrome_url_overrides?.newtab).toBe("newtab.html");
     const sizes = Object.keys(manifest.icons ?? {}).sort(
       (a, b) => Number(a) - Number(b),
@@ -78,14 +81,31 @@ describe("manifest.json", () => {
     );
   });
 
-  test("requests minimal permissions; history only on demand", () => {
-    expect([...(manifest.permissions ?? [])].sort()).toEqual([
-      "favicon",
-      "storage",
-      "topSites",
-    ]);
+  test("wires the yolo-agent: debugger, side panel, offscreen, WebMCP", () => {
+    expect([...(manifest.permissions ?? [])].sort()).toEqual(
+      [
+        "debugger",
+        "favicon",
+        "offscreen",
+        "sidePanel",
+        "storage",
+        "tabs",
+        "topSites",
+      ].sort(),
+    );
     expect(manifest.optional_permissions ?? []).toEqual(["history"]);
-    expect(manifest.host_permissions ?? []).toEqual([]);
+    expect(manifest.host_permissions ?? []).toEqual([
+      "https://api.anthropic.com/*",
+    ]);
+    expect(manifest.side_panel?.default_path).toBe("sidepanel.html");
+    const scripts = manifest.content_scripts ?? [];
+    expect(scripts.flatMap((entry) => entry.js ?? []).sort()).toEqual([
+      "webmcp-main.js",
+      "webmcp-relay.js",
+    ]);
+    expect(
+      scripts.find((entry) => entry.js?.[0] === "webmcp-main.js")?.world,
+    ).toBe("MAIN");
   });
 
   test(
@@ -110,11 +130,12 @@ describe("manifest.json", () => {
       const referenced = [
         ...Object.values(manifest.icons ?? {}),
         ...Object.values(manifest.action?.default_icon ?? {}),
-        manifest.action?.default_popup,
+        manifest.side_panel?.default_path,
+        ...(manifest.content_scripts ?? []).flatMap((entry) => entry.js ?? []),
         manifest.background?.service_worker,
         manifest.chrome_url_overrides?.newtab,
       ].filter((path): path is string => typeof path === "string");
-      expect(referenced.length).toBeGreaterThanOrEqual(7);
+      expect(referenced.length).toBeGreaterThanOrEqual(8);
       for (const path of referenced) {
         expect(await Bun.file(join(DIST_DIR, path)).exists()).toBe(true);
       }

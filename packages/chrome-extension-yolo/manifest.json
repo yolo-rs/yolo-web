@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YOLO-Web",
   "version": "0.2.0",
-  "description": "Aphrody search and a new tab page with live suggestions, shortcuts and recently opened pages, for yolo-chromium and Chrome.",
+  "description": "Browser-use and computer-use agent for yolo-chromium: side panel, WebMCP, debugger driver. Aphrody search and new tab.",
   "homepage_url": "https://aphrody.com/",
   "minimum_chrome_version": "120",
   "icons": {
@@ -12,8 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "YOLO-Web",
-    "default_popup": "popup.html",
+    "default_title": "YOLO-Web Agent",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
@@ -37,9 +36,36 @@
       "is_default": true
     }
   },
-  "permissions": ["storage", "topSites", "favicon"],
+  "permissions": [
+    "storage",
+    "topSites",
+    "favicon",
+    "debugger",
+    "tabs",
+    "offscreen",
+    "sidePanel"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
-  "optional_permissions": ["history"]
+  "optional_permissions": ["history"],
+  "host_permissions": ["https://api.anthropic.com/*"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["webmcp-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["webmcp-relay.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ]
 }

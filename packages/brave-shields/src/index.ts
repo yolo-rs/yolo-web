@@ -852,12 +852,12 @@ export async function yoloSearch(query: string, count = 10, fetchImpl: typeof fe
     if (out.length >= count) break;
     const a = block.match(/href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
     if (!a) continue;
-    let url = a[1];
+    let url: string = a[1] ?? "";
     const u = url.match(/[?&]uddg=([^&]+)/);
-    if (u) url = decodeURIComponent(u[1]);
+    if (u) url = decodeURIComponent(u[1] ?? "");
     else if (url.startsWith("//")) url = "https:" + url;
     const s = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/);
-    out.push({ title: decode(a[2]), url, description: decode(s?.[1] ?? "") });
+    out.push({ title: decode(a[2] ?? ""), url, description: decode(s?.[1] ?? "") });
   }
   return out;
 }

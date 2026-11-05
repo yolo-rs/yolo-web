@@ -5,8 +5,10 @@
  * copies `manifest.json` and the self-hosted font with its license, and
  * renders the icons.
  */
-import { readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { buildExtension } from "../../yolo-agent/scripts/build-extension.ts";
 import { entryDocument } from "./html.ts";
 import { writeIcons } from "./icons.ts";
 
@@ -22,6 +24,25 @@ export const ENTRY_SOURCES = {
   popup: "src/popup.tsx",
   "service-worker": "src/service-worker.ts",
 } as const;
+
+/** Agent files copied from the yolo-agent extension build (the service worker is bundled with ours). */
+export const AGENT_FILES = [
+  "offscreen.html",
+  "offscreen.js",
+  "sidepanel.html",
+  "sidepanel.js",
+  "sidepanel.css",
+  "webmcp-main.js",
+  "webmcp-relay.js",
+] as const;
+
+const AGENT_SERVICE_WORKER = resolve(
+  PACKAGE_ROOT,
+  "..",
+  "yolo-agent",
+  "extension",
+  "service-worker.ts",
+);
 
 /** Entries that also get an HTML document. */
 export const PAGES = [
@@ -52,10 +73,29 @@ export async function build(outDir: string = DIST_DIR): Promise<BuildResult> {
 
   await rm(outDir, { recursive: true, force: true });
 
+  // One service worker serves the extension: the theme/first-run worker and
+  // the yolo-agent driver are bundled from a generated entry so neither
+  // package type-checks the other's chrome typings.
+  const scratch = await mkdtemp(join(tmpdir(), "yolo-ext-"));
+  const swEntry = join(scratch, "service-worker.ts");
+  const slash = (path: string) => JSON.stringify(path.replaceAll("\\", "/"));
+  await Bun.write(
+    swEntry,
+    [
+      `import * as theme from ${slash(join(PACKAGE_ROOT, ENTRY_SOURCES["service-worker"]))};`,
+      `import * as agent from ${slash(AGENT_SERVICE_WORKER)};`,
+      // Referenced so the packages' "sideEffects": false does not drop the
+      // workers' top-level listener registration.
+      "(globalThis as { __yoloModules?: unknown }).__yoloModules = [theme, agent];",
+      "",
+    ].join(String.fromCharCode(10)),
+  );
+  const entrypoints = Object.entries(ENTRY_SOURCES).map(([name, source]) =>
+    name === "service-worker" ? swEntry : join(PACKAGE_ROOT, source),
+  );
+
   const result = await Bun.build({
-    entrypoints: Object.values(ENTRY_SOURCES).map((source) =>
-      join(PACKAGE_ROOT, source),
-    ),
+    entrypoints,
     outdir: outDir,
     target: "browser",
     format: "esm",
@@ -70,7 +110,20 @@ export async function build(outDir: string = DIST_DIR): Promise<BuildResult> {
     throw new Error("bundling failed");
   }
 
+  await rm(scratch, { recursive: true, force: true });
   const files: string[] = result.outputs.map((output) => output.path);
+  const agentDir = await mkdtemp(join(tmpdir(), "yolo-agent-ext-"));
+  try {
+    await buildExtension(agentDir);
+    await mkdir(outDir, { recursive: true });
+    for (const name of AGENT_FILES) {
+      const target = join(outDir, name);
+      await Bun.write(target, Bun.file(join(agentDir, name)));
+      files.push(target);
+    }
+  } finally {
+    await rm(agentDir, { recursive: true, force: true });
+  }
   for (const page of PAGES) {
     const path = join(outDir, `${page.name}.html`);
     await Bun.write(
