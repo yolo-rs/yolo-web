@@ -1,0 +1,12 @@
+{
+  "name": "@yolo-web/web-cluster",
+  "version": "0.1.0",
+  "description": "Redis-queued, PostgreSQL-backed, WebSocket-controlled crawl cluster for YOLO-Web",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "scripts": {
+    "coordinator": "bun src/coordinator.ts",
+    "worker": "bun src/worker.ts",
+    "test": "bun test"
+  }
+}

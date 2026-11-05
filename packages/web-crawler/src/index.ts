@@ -150,13 +150,15 @@ async function robots(origin: string, userAgent: string, timeoutMs: number) {
         const lines = robotsText.split(/\r?\n/);
         const rules: RobotsRule[] = [];
         let applies = false;
+        let lastWasAgent = false;
         let delay = 0;
         for (const line of lines) {
           const [keyRaw, ...rest] = line.split(":");
           const key = keyRaw?.trim().toLowerCase();
           const value = rest.join(":").trim();
-          if (key === "user-agent") applies = value === "*" || userAgent.toLowerCase().includes(value.toLowerCase());
-          else if (applies && (key === "allow" || key === "disallow") && value) rules.push({ allow: key === "allow", path: value });
+          if (key === "user-agent") { const match = value === "*" || (value !== "" && userAgent.toLowerCase().includes(value.toLowerCase())); applies = lastWasAgent ? applies || match : match; lastWasAgent = true; continue; }
+          lastWasAgent = false;
+          if (applies && (key === "allow" || key === "disallow") && value) rules.push({ allow: key === "allow", path: value });
           else if (applies && key === "crawl-delay" && Number.isFinite(Number(value))) delay = Math.max(delay, Number(value) * 1000);
         }
         return { rules, delay };

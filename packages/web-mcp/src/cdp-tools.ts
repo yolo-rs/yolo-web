@@ -47,6 +47,8 @@ async function ensureCdp() {
   const targets = await cdp.listTargets() as Target[];
   let target = targets.find((item) => item.targetId === activeTargetId && item.type === "page");
   if (!target) target = targets.find((item) => item.type === "page" && !item.url.startsWith("devtools://"));
+  // Engines whose /json/list is empty (Lightpanda, Obscura) keep the already-attached target.
+  if (!target && activeTargetId && cdp.activeSessionId) return cdp;
   if (!target) {
     activeTargetId = await cdp.createTarget("about:blank");
     target = { targetId: activeTargetId, title: "", url: "about:blank", type: "page" };

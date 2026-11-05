@@ -1,0 +1,80 @@
+# Cluster receipts, collected 2026-11-05T03:43:12.9479046+01:00 on PC (Windows 11)
+## Scheduled tasks
+
+TaskName                 State
+--------                 -----
+yolo-chrome              Ready
+yolo-coordinator       Running
+yolo-edge                Ready
+yolo-firefox           Running
+yolo-obscura           Running
+yolo-obscura-build       Ready
+yolo-tunnel            Running
+yolo-tunnel-bunos      Running
+yolo-tunnel-lightpanda Running
+yolo-worker-pc         Running
+
+
+
+## Fleet inventory (read-only, ssh BatchMode; addresses omitted)
+=== vps
+vps-203bea89
+7.3.0-9-generic
+12
+Mem:           47033       11321         641        3558       39416       35712
+/dev/sda1       290G  228G   59G  80% /
+redis-server=inactive
+redis=inactive
+postgresql=inactive
+wg-quick@wg0=inactive
+wg-quick@wg1=active
+127.0.0.1:18788
+127.0.0.1:6379
+wg1 UNKNOWN
+=== bunos
+bunos
+7.3.0-9-generic
+6
+Mem:           11669         972        2903         132        8312       10697
+/dev/sda1        96G   23G   74G  24% /
+redis-server=inactive
+redis=inactive
+postgresql=inactive
+wg-quick@wg0=inactive
+wg-quick@wg1=active
+127.0.0.1:18788
+wg1 UNKNOWN
+=== prod
+srv2116886
+7.2.11-arch1-1
+8
+Mem:           32086        3300         766         151       28857       28786
+/dev/sda3       400G  100G  298G  25% /
+redis-server=inactive
+redis=inactive
+postgresql=inactive
+wg-quick@wg0=inactive
+wg-quick@wg1=inactive
+127.0.0.1:18788
+127.0.0.1:5432
+127.0.0.1:6379
+## Engines (bun engines-check.ts)
+chrome:9222 CDP Chrome/157.0.8103.38 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 162ms
+edge:9223 CDP Edg/159.0.4382.0 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 230ms
+firefox:9224 BiDi {"type":"success","id":1,"result":{"ready":true,"message":""}}
+obscura:9225 CDP Chrome/145.0.0.0 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 117ms
+lightpanda:9226 CDP Lightpanda/1.0 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 386ms
+## Coordinator /status
+{"queued":0,"workers":3,"observers":0,"jobs":{"done":16,"failed":14}}
+## Job table (/results)
+1 | const r=await (await fetch(http://127.0.0.1:18800/results)).json(); console.table(r.map(x=>({id:x.id,url:x.url,
+                                   ^
+error: Expected ")" but found ":"
+    at C:\src\yolo-ai\scripts\cluster\[eval]:1:32
+System.Management.Automation.RemoteException
+1 | const r=await (await fetch(http://127.0.0.1:18800/results)).json(); console.table(r.map(x=>({id:x.id,url:x.url,mode:x.mode,status:x.status,worker:x.worker,http:x.http_status,ms:x.elapsed_ms})))
+                                                                                                                                                                                                    ^
+error: Expected ")" but found end of file
+    at C:\src\yolo-ai\scripts\cluster\[eval]:1:193
+System.Management.Automation.RemoteException
+Bun v1.4.4-canary.1+cdfa19bba (Windows x64)

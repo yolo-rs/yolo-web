@@ -281,7 +281,9 @@ export class YoloCdpClient implements AsyncDisposable {
         headers: this.authHeaders(),
       });
       if (res.ok) {
-        return (await res.json()) as CdpTargetInfo[];
+        const list = (await res.json()) as Array<CdpTargetInfo & { id?: string }>;
+        // /json/list reports id; Target.getTargets reports 	argetId. Normalize to 	argetId.
+        return list.map((t) => ({ ...t, targetId: t.targetId ?? t.id ?? "" }));
       }
     } catch {
       // Fallback to WebSocket Target.getTargets
