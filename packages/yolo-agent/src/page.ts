@@ -196,6 +196,21 @@ export class PageSession {
     ]);
     const tree = await this.send("Page.getFrameTree");
     this.mainFrameId = tree.frameTree?.frame?.id ?? "";
+    // Headless tabs created without a window can report a 0x0 viewport, which
+    // breaks coordinate clicks and hangs Page.captureScreenshot.
+    try {
+      const size = await this.evaluate<number>("innerWidth * innerHeight");
+      if (!size) {
+        await this.send("Emulation.setDeviceMetricsOverride", {
+          width: 1280,
+          height: 800,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+      }
+    } catch {
+      // The target does not support emulation; keep going with its own size.
+    }
   }
 
   /** Evaluates an expression in the page and returns its JSON value. */
