@@ -157,9 +157,12 @@ export async function launchBrowser(
     options.profileDir ?? join(tmpdir(), `yolo-agent-profile-${port}`);
   await mkdir(profileDir, { recursive: true });
   const args = buildArgs(kind, { ...options, port, profileDir });
+  // YOLO_AGENT_BROWSER_LOG=<file> keeps the browser's output for diagnosis.
+  const logPath = Bun.env.YOLO_AGENT_BROWSER_LOG;
+  const sink = logPath ? Bun.file(logPath) : "ignore";
   const proc = Bun.spawn([executable, ...args], {
-    stdout: "ignore",
-    stderr: "ignore",
+    stdout: sink,
+    stderr: sink,
     stdin: "ignore",
   });
   const endpoint = `http://127.0.0.1:${port}`;
