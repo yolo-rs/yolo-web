@@ -261,16 +261,17 @@ export async function executeBrowserTool(name: string, args: Args): Promise<unkn
       let clip: { x: number; y: number; width: number; height: number } | undefined;
       const selector = stringArg(args, "selector");
       if (selector) clip = await evaluate(`(()=>{const r=document.querySelector(${literal(selector)})?.getBoundingClientRect();if(!r)throw new Error('No element matches selector');return {x:r.x,y:r.y,width:r.width,height:r.height}})()`);
-      const bytes = await client.captureScreenshot({ format: "png", captureBeyondViewport: args.fullPage === true, ...(clip ? { clip } : {}) });
+      const options = { format: "png" as const, captureBeyondViewport: args.fullPage === true, ...(clip ? { clip } : {}) };
       const path = stringArg(args, "path");
-      if (path) { await Bun.write(path, bytes); return { path, bytes: bytes.byteLength, format: "png" }; }
-      return { format: "png", base64: Buffer.from(bytes).toString("base64") };
+      if (path) { const bytes = await client.captureScreenshot(options); await Bun.write(path, bytes); return { path, bytes: bytes.byteLength, format: "png" }; }
+      return { format: "png", base64: await client.captureScreenshotBase64(options) };
     }
     case "browser_pdf": {
-      const bytes = await (await ensureCdp()).printToPdf({ landscape: args.landscape === true, printBackground: args.print_background !== false });
+      const client = await ensureCdp();
+      const options = { landscape: args.landscape === true, printBackground: args.print_background !== false };
       const path = stringArg(args, "path");
-      if (path) { await Bun.write(path, bytes); return { path, bytes: bytes.byteLength, format: "pdf" }; }
-      return { format: "pdf", base64: Buffer.from(bytes).toString("base64") };
+      if (path) { const bytes = await client.printToPdf(options); await Bun.write(path, bytes); return { path, bytes: bytes.byteLength, format: "pdf" }; }
+      return { format: "pdf", base64: await client.printToPdfBase64(options) };
     }
     default: throw new Error(`No real browser implementation is registered for MCP tool: ${name}`);
   }

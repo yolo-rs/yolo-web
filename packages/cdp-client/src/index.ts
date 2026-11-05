@@ -281,7 +281,9 @@ export class YoloCdpClient implements AsyncDisposable {
         headers: this.authHeaders(),
       });
       if (res.ok) {
-        const list = (await res.json()) as Array<CdpTargetInfo & { id?: string }>;
+        const list = (await res.json()) as Array<
+          CdpTargetInfo & { id?: string }
+        >;
         // /json/list reports id; Target.getTargets reports 	argetId. Normalize to 	argetId.
         return list.map((t) => ({ ...t, targetId: t.targetId ?? t.id ?? "" }));
       }
@@ -438,7 +440,8 @@ export class YoloCdpClient implements AsyncDisposable {
     return response.result.value as T;
   }
 
-  async captureScreenshot(options?: ScreenshotOptions): Promise<Uint8Array> {
+  /** Raw base64 payload from CDP, with no decode; use when the caller re-serializes it. */
+  async captureScreenshotBase64(options?: ScreenshotOptions): Promise<string> {
     const { data } = await this.send<{ data: string }>(
       "Page.captureScreenshot",
       {
@@ -450,10 +453,15 @@ export class YoloCdpClient implements AsyncDisposable {
         ...(options?.clip ? { clip: options.clip } : {}),
       },
     );
-    return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    return data;
   }
 
-  async printToPdf(options?: PdfOptions): Promise<Uint8Array> {
+  async captureScreenshot(options?: ScreenshotOptions): Promise<Uint8Array> {
+    return Uint8Array.fromBase64(await this.captureScreenshotBase64(options));
+  }
+
+  /** Raw base64 payload from CDP, with no decode. */
+  async printToPdfBase64(options?: PdfOptions): Promise<string> {
     const { data } = await this.send<{ data: string }>("Page.printToPDF", {
       landscape: options?.landscape ?? false,
       printBackground: options?.printBackground ?? true,
@@ -465,7 +473,11 @@ export class YoloCdpClient implements AsyncDisposable {
         ? { paperHeight: options.paperHeight }
         : {}),
     });
-    return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    return data;
+  }
+
+  async printToPdf(options?: PdfOptions): Promise<Uint8Array> {
+    return Uint8Array.fromBase64(await this.printToPdfBase64(options));
   }
 
   async dispatchMouseEvent(params: MouseEventParams): Promise<void> {
