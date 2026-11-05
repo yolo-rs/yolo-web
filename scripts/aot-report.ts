@@ -51,6 +51,12 @@ export const VARIANTS: Record<string, string[]> = {
     "--no-compile-autoload-bunfig",
   ],
   "shipped+splitting": [...AOT_FLAGS, "--splitting"],
+  "esm-splitting-no-bytecode": [
+    "--compile",
+    "--minify",
+    "--format=esm",
+    "--splitting",
+  ],
   "shipped+no-autoload-all": [
     ...AOT_FLAGS,
     "--no-compile-autoload-dotenv",
@@ -62,6 +68,7 @@ export const VARIANTS: Record<string, string[]> = {
   "shipped+no-optimize-bytecode": [...AOT_FLAGS, "--no-optimize-bytecode"],
   "shipped+jit-policy-2": [...AOT_FLAGS, "--compile-jit-policy=2"],
   "shipped+jit-policy-0.5": [...AOT_FLAGS, "--compile-jit-policy=0.5"],
+  "shipped+exec-argv-smol": [...AOT_FLAGS, "--compile-exec-argv=--smol"],
   "shipped+keep-names": [...AOT_FLAGS, "--keep-names"],
   "shipped+target-modern": [...AOT_FLAGS, "--target=bun-linux-x64-modern"],
   "shipped+target-baseline": [...AOT_FLAGS, "--target=bun-linux-x64-baseline"],
