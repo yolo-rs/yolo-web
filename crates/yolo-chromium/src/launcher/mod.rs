@@ -15,6 +15,7 @@ pub mod runtime;
 /// Exit code when the launcher itself fails (bad arguments, missing files).
 pub const EXIT_LAUNCHER_ERROR: i32 = 64;
 /// Exit code when the host process exceeded `--launcher-timeout-ms`.
+#[cfg(target_os = "windows")]
 pub const EXIT_HOST_TIMEOUT: i32 = 4;
 /// Extra time granted to the host beyond the smoke timeout.
 const SMOKE_GRACE_MS: u64 = 20_000;
@@ -77,6 +78,7 @@ pub enum HostKind {
 }
 
 impl HostKind {
+    #[cfg(any(target_os = "windows", test))]
     pub fn bootstrap_file_name(self) -> &'static str {
         match self {
             HostKind::Console => "bootstrapc.exe",
@@ -85,6 +87,7 @@ impl HostKind {
     }
 
     /// Base name of the host executable and DLL inside the runtime directory.
+    #[cfg(any(target_os = "windows", test))]
     pub fn app_base_name(self) -> &'static str {
         match self {
             HostKind::Console => "yolo-chromium",

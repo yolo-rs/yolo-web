@@ -70,6 +70,7 @@ impl PolicySet {
     }
 
     /// `reg.exe` argument vectors that apply this set under `HKCU`.
+    #[cfg(any(target_os = "windows", test))]
     pub fn reg_commands(&self) -> Vec<Vec<String>> {
         let key = format!("HKCU\\{POLICY_KEY}");
         let mut commands = Vec::new();
