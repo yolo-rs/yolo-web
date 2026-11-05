@@ -15,6 +15,7 @@ Cross-check from yolo-re (not copied here): `C:/src/yolo-re/docs/audits/rea-2026
 | aphrody.com | [aphrody.md](aphrody.md) | yolo-ui-aa | 99 / 98 / 96 / 100 | 1.0 | Public /status exposes internals; /boot.js 404; live copy differs from committed landing.html |
 | dragonballfr.com | [dragonballfr.md](dragonballfr.md) | sheron-24 | 39 / 100 / 77 / 100 | 9.0 | Mobile perf 36-64 site-wide, no HTML caching, security.txt 503 |
 | rosegriffon.fr (before) | [rosegriffon-before.md](rosegriffon-before.md) | rosegriffon-4a | 47 / 100 / 77 / 100 | 7.2 | Mobile perf, 3.5-5.9 MB community HTML, iergday images 400 |
+| rosegriffon.fr (after) | [rosegriffon-after.md](rosegriffon-after.md) | rosegriffon-4a | 49 / 100 / 100 / 100 | 7.2 | Mobile perf 42-49, /news LCP 52 s, iergday images 400; community HTML 3.5-5.9 MB down to about 0.21 MB |
 | yolo.aphrody.com | [yolo.md](yolo.md) | yolo-ui-aa | 100 / 91 / 100 / 91 | 1.0 | Page counts differ from repo (7 vs 8 presets, 124 vs 156 submodules), no description |
 | secondary and disabled hosts | [secondary-hosts.md](secondary-hosts.md) | yolo-ui-aa | not run | not run | Disabled hosts return 526; cdn/deploy/nie/video lack CSP |
 
