@@ -241,9 +241,9 @@ impl Session {
     fn pid(&self) -> String {
         std::fs::read_to_string(self.tmp.path().join("sockets/tls.pid")).unwrap()
     }
-    fn ca(&self, name: &str, contents: &str) -> PathBuf {
+    fn ca(&self, name: &str, contents: impl AsRef<str>) -> PathBuf {
         let path = self.tmp.path().join(name);
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, contents.as_ref()).unwrap();
         path
     }
 }
