@@ -35,7 +35,7 @@ const outPath = resolve(
 );
 const browserArgs =
   opt("browser-args") ??
-  (process.platform === "linux" ? "--ozone-platform=headless" : "");
+  (process.platform === "linux" ? "--ozone-platform=headless --disable-gpu" : "");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
