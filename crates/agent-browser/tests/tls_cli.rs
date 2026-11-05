@@ -29,8 +29,8 @@ fn leak(pem: String) -> &'static str {
 
 fn fixtures() -> &'static Fixtures {
     use rcgen::{
-        date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName,
-        DnType, IsCa, KeyPair,
+        date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
+        IsCa, KeyPair,
     };
     static FIXTURES: std::sync::OnceLock<Fixtures> = std::sync::OnceLock::new();
     FIXTURES.get_or_init(|| {
@@ -66,9 +66,12 @@ fn fixtures() -> &'static Fixtures {
         let expired = expired.signed_by(&key_a, &ca_a, &ca_a_key).unwrap();
         // Self-signed leaf for the install manifest host, used as its own trust root.
         let install_key = KeyPair::generate().unwrap();
-        let install = params("googlechromelabs.github.io", &["googlechromelabs.github.io"])
-            .self_signed(&install_key)
-            .unwrap();
+        let install = params(
+            "googlechromelabs.github.io",
+            &["googlechromelabs.github.io"],
+        )
+        .self_signed(&install_key)
+        .unwrap();
         Fixtures {
             ca_a: leak(ca_a.pem()),
             ca_b: leak(ca_b.pem()),
