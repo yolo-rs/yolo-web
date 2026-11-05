@@ -1,0 +1,280 @@
+{
+ "note": "a: fresh profile, no consent, 20 s idle + scroll + click on an H2 (non-consent, non-link); b: per-page CSP checks. puppeteer-core 24 + Chrome for Testing 157 headless shell on bunos. Episodes LH extra runs: perf 44/44, LCP 12.8 s / 10.5 s, CLS 0, TBT 1823/1591 ms.",
+ "a": {
+  "clickInfo": {
+   "tag": "H2",
+   "text": "Dragon Ball Super : Beerus",
+   "x": 24,
+   "y": 457.40625,
+   "viewport": {
+    "x": 24,
+    "y": 457.40625,
+    "vh": 915
+   }
+  },
+  "state": "{\"consent\":null,\"url\":\"https://dragonballfr.com/\"}",
+  "total": 120,
+  "idleCount": 112,
+  "googleHostRequests": [],
+  "hosts": [
+   [
+    "dragonballfr.com",
+    24
+   ],
+   [
+    "cdn.dragonballfr.com",
+    70
+   ],
+   [
+    "cdn.discordapp.com",
+    21
+   ],
+   [
+    "bot.dragonballfr.com",
+    5
+   ]
+  ],
+  "log": [
+   "0s https://dragonballfr.com/",
+   "0.7s https://dragonballfr.com/cdn-cgi/speculation",
+   "0.8s https://cdn.dragonballfr.com/fonts/google-sans-flex/fa677db111b6e8c5.woff2",
+   "0.8s https://dragonballfr.com/brand/dragonballfr-logo.svg",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/3i-omfrnqcchm.css",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/07d24dg6oudw7.css",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/222_32pjwwo-g.css",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/2qsnm-okslox7.css",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/3bwtk0fl_ewb6.css",
+   "0.8s https://cdn.dragonballfr.com/assets/crawl/dragon-ball-super.com/st04-01.jpg",
+   "0.8s https://cdn.dragonballfr.com/media/episodes/877/press/f6a2e7cca43a4e7c0e532587e7450ea6f2435b8aa0053824cbf4fadb6006d00d.webp",
+   "0.8s https://dragonballfr.com/official/beerus/logo-en.webp",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0zo_3rcebvrp8.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/3ebdknkkxtir_.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/1qp_9v99t_5fd.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0ou9ypbr7sl6k.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/3iqsw1c0sfkhv.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/turbopack-08cp3w0v4o9ya.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/13yptknwqght9.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/1kgfw5taqn3g1.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/074edd0tz-8uo.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/1nmhdj4azwvro.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0p5chmcuz4b7t.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/33dn7zz1h6kkt.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0qco0haia0rss.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/1_kr5om0osxdy.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/2ovuz1b9swdwr.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/34azt3dw34l12.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/2_jeh8afau1zv.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0ln5l1v8w4n7r.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0wp25aokf0r7e.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/34njblnxkcc0p.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/18cw47j4g7bb8.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0rlay_vl596g4.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/3sw-dz08kel9c.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/0tuxkktdgqxi-.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/2vz3a_2us4gw2.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/1an6amjpg9xn9.js",
+   "0.8s https://cdn.dragonballfr.com/_next/static/chunks/06dgukykx05m6.js",
+   "1s https://cdn.dragonballfr.com/fonts/jetbrains-mono/83c005d49d8a6a50.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/2c0a698f3f840c00.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/1a41a1e026f03712.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/add77686e5062903.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/30425125bb740642.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/9e288e859248aa2c.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/a4cb052e82a4e5b2.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/5a2b7c813f0122dc.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/ce324843172afe1f.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/030dfa6fc4f0b364.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/7f678d4883427c76.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/ccf139ce62b0e9aa.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/b95cee9ae53563a5.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/f5861b584d084262.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/814636ff75c8a68f.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/bf2d4809fe1a3522.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/35735498a219c486.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/835b976dad277177.woff2",
+   "1s https://cdn.dragonballfr.com/fonts/noto-sans-jp/98e1708d126eec4f.woff2",
+   "1s https://cdn.dragonballfr.com/media/episodes/876/hero/15415c1073ea1809729659d109842fc4a4d34e977e2b50a62735684e33957aa1/frame-1115.webp",
+   "1s https://cdn.dragonballfr.com/media/episodes/875/hero/84284388bf476254dd74ab2b9284476e6135d578d3d5b039dd38dff13e762ab3/frame-1100.webp",
+   "1s https://cdn.discordapp.com/avatars/728580688747429938/c14b4227f0cd06cbb297f093b6164c8b.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/772907850350985217/f28f9372f4e44e8e3ada45c372a02dc9.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1014634989305995266/b422f3874f0c87cd125b26c26e194e78.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/922961722959069255/a_1b8e82f913d5250a69a7c2afa0bd79c2.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/229560889278332928/b6dba78974e2e65c2258d647bf954979.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/embed/avatars/0.png",
+   "1s https://cdn.discordapp.com/avatars/1170100086517288992/a7ac778c4d6a4299d9a31c5a0aaa53b8.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/702427742192533564/88a86eaca6f9db658c646c43de2bb5bf.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/911356818335359006/228e8aebbd96ab6a6f61a80a9e79a229.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/760129826169421824/a_7557a15eb15cfc4e25ae0a609497a6f6.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/340117481127542784/a_a5c8a14f4d513c547fd4b804650df176.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1205469204799561738/48a520ac8aa10f67366bddba3cda43ba.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1341168229011292160/41b8b0ec71d771beb27f758230dadf25.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1546923487652872254/0a3cc7259711a9d726e000fdd29bad18.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1527405876695142620/14e68d4db0a00ec6c9e9ec8090d0ac5e.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1177739856307298485/a_7bc53da55920c03a28c62cadda4534b5.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1393658097452580915/f8d1793698ab5a3a7deccda8a2cbb332.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/1548086626868011079/34f18be46dc9713fbff5147beb0317da.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/837661881137102890/8cc79910638c56f8c67a54ca52b811f5.webp?size=64&animated=false",
+   "1s https://cdn.discordapp.com/avatars/209711745114177547/d5a8017520587756e03e6897f1ddb354.webp?size=64&animated=false",
+   "1s https://dragonballfr.com/assets/wiki/sagas/ae36823f-f83b-43f6-9ae1-db0e775bb058.webp",
+   "1s https://dragonballfr.com/assets/wiki/sagas/95591f0c-c873-4ede-abac-e048e225ec42.webp",
+   "1s https://dragonballfr.com/assets/wiki/sagas/e5d309ab-8e5a-4522-8f8a-9dfc9c6ed42d.webp",
+   "1.2s https://cdn.dragonballfr.com/fonts/noto-sans-jp/b3f23a841571a12f.woff2",
+   "1.2s https://cdn.dragonballfr.com/fonts/noto-sans-jp/c41523b6bb431cbe.woff2",
+   "1.2s https://cdn.dragonballfr.com/fonts/noto-sans-jp/d264b7fb4eb86901.woff2",
+   "1.2s https://cdn.dragonballfr.com/fonts/noto-sans-jp/5d7d5d55029636a2.woff2",
+   "1.2s https://cdn.dragonballfr.com/assets/ext/db_episodes/1.jpg",
+   "1.2s https://cdn.dragonballfr.com/assets/ext/db_episodes/4.jpg",
+   "1.2s https://cdn.dragonballfr.com/assets/ext/db_movies/15.jpg",
+   "1.2s https://cdn.dragonballfr.com/assets/ext/db_movies/36.jpg",
+   "1.2s https://cdn.dragonballfr.com/assets/ext/db_movies/12.webp",
+   "1.9s https://dragonballfr.com/api/ads/eligibility",
+   "1.9s https://dragonballfr.com/api/me",
+   "1.9s https://bot.dragonballfr.com/api/public/stats",
+   "1.9s https://bot.dragonballfr.com/api/public/personas",
+   "1.9s https://bot.dragonballfr.com/api/public/leaderboard?enrich=1&limit=12",
+   "1.9s https://bot.dragonballfr.com/api/public/presence",
+   "2s https://bot.dragonballfr.com/api/a2a/events",
+   "2s https://dragonballfr.com/wiki/episodes/878?_rsc=5CB68i4pnAekjehf",
+   "2s https://dragonballfr.com/wiki/episodes/series/DBS_BEERUS?_rsc=5CB68i4pnAekjehf",
+   "2s https://dragonballfr.com/wiki/episodes/877?_rsc=5CB68i4pnAekjehf",
+   "2s https://dragonballfr.com/wiki/episodes/876?_rsc=5CB68i4pnAekjehf",
+   "2.1s https://dragonballfr.com/wiki/episodes/875?_rsc=5CB68i4pnAekjehf",
+   "2.1s https://dragonballfr.com/wiki/episodes/878?_rsc=tXyZJ52UQVBCVsD3",
+   "2.1s https://dragonballfr.com/wiki/episodes/series/DBS_BEERUS?_rsc=tXyZJ52UQVBCVsD3",
+   "2.1s https://dragonballfr.com/wiki/episodes/877?_rsc=tXyZJ52UQVBCVsD3",
+   "2.1s https://dragonballfr.com/wiki/episodes/876?_rsc=tXyZJ52UQVBCVsD3",
+   "2.2s https://cdn.discordapp.com/avatars/519230294004334602/062c5b831849605c8a34463bd207457f.webp?size=64&animated=false",
+   "2.2s https://dragonballfr.com/wiki/episodes/875?_rsc=tXyZJ52UQVBCVsD3",
+   "8.7s https://dragonballfr.com/privacy?_rsc=5CB68i4pnAekjehf",
+   "8.8s https://dragonballfr.com/privacy?_rsc=tXyZJ52UQVBCVsD3",
+   "21.8s https://cdn.dragonballfr.com/assets/ext/db_manga_volumes/82.jpg",
+   "21.8s https://cdn.dragonballfr.com/assets/ext/db_manga_volumes/83.jpg",
+   "21.8s https://cdn.dragonballfr.com/assets/ext/db_manga_volumes/147.jpg",
+   "21.8s https://cdn.dragonballfr.com/publications/nozawa-yamaguchi-sdbh-ja/objects/0dc0c9b95f45e74618f284828e3455b1063106ee0b8ffb6b11a5f369d0820e94.",
+   "21.8s https://cdn.dragonballfr.com/assets/wiki/databooks/01.jpg",
+   "21.8s https://dragonballfr.com/assets/wiki/databooks/5a79c508-becb-4cce-8e75-d246749e61c8.jpg",
+   "21.8s https://dragonballfr.com/leaderboard?_rsc=5CB68i4pnAekjehf",
+   "22s https://dragonballfr.com/leaderboard?_rsc=tXyZJ52UQVBCVsD3"
+  ]
+ },
+ "b": {
+  "/": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "CookieIssue",
+     20
+    ],
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  },
+  "/wiki": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  },
+  "/wiki/episodes": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  },
+  "/wiki/timeline": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  },
+  "/wiki/manga": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  },
+  "/catalog": {
+   "status": 200,
+   "csp": "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+   "cspRO": "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.dragonballfr.com https://www.googletagmanager.com https://*.google-analytics.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://*.doubleclick.net https://*.gstatic.com https://*.adtrafficquality.google https://*.google.com https://*.vercel-scripts.com; report-uri /api/csp-report",
+   "cacheControl": "private, no-cache, no-store, max-age=0, must-revalidate",
+   "cfCache": "DYNAMIC",
+   "violationEvents": 0,
+   "violationSample": [],
+   "cspIssues": 0,
+   "cspIssueSample": [],
+   "allIssueCodes": [
+    [
+     "PerformanceIssue",
+     1
+    ]
+   ],
+   "consoleErrWarn": 0,
+   "consoleSample": []
+  }
+ }
+}
