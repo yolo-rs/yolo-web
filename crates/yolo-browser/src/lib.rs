@@ -28,7 +28,7 @@ pub use yolo_web_standards as standards;
 /// containing the target-specific library built by the yolo-zig workspace.
 #[cfg(feature = "zig-ffi")]
 pub mod zig_ffi {
-    pub use yolo_zig_ffi::{ABI_VERSION, Error, RuntimeInfo, runtime_info};
+    pub use yolo_zig_ffi::{runtime_info, Error, RuntimeInfo, ABI_VERSION};
 }
 
 /// Re-exported Servo engine crates consolidated into the monorepo.
@@ -176,11 +176,7 @@ impl YoloBrowserSession {
         Self::with_filter_rules(mode, viewport, DEFAULT_BRAVE_SHIELDS_RULES)
     }
 
-    pub fn with_filter_rules(
-        mode: EngineMode,
-        viewport: YoloViewport,
-        rules: &[&str],
-    ) -> Self {
+    pub fn with_filter_rules(mode: EngineMode, viewport: YoloViewport, rules: &[&str]) -> Self {
         let mut metadata = FnvHashMap::default();
         metadata.insert(
             "engine".to_string(),
@@ -208,17 +204,15 @@ impl YoloBrowserSession {
     }
 
     /// Evaluates a network request against Brave's native Rust `adblock` engine.
-    pub fn should_block_request(
-        &self,
-        url: &str,
-        source_url: &str,
-        request_type: &str,
-    ) -> bool {
+    pub fn should_block_request(&self, url: &str, source_url: &str, request_type: &str) -> bool {
         if !self.brave_shields_enabled {
             return false;
         }
         match AdblockRequest::new(url, source_url, request_type, "GET") {
-            Ok(req) => self.adblock_engine.check_network_request(&req).should_block(),
+            Ok(req) => self
+                .adblock_engine
+                .check_network_request(&req)
+                .should_block(),
             Err(_) => false,
         }
     }
@@ -261,7 +255,11 @@ impl YoloBrowserSession {
         match parsed.scheme() {
             "http" | "https" | "data" => {}
             "about" if parsed.as_str() == "about:blank" => return Ok(parsed),
-            scheme => return Err(format!("URL scheme '{scheme}' is not allowed by browser navigation policy")),
+            scheme => {
+                return Err(format!(
+                    "URL scheme '{scheme}' is not allowed by browser navigation policy"
+                ))
+            }
         }
 
         // `data:` documents have no network destination. Their payload is
@@ -399,10 +397,8 @@ mod tests {
 
     #[test]
     fn session_uluru_cache_and_html5ever_dom_work_together() {
-        let mut session = YoloBrowserSession::new(
-            EngineMode::HybridCoPilot,
-            YoloViewport::default(),
-        );
+        let mut session =
+            YoloBrowserSession::new(EngineMode::HybridCoPilot, YoloViewport::default());
         let tree = session.parse_html(
             "<!doctype html><html><body><main id='app'><button class='cta'>Launch</button></main></body></html>",
         );
@@ -411,7 +407,10 @@ mod tests {
         let indices: Vec<usize> = matches.iter().map(|n| n.index()).collect();
 
         session.cache_selector_match(".cta", &indices);
-        assert_eq!(session.lookup_cached_selector(".cta"), Some(indices.as_slice()));
+        assert_eq!(
+            session.lookup_cached_selector(".cta"),
+            Some(indices.as_slice())
+        );
     }
 
     #[test]

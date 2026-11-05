@@ -78,7 +78,10 @@ async fn main() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
-                println!("=== {} v{} ({}) ===", info.name, info.version, info.organization);
+                println!(
+                    "=== {} v{} ({}) ===",
+                    info.name, info.version, info.organization
+                );
                 println!("Repository      : {}", info.repository);
                 println!("JS/TS Toolchain : {}", info.js_toolchain);
                 println!("Host Plane      : {}", info.host_runtime_plane);
@@ -112,10 +115,8 @@ async fn main() -> Result<()> {
             } else {
                 html
             };
-            let mut session = YoloBrowserSession::new(
-                EngineMode::HybridCoPilot,
-                YoloViewport::default(),
-            );
+            let mut session =
+                YoloBrowserSession::new(EngineMode::HybridCoPilot, YoloViewport::default());
             session.stealth_enabled = cli.stealth;
             session.brave_shields_enabled = cli.brave_shields;
             session.allow_private_network = cli.allow_private_network;
@@ -140,10 +141,7 @@ async fn main() -> Result<()> {
             source_url,
             resource_type,
         } => {
-            let mut session = YoloBrowserSession::new(
-                EngineMode::AiAgent,
-                YoloViewport::default(),
-            );
+            let mut session = YoloBrowserSession::new(EngineMode::AiAgent, YoloViewport::default());
             session.brave_shields_enabled = cli.brave_shields;
             session.allow_private_network = cli.allow_private_network;
             let ssrf_valid = session.validate_url(&url).is_ok();

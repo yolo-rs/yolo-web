@@ -7,8 +7,7 @@ pub const WEBASSEMBLY_PROFILE: &str =
 pub const MDN_COMPAT_PROFILE: &str =
     include_str!("../../../data/standards/web/mdn/mdn-compat.current.json");
 pub const TC39_PROFILE: &str = include_str!("../../../data/standards/web/tc39/tc39.current.json");
-pub const MCP_PROFILE: &str =
-    include_str!("../../../data/standards/web/mcp/mcp-2026.current.json");
+pub const MCP_PROFILE: &str = include_str!("../../../data/standards/web/mcp/mcp-2026.current.json");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StandardError {
@@ -161,15 +160,23 @@ pub fn parse_webassembly_spec(json: &str) -> Result<WebAssemblySpec, StandardErr
 pub fn parse_mdn_compat(json: &str) -> Result<MdnCompatSchema, StandardError> {
     let spec: MdnCompatSchema = serde_json::from_str(json)?;
     if spec.feature.is_empty() || spec.support.is_empty() {
-        return Err(StandardError::Validation("MDN feature and support matrix must be non-empty".into()));
+        return Err(StandardError::Validation(
+            "MDN feature and support matrix must be non-empty".into(),
+        ));
     }
     Ok(spec)
 }
 
 pub fn parse_tc39_proposals(json: &str) -> Result<Tc39ProposalsSchema, StandardError> {
     let spec: Tc39ProposalsSchema = serde_json::from_str(json)?;
-    if spec.proposals.iter().any(|proposal| proposal.stage > 4 || proposal.name.is_empty()) {
-        return Err(StandardError::Validation("TC39 proposal stage must be 0 through 4 and name must be non-empty".into()));
+    if spec
+        .proposals
+        .iter()
+        .any(|proposal| proposal.stage > 4 || proposal.name.is_empty())
+    {
+        return Err(StandardError::Validation(
+            "TC39 proposal stage must be 0 through 4 and name must be non-empty".into(),
+        ));
     }
     Ok(spec)
 }
@@ -177,7 +184,9 @@ pub fn parse_tc39_proposals(json: &str) -> Result<Tc39ProposalsSchema, StandardE
 pub fn parse_mcp_spec(json: &str) -> Result<McpSpec2026, StandardError> {
     let spec: McpSpec2026 = serde_json::from_str(json)?;
     if spec.version.is_empty() || spec.protocol_version.is_empty() {
-        return Err(StandardError::Validation("MCP profile and protocol versions must be non-empty".into()));
+        return Err(StandardError::Validation(
+            "MCP profile and protocol versions must be non-empty".into(),
+        ));
     }
     Ok(spec)
 }
@@ -204,7 +213,9 @@ fn validate_webassembly(spec: &WebAssemblySpec) -> Result<(), StandardError> {
         || spec.component_model_spec_url.is_empty()
         || spec.sections.iter().any(|section| section.name.is_empty())
     {
-        return Err(StandardError::Validation("WebAssembly metadata and section names must be non-empty".into()));
+        return Err(StandardError::Validation(
+            "WebAssembly metadata and section names must be non-empty".into(),
+        ));
     }
     Ok(())
 }
