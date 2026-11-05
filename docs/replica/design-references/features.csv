@@ -1,0 +1,28 @@
+feature,area,priority,original,clone,notes
+Stage hero: one object on dark or saturated field with one primary CTA,layout,must,R02 R11 R13,yes,yolo-ui landing template; StageHero; one primary CTA
+Scroll-driven 3D object reveal with static fallback,motion,should,R02 R14,partial,yolo-gpu / Bevy or WebGPU; prefers-reduced-motion; CSS 3D cube + scroll timeline + static fallback; no wgpu/Bevy path yet
+Scroll-driven split title converging,motion,could,R14,yes,CSS scroll timelines plus Rust fallback; CSS scroll timeline; final frame fallback
+Particle starfield background,motion,could,R13 R14,yes,WGSL shader; pause control; CSS layers + WGSL shader (naga validated); pause switch; shader not yet rendered on GPU
+Global nav with per-item flyout panels,navigation,must,R11 R08,yes,keyboard and touch accessible; popover flyouts; keyboard by platform; not tested in a screen reader
+Mega menu with grouped product links,navigation,should,R08,yes,2+ groups
+Sticky in-page section tabs,navigation,must,R08 R09 R07,yes,SectionTabs
+Audience segmented control,navigation,could,R07,no,not built
+Design-system site shell: nav tree + platform switcher + theme toggle + token pages,docs,must,R06 R03,yes,yolo-ui docs site; DocsShell: tree; platform radios; theme switch; token page
+Product page template: hero + UI illustration + section tabs + FAQ,layout,must,R08 R09,yes,reused for every Aphrody product; ProductPageView with FAQ
+Downloadable channels cards (stable / preview / nightly),layout,should,R04 R05,yes,YOLO browser and OS downloads; DownloadChannels
+Release pill banner,component,should,R03 R04,yes,ReleasePill
+Site theme switcher across presets,theming,must,R03 R06,partial,8 yolo presets; docs shell switches light/dark; preset switching is by data-yt-preset; no in-page preset picker
+Language picker,i18n,should,R03 R11,no,EN and FR strings exist; no picker
+Region selector banner,i18n,could,R11,no,not built
+Rail navigation for app chrome,app,must,R10,yes,collapsible; labels on expand; collapsible; bottom bar on phones
+Centered search with voice in app header,app,must,R10 R01,yes,centred in bar (Taffy-tested); voice button is UI only; no recognition wired
+Dense media grid with metadata rows,app,should,R10,partial,virtualized; grid + content-visibility + visible_window helper; not virtualised in the DOM
+Listen-to-article audio control and share,editorial,could,R13,no,not built
+Editorial grid with oversized headline and 3D illustration,editorial,should,R12,yes,original illustrations only; EditorialGrid
+Terminal-styled monospace identity variant,theming,should,R03,yes,omarchy preset; Omarchy preset uses monospace stacks
+Geometric gradient identity variant,theming,could,R04,no,not built
+Benchmark tab strip with charts,data,could,R14,no,accessible charts; not built
+Logos product imagery photography and copy of any reference,brand,skip,yes,skip,not ours
+Proprietary fonts (Google Sans Product Sans SF Pro Segoe UI Variable) ,brand,skip,yes,skip,use open variable fonts
+Videos and 3D models from references,brand,skip,yes,skip,original or CC0 assets only
+Account data (Gmail Drive YouTube history),data,skip,yes,skip,owner data not captured
