@@ -1,0 +1,96 @@
+{
+  "generated": "2026-11-05",
+  "base": "origin/main 44fb4592",
+  "scope": "first-party package.json (excludes vendor, third_party, .agents, skills, packages/agent-browser-skills, crates/*/docs and www sites)",
+  "dependencies": [
+    {
+      "name": "@modelcontextprotocol/sdk",
+      "usedBy": ["packages/web-mcp", "packages/web-cli", "packages/brave-search-mcp"],
+      "replaceable": "partial",
+      "status": "removed from web-mcp and web-cli (now @yolo-web/mcp-native); kept in brave-search-mcp and as a test-only devDependency of mcp-native (reference client for the handshake tests)",
+      "why": "brave-search-mcp registers ~10 tools through McpServer.registerTool with zod shapes, output schemas and a JSON-Schema dialect shim; replacing it means rewriting every tool schema, an upstream-derived package"
+    },
+    {
+      "name": "commander",
+      "usedBy": ["packages/web-mcp", "packages/web-cli", "packages/brave-search-mcp"],
+      "replaceable": "yes",
+      "status": "removed everywhere (@yolo-web/cli-native, 6 tests)",
+      "why": "only subcommands, options, variadics, negation and defaults are used"
+    },
+    {
+      "name": "zod",
+      "usedBy": ["packages/web-mcp (declared, never imported)", "packages/brave-search-mcp"],
+      "replaceable": "partial",
+      "status": "removed from web-mcp (unused); kept in brave-search-mcp",
+      "why": "MCP SDK registerTool requires zod shapes; stays with the SDK"
+    },
+    {
+      "name": "ai",
+      "usedBy": ["packages/google/src/vertex.ts"],
+      "replaceable": "yes",
+      "status": "removed; Vertex generateContent over fetch with an ADC bearer token (4 tests)"
+    },
+    {
+      "name": "@ai-sdk/google-vertex",
+      "usedBy": ["packages/google/src/vertex.ts"],
+      "replaceable": "yes",
+      "status": "removed (same change)"
+    },
+    {
+      "name": "google-auth-library",
+      "usedBy": ["packages/google/src/api.ts", "drive-cli.ts", "adc.ts"],
+      "replaceable": "no",
+      "why": "Application Default Credentials resolution (service account JWT, authorized_user refresh, GCE metadata, external accounts), OAuth2 refresh and PKCE exchange; a crypto.subtle JWT would cover only the service-account case and would change behavior"
+    },
+    {
+      "name": "@googleapis/drive",
+      "usedBy": ["packages/google"],
+      "replaceable": "no (this pass)",
+      "why": "files.list/get/create/export plus resumable behavior at ~20 call sites and drive_v3 types shared by tests; a fetch client is feasible but is a separate rewrite"
+    },
+    {
+      "name": "@googleapis/docs",
+      "usedBy": ["packages/google"],
+      "replaceable": "no (this pass)",
+      "why": "documents.get/batchUpdate with docs_v1 types in drive-reconcile-review and docs-wordcraft"
+    },
+    {
+      "name": "lighthouse",
+      "usedBy": ["root script audit:lighthouse"],
+      "replaceable": "yes",
+      "status": "removed from devDependencies; script uses bunx lighthouse@13.6.0"
+    },
+    {
+      "name": "@lhci/cli",
+      "usedBy": ["root script audit:lighthouse:ci"],
+      "replaceable": "yes",
+      "status": "removed; bunx --package @lhci/cli@0.16.0"
+    },
+    {
+      "name": "vercel",
+      "usedBy": ["root script vercel:metrics"],
+      "replaceable": "yes",
+      "status": "removed; bunx vercel@65.11.0 metrics"
+    },
+    {
+      "name": "typescript",
+      "usedBy": ["root (bun check / tsgo native binaries)"],
+      "replaceable": "no",
+      "why": "bun check resolves TypeScript 7 native packages from it"
+    },
+    {
+      "name": "@types/bun",
+      "usedBy": ["root"],
+      "replaceable": "no",
+      "why": "type definitions"
+    }
+  ],
+  "notChecked": "apps/* and packages/chrome-extension-yolo declare no external dependencies beyond workspace links; crates/brave-star/star-wasm/www and crates/brave-bot/docs/website are upstream sites left alone",
+  "counts": {
+    "installedPackagesBefore": 635,
+    "installedPackagesAfter": 151,
+    "nodeModulesBeforeMB": 687,
+    "nodeModulesAfterMB": 87,
+    "measuredOn": "bunos, bun install, hoisted linker"
+  }
+}
