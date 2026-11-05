@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.workspace.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun"]
+  },
+  "include": ["src/**/*", "scripts/**/*", "extension/**/*"],
+  "exclude": ["dist", "node_modules"]
+}

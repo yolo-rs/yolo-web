@@ -1,0 +1,22 @@
+{
+  "name": "@yolo-web/yolo-agent",
+  "version": "0.1.0",
+  "description": "YOLO agent: browser use and computer use core, MV3 extension, MCP bridge, and compiled launcher for yolo-chromium",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "yolo-agent": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build:ext": "bun run scripts/build-extension.ts",
+    "aot": "bun run scripts/compile.ts",
+    "e2e": "bun run scripts/e2e.ts",
+    "check": "bun check --no-script",
+    "test": "bun test"
+  }
+}
