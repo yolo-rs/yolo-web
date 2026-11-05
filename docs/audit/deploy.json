@@ -1,0 +1,219 @@
+{
+  "site": "deploy",
+  "origin": "https://deploy.aphrody.app",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:25.471Z",
+  "durationS": 3,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [],
+    "sitemaps": [],
+    "body": "# https://www.robotstxt.org/robotstxt.html\nUser-agent: *\nDisallow:\n"
+  },
+  "sitemap": {
+    "url": "https://deploy.aphrody.app/sitemap.xml",
+    "status": 404,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://deploy.aphrody.app/",
+        "status": 301,
+        "location": "https://deploy.aphrody.app/"
+      },
+      {
+        "url": "https://deploy.aphrody.app/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://deploy.aphrody.app/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "strict-origin-when-cross-origin, strict-origin-when-cross-origin",
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": null,
+    "content-encoding": "zstd",
+    "server": "cloudflare",
+    "cf-cache-status": "DYNAMIC"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.app",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Oct 11 22:55:52 2026 GMT",
+    "notAfter": "Jan  9 23:55:50 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "200": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 11
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": [
+        "https://deploy.aphrody.app/"
+      ]
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": [
+        "https://deploy.aphrody.app/"
+      ]
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://deploy.aphrody.app/"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://deploy.aphrody.app/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://deploy.aphrody.app/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://deploy.aphrody.app/",
+      "hops": [
+        {
+          "url": "https://deploy.aphrody.app/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 359,
+      "htmlBytes": 1121,
+      "lang": "en",
+      "title": "Komodo",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://deploy.aphrody.app/favicon.svg",
+        "https://deploy.aphrody.app/favicon.ico",
+        "https://deploy.aphrody.app/apple-touch-icon.png",
+        "https://deploy.aphrody.app/manifest.json",
+        "https://deploy.aphrody.app/assets/index-DQPS6L49.js",
+        "https://deploy.aphrody.app/assets/rolldown-runtime-B0Z9INg1.js",
+        "https://deploy.aphrody.app/assets/react-5P_E3t10.js",
+        "https://deploy.aphrody.app/assets/tanstack-BhLeje1C.js",
+        "https://deploy.aphrody.app/assets/mantine-B49NM7nF.js",
+        "https://deploy.aphrody.app/assets/mantine-zBFmX-cF.css",
+        "https://deploy.aphrody.app/assets/index-Bto2WM3e.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

@@ -1,0 +1,214 @@
+{
+  "site": "downloads",
+  "origin": "https://downloads.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:28.940Z",
+  "durationS": 4,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 404,
+    "disallow": [],
+    "sitemaps": [],
+    "body": ""
+  },
+  "sitemap": {
+    "url": "https://downloads.aphrody.com/sitemap.xml",
+    "status": 404,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://downloads.aphrody.com/",
+        "status": 301,
+        "location": "https://downloads.aphrody.com/"
+      },
+      {
+        "url": "https://downloads.aphrody.com/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://downloads.aphrody.com/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000",
+    "content-security-policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": "no-referrer",
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": "public, max-age=60",
+    "content-encoding": "zstd",
+    "server": "nginx",
+    "cf-cache-status": null
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Let's Encrypt, CN=YE1",
+    "notBefore": "Oct 24 10:11:43 2026 GMT",
+    "notAfter": "Jan 22 10:11:42 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "200": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 1
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": [
+        "https://downloads.aphrody.com/"
+      ]
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://downloads.aphrody.com/"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://downloads.aphrody.com/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": [
+        "https://downloads.aphrody.com/"
+      ]
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://downloads.aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://downloads.aphrody.com/",
+      "hops": [
+        {
+          "url": "https://downloads.aphrody.com/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html; charset=utf-8",
+      "ms": 264,
+      "htmlBytes": 3781,
+      "lang": "en",
+      "title": "Aphrody",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [
+        "https://downloads.aphrody.com/icon.svg"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": [
+        {
+          "kind": "garbled-double",
+          "match": "Aphrody Aphrody"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+{
+  "site": "os",
+  "origin": "https://os.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:51.668Z",
+  "durationS": 4,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 526,
+    "disallow": [],
+    "sitemaps": [],
+    "body": ""
+  },
+  "sitemap": {
+    "url": "https://os.aphrody.com/sitemap.xml",
+    "status": 526,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 526,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://os.aphrody.com/",
+        "status": 301,
+        "location": "https://os.aphrody.com/"
+      },
+      {
+        "url": "https://os.aphrody.com/",
+        "status": 526
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://os.aphrody.com/",
+      "status": 526
+    }
+  ],
+  "headers": {
+    "strict-transport-security": null,
+    "content-security-policy": null,
+    "x-content-type-options": null,
+    "x-frame-options": "SAMEORIGIN",
+    "referrer-policy": "same-origin",
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+    "content-encoding": null,
+    "server": "cloudflare",
+    "cf-cache-status": null
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Let's Encrypt, CN=YE2",
+    "notBefore": "Oct 11 23:27:52 2026 GMT",
+    "notAfter": "Jan  9 23:27:51 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "526": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 1
+  },
+  "brokenLinks": [
+    {
+      "url": "https://os.aphrody.com/",
+      "status": 526,
+      "from": "(crawl frontier)",
+      "error": "text/html; charset=UTF-8"
+    }
+  ],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": []
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": []
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://os.aphrody.com/",
+      "depth": 0,
+      "status": 526,
+      "finalUrl": "https://os.aphrody.com/",
+      "hops": [
+        {
+          "url": "https://os.aphrody.com/",
+          "status": 526
+        }
+      ],
+      "contentType": "text/html; charset=UTF-8",
+      "ms": 302,
+      "htmlBytes": 7703,
+      "lang": "en-US",
+      "title": "aphrody.com | 526: Invalid SSL certificate",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": "noindex, nofollow",
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [
+        "https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_526&utm_campaign=os.aphrody.com",
+        "https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-526/",
+        "https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/"
+      ],
+      "assets": [
+        "https://os.aphrody.com/cdn-cgi/styles/main.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

@@ -1,0 +1,206 @@
+{
+  "site": "nie",
+  "origin": "https://nie.aphrody.app",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:32.566Z",
+  "durationS": 4,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 410,
+    "disallow": [],
+    "sitemaps": [],
+    "body": ""
+  },
+  "sitemap": {
+    "url": "https://nie.aphrody.app/sitemap.xml",
+    "status": 410,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 410,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 410,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 410,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 410,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 410,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://nie.aphrody.app/",
+        "status": 301,
+        "location": "https://nie.aphrody.app/"
+      },
+      {
+        "url": "https://nie.aphrody.app/",
+        "status": 410
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://nie.aphrody.app/",
+      "status": 410
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": null,
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": null,
+    "content-encoding": null,
+    "server": "cloudflare",
+    "cf-cache-status": "DYNAMIC"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.app",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Oct 11 22:55:52 2026 GMT",
+    "notAfter": "Jan  9 23:55:50 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "410": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 0
+  },
+  "brokenLinks": [
+    {
+      "url": "https://nie.aphrody.app/",
+      "status": 410,
+      "from": "(crawl frontier)",
+      "error": "text/plain"
+    }
+  ],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": []
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": []
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://nie.aphrody.app/",
+      "depth": 0,
+      "status": 410,
+      "finalUrl": "https://nie.aphrody.app/",
+      "hops": [
+        {
+          "url": "https://nie.aphrody.app/",
+          "status": 410
+        }
+      ],
+      "contentType": "text/plain",
+      "ms": 319,
+      "htmlBytes": 0,
+      "lang": null,
+      "title": "",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": false,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

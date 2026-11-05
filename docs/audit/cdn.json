@@ -1,0 +1,216 @@
+{
+  "site": "cdn",
+  "origin": "https://cdn.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:21.638Z",
+  "durationS": 4,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [
+      "/"
+    ],
+    "sitemaps": [],
+    "body": "User-agent: *\nDisallow: /\n"
+  },
+  "sitemap": {
+    "url": "https://cdn.aphrody.com/sitemap.xml",
+    "status": 404,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://cdn.aphrody.com/",
+        "status": 301,
+        "location": "https://cdn.aphrody.com/"
+      },
+      {
+        "url": "https://cdn.aphrody.com/",
+        "status": 302,
+        "location": "https://cdn.aphrody.com/s/manifest.json"
+      },
+      {
+        "url": "https://cdn.aphrody.com/s/manifest.json",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://cdn.aphrody.com/",
+      "status": 302,
+      "location": "https://cdn.aphrody.com/s/manifest.json"
+    },
+    {
+      "url": "https://cdn.aphrody.com/s/manifest.json",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000",
+    "content-security-policy": null,
+    "x-content-type-options": null,
+    "x-frame-options": null,
+    "referrer-policy": null,
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": null,
+    "content-encoding": null,
+    "server": "nginx",
+    "cf-cache-status": null
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Let's Encrypt, CN=YE1",
+    "notBefore": "Oct 24 10:11:43 2026 GMT",
+    "notAfter": "Jan 22 10:11:42 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "200": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 0
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": []
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": []
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://cdn.aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://cdn.aphrody.com/s/manifest.json",
+      "hops": [
+        {
+          "url": "https://cdn.aphrody.com/",
+          "status": 302,
+          "location": "https://cdn.aphrody.com/s/manifest.json"
+        },
+        {
+          "url": "https://cdn.aphrody.com/s/manifest.json",
+          "status": 200
+        }
+      ],
+      "contentType": "application/json",
+      "ms": 525,
+      "htmlBytes": 0,
+      "lang": null,
+      "title": "",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": false,
+      "h1Count": 0,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

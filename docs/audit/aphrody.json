@@ -2,8 +2,8 @@
   "site": "aphrody",
   "origin": "https://aphrody.com",
   "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
-  "startedAt": "2026-11-05T09:58:03.185Z",
-  "durationS": 66,
+  "startedAt": "2026-11-05T10:58:27.713Z",
+  "durationS": 59,
   "limits": {
     "maxPages": 60,
     "depth": 2,
@@ -108,14 +108,22 @@
   "crawl": {
     "pages": 4,
     "statuses": {
-      "200": 4
+      "200": 3,
+      "403": 1
     },
     "linkChecked": 3,
     "linkTargets": 3,
-    "assetChecked": 13,
-    "assetTargets": 13
+    "assetChecked": 9,
+    "assetTargets": 9
   },
-  "brokenLinks": [],
+  "brokenLinks": [
+    {
+      "url": "https://aphrody.com/status",
+      "status": 403,
+      "from": "(crawl frontier)",
+      "error": "text/html"
+    }
+  ],
   "badAssets": [],
   "checks": [
     {
@@ -132,9 +140,7 @@
     },
     {
       "name": "missing meta description",
-      "urls": [
-        "https://aphrody.com/status"
-      ]
+      "urls": []
     },
     {
       "name": "h1 count != 1",
@@ -142,9 +148,7 @@
     },
     {
       "name": "missing canonical",
-      "urls": [
-        "https://aphrody.com/status"
-      ]
+      "urls": []
     },
     {
       "name": "canonical differs from final URL",
@@ -160,9 +164,7 @@
     },
     {
       "name": "missing og:title/og:image",
-      "urls": [
-        "https://aphrody.com/status"
-      ]
+      "urls": []
     },
     {
       "name": "noindex",
@@ -192,11 +194,11 @@
       "a11y": 98,
       "bp": 96,
       "seo": 100,
-      "lcp": 996.0575,
+      "lcp": 1029.7955,
       "cls": 0,
-      "tbt": 95.99999999999989,
-      "fcp": 996.0575,
-      "si": 2221.651804496508,
+      "tbt": 103.00000000000011,
+      "fcp": 1029.7955,
+      "si": 2186.404810019099,
       "consoleErrors": 0,
       "consoleSample": [],
       "fails": [
@@ -216,11 +218,11 @@
       "a11y": 98,
       "bp": 96,
       "seo": 100,
-      "lcp": 275.3555,
+      "lcp": 284.719,
       "cls": 0,
-      "tbt": 0,
-      "fcp": 275.3555,
-      "si": 640.0296273622638,
+      "tbt": 47,
+      "fcp": 284.719,
+      "si": 645.0952160188036,
       "consoleErrors": 0,
       "consoleSample": [],
       "fails": [
@@ -233,29 +235,6 @@
       ]
     },
     {
-      "url": "https://aphrody.com/status",
-      "form": "mobile",
-      "ok": true,
-      "perf": 100,
-      "a11y": 88,
-      "bp": 100,
-      "seo": 92,
-      "lcp": 833.748,
-      "cls": 0,
-      "tbt": 2.5,
-      "fcp": 833.748,
-      "si": 833.748,
-      "consoleErrors": 0,
-      "consoleSample": [],
-      "fails": [
-        "meta-refresh (0)",
-        "td-has-header (0)",
-        "meta-description (0)",
-        "unsized-images (50)",
-        "image-delivery-insight (50)"
-      ]
-    },
-    {
       "url": "https://aphrody.com/privacy",
       "form": "mobile",
       "ok": true,
@@ -263,11 +242,11 @@
       "a11y": 100,
       "bp": 100,
       "seo": 100,
-      "lcp": 835.281,
+      "lcp": 807.577,
       "cls": 0.03102092926775614,
-      "tbt": 9,
-      "fcp": 835.281,
-      "si": 835.281,
+      "tbt": 4,
+      "fcp": 807.577,
+      "si": 807.577,
       "consoleErrors": 0,
       "consoleSample": [],
       "fails": [
@@ -277,6 +256,14 @@
         "cache-insight (50)",
         "render-blocking-insight (50)"
       ]
+    },
+    {
+      "url": "https://aphrody.com/status",
+      "form": "mobile",
+      "ok": true,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": []
     }
   ],
   "lighthouseNote": "",
@@ -293,7 +280,7 @@
         }
       ],
       "contentType": "text/html; charset=utf-8",
-      "ms": 266,
+      "ms": 265,
       "htmlBytes": 45640,
       "lang": "en",
       "title": "Aphrody &bull; The Calm, Divine Operating System",
@@ -361,7 +348,7 @@
         }
       ],
       "contentType": "text/html; charset=utf-8",
-      "ms": 262,
+      "ms": 263,
       "htmlBytes": 3405,
       "lang": "en",
       "title": "Privacy and storage · Aphrody",
@@ -398,38 +385,33 @@
     {
       "url": "https://aphrody.com/status",
       "depth": 1,
-      "status": 200,
+      "status": 403,
       "finalUrl": "https://aphrody.com/status",
       "hops": [
         {
           "url": "https://aphrody.com/status",
-          "status": 200
+          "status": 403
         }
       ],
       "contentType": "text/html",
       "ms": 287,
-      "htmlBytes": 15183,
-      "lang": "en",
-      "title": "Bun OS status",
+      "htmlBytes": 146,
+      "lang": null,
+      "title": "403 Forbidden",
       "description": null,
       "canonical": null,
       "robotsMeta": null,
-      "viewport": true,
+      "viewport": false,
       "h1Count": 1,
       "og": {},
       "twitterCard": null,
       "hreflang": [],
       "jsonLd": 0,
       "links": [],
-      "assets": [
-        "https://aphrody.com/status/nightly/2026-11-05T0231/01-desktop.png",
-        "https://aphrody.com/status/nightly/2026-11-05T0231/02-linux-and-web.png",
-        "https://aphrody.com/status/nightly/2026-11-05T0231/03-android-window.png",
-        "https://aphrody.com/status/nightly/2026-11-05T0231/04-fdroid-window.png"
-      ],
+      "assets": [],
       "mixed": [],
       "imgNoAlt": 0,
-      "imgNoDims": 4,
+      "imgNoDims": 0,
       "copy": []
     },
     {
@@ -444,7 +426,7 @@
         }
       ],
       "contentType": "application/manifest+json",
-      "ms": 263,
+      "ms": 262,
       "htmlBytes": 0,
       "lang": null,
       "title": "",

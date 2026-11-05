@@ -1,0 +1,250 @@
+{
+  "site": "yolo",
+  "origin": "https://yolo.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:52:51.247Z",
+  "durationS": 30,
+  "limits": {
+    "maxPages": 60,
+    "depth": 2,
+    "linkChecks": 150,
+    "assetChecks": 120,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [],
+    "sitemaps": [],
+    "body": "# As a condition of accessing this website, you agree to abide by the following\n# content signals:\n\n# (a)  If a content-signal = yes, you may collect content for the corresponding\n#      use.\n# (b)  If a content-signal = no, you may not collect content for the\n#      corresponding use.\n# (c)  If the website operator does not include a content signal for a\n#      corresponding use, the website operator neither grants nor restricts\n#      permission via content signal with respect to the corresponding use.\n\n# The content signals and their meanings are:\n\n# search:   building a search index and providing search results (e.g., returning\n#           hyperlinks and short excerpts from your website's contents). Search does not\n#           include providing AI-generated search summaries.\n# ai-input: inputting content into one or more AI models (e.g., retrieval\n#           augmented generation, grounding, or other real-time taking of content for\n#           generative AI search answers).\n# ai-train: training or fine-tuning AI models.\n\n# ANY RESTRICTIONS EXPRESSED VIA CONTENT SIGNALS ARE EXPRESS RESERVATIONS OF\n# RIGHTS UNDER ARTICLE 4 OF THE EUROPEAN UNION DIRECTIVE 2019/790 ON COPYRIGHT\n# AND RELATED RIGHTS IN THE DIGITAL SINGLE MARKET.\n"
+  },
+  "sitemap": {
+    "url": "https://yolo.aphrody.com/sitemap.xml",
+    "status": 404,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://yolo.aphrody.com/",
+        "status": 301,
+        "location": "https://yolo.aphrody.com/"
+      },
+      {
+        "url": "https://yolo.aphrody.com/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": null,
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": "public, max-age=0, must-revalidate",
+    "content-encoding": "zstd",
+    "server": "cloudflare",
+    "cf-cache-status": "HIT"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Nov  4 08:32:12 2026 GMT",
+    "notAfter": "Feb  2 09:32:08 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "200": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 0
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "missing meta description",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 91,
+      "bp": 100,
+      "seo": 91,
+      "lcp": 978.0965,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 978.0965,
+      "si": 978.0965,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "color-contrast (0)",
+        "meta-description (0)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/",
+      "form": "desktop",
+      "ok": true,
+      "perf": 100,
+      "a11y": 91,
+      "bp": 100,
+      "seo": 91,
+      "lcp": 317.986,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 317.986,
+      "si": 378.06094996709817,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "color-contrast (0)",
+        "meta-description (0)"
+      ]
+    }
+  ],
+  "lighthouseNote": "",
+  "pages": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 291,
+      "htmlBytes": 59690,
+      "lang": "fr",
+      "title": "yolo.aphrody.com — Unified Dioxus, Iced, Egui, Taffy, WGPUI & Zed GPUI Hub",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/"
+      ],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}

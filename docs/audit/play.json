@@ -1,0 +1,223 @@
+{
+  "site": "play",
+  "origin": "https://play.aphrody.app",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T10:53:47.568Z",
+  "durationS": 4,
+  "limits": {
+    "maxPages": 1,
+    "depth": 2,
+    "linkChecks": 0,
+    "assetChecks": 0,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 526,
+    "disallow": [],
+    "sitemaps": [],
+    "body": ""
+  },
+  "sitemap": {
+    "url": "https://play.aphrody.app/sitemap.xml",
+    "status": 526,
+    "urls": 0
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 526,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 526,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://play.aphrody.app/",
+        "status": 301,
+        "location": "https://play.aphrody.app/"
+      },
+      {
+        "url": "https://play.aphrody.app/",
+        "status": 301,
+        "location": "https://aphrody.com/workspace/games"
+      },
+      {
+        "url": "https://aphrody.com/workspace/games",
+        "status": 404
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://play.aphrody.app/",
+      "status": 301,
+      "location": "https://aphrody.com/workspace/games"
+    },
+    {
+      "url": "https://aphrody.com/workspace/games",
+      "status": 404
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "content-security-policy": null,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": null,
+    "referrer-policy": null,
+    "permissions-policy": null,
+    "cross-origin-opener-policy": null,
+    "cross-origin-resource-policy": null,
+    "cache-control": null,
+    "content-encoding": null,
+    "server": "cloudflare",
+    "cf-cache-status": null
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.app",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Oct 11 22:55:52 2026 GMT",
+    "notAfter": "Jan  9 23:55:50 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 1,
+    "statuses": {
+      "404": 1
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 0,
+    "assetTargets": 0
+  },
+  "brokenLinks": [
+    {
+      "url": "https://play.aphrody.app/",
+      "status": 404,
+      "from": "(crawl frontier)",
+      "error": "text/html; charset=utf-8"
+    }
+  ],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": []
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": []
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": []
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": []
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [],
+  "lighthouseNote": "not run (light mode: status, TLS, headers only)",
+  "pages": [
+    {
+      "url": "https://play.aphrody.app/",
+      "depth": 0,
+      "status": 404,
+      "finalUrl": "https://aphrody.com/workspace/games",
+      "hops": [
+        {
+          "url": "https://play.aphrody.app/",
+          "status": 301,
+          "location": "https://aphrody.com/workspace/games"
+        },
+        {
+          "url": "https://aphrody.com/workspace/games",
+          "status": 404
+        }
+      ],
+      "contentType": "text/html; charset=utf-8",
+      "ms": 601,
+      "htmlBytes": 980,
+      "lang": "en",
+      "title": "404 Not Found - Aphrody Bun OS",
+      "description": null,
+      "canonical": null,
+      "robotsMeta": "noindex",
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [],
+      "jsonLd": 0,
+      "links": [
+        "https://aphrody.com/"
+      ],
+      "assets": [],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}
