@@ -7,6 +7,7 @@
 //! keeps Chromium's sandbox enabled. On other platforms it runs the shell
 //! in-process.
 
+#[cfg(any(target_os = "windows", test))]
 #[path = "cdp.rs"]
 mod cdp;
 #[path = "engine_info.rs"]

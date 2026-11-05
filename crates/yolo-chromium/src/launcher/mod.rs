@@ -4,8 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::engine_info;
 
+// The Windows launcher is the only caller of these; elsewhere the shell runs
+// in-process. Tests still build them so their unit tests run on every host.
+#[cfg(any(target_os = "windows", test))]
 pub mod devtools;
 pub mod policy;
+#[cfg(any(target_os = "windows", test))]
 pub mod runtime;
 
 /// Exit code when the launcher itself fails (bad arguments, missing files).
@@ -451,9 +455,10 @@ mod tests {
         let held = parse(&["--smoke", "--remote-debugging-port=9333"]);
         assert_eq!(held.remote_debugging_port, Some(9333));
         assert_eq!(held.smoke_hold_ms, Some(DEFAULT_SMOKE_HOLD_MS));
-        assert!(held
-            .forwarded
-            .contains(&format!("--smoke-hold-ms={DEFAULT_SMOKE_HOLD_MS}")));
+        assert!(
+            held.forwarded
+                .contains(&format!("--smoke-hold-ms={DEFAULT_SMOKE_HOLD_MS}"))
+        );
         assert_eq!(
             held.timeout_ms,
             Some(DEFAULT_SMOKE_TIMEOUT_MS + DEFAULT_SMOKE_HOLD_MS + SMOKE_GRACE_MS)
