@@ -11,6 +11,7 @@ Cross-check from yolo-re (not copied here): `C:/src/yolo-re/docs/audits/rea-2026
 | Site | Report | Owner | Lighthouse mobile perf / a11y / BP / SEO (home) | LCP s | Top blocker |
 |---|---|---|---|---|---|
 | craft.aphrody.app | [craft.md](craft.md) | yolo-ui-aa | 95 / 100 / 100 / 100 | 2.9 | No CSP; studio pages lack canonical, OG, description, h1 |
+| craft.aphrody.app (after, owner release 2026-11-05T16-25-14-419Z) | [craft-after.md](craft-after.md) | yolo-ui-aa | 100 / 96 / 100 / 100 | 1.0 | Hashed css/js/wasm immutable, /word/ first visit 9,447,987 B and repeat 1,280 B, br served confirmed; wasm still DYNAMIC at Cloudflare; /art/ broken (glob error, analytics), /light/ 16.4 MB uncached font, no CSP, studio SEO unchanged; 13 studios load with 0 errors but no GPU adapter |
 | auto.aphrody.com | [auto.md](auto.md) | yolo-ui-aa | 52 / 97 / 100 / 100 | 8.2 | No sitemap, SPA with empty no-JS fallback, slow mobile LCP, no CSP |
 | auto.aphrody.com (after 93408ded) | [auto-after.md](auto-after.md) | yolo-ui-aa | 80 / 97 / 100 / 100 | 4.8 | Hero image is a CSS background (late LCP), Material Symbols 374 KB, no sitemap, no CSP; CSS 1.29 MB down to 79.6 KB confirmed |
 | auto.aphrody.com (round 2, 3bc47ea0) | [auto-after-r2.md](auto-after-r2.md) | yolo-ui-aa | 95-98 / 100 / 100 / 100 | 2.0 | Page 353 KB; /app bundle 331 KB (232 KiB unused); unhashed poster /img/btp-analytique.webp 85.9 KB loaded on /; legal pages lack meta description; sitemap, CSP, security.txt, hashed hero confirmed |
