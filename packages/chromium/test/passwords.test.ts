@@ -8,12 +8,17 @@ import { createTestPasswordProvider } from "./fixtures/password-provider.ts";
 
 function tempDir(prefix: string, files: Record<string, string>) {
   const path = mkdtempSync(join(tmpdir(), `${prefix}-`));
-  for (const [name, contents] of Object.entries(files)) writeFileSync(join(path, name), contents);
-  return { toString: () => path, [Symbol.dispose]: () => rmSync(path, { recursive: true, force: true }) };
+  for (const [name, contents] of Object.entries(files))
+    writeFileSync(join(path, name), contents);
+  return {
+    toString: () => path,
+    [Symbol.dispose]: () => rmSync(path, { recursive: true, force: true }),
+  };
 }
 
 test("Chromium shares the private owner provider without claiming browser import or exposing credential metadata", async () => {
-  const csv = "name,url,username,password\nFixture,https://example.test/login,fixture-user,fixture-password\n";
+  const csv =
+    "name,url,username,password\nFixture,https://example.test/login,fixture-user,fixture-password\n";
   using directory = tempDir("chromium-passwords", { "private.csv": csv });
   const filename = join(String(directory), "private.csv");
   chmodSync(filename, 0o600);
@@ -32,7 +37,7 @@ test("Chromium shares the private owner provider without claiming browser import
   let consumed = false;
   const returned = await connection.withCredential(
     { url: "https://example.test/other", username: "fixture-user" },
-    credential => {
+    (credential) => {
       expect(credential.password).toBe("fixture-password");
       consumed = true;
     },
@@ -44,7 +49,8 @@ test("Chromium shares the private owner provider without claiming browser import
 
 test("Chromium retains shared provider origin and private-path boundaries", async () => {
   using directory = tempDir("chromium-password-boundaries", {
-    "private.csv": "name,url,username,password\nFixture,https://example.test/login,user,password\n",
+    "private.csv":
+      "name,url,username,password\nFixture,https://example.test/login,user,password\n",
   });
   const filename = join(String(directory), "private.csv");
   chmodSync(filename, 0o600);
@@ -56,9 +62,15 @@ test("Chromium retains shared provider origin and private-path boundaries", asyn
     },
   );
   const connection = createChromiumPasswordConnection(provider);
-  await expect(connection.withCredential({ url: "https://other.test" }, () => {})).rejects.toThrow();
+  await expect(
+    connection.withCredential({ url: "https://other.test" }, () => {}),
+  ).rejects.toThrow();
   protectedPath = false;
   expect(() => connection.importPlan()).toThrow("Protected source unavailable");
-  await expect(connection.withCredential({ url: "https://example.test" }, () => {})).rejects.toThrow();
-  expect(() => createChromiumPasswordConnection(null as never)).toThrow("explicit shared Chrome password provider");
+  await expect(
+    connection.withCredential({ url: "https://example.test" }, () => {}),
+  ).rejects.toThrow();
+  expect(() => createChromiumPasswordConnection(null as never)).toThrow(
+    "explicit shared Chrome password provider",
+  );
 });

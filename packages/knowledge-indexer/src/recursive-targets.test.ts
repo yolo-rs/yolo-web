@@ -281,7 +281,9 @@ describe("Recursive Web Target Test Matrix (Google, Cloudflare, Chromium, Chromi
 
   afterAll(async () => {
     await db.syncToDocsAndSkill(TEST_DOCS, TEST_SKILL);
-    expect(await Bun.file(TEST_DOCS).text()).toContain("recursive-target-matrix");
+    expect(await Bun.file(TEST_DOCS).text()).toContain(
+      "recursive-target-matrix",
+    );
     db.close();
     await Promise.all(
       [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`, TEST_DOCS, TEST_SKILL].map(

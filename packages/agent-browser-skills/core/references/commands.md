@@ -47,7 +47,7 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-`open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
+`open` with no URL gives you a clean launch so interception rules and cookies can take effect on the _first_ real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
 With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
@@ -327,6 +327,7 @@ agent-browser frame main              # Return to main frame
 ```
 
 The `frame` command accepts:
+
 - **Element refs** — `frame @e3` resolves the ref to an iframe element
 - **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
 - **Frame name/URL** — matches against the browser's frame tree
@@ -390,6 +391,7 @@ agent-browser plugin run <name> <type> --payload <json>
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
 
 Other capabilities use the same protocol:
+
 - `browser.provider`: `agent-browser --provider <name> open <url>`
 - `launch.mutate`: append local launch args, extensions, or init scripts
 - `command.run`: `agent-browser plugin run <name> <type> --payload <json>`

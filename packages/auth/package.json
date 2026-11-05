@@ -10,7 +10,11 @@
     ".": "./src/index.ts",
     "./session": "./src/session.ts"
   },
-  "files": ["src", "README.md", "LICENSE-APACHE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE-APACHE"
+  ],
   "scripts": {
     "check": "bun check --no-script",
     "test": "bun test"

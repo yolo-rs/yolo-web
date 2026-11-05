@@ -59,7 +59,8 @@ export const CHROMIUM_2026_DEFAULT_PROFILE: ChromiumLegitimacyProfile = {
   secChUaPlatform: '"Windows"',
   hasWebGL2: true,
   webglVendor: "Google Inc. (NVIDIA)",
-  webglRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  webglRenderer:
+    "ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Direct3D11 vs_5_0 ps_5_0, D3D11)",
   audioFingerprintNoise: 0.00000001,
   supportsCredentialsGet: true,
 };
@@ -67,7 +68,9 @@ export const CHROMIUM_2026_DEFAULT_PROFILE: ChromiumLegitimacyProfile = {
 export class ChallengeSolverEngine {
   private readonly profile: ChromiumLegitimacyProfile;
 
-  constructor(profile: ChromiumLegitimacyProfile = CHROMIUM_2026_DEFAULT_PROFILE) {
+  constructor(
+    profile: ChromiumLegitimacyProfile = CHROMIUM_2026_DEFAULT_PROFILE,
+  ) {
     this.profile = profile;
   }
 
@@ -147,7 +150,7 @@ export class ChallengeSolverEngine {
     if (
       html.includes("challenges.cloudflare.com/turnstile") ||
       html.includes("cf-turnstile") ||
-      html.includes("data-sitekey") && html.includes("turnstile")
+      (html.includes("data-sitekey") && html.includes("turnstile"))
     ) {
       const matchKey = html.match(/data-sitekey=["']([^"']+)["']/i);
       return {
@@ -176,7 +179,7 @@ export class ChallengeSolverEngine {
     if (
       html.includes("google.com/recaptcha/api.js") ||
       html.includes("g-recaptcha") ||
-      html.includes("data-sitekey") && html.includes("recaptcha")
+      (html.includes("data-sitekey") && html.includes("recaptcha"))
     ) {
       const matchKey = html.match(/data-sitekey=["']([^"']+)["']/i);
       return {
@@ -203,7 +206,7 @@ export class ChallengeSolverEngine {
     // 5. Google IPP (Identity Provider Protocol / One Tap / Credential Management)
     if (
       html.includes("accounts.google.com/gsi/client") ||
-      html.includes("data-client_id") && html.includes("google")
+      (html.includes("data-client_id") && html.includes("google"))
     ) {
       const matchClient = html.match(/data-client_id=["']([^"']+)["']/i);
       return {
@@ -221,7 +224,9 @@ export class ChallengeSolverEngine {
    * Kept as a compatibility entry point. This package detects challenge markers
    * but does not solve them, emulate human interaction, or manufacture tokens.
    */
-  async solveChallenge(detection: ChallengeDetectionResult): Promise<ChallengeSolveResult> {
+  async solveChallenge(
+    detection: ChallengeDetectionResult,
+  ): Promise<ChallengeSolveResult> {
     const start = performance.now();
     const detected = detection.detected && detection.type !== undefined;
     return {
@@ -246,7 +251,8 @@ export class ChallengeSolverEngine {
       "sec-ch-ua-platform": this.profile.secChUaPlatform,
       "upgrade-insecure-requests": "1",
       "user-agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${this.profile.browserVersion} Safari/537.36`,
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
       "sec-fetch-site": "none",
       "sec-fetch-mode": "navigate",
       "sec-fetch-user": "?1",

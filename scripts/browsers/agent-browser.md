@@ -30,9 +30,10 @@ Smoke result for (B): `docs/browsers/receipts/agent-browser-smoke.txt`.
 ## B. Installed Canary over CDP (no build needed) — smoked here
 
 Chrome Canary: `%LOCALAPPDATA%\Google\Chrome SxS\Application\chrome.exe`
-Edge Canary:   `%LOCALAPPDATA%\Microsoft\Edge SxS\Application\msedge.exe`
+Edge Canary: `%LOCALAPPDATA%\Microsoft\Edge SxS\Application\msedge.exe`
 
 Launch an isolated headless instance with a CDP endpoint:
+
 ```powershell
 $prof = "$env:TEMP\agent-run"          # throwaway, NOT the user's profile
 & "$env:LOCALAPPDATA\Google\Chrome SxS\Application\chrome.exe" `
@@ -40,14 +41,17 @@ $prof = "$env:TEMP\agent-run"          # throwaway, NOT the user's profile
   --user-data-dir=$prof --remote-debugging-port=9465 --remote-allow-origins=* about:blank
 curl http://127.0.0.1:9465/json/version      # agent attach surface
 ```
+
 - `--remote-allow-origins=*` is **required** by Chrome 111+ for CDP WebSocket clients.
 - Attach from Playwright (`connectOverCDP("http://127.0.0.1:9465")`), Puppeteer
   (`puppeteer.connect({browserURL})`), a Bun CDP client, or `browser-use`.
 - Screenshot via CDP (the CLI `--screenshot` flag writes a 0-byte file under
   Chrome 159 new-headless — use CDP `Page.captureScreenshot` instead):
+
 ```bash
 bun scripts/browsers/cdp-screenshot.ts 9465 https://example.com out.png
 ```
+
 - Teardown: kill only processes whose command line carries your unique
   `--user-data-dir` marker; never `Get-Process chrome | Stop-Process` (that would
   kill the user's browser).

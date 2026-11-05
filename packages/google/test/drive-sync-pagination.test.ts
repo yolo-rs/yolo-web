@@ -13,6 +13,8 @@ test("Drive sync rejects repeated pagination tokens", async () => {
       },
     },
   } as unknown as drive_v3.Drive;
-  await expect(remoteDocs(drive, "root")).rejects.toThrow("repeated page token");
+  await expect(remoteDocs(drive, "root")).rejects.toThrow(
+    "repeated page token",
+  );
   expect(calls).toBe(2);
 });

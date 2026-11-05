@@ -3,7 +3,10 @@
 /* oxlint-disable no-control-regex -- Queries reject raw control characters. */
 import { lstat, open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { createPublicIndexSearch, type PublicIndexCollection } from "./public-index.ts";
+import {
+  createPublicIndexSearch,
+  type PublicIndexCollection,
+} from "./public-index.ts";
 
 const HELP = {
   command: "bun-google-index-public",
@@ -11,18 +14,35 @@ const HELP = {
     "bun-google-index-public --root <absolute-export-root> --collections-file <absolute-policy.json> --collection <slug> --query <text> [--num 1..20] [--start 0..1000]",
   source: "public-crawl-cache",
 };
-const FLAGS = new Set(["--root", "--collections-file", "--collection", "--query", "--num", "--start"]);
+const FLAGS = new Set([
+  "--root",
+  "--collections-file",
+  "--collection",
+  "--query",
+  "--num",
+  "--start",
+]);
 
 async function readCollections(path: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > 65536 || before.nlink !== 1)
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.size > 65536 ||
+    before.nlink !== 1
+  )
     throw new Error("Public index configuration unavailable");
   const file = await open(path, "r");
   try {
     signal?.throwIfAborted();
     const actual = await file.stat();
-    if (!actual.isFile() || actual.ino !== before.ino || actual.dev !== before.dev || actual.size !== before.size)
+    if (
+      !actual.isFile() ||
+      actual.ino !== before.ino ||
+      actual.dev !== before.dev ||
+      actual.size !== before.size
+    )
       throw new Error("Public index configuration unavailable");
     const buffer = Buffer.alloc(actual.size + 1);
     let size = 0;
@@ -33,8 +53,13 @@ async function readCollections(path: string, signal?: AbortSignal) {
       if (!result.bytesRead) break;
       size += result.bytesRead;
     }
-    if (size !== actual.size) throw new Error("Public index configuration unavailable");
-    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)));
+    if (size !== actual.size)
+      throw new Error("Public index configuration unavailable");
+    const value: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        buffer.subarray(0, size),
+      ),
+    );
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("Public index configuration unavailable");
     return value as Record<string, PublicIndexCollection>;
@@ -44,7 +69,10 @@ async function readCollections(path: string, signal?: AbortSignal) {
 }
 
 /** Reads only caller-selected public policy/export paths; no provider authentication. */
-export async function runPublicIndexCommand(args: string[], signal?: AbortSignal) {
+export async function runPublicIndexCommand(
+  args: string[],
+  signal?: AbortSignal,
+) {
   signal?.throwIfAborted();
   if (args.length === 1 && args[0] === "--help") return { ...HELP };
   const flags = new Map<string, string>();
@@ -103,9 +131,15 @@ if (import.meta.main) {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
-    console.log(JSON.stringify(await runPublicIndexCommand(Bun.argv.slice(2), controller.signal)));
+    console.log(
+      JSON.stringify(
+        await runPublicIndexCommand(Bun.argv.slice(2), controller.signal),
+      ),
+    );
   } catch {
-    console.error("Public index command failed; verify explicit public configuration and input");
+    console.error(
+      "Public index command failed; verify explicit public configuration and input",
+    );
     process.exitCode = 1;
   } finally {
     process.removeListener("SIGINT", stop);

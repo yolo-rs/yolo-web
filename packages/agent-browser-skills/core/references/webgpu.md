@@ -19,13 +19,13 @@ macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to instal
 
 ## Platform matrix (verified)
 
-| Platform | WebGPU rendering (headless) | Screenshots of WebGPU canvases |
-|---|---|---|
-| macOS | works | works headless |
-| Windows | works (hardware D3D) | **headless captures black** — use `--headed` on a logged-in desktop |
-| Linux | works (SwiftShader Vulkan) | headless capture not supported upstream — add `--headed` (virtual display starts automatically) |
+| Platform | WebGPU rendering (headless) | Screenshots of WebGPU canvases                                                                  |
+| -------- | --------------------------- | ----------------------------------------------------------------------------------------------- |
+| macOS    | works                       | works headless                                                                                  |
+| Windows  | works (hardware D3D)        | **headless captures black** — use `--headed` on a logged-in desktop                             |
+| Linux    | works (SwiftShader Vulkan)  | headless capture not supported upstream — add `--headed` (virtual display starts automatically) |
 
-The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor, even though rendering itself works (verified by pixel readback). It is not an agent-browser or flag problem — no known flag combination fixes it. Rendering, `eval`-based pixel readbacks, and compute all work headless everywhere.
+The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas _presentation_ never reaches the headless compositor, even though rendering itself works (verified by pixel readback). It is not an agent-browser or flag problem — no known flag combination fixes it. Rendering, `eval`-based pixel readbacks, and compute all work headless everywhere.
 
 On Linux, `--headed` is all you need even on displayless servers and containers: when no `DISPLAY` is set and Xvfb is installed (`apt-get install -y xvfb`), agent-browser starts a private virtual display for the browser and tears it down with it. Set `AGENT_BROWSER_NO_XVFB=1` to opt out. Do not wrap the CLI in `xvfb-run`: it removes the display when the CLI exits while the browser keeps running.
 
@@ -103,8 +103,11 @@ agent-browser eval "document.querySelector('canvas').getContext('webgpu') ? 'web
 If you `eval` your own WebGPU readback, don't snapshot the canvas (`drawImage(webgpuCanvas, ...)`) — it depends on presentation timing and reads transparent black on Windows even when rendering works. Render to an offscreen texture and read it back deterministically:
 
 ```js
-const tex = device.createTexture({ size: [w, h], format: 'rgba8unorm',
-  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+const tex = device.createTexture({
+  size: [w, h],
+  format: "rgba8unorm",
+  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+});
 // ...render to tex, then:
 encoder.copyTextureToBuffer({ texture: tex }, { buffer, bytesPerRow }, [w, h]);
 device.queue.submit([encoder.finish()]);

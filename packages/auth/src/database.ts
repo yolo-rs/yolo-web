@@ -82,100 +82,135 @@ export class AuthDatabase {
       CREATE INDEX IF NOT EXISTS idx_sessions_token ON better_auth_sessions(token);
       CREATE INDEX IF NOT EXISTS idx_passkeys_user ON better_auth_passkeys(user_id);
     `);
-
   }
 
   // User CRUD
   public createUser(user: User): void {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO better_auth_users (id, email, name, avatar, role, is_owner, created_at, updated_at)
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-    `).run(
-      user.id,
-      user.email,
-      user.name,
-      user.avatar ?? null,
-      user.role,
-      user.isOwner ? 1 : 0,
-      user.createdAt,
-      user.updatedAt,
-    );
+    `,
+      )
+      .run(
+        user.id,
+        user.email,
+        user.name,
+        user.avatar ?? null,
+        user.role,
+        user.isOwner ? 1 : 0,
+        user.createdAt,
+        user.updatedAt,
+      );
   }
 
   public getUserById(id: string): User | null {
-    const row = this.db.query("SELECT * FROM better_auth_users WHERE id = ?1").get(id) as Record<string, unknown> | null;
+    const row = this.db
+      .query("SELECT * FROM better_auth_users WHERE id = ?1")
+      .get(id) as Record<string, unknown> | null;
     return row ? this.mapUser(row) : null;
   }
 
   public getUserByEmail(email: string): User | null {
-    const row = this.db.query("SELECT * FROM better_auth_users WHERE email = ?1 COLLATE NOCASE").get(email) as Record<string, unknown> | null;
+    const row = this.db
+      .query("SELECT * FROM better_auth_users WHERE email = ?1 COLLATE NOCASE")
+      .get(email) as Record<string, unknown> | null;
     return row ? this.mapUser(row) : null;
   }
 
   public listUsers(): User[] {
-    const rows = this.db.query("SELECT * FROM better_auth_users ORDER BY is_owner DESC, created_at ASC").all() as Record<string, unknown>[];
-    return rows.map(r => this.mapUser(r));
+    const rows = this.db
+      .query(
+        "SELECT * FROM better_auth_users ORDER BY is_owner DESC, created_at ASC",
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.mapUser(r));
   }
 
   // Session CRUD
   public createSession(session: Session): void {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO better_auth_sessions (id, user_id, token, expires_at, ip_address, user_agent, active_account_id, is_owner_verified, created_at, updated_at)
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-    `).run(
-      session.id,
-      session.userId,
-      session.token,
-      session.expiresAt,
-      session.ipAddress || null,
-      session.userAgent || null,
-      session.activeAccountId,
-      session.isOwnerVerified ? 1 : 0,
-      session.createdAt,
-      session.updatedAt,
-    );
+    `,
+      )
+      .run(
+        session.id,
+        session.userId,
+        session.token,
+        session.expiresAt,
+        session.ipAddress || null,
+        session.userAgent || null,
+        session.activeAccountId,
+        session.isOwnerVerified ? 1 : 0,
+        session.createdAt,
+        session.updatedAt,
+      );
   }
 
   public getSessionByToken(token: string): Session | null {
-    const row = this.db.query("SELECT * FROM better_auth_sessions WHERE token = ?1 AND expires_at > ?2").get(token, Date.now()) as Record<string, unknown> | null;
+    const row = this.db
+      .query(
+        "SELECT * FROM better_auth_sessions WHERE token = ?1 AND expires_at > ?2",
+      )
+      .get(token, Date.now()) as Record<string, unknown> | null;
     return row ? this.mapSession(row) : null;
   }
 
   public updateSessionActiveAccount(token: string, accountId: string): void {
-    this.db.prepare("UPDATE better_auth_sessions SET active_account_id = ?1, updated_at = ?2 WHERE token = ?3").run(accountId, Date.now(), token);
+    this.db
+      .prepare(
+        "UPDATE better_auth_sessions SET active_account_id = ?1, updated_at = ?2 WHERE token = ?3",
+      )
+      .run(accountId, Date.now(), token);
   }
 
   public deleteSession(token: string): void {
-    this.db.prepare("DELETE FROM better_auth_sessions WHERE token = ?1").run(token);
+    this.db
+      .prepare("DELETE FROM better_auth_sessions WHERE token = ?1")
+      .run(token);
   }
 
   // Passkey CRUD
   public getPasskeysByUserId(userId: string): PasskeyCredential[] {
-    const rows = this.db.query("SELECT * FROM better_auth_passkeys WHERE user_id = ?1").all(userId) as Record<string, unknown>[];
-    return rows.map(r => this.mapPasskey(r));
+    const rows = this.db
+      .query("SELECT * FROM better_auth_passkeys WHERE user_id = ?1")
+      .all(userId) as Record<string, unknown>[];
+    return rows.map((r) => this.mapPasskey(r));
   }
 
-  public getPasskeyByCredentialId(credentialId: string): PasskeyCredential | null {
-    const row = this.db.query("SELECT * FROM better_auth_passkeys WHERE credential_id = ?1").get(credentialId) as Record<string, unknown> | null;
+  public getPasskeyByCredentialId(
+    credentialId: string,
+  ): PasskeyCredential | null {
+    const row = this.db
+      .query("SELECT * FROM better_auth_passkeys WHERE credential_id = ?1")
+      .get(credentialId) as Record<string, unknown> | null;
     return row ? this.mapPasskey(row) : null;
   }
 
   public createPasskey(passkey: PasskeyCredential): void {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO better_auth_passkeys (id, user_id, credential_id, public_key, counter, device_type, backed_up, transports, created_at, last_used_at)
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-    `).run(
-      passkey.id,
-      passkey.userId,
-      passkey.credentialId,
-      passkey.publicKey,
-      passkey.counter,
-      passkey.deviceType || "platform",
-      passkey.backedUp ? 1 : 0,
-      passkey.transports ? JSON.stringify(passkey.transports) : null,
-      passkey.createdAt,
-      passkey.lastUsedAt || null,
-    );
+    `,
+      )
+      .run(
+        passkey.id,
+        passkey.userId,
+        passkey.credentialId,
+        passkey.publicKey,
+        passkey.counter,
+        passkey.deviceType || "platform",
+        passkey.backedUp ? 1 : 0,
+        passkey.transports ? JSON.stringify(passkey.transports) : null,
+        passkey.createdAt,
+        passkey.lastUsedAt || null,
+      );
   }
 
   private mapUser(row: Record<string, unknown>): User {
@@ -215,7 +250,9 @@ export class AuthDatabase {
       counter: Number(row.counter),
       deviceType: row.device_type ? String(row.device_type) : undefined,
       backedUp: Boolean(row.backed_up),
-      transports: row.transports ? (JSON.parse(String(row.transports)) as string[]) : undefined,
+      transports: row.transports
+        ? (JSON.parse(String(row.transports)) as string[])
+        : undefined,
       createdAt: Number(row.created_at),
       lastUsedAt: row.last_used_at ? Number(row.last_used_at) : undefined,
     };

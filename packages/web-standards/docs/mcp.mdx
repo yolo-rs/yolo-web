@@ -20,5 +20,7 @@ import { StandardsLoader } from "@yolo-web/standards";
 
 const loader = new StandardsLoader();
 const mcp = await loader.loadMCP2026();
-console.log(`MCP Version: ${mcp.version}, Transports: ${mcp.transports.join(", ")}`);
+console.log(
+  `MCP Version: ${mcp.version}, Transports: ${mcp.transports.join(", ")}`,
+);
 ```

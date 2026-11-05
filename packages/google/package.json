@@ -11,7 +11,12 @@
     "yolo-web-google-index-public": "./src/public-index-cli.ts",
     "gws": "./src/gws-cli.ts"
   },
-  "files": ["src", "types", "README.md", "LICENSE-APACHE"],
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE-APACHE"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./runtime": "./src/runtime.ts",

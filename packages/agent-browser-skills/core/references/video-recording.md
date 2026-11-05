@@ -71,11 +71,11 @@ agent-browser record start ./output.webm
 
 Recording captures 30 fps by default, so scrolling, hover states, and CSS transitions read as motion instead of a slideshow. `--fps` takes any rate from 1 to 60.
 
-| Rate | Use it for |
-| --- | --- |
-| 60 | Short, motion-heavy takes: drag interactions, animation, scroll polish work |
-| 30 (default) | Flows, CI evidence, walkthroughs |
-| 1-15 | Long sessions where the video is a timeline, not a motion study |
+| Rate         | Use it for                                                                  |
+| ------------ | --------------------------------------------------------------------------- |
+| 60           | Short, motion-heavy takes: drag interactions, animation, scroll polish work |
+| 30 (default) | Flows, CI evidence, walkthroughs                                            |
+| 1-15         | Long sessions where the video is a timeline, not a motion study             |
 
 ```bash
 # Animation review

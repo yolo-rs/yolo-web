@@ -29,15 +29,32 @@ export type PatchQueueMeta = {
   schema: 1;
   queue: string;
   owner: string;
-  base: { chromiumRevision: string; chromiumVersion?: string; checkedAt?: string };
+  base: {
+    chromiumRevision: string;
+    chromiumVersion?: string;
+    checkedAt?: string;
+  };
   patches: PatchProvenance[];
 };
 
-export type PatchQueue = { dir: string; series: string[]; meta: PatchQueueMeta };
+export type PatchQueue = {
+  dir: string;
+  series: string[];
+  meta: PatchQueueMeta;
+};
 
-export type QueueFinding = { level: "error" | "warning"; patch?: string; message: string };
+export type QueueFinding = {
+  level: "error" | "warning";
+  patch?: string;
+  message: string;
+};
 
-export type PatchCheckResult = { patch: string; ok: boolean; files: string[]; detail?: string };
+export type PatchCheckResult = {
+  patch: string;
+  ok: boolean;
+  files: string[];
+  detail?: string;
+};
 
 const REQUIRED_PROVENANCE: (keyof PatchProvenance)[] = [
   "upstream",
@@ -81,25 +98,50 @@ function stripPrefix(raw: string): string | null {
 export async function loadQueue(dir: string): Promise<PatchQueue> {
   const seriesFile = Bun.file(join(dir, "series"));
   const metaFile = Bun.file(join(dir, "series.json"));
-  if (!(await seriesFile.exists())) throw new Error(`${dir}: missing series file`);
-  if (!(await metaFile.exists())) throw new Error(`${dir}: missing series.json`);
-  return { dir, series: parseSeries(await seriesFile.text()), meta: (await metaFile.json()) as PatchQueueMeta };
+  if (!(await seriesFile.exists()))
+    throw new Error(`${dir}: missing series file`);
+  if (!(await metaFile.exists()))
+    throw new Error(`${dir}: missing series.json`);
+  return {
+    dir,
+    series: parseSeries(await seriesFile.text()),
+    meta: (await metaFile.json()) as PatchQueueMeta,
+  };
 }
 
-export async function validateQueue(queue: PatchQueue): Promise<QueueFinding[]> {
+export async function validateQueue(
+  queue: PatchQueue,
+): Promise<QueueFinding[]> {
   const findings: QueueFinding[] = [];
   const { meta, series } = queue;
-  if (meta.schema !== 1) findings.push({ level: "error", message: `unsupported schema ${meta.schema}` });
-  if (!meta.owner) findings.push({ level: "error", message: "queue owner is required" });
+  if (meta.schema !== 1)
+    findings.push({
+      level: "error",
+      message: `unsupported schema ${meta.schema}`,
+    });
+  if (!meta.owner)
+    findings.push({ level: "error", message: "queue owner is required" });
   if (!/^[0-9a-f]{40}$/.test(meta.base?.chromiumRevision ?? "")) {
-    findings.push({ level: "error", message: "base.chromiumRevision must be a 40-hex Chromium commit" });
+    findings.push({
+      level: "error",
+      message: "base.chromiumRevision must be a 40-hex Chromium commit",
+    });
   }
   const seen = new Set<string>();
   for (const patch of series) {
-    if (seen.has(patch)) findings.push({ level: "error", patch, message: "listed twice in series" });
+    if (seen.has(patch))
+      findings.push({
+        level: "error",
+        patch,
+        message: "listed twice in series",
+      });
     seen.add(patch);
     if (patch.includes("..") || patch.startsWith("/") || patch.includes("\\")) {
-      findings.push({ level: "error", patch, message: "series paths must be relative POSIX paths inside the queue" });
+      findings.push({
+        level: "error",
+        patch,
+        message: "series paths must be relative POSIX paths inside the queue",
+      });
       continue;
     }
     const file = Bun.file(join(queue.dir, patch));
@@ -108,24 +150,47 @@ export async function validateQueue(queue: PatchQueue): Promise<QueueFinding[]> 
       continue;
     }
     if (patchedFiles(await file.text()).length === 0) {
-      findings.push({ level: "error", patch, message: "patch touches no files" });
+      findings.push({
+        level: "error",
+        patch,
+        message: "patch touches no files",
+      });
     }
     const provenance = meta.patches.find((p) => p.path === patch);
     if (!provenance) {
-      findings.push({ level: "error", patch, message: "no provenance entry in series.json" });
+      findings.push({
+        level: "error",
+        patch,
+        message: "no provenance entry in series.json",
+      });
       continue;
     }
     for (const key of REQUIRED_PROVENANCE) {
-      if (!provenance[key]) findings.push({ level: "error", patch, message: `provenance.${key} is required` });
+      if (!provenance[key])
+        findings.push({
+          level: "error",
+          patch,
+          message: `provenance.${key} is required`,
+        });
     }
   }
   for (const entry of meta.patches) {
-    if (!seen.has(entry.path)) findings.push({ level: "warning", patch: entry.path, message: "provenance entry not in series" });
+    if (!seen.has(entry.path))
+      findings.push({
+        level: "warning",
+        patch: entry.path,
+        message: "provenance entry not in series",
+      });
   }
   return findings;
 }
 
-async function git(args: string[], cwd: string, env?: Record<string, string>, stdin?: Blob) {
+async function git(
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+  stdin?: Blob,
+) {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     env: { ...process.env, ...env },
@@ -150,19 +215,33 @@ export function chromiumSourceDir(root: string): string {
  * Stops reporting cumulative success after the first failure but still checks
  * each remaining patch on top of the last good state.
  */
-export async function checkQueue(queue: PatchQueue, chromiumSrc: string): Promise<{ head: string; results: PatchCheckResult[] }> {
+export async function checkQueue(
+  queue: PatchQueue,
+  chromiumSrc: string,
+): Promise<{ head: string; results: PatchCheckResult[] }> {
   const head = (await git(["rev-parse", "HEAD"], chromiumSrc)).stdout;
   const scratch = mkdtempSync(join(tmpdir(), "yolo-patch-queue-"));
   const env = { GIT_INDEX_FILE: join(scratch, "index") };
   try {
     const seeded = await git(["read-tree", "HEAD"], chromiumSrc, env);
-    if (seeded.code !== 0) throw new Error(`git read-tree failed: ${seeded.stderr}`);
+    if (seeded.code !== 0)
+      throw new Error(`git read-tree failed: ${seeded.stderr}`);
     const results: PatchCheckResult[] = [];
     for (const patch of queue.series) {
       const file = Bun.file(join(queue.dir, patch));
       const files = patchedFiles(await file.text());
-      const run = await git(["apply", "--cached", "--whitespace=nowarn", "-"], chromiumSrc, env, file);
-      results.push({ patch, ok: run.code === 0, files, ...(run.code === 0 ? {} : { detail: run.stderr }) });
+      const run = await git(
+        ["apply", "--cached", "--whitespace=nowarn", "-"],
+        chromiumSrc,
+        env,
+        file,
+      );
+      results.push({
+        patch,
+        ok: run.code === 0,
+        files,
+        ...(run.code === 0 ? {} : { detail: run.stderr }),
+      });
     }
     return { head, results };
   } finally {
@@ -173,33 +252,64 @@ export async function checkQueue(queue: PatchQueue, chromiumSrc: string): Promis
 async function assertTouchedFilesClean(queue: PatchQueue, chromiumSrc: string) {
   const touched = new Set<string>();
   for (const patch of queue.series) {
-    for (const f of patchedFiles(await Bun.file(join(queue.dir, patch)).text())) touched.add(f);
+    for (const f of patchedFiles(await Bun.file(join(queue.dir, patch)).text()))
+      touched.add(f);
   }
-  const status = await git(["status", "--porcelain", "--untracked-files=no", "--", ...touched], chromiumSrc);
-  if (status.stdout) throw new Error(`Chromium files touched by the queue have local changes:\n${status.stdout}`);
+  const status = await git(
+    ["status", "--porcelain", "--untracked-files=no", "--", ...touched],
+    chromiumSrc,
+  );
+  if (status.stdout)
+    throw new Error(
+      `Chromium files touched by the queue have local changes:\n${status.stdout}`,
+    );
 }
 
-export async function applyQueue(queue: PatchQueue, chromiumSrc: string): Promise<string[]> {
+export async function applyQueue(
+  queue: PatchQueue,
+  chromiumSrc: string,
+): Promise<string[]> {
   await assertTouchedFilesClean(queue, chromiumSrc);
   const applied: string[] = [];
   for (const patch of queue.series) {
-    const run = await git(["apply", "--whitespace=nowarn", "-"], chromiumSrc, undefined, Bun.file(join(queue.dir, patch)));
+    const run = await git(
+      ["apply", "--whitespace=nowarn", "-"],
+      chromiumSrc,
+      undefined,
+      Bun.file(join(queue.dir, patch)),
+    );
     if (run.code !== 0) {
-      throw new Error(`${patch} failed after ${applied.length} applied patches; run revert to roll back.\n${run.stderr}`);
+      throw new Error(
+        `${patch} failed after ${applied.length} applied patches; run revert to roll back.\n${run.stderr}`,
+      );
     }
     applied.push(patch);
   }
   return applied;
 }
 
-export async function revertQueue(queue: PatchQueue, chromiumSrc: string): Promise<string[]> {
+export async function revertQueue(
+  queue: PatchQueue,
+  chromiumSrc: string,
+): Promise<string[]> {
   const reverted: string[] = [];
   for (const patch of [...queue.series].reverse()) {
     const file = Bun.file(join(queue.dir, patch));
-    const probe = await git(["apply", "-R", "--check", "-"], chromiumSrc, undefined, file);
+    const probe = await git(
+      ["apply", "-R", "--check", "-"],
+      chromiumSrc,
+      undefined,
+      file,
+    );
     if (probe.code !== 0) continue; // not applied
-    const run = await git(["apply", "-R", "--whitespace=nowarn", "-"], chromiumSrc, undefined, file);
-    if (run.code !== 0) throw new Error(`${patch} could not be reverted: ${run.stderr}`);
+    const run = await git(
+      ["apply", "-R", "--whitespace=nowarn", "-"],
+      chromiumSrc,
+      undefined,
+      file,
+    );
+    if (run.code !== 0)
+      throw new Error(`${patch} could not be reverted: ${run.stderr}`);
     reverted.push(patch);
   }
   return reverted;
@@ -208,6 +318,7 @@ export async function revertQueue(queue: PatchQueue, chromiumSrc: string): Promi
 export async function listQueues(patchesRoot: string): Promise<string[]> {
   const glob = new Bun.Glob("*/series.json");
   const queues: string[] = [];
-  for await (const match of glob.scan({ cwd: patchesRoot })) queues.push(match.split(/[\\/]/)[0]!);
+  for await (const match of glob.scan({ cwd: patchesRoot }))
+    queues.push(match.split(/[\\/]/)[0]!);
   return queues.sort();
 }

@@ -23,19 +23,35 @@ import {
   CHROMIUM_2026_DEFAULT_PROFILE,
 } from "@yolo-web/challenge-solver";
 import { ChromiumTrackingEngine } from "@yolo-web/chromium-tracker";
-import { ENGINE_MANAGER_REGISTRY, fetchChromeForTestingChannels, findEngine, inspectEngine, packageCommand, packageCommandInvocations, sourceCheckoutCommand, type PackageManager } from "../../chromium-tracker/src/engine-manager";
+import {
+  ENGINE_MANAGER_REGISTRY,
+  fetchChromeForTestingChannels,
+  findEngine,
+  inspectEngine,
+  packageCommand,
+  packageCommandInvocations,
+  sourceCheckoutCommand,
+  type PackageManager,
+} from "../../chromium-tracker/src/engine-manager";
 import { YoloBrowser } from "@yolo-web/browser-sdk";
 import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
 } from "@yolo-web/bun-v8-bridge";
 import { Errno, strerror } from "@yolo-web/posix-bun";
-import { crawl, inspectGitRemote, listGitHubRepositories, synthesizeMarkdown } from "@yolo-web/web-crawler";
+import {
+  crawl,
+  inspectGitRemote,
+  listGitHubRepositories,
+  synthesizeMarkdown,
+} from "@yolo-web/web-crawler";
 
 function describeSpawnError(error: unknown): string {
   const value = error as { code?: unknown; message?: unknown };
-  const message = typeof value?.message === "string" ? value.message : String(error);
-  if (typeof value?.code !== "string" || !Object.hasOwn(Errno, value.code)) return message;
+  const message =
+    typeof value?.message === "string" ? value.message : String(error);
+  if (typeof value?.code !== "string" || !Object.hasOwn(Errno, value.code))
+    return message;
   const errno = Errno[value.code as keyof typeof Errno];
   return `${message} (${value.code}: ${strerror(errno)})`;
 }
@@ -43,8 +59,11 @@ function describeSpawnError(error: unknown): string {
 export function createWebCli(): Command {
   const program = new Command();
 
-  program.command("crawl")
-    .description("Crawl a bounded set of public pages and save provenance-first JSON and Markdown")
+  program
+    .command("crawl")
+    .description(
+      "Crawl a bounded set of public pages and save provenance-first JSON and Markdown",
+    )
     .argument("<urls...>", "HTTP(S) seed URLs")
     .option("--depth <number>", "Maximum link depth (0-8)", "1")
     .option("--max-pages <number>", "Maximum pages to fetch", "50")
@@ -53,69 +72,181 @@ export function createWebCli(): Command {
     .option("--markdown <path>", "Markdown synthesis output", "crawl.md")
     .option("--include-body", "Include raw response text in the JSON capture")
     .option("--ignore-robots", "Do not apply robots.txt exclusions")
-    .action(async (urls: string[], opts: { depth: string; maxPages: string; delayMs: string; output: string; markdown: string; includeBody?: boolean; ignoreRobots?: boolean }) => {
-      const result = await crawl({ seeds: urls, maxDepth: Number(opts.depth), maxPages: Number(opts.maxPages), delayMs: Number(opts.delayMs), respectRobots: !opts.ignoreRobots, includeBody: opts.includeBody });
-      await Bun.write(opts.output, `${JSON.stringify(result, null, 2)}\n`);
-      await Bun.write(opts.markdown, synthesizeMarkdown(result));
-      console.log(JSON.stringify({ pages: result.pages.length, output: opts.output, markdown: opts.markdown, policy: result.policy }, null, 2));
-    });
+    .action(
+      async (
+        urls: string[],
+        opts: {
+          depth: string;
+          maxPages: string;
+          delayMs: string;
+          output: string;
+          markdown: string;
+          includeBody?: boolean;
+          ignoreRobots?: boolean;
+        },
+      ) => {
+        const result = await crawl({
+          seeds: urls,
+          maxDepth: Number(opts.depth),
+          maxPages: Number(opts.maxPages),
+          delayMs: Number(opts.delayMs),
+          respectRobots: !opts.ignoreRobots,
+          includeBody: opts.includeBody,
+        });
+        await Bun.write(opts.output, `${JSON.stringify(result, null, 2)}\n`);
+        await Bun.write(opts.markdown, synthesizeMarkdown(result));
+        console.log(
+          JSON.stringify(
+            {
+              pages: result.pages.length,
+              output: opts.output,
+              markdown: opts.markdown,
+              policy: result.policy,
+            },
+            null,
+            2,
+          ),
+        );
+      },
+    );
 
-  program.command("github-repos")
-    .description("List a GitHub organization or user's public repositories by star count through the REST API")
+  program
+    .command("github-repos")
+    .description(
+      "List a GitHub organization or user's public repositories by star count through the REST API",
+    )
     .argument("<owner>", "GitHub owner login")
     .option("--kind <kind>", "Owner kind: org or user", "org")
     .option("--pages <number>", "Maximum 100-repository pages", "5")
     .option("--output <path>", "Write JSON to this file instead of stdout")
-    .action(async (owner: string, opts: { kind: string; pages: string; output?: string }) => {
-      if (opts.kind !== "org" && opts.kind !== "user") throw new Error("--kind must be org or user");
-      const result = await listGitHubRepositories(owner, { ownerType: opts.kind, maxPages: Number(opts.pages), token: process.env.GITHUB_TOKEN });
-      const json = `${JSON.stringify(result, null, 2)}\n`;
-      if (opts.output) await Bun.write(opts.output, json);
-      else console.log(json);
-    });
+    .action(
+      async (
+        owner: string,
+        opts: { kind: string; pages: string; output?: string },
+      ) => {
+        if (opts.kind !== "org" && opts.kind !== "user")
+          throw new Error("--kind must be org or user");
+        const result = await listGitHubRepositories(owner, {
+          ownerType: opts.kind,
+          maxPages: Number(opts.pages),
+          token: process.env.GITHUB_TOKEN,
+        });
+        const json = `${JSON.stringify(result, null, 2)}\n`;
+        if (opts.output) await Bun.write(opts.output, json);
+        else console.log(json);
+      },
+    );
 
-  program.command("git-head")
-    .description("Read the symbolic default branch and HEAD commit from a public Git HTTPS remote")
+  program
+    .command("git-head")
+    .description(
+      "Read the symbolic default branch and HEAD commit from a public Git HTTPS remote",
+    )
     .argument("<remote>", "HTTPS Git URL")
-    .action(async (remote: string) => console.log(JSON.stringify(await inspectGitRemote(remote), null, 2)));
+    .action(async (remote: string) =>
+      console.log(JSON.stringify(await inspectGitRemote(remote), null, 2)),
+    );
 
-  const engines = program.command("engines").description("Manage browser engine catalog and upstream versions");
-  engines.command("list").description("List supported browser targets").action(() => {
-    console.table(ENGINE_MANAGER_REGISTRY.map(({ id, name, family, channel, kind }) => ({ id, name, family, channel, kind })));
-  });
-  engines.command("status [id]").description("Show catalog metadata and detect local executables/source roots").action(async (id?: string) => {
-    const entries = id ? [findEngine(id)] : ENGINE_MANAGER_REGISTRY;
-    const results = await Promise.all(entries.map(async (entry) => ({ ...entry, local: await inspectEngine(entry) })));
-    console.log(JSON.stringify(results, null, 2));
-  });
-  engines.command("versions").description("Fetch current Chrome for Testing channel versions").action(async () => {
-    console.log(JSON.stringify(await fetchChromeForTestingChannels(), null, 2));
-  });
-  for (const action of ["install", "update"] as const) {
-    engines.command(`${action} <id>`).requiredOption("--manager <manager>").option("--execute").action(async (id: string, options: { manager: string; execute?: boolean }) => {
-      const entry = findEngine(id);
-      const cmd = packageCommand(entry, options.manager as PackageManager, action);
-      const invocations = packageCommandInvocations(entry, options.manager as PackageManager, action);
-      if (!cmd || !invocations) throw new Error(`${id} has no verified ${options.manager} package mapping.`);
-      console.log(`Provider trust: ${entry.packages?.[options.manager as PackageManager]?.trust}. ${entry.packages?.[options.manager as PackageManager]?.note ?? ""}`);
-      if (!options.execute) { console.log(`Plan only (add --execute to run): ${cmd}`); return; }
-      for (const invocation of invocations) {
-        const child = Bun.spawn([invocation.program, ...invocation.args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-        const code = await child.exited;
-        if (code !== 0) throw new Error(`${invocation.program} exited with status ${code}`);
-      }
+  const engines = program
+    .command("engines")
+    .description("Manage browser engine catalog and upstream versions");
+  engines
+    .command("list")
+    .description("List supported browser targets")
+    .action(() => {
+      console.table(
+        ENGINE_MANAGER_REGISTRY.map(({ id, name, family, channel, kind }) => ({
+          id,
+          name,
+          family,
+          channel,
+          kind,
+        })),
+      );
     });
+  engines
+    .command("status [id]")
+    .description(
+      "Show catalog metadata and detect local executables/source roots",
+    )
+    .action(async (id?: string) => {
+      const entries = id ? [findEngine(id)] : ENGINE_MANAGER_REGISTRY;
+      const results = await Promise.all(
+        entries.map(async (entry) => ({
+          ...entry,
+          local: await inspectEngine(entry),
+        })),
+      );
+      console.log(JSON.stringify(results, null, 2));
+    });
+  engines
+    .command("versions")
+    .description("Fetch current Chrome for Testing channel versions")
+    .action(async () => {
+      console.log(
+        JSON.stringify(await fetchChromeForTestingChannels(), null, 2),
+      );
+    });
+  for (const action of ["install", "update"] as const) {
+    engines
+      .command(`${action} <id>`)
+      .requiredOption("--manager <manager>")
+      .option("--execute")
+      .action(
+        async (id: string, options: { manager: string; execute?: boolean }) => {
+          const entry = findEngine(id);
+          const cmd = packageCommand(
+            entry,
+            options.manager as PackageManager,
+            action,
+          );
+          const invocations = packageCommandInvocations(
+            entry,
+            options.manager as PackageManager,
+            action,
+          );
+          if (!cmd || !invocations)
+            throw new Error(
+              `${id} has no verified ${options.manager} package mapping.`,
+            );
+          console.log(
+            `Provider trust: ${entry.packages?.[options.manager as PackageManager]?.trust}. ${entry.packages?.[options.manager as PackageManager]?.note ?? ""}`,
+          );
+          if (!options.execute) {
+            console.log(`Plan only (add --execute to run): ${cmd}`);
+            return;
+          }
+          for (const invocation of invocations) {
+            const child = Bun.spawn([invocation.program, ...invocation.args], {
+              stdin: "inherit",
+              stdout: "inherit",
+              stderr: "inherit",
+            });
+            const code = await child.exited;
+            if (code !== 0)
+              throw new Error(
+                `${invocation.program} exited with status ${code}`,
+              );
+          }
+        },
+      );
   }
 
-  program.command("zig")
-    .description("Run the yolo-zig toolchain dispatcher (set YOLO_ZIG_ROOT or check out yolo-zig beside yolo-web)")
+  program
+    .command("zig")
+    .description(
+      "Run the yolo-zig toolchain dispatcher (set YOLO_ZIG_ROOT or check out yolo-zig beside yolo-web)",
+    )
     .argument("[args...]", "Arguments forwarded to tools/yolo-zig.ts")
     .allowUnknownOption(true)
     .action(async (args: string[] = []) => {
-      const zigRoot = process.env.YOLO_ZIG_ROOT ?? `${import.meta.dir}/../../../../yolo-zig`;
+      const zigRoot =
+        process.env.YOLO_ZIG_ROOT ?? `${import.meta.dir}/../../../../yolo-zig`;
       const dispatcher = `${zigRoot}/tools/yolo-zig.ts`;
       if (!(await Bun.file(dispatcher).exists())) {
-        throw new Error(`Cannot find yolo-zig dispatcher at ${dispatcher}; set YOLO_ZIG_ROOT to its checkout.`);
+        throw new Error(
+          `Cannot find yolo-zig dispatcher at ${dispatcher}; set YOLO_ZIG_ROOT to its checkout.`,
+        );
       }
       try {
         const child = Bun.spawn([process.execPath, dispatcher, ...args], {
@@ -126,19 +257,46 @@ export function createWebCli(): Command {
         });
         process.exitCode = await child.exited;
       } catch (error) {
-        throw new Error(`Could not start yolo-zig: ${describeSpawnError(error)}`, { cause: error });
+        throw new Error(
+          `Could not start yolo-zig: ${describeSpawnError(error)}`,
+          { cause: error },
+        );
       }
     });
 
-  engines.command("source <id> <destination>").option("--execute").action(async (id: string, destination: string, options: { execute?: boolean }) => {
-    const entry = findEngine(id);
-    const cmd = sourceCheckoutCommand(entry, destination);
-    console.log(options.execute ? `Running: ${cmd}` : `Plan only (add --execute to run): ${cmd}`);
-    if (!options.execute) return;
-    const child = Bun.spawn(["git", "clone", ...(entry.branch ? ["--branch", entry.branch, "--single-branch"] : []), entry.repo!, destination], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-    const code = await child.exited;
-    if (code !== 0) throw new Error(`git exited with status ${code}`);
-  });
+  engines
+    .command("source <id> <destination>")
+    .option("--execute")
+    .action(
+      async (
+        id: string,
+        destination: string,
+        options: { execute?: boolean },
+      ) => {
+        const entry = findEngine(id);
+        const cmd = sourceCheckoutCommand(entry, destination);
+        console.log(
+          options.execute
+            ? `Running: ${cmd}`
+            : `Plan only (add --execute to run): ${cmd}`,
+        );
+        if (!options.execute) return;
+        const child = Bun.spawn(
+          [
+            "git",
+            "clone",
+            ...(entry.branch
+              ? ["--branch", entry.branch, "--single-branch"]
+              : []),
+            entry.repo!,
+            destination,
+          ],
+          { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+        );
+        const code = await child.exited;
+        if (code !== 0) throw new Error(`git exited with status ${code}`);
+      },
+    );
 
   program
     .name("web")
@@ -179,24 +337,41 @@ export function createWebCli(): Command {
           console.error(
             `[web shields] Blocked navigation to ${sanitizedUrl} by rule: ${check.matchedRule}`,
           );
-          throw new Error(`Brave Shields blocked the navigation: ${check.matchedRule}`);
+          throw new Error(
+            `Brave Shields blocked the navigation: ${check.matchedRule}`,
+          );
         }
       }
 
-      const endpoint = process.env.YOLO_CDP_ENDPOINT ?? `http://127.0.0.1:${process.env.YOLO_CDP_PORT ?? "9222"}`;
-      const browser = await YoloBrowser.connect({ cdpUrl: endpoint, token: process.env.YOLO_CDP_TOKEN });
+      const endpoint =
+        process.env.YOLO_CDP_ENDPOINT ??
+        `http://127.0.0.1:${process.env.YOLO_CDP_PORT ?? "9222"}`;
+      const browser = await YoloBrowser.connect({
+        cdpUrl: endpoint,
+        token: process.env.YOLO_CDP_TOKEN,
+      });
       try {
         const page = await browser.newPage();
         await page.goto(sanitizedUrl, { waitUntil: "domcontentloaded" });
-        if (typeof opts.screenshot === "string") await page.screenshot({ path: opts.screenshot });
-        if (typeof opts.pdf === "string") await page.pdf({ path: opts.pdf, printBackground: true });
+        if (typeof opts.screenshot === "string")
+          await page.screenshot({ path: opts.screenshot });
+        if (typeof opts.pdf === "string")
+          await page.pdf({ path: opts.pdf, printBackground: true });
         let output: unknown;
-        if (typeof opts.eval === "string") output = await page.evaluate(opts.eval);
-        else if (opts.markdown || opts.dump === "markdown") output = await page.markdown();
-        else if (opts.dump === "html" || opts.dump === "original") output = await page.content();
-        else if (opts.dump === "links") output = await page.evaluate("Array.from(document.querySelectorAll('a[href]'),a=>({text:(a.innerText||a.getAttribute('aria-label')||'').trim(),href:a.href,title:a.title}))");
+        if (typeof opts.eval === "string")
+          output = await page.evaluate(opts.eval);
+        else if (opts.markdown || opts.dump === "markdown")
+          output = await page.markdown();
+        else if (opts.dump === "html" || opts.dump === "original")
+          output = await page.content();
+        else if (opts.dump === "links")
+          output = await page.evaluate(
+            "Array.from(document.querySelectorAll('a[href]'),a=>({text:(a.innerText||a.getAttribute('aria-label')||'').trim(),href:a.href,title:a.title}))",
+          );
         else output = await page.evaluate("document.body?.innerText ?? ''");
-        console.log(typeof output === "string" ? output : JSON.stringify(output, null, 2));
+        console.log(
+          typeof output === "string" ? output : JSON.stringify(output, null, 2),
+        );
       } finally {
         await browser.disconnect();
       }
@@ -349,7 +524,8 @@ export function createWebCli(): Command {
     .option("-t, --transport <type>", "Transport type: stdio or http", "stdio")
     .option("-p, --port <number>", "HTTP port", "3000")
     .action(async (_opts: { transport: string; port: string }) => {
-      const { createWebMcpServer } = await import("../../web-mcp/src/server.js");
+      const { createWebMcpServer } =
+        await import("../../web-mcp/src/server.js");
       const server = createWebMcpServer();
       console.error("Unified Web MCP server connected over stdio");
       await server.serveStdio();
@@ -397,7 +573,11 @@ export function createWebCli(): Command {
     .description(
       "Real-time tracking, patching and monitoring for Chromium, CEF, Brave, Helium & Google depot_tools",
     )
-    .argument("[action]", "Action to perform: status, patches, channels, cef, depot-tools", "status")
+    .argument(
+      "[action]",
+      "Action to perform: status, patches, channels, cef, depot-tools",
+      "status",
+    )
     .option("--json", "Output raw JSON payload")
     .action(async (action: string, opts: { json?: boolean }) => {
       const tracker = new ChromiumTrackingEngine();
@@ -422,12 +602,16 @@ export function createWebCli(): Command {
           console.log(`Timestamp: ${report.timestamp}`);
           console.log(`\n[Official Chrome Channels]`);
           for (const [k, v] of Object.entries(report.channels)) {
-            console.log(`  - ${k.padEnd(8)}: v${v.version} (M${v.milestone}, rev ${v.revision})`);
+            console.log(
+              `  - ${k.padEnd(8)}: v${v.version} (M${v.milestone}, rev ${v.revision})`,
+            );
           }
           if (report.canaryDetails?.hashes) {
             console.log(`\n[Canary Hashes]`);
             console.log(`  - V8      : ${report.canaryDetails.hashes.v8}`);
-            console.log(`  - Chromium: ${report.canaryDetails.hashes.chromium}`);
+            console.log(
+              `  - Chromium: ${report.canaryDetails.hashes.chromium}`,
+            );
             console.log(`  - ANGLE   : ${report.canaryDetails.hashes.angle}`);
           }
           if (report.cef) {
@@ -437,17 +621,25 @@ export function createWebCli(): Command {
           }
           if (report.depotTools) {
             console.log(`\n[Google depot_tools]`);
-            console.log(`  - Latest  : ${report.depotTools.latestCommit.slice(0, 10)} by ${report.depotTools.author}`);
+            console.log(
+              `  - Latest  : ${report.depotTools.latestCommit.slice(0, 10)} by ${report.depotTools.author}`,
+            );
             console.log(`  - Commit  : "${report.depotTools.message}"`);
           }
           if (report.downstreams) {
             console.log(`\n[Downstream Chromium Forks]`);
-            console.log(`  - Brave   : ${report.downstreams.brave.tag} (${report.downstreams.brave.title})`);
-            console.log(`  - Helium  : ${report.downstreams.helium.tag} (${report.downstreams.helium.title})`);
+            console.log(
+              `  - Brave   : ${report.downstreams.brave.tag} (${report.downstreams.brave.title})`,
+            );
+            console.log(
+              `  - Helium  : ${report.downstreams.helium.tag} (${report.downstreams.helium.title})`,
+            );
           }
           console.log(`\n[YOLO-Web Chromium Patch Proposals (not applied)]`);
           for (const p of report.patches) {
-            console.log(`  - [${p.status.toUpperCase()}] ${p.name} (${p.patchStrategy}) -> ${p.upstreamFile}`);
+            console.log(
+              `  - [${p.status.toUpperCase()}] ${p.name} (${p.patchStrategy}) -> ${p.upstreamFile}`,
+            );
           }
         }
       }

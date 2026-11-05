@@ -10,59 +10,59 @@ export const TermiosConstants = {
   BRKINT: 0o000002,
   IGNPAR: 0o000004,
   PARMRK: 0o000010,
-  INPCK:  0o000020,
+  INPCK: 0o000020,
   ISTRIP: 0o000040,
-  INLCR:  0o000100,
-  IGNCR:  0o000200,
-  ICRNL:  0o000400,
-  IXON:   0o002000,
-  IXOFF:  0o010000,
+  INLCR: 0o000100,
+  IGNCR: 0o000200,
+  ICRNL: 0o000400,
+  IXON: 0o002000,
+  IXOFF: 0o010000,
 
   // c_oflag
-  OPOST:  0o000001,
-  ONLCR:  0o000004,
-  OCRNL:  0o000010,
-  ONOCR:  0o000020,
+  OPOST: 0o000001,
+  ONLCR: 0o000004,
+  OCRNL: 0o000010,
+  ONOCR: 0o000020,
   ONLRET: 0o000040,
 
   // c_cflag
-  CSIZE:  0o000060,
-  CS5:    0o000000,
-  CS6:    0o000020,
-  CS7:    0o000040,
-  CS8:    0o000060,
+  CSIZE: 0o000060,
+  CS5: 0o000000,
+  CS6: 0o000020,
+  CS7: 0o000040,
+  CS8: 0o000060,
   CSTOPB: 0o000100,
-  CREAD:  0o000200,
+  CREAD: 0o000200,
   PARENB: 0o000400,
   PARODD: 0o001000,
-  HUPCL:  0o002000,
+  HUPCL: 0o002000,
   CLOCAL: 0o004000,
 
   // c_lflag
-  ISIG:   0o000001,
+  ISIG: 0o000001,
   ICANON: 0o000002,
-  ECHO:   0o000010,
-  ECHOE:  0o000020,
-  ECHOK:  0o000040,
+  ECHO: 0o000010,
+  ECHOE: 0o000020,
+  ECHOK: 0o000040,
   ECHONL: 0o000100,
   NOFLSH: 0o000200,
   TOSTOP: 0o000400,
   IEXTEN: 0o100000,
 
   // c_cc indices
-  VINTR:  0,
-  VQUIT:  1,
+  VINTR: 0,
+  VQUIT: 1,
   VERASE: 2,
-  VKILL:  3,
-  VEOF:   4,
-  VTIME:  5,
-  VMIN:   6,
-  VSUSP:  10,
+  VKILL: 3,
+  VEOF: 4,
+  VTIME: 5,
+  VMIN: 6,
+  VSUSP: 10,
   VSTART: 8,
-  VSTOP:  9,
+  VSTOP: 9,
 
   // tcsetattr actions
-  TCSANOW:   0,
+  TCSANOW: 0,
   TCSADRAIN: 1,
   TCSAFLUSH: 2,
 } as const;
@@ -79,22 +79,29 @@ export interface Termios {
 
 export function createDefaultTermios(): Termios {
   const cc = new Uint8Array(TermiosConstants.NCCS);
-  cc[TermiosConstants.VINTR] = 3;   // Ctrl-C
-  cc[TermiosConstants.VQUIT] = 28;  // Ctrl-\
-  cc[TermiosConstants.VERASE] = 127;// DEL
-  cc[TermiosConstants.VKILL] = 21;  // Ctrl-U
-  cc[TermiosConstants.VEOF] = 4;    // Ctrl-D
+  cc[TermiosConstants.VINTR] = 3; // Ctrl-C
+  cc[TermiosConstants.VQUIT] = 28; // Ctrl-\
+  cc[TermiosConstants.VERASE] = 127; // DEL
+  cc[TermiosConstants.VKILL] = 21; // Ctrl-U
+  cc[TermiosConstants.VEOF] = 4; // Ctrl-D
   cc[TermiosConstants.VMIN] = 1;
   cc[TermiosConstants.VTIME] = 0;
-  cc[TermiosConstants.VSUSP] = 26;  // Ctrl-Z
+  cc[TermiosConstants.VSUSP] = 26; // Ctrl-Z
   cc[TermiosConstants.VSTART] = 17; // Ctrl-Q
-  cc[TermiosConstants.VSTOP] = 19;  // Ctrl-S
+  cc[TermiosConstants.VSTOP] = 19; // Ctrl-S
 
   return {
     c_iflag: TermiosConstants.ICRNL | TermiosConstants.IXON,
     c_oflag: TermiosConstants.OPOST | TermiosConstants.ONLCR,
-    c_cflag: TermiosConstants.CS8 | TermiosConstants.CREAD | TermiosConstants.CLOCAL,
-    c_lflag: TermiosConstants.ISIG | TermiosConstants.ICANON | TermiosConstants.ECHO | TermiosConstants.ECHOE | TermiosConstants.ECHOK | TermiosConstants.IEXTEN,
+    c_cflag:
+      TermiosConstants.CS8 | TermiosConstants.CREAD | TermiosConstants.CLOCAL,
+    c_lflag:
+      TermiosConstants.ISIG |
+      TermiosConstants.ICANON |
+      TermiosConstants.ECHO |
+      TermiosConstants.ECHOE |
+      TermiosConstants.ECHOK |
+      TermiosConstants.IEXTEN,
     c_cc: cc,
     c_ispeed: 38400,
     c_ospeed: 38400,

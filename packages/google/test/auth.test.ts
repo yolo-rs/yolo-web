@@ -16,10 +16,17 @@ test("Google CLI resolves the canonical multi-call owner before legacy links", (
   const previous = Bun.env.YOLO_WEB_GOOGLE_BIN;
   delete Bun.env.YOLO_WEB_GOOGLE_BIN;
   try {
-    const which = (name: string) => (name === "yolo-web" ? "/native/yolo-web" : "/legacy/google");
+    const which = (name: string) =>
+      name === "yolo-web" ? "/native/yolo-web" : "/legacy/google";
     expect(resolveGoogleCommand(which)).toEqual(["/native/yolo-web", "google"]);
-    expect(resolveGoogleCommand(name => (name === "google" ? "/native/google" : null))).toEqual(["/native/google"]);
-    expect(() => resolveGoogleCommand(() => null)).toThrow("install yolo-web-google");
+    expect(
+      resolveGoogleCommand((name) =>
+        name === "google" ? "/native/google" : null,
+      ),
+    ).toEqual(["/native/google"]);
+    expect(() => resolveGoogleCommand(() => null)).toThrow(
+      "install yolo-web-google",
+    );
     Bun.env.YOLO_WEB_GOOGLE_BIN = "/configured/google";
     expect(resolveGoogleCommand(() => null)).toEqual(["/configured/google"]);
   } finally {

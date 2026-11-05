@@ -21,11 +21,20 @@ const BROWSER_HEADERS: Record<string, string> = {
   "accept-language": "en-US,en;q=0.9",
 };
 
-export function detectChallenge(status: number, headers: Headers, body: string): ChallengeKind {
+export function detectChallenge(
+  status: number,
+  headers: Headers,
+  body: string,
+): ChallengeKind {
   const server = headers.get("server") ?? "";
-  if (!/cloudflare/i.test(server) && !headers.has("cf-mitigated")) return "none";
-  if (headers.get("cf-mitigated") === "challenge" || /cf-chl|Just a moment/i.test(body)) {
-    if (/challenges\.cloudflare\.com\/turnstile|cf-turnstile/i.test(body)) return "turnstile";
+  if (!/cloudflare/i.test(server) && !headers.has("cf-mitigated"))
+    return "none";
+  if (
+    headers.get("cf-mitigated") === "challenge" ||
+    /cf-chl|Just a moment/i.test(body)
+  ) {
+    if (/challenges\.cloudflare\.com\/turnstile|cf-turnstile/i.test(body))
+      return "turnstile";
     if (/managed_challenge|cType: 'managed'/i.test(body)) return "managed";
     if (/g-recaptcha|hcaptcha/i.test(body)) return "captcha";
     return "js";

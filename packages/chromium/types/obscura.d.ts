@@ -1,5 +1,8 @@
 declare module "bun:obscura" {
-  import type { ChromiumBrowser, LaunchOptions as ChromiumLaunchOptions } from "bun:chromium";
+  import type {
+    ChromiumBrowser,
+    LaunchOptions as ChromiumLaunchOptions,
+  } from "bun:chromium";
   /** Connect to the shared Chromium engine's loopback CDP endpoint. */
   export const connect: typeof import("bun:chromium").connect;
   /** Discover Chromium using the same executable owner as bun:chromium. */

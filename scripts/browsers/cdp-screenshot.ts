@@ -15,7 +15,9 @@ if (!portArg || !targetUrl || !outPath) {
 const base = `http://127.0.0.1:${portArg}`;
 
 // Create a fresh tab. Modern Chrome requires HTTP PUT on /json/new.
-const res = await fetch(`${base}/json/new?${encodeURIComponent(targetUrl)}`, { method: "PUT" });
+const res = await fetch(`${base}/json/new?${encodeURIComponent(targetUrl)}`, {
+  method: "PUT",
+});
 const tab = (await res.json()) as { webSocketDebuggerUrl?: string };
 const ws = tab.webSocketDebuggerUrl;
 if (!ws) {

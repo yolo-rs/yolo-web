@@ -25,9 +25,17 @@ export interface GooglePublicSearchOptions {
 
 const MAX_OUTPUT = 1024 * 1024;
 
-async function runOwner(executable: string, args: string[], signal: AbortSignal): Promise<string> {
+async function runOwner(
+  executable: string,
+  args: string[],
+  signal: AbortSignal,
+): Promise<string> {
   signal.throwIfAborted();
-  const child = Bun.spawn([executable, ...args], { stdout: "pipe", stderr: "ignore", signal });
+  const child = Bun.spawn([executable, ...args], {
+    stdout: "pipe",
+    stderr: "ignore",
+    signal,
+  });
   const reader = child.stdout.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let bytes = 0;
@@ -38,11 +46,13 @@ async function runOwner(executable: string, args: string[], signal: AbortSignal)
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_OUTPUT) throw new Error("Google search owner output exceeds limit");
+      if (bytes > MAX_OUTPUT)
+        throw new Error("Google search owner output exceeds limit");
       output += decoder.decode(next.value, { stream: true });
     }
     output += decoder.decode();
-    if ((await child.exited) !== 0) throw new Error("Google search owner failed");
+    if ((await child.exited) !== 0)
+      throw new Error("Google search owner failed");
     return output;
   } finally {
     child.kill();
@@ -51,11 +61,18 @@ async function runOwner(executable: string, args: string[], signal: AbortSignal)
   }
 }
 
-export function createGooglePublicSearch(options: GooglePublicSearchOptions = {}) {
-  const executable = options.executable ?? process.env.YOLO_WEB_GOOGLE_SEARCH_BIN ?? "yolo";
-  if (!executable.trim() || executable.includes("\0")) throw new TypeError("Invalid Google owner executable");
+export function createGooglePublicSearch(
+  options: GooglePublicSearchOptions = {},
+) {
+  const executable =
+    options.executable ?? process.env.YOLO_WEB_GOOGLE_SEARCH_BIN ?? "yolo";
+  if (!executable.trim() || executable.includes("\0"))
+    throw new TypeError("Invalid Google owner executable");
   let active = 0;
-  return async (request: GooglePublicSearchRequest, signal?: AbortSignal): Promise<GooglePublicSearchPage> => {
+  return async (
+    request: GooglePublicSearchRequest,
+    signal?: AbortSignal,
+  ): Promise<GooglePublicSearchPage> => {
     const query = request.query?.trim();
     const hl = request.hl ?? "en";
     const start = request.start ?? 0;
@@ -64,7 +81,9 @@ export function createGooglePublicSearch(options: GooglePublicSearchOptions = {}
       typeof query !== "string" ||
       !query ||
       new TextEncoder().encode(query).byteLength > 4096 ||
-      Array.from(query).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+      Array.from(query).some(
+        (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+      )
     )
       throw new TypeError("Invalid search query");
     if (
@@ -72,12 +91,24 @@ export function createGooglePublicSearch(options: GooglePublicSearchOptions = {}
       (request.safe ?? "active") !== "active" ||
       !/^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/.test(hl)
     )
-      throw new TypeError("Public search requires web SafeSearch and a valid language");
-    if (!Number.isInteger(start) || start < 0 || start > 1000 || !Number.isInteger(num) || num < 1 || num > 20)
+      throw new TypeError(
+        "Public search requires web SafeSearch and a valid language",
+      );
+    if (
+      !Number.isInteger(start) ||
+      start < 0 ||
+      start > 1000 ||
+      !Number.isInteger(num) ||
+      num < 1 ||
+      num > 20
+    )
       throw new TypeError("Invalid search bounds");
     signal?.throwIfAborted();
     if (active >= 4) throw new Error("Google search capacity exceeded");
-    const combined = AbortSignal.any([AbortSignal.timeout(20_000), ...(signal ? [signal] : [])]);
+    const combined = AbortSignal.any([
+      AbortSignal.timeout(20_000),
+      ...(signal ? [signal] : []),
+    ]);
     const args = [
       "web",
       "search",
@@ -101,9 +132,12 @@ export function createGooglePublicSearch(options: GooglePublicSearchOptions = {}
     ];
     active++;
     try {
-      const output = await (options.run ? options.run(args, combined) : runOwner(executable, args, combined));
+      const output = await (options.run
+        ? options.run(args, combined)
+        : runOwner(executable, args, combined));
       combined.throwIfAborted();
-      if (new TextEncoder().encode(output).byteLength > MAX_OUTPUT) throw new Error();
+      if (new TextEncoder().encode(output).byteLength > MAX_OUTPUT)
+        throw new Error();
       const payload: unknown = JSON.parse(output);
       if (
         !payload ||
@@ -117,17 +151,28 @@ export function createGooglePublicSearch(options: GooglePublicSearchOptions = {}
         throw new Error();
       const organic: GooglePublicSearchPage["organic"] = [];
       for (const hit of payload.organic.slice(0, num)) {
-        if (!hit || typeof hit.title !== "string" || typeof hit.url !== "string" || typeof hit.snippet !== "string")
+        if (
+          !hit ||
+          typeof hit.title !== "string" ||
+          typeof hit.url !== "string" ||
+          typeof hit.snippet !== "string"
+        )
           throw new Error();
         const url = new URL(hit.url);
-        if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new Error();
+        if (
+          !["https:", "http:"].includes(url.protocol) ||
+          url.username ||
+          url.password
+        )
+          throw new Error();
         organic.push({ title: hit.title, url: url.href, snippet: hit.snippet });
       }
       return {
         query,
         organic,
         authenticated: false,
-        ...("correctedQuery" in payload && typeof payload.correctedQuery === "string"
+        ...("correctedQuery" in payload &&
+        typeof payload.correctedQuery === "string"
           ? { correctedQuery: payload.correctedQuery }
           : {}),
       };

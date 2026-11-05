@@ -9,10 +9,15 @@ test("simultaneous syncs cannot take the same lock", async () => {
   const root = await mkdtemp(join(tmpdir(), "drive-lock-"));
   try {
     const lock = join(root, "lock");
-    const attempts = await Promise.allSettled([acquireSyncLock(lock), acquireSyncLock(lock)]);
-    const acquired = attempts.filter(result => result.status === "fulfilled");
+    const attempts = await Promise.allSettled([
+      acquireSyncLock(lock),
+      acquireSyncLock(lock),
+    ]);
+    const acquired = attempts.filter((result) => result.status === "fulfilled");
     expect(acquired).toHaveLength(1);
-    expect(attempts.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect(
+      attempts.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
     await (acquired[0] as PromiseFulfilledResult<() => Promise<void>>).value();
   } finally {
     await rm(root, { recursive: true, force: true });

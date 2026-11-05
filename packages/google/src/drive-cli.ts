@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CodeChallengeMethod } from "google-auth-library";
-import { GOOGLE_SCOPES, googleApi, googlePaths, oauthClient, saveOAuthToken } from "./api.ts";
+import {
+  GOOGLE_SCOPES,
+  googleApi,
+  googlePaths,
+  oauthClient,
+  saveOAuthToken,
+} from "./api.ts";
 import { syncAgentHome } from "./drive-sync.ts";
 import { syncTrainedArtifacts } from "./drive-model-sync.ts";
 
 async function login(): Promise<void> {
   const client = await oauthClient(false);
   const state = crypto.getRandomValues(new Uint8Array(24)).toHex();
-  const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
+  const { codeVerifier, codeChallenge } =
+    await client.generateCodeVerifierAsync();
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;
   const codePromise = new Promise<string>((resolve, reject) => {
@@ -19,7 +26,8 @@ async function login(): Promise<void> {
     port: 0,
     fetch(request) {
       const url = new URL(request.url);
-      if (url.pathname !== "/") return new Response("Not found", { status: 404 });
+      if (url.pathname !== "/")
+        return new Response("Not found", { status: 404 });
       if (url.searchParams.get("state") !== state) {
         rejectCode(new Error("OAuth state mismatch"));
         return new Response("Invalid OAuth state", { status: 400 });
@@ -27,12 +35,17 @@ async function login(): Promise<void> {
       const error = url.searchParams.get("error");
       if (error) {
         rejectCode(new Error(`Google OAuth: ${error}`));
-        return new Response("Google authorization was declined", { status: 400 });
+        return new Response("Google authorization was declined", {
+          status: 400,
+        });
       }
       const code = url.searchParams.get("code");
-      if (!code) return new Response("Missing authorization code", { status: 400 });
+      if (!code)
+        return new Response("Missing authorization code", { status: 400 });
       resolveCode(code);
-      return new Response("YOLO-Web Google Drive authorization complete. You may close this page.");
+      return new Response(
+        "YOLO-Web Google Drive authorization complete. You may close this page.",
+      );
     },
   });
   try {
@@ -56,13 +69,24 @@ async function login(): Promise<void> {
       });
       void process.exited;
     }
-    const timeout = setTimeout(() => rejectCode(new Error("OAuth callback timed out after five minutes")), 300_000);
+    const timeout = setTimeout(
+      () =>
+        rejectCode(new Error("OAuth callback timed out after five minutes")),
+      300_000,
+    );
     try {
       const code = await codePromise;
-      const response = await client.getToken({ code, codeVerifier, redirect_uri: redirectUri });
-      if (!response.tokens.refresh_token) throw new Error("Google did not grant an offline refresh token");
+      const response = await client.getToken({
+        code,
+        codeVerifier,
+        redirect_uri: redirectUri,
+      });
+      if (!response.tokens.refresh_token)
+        throw new Error("Google did not grant an offline refresh token");
       await saveOAuthToken(response.tokens, googlePaths().token);
-  console.log("Google OAuth token saved in the private YOLO-Web credential store.");
+      console.log(
+        "Google OAuth token saved in the private YOLO-Web credential store.",
+      );
     } finally {
       clearTimeout(timeout);
     }
@@ -78,11 +102,20 @@ async function status(): Promise<void> {
     oauthToken: await Bun.file(paths.token).exists(),
     serviceAccount: await Bun.file(paths.serviceAccount).exists(),
   };
-  let folder: { id?: string | null; name?: string | null; canAddChildren?: boolean } | null = null;
-  const authMode = process.env.YOLO_WEB_GOOGLE_DRIVE_AUTH ?? process.env.APHRODY_GOOGLE_DRIVE_AUTH ?? "oauth-user";
+  let folder: {
+    id?: string | null;
+    name?: string | null;
+    canAddChildren?: boolean;
+  } | null = null;
+  const authMode =
+    process.env.YOLO_WEB_GOOGLE_DRIVE_AUTH ??
+    process.env.APHRODY_GOOGLE_DRIVE_AUTH ??
+    "oauth-user";
   if (authMode === "gcloud-user" || privateFiles.oauthToken) {
     const { drive } = await googleApi();
-    const id = process.env.YOLO_WEB_GOOGLE_DRIVE_FOLDER_ID ?? process.env.APHRODY_GOOGLE_DRIVE_FOLDER_ID;
+    const id =
+      process.env.YOLO_WEB_GOOGLE_DRIVE_FOLDER_ID ??
+      process.env.APHRODY_GOOGLE_DRIVE_FOLDER_ID;
     if (id) {
       const response = await drive.files.get({
         fileId: id,
@@ -109,19 +142,26 @@ export async function runDriveCli(args: string[]): Promise<void> {
     return;
   }
   if (args.includes("--legacy-bidirectional"))
-    throw new Error("Legacy plain-text Google Docs writes are disabled; use native download-only projection");
+    throw new Error(
+      "Legacy plain-text Google Docs writes are disabled; use native download-only projection",
+    );
   if (
     args.includes("--seed-reviewed") &&
-    (!args[args.indexOf("--seed-reviewed") + 1] || args[args.indexOf("--seed-reviewed") + 1]!.startsWith("--"))
+    (!args[args.indexOf("--seed-reviewed") + 1] ||
+      args[args.indexOf("--seed-reviewed") + 1]!.startsWith("--"))
   )
-    throw new Error("--seed-reviewed requires the private native snapshot directory");
+    throw new Error(
+      "--seed-reviewed requires the private native snapshot directory",
+    );
   if (command === "auth-login") await login();
   else if (command === "status") await status();
   else if (command === "sync-models") await syncTrainedArtifacts();
   else if (command === "sync")
     await syncAgentHome({
       dryRun: args.includes("--dry-run"),
-      seedReviewed: args.includes("--seed-reviewed") ? args[args.indexOf("--seed-reviewed") + 1] : undefined,
+      seedReviewed: args.includes("--seed-reviewed")
+        ? args[args.indexOf("--seed-reviewed") + 1]
+        : undefined,
     });
   else throw new Error(usage);
 }

@@ -42,13 +42,17 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
   const accountManager = new MultiAccountManager(db);
 
   // In-memory challenge store for active passkey ceremonies
-  const activeChallenges = new Map<string, { challenge: string; userId: string; expires: number }>();
+  const activeChallenges = new Map<
+    string,
+    { challenge: string; userId: string; expires: number }
+  >();
 
   const requestSession = (req: Request): Session | null => {
     const token = extractSessionToken(req.headers);
     return token ? db.getSessionByToken(token) : null;
   };
-  const unauthenticated = () => Response.json({ error: "Authentication required" }, { status: 401 });
+  const unauthenticated = () =>
+    Response.json({ error: "Authentication required" }, { status: 401 });
 
   return {
     db,
@@ -82,13 +86,18 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
       [`${prefix}/accounts/switch`]: async (req: Request) => {
         const session = requestSession(req);
         if (!session) return unauthenticated();
-        const body = (await req.json().catch(() => ({}))) as { accountId?: string };
+        const body = (await req.json().catch(() => ({}))) as {
+          accountId?: string;
+        };
         if (!body.accountId) {
           return Response.json({ error: "Missing accountId" }, { status: 400 });
         }
 
         try {
-          const presence = accountManager.switchActiveAccount(session.token, body.accountId);
+          const presence = accountManager.switchActiveAccount(
+            session.token,
+            body.accountId,
+          );
           return Response.json(presence);
         } catch (e) {
           return Response.json({ error: String(e) }, { status: 400 });
@@ -98,10 +107,17 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
       [`${prefix}/passkey/register-options`]: async (req: Request) => {
         const session = requestSession(req);
         if (!session) return unauthenticated();
-        const user = db.getUserById(session.activeAccountId) || db.getUserById(session.userId);
-        if (!user) return Response.json({ error: "User not found" }, { status: 404 });
+        const user =
+          db.getUserById(session.activeAccountId) ||
+          db.getUserById(session.userId);
+        if (!user)
+          return Response.json({ error: "User not found" }, { status: 404 });
 
-        const opts = createPasskeyRegistrationOptions(user, options.rpId, options.rpName);
+        const opts = createPasskeyRegistrationOptions(
+          user,
+          options.rpId,
+          options.rpName,
+        );
         activeChallenges.set(user.id, {
           challenge: opts.challenge,
           userId: user.id,
@@ -114,20 +130,34 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
       [`${prefix}/passkey/register-verify`]: async (req: Request) => {
         const session = requestSession(req);
         if (!session) return unauthenticated();
-        const user = db.getUserById(session.activeAccountId) || db.getUserById(session.userId);
-        if (!user) return Response.json({ error: "User not found" }, { status: 404 });
+        const user =
+          db.getUserById(session.activeAccountId) ||
+          db.getUserById(session.userId);
+        if (!user)
+          return Response.json({ error: "User not found" }, { status: 404 });
 
         const stored = activeChallenges.get(user.id);
         if (!stored || stored.expires < Date.now()) {
-          return Response.json({ error: "Challenge expired or invalid" }, { status: 400 });
+          return Response.json(
+            { error: "Challenge expired or invalid" },
+            { status: 400 },
+          );
         }
         activeChallenges.delete(user.id);
 
-        const body = (await req.json().catch(() => ({}))) as ClientRegistrationResponse;
-        const verification = verifyPasskeyRegistrationResponse(body, stored.challenge);
+        const body = (await req
+          .json()
+          .catch(() => ({}))) as ClientRegistrationResponse;
+        const verification = verifyPasskeyRegistrationResponse(
+          body,
+          stored.challenge,
+        );
 
         if (!verification.ok) {
-          return Response.json({ error: verification.error || "Verification failed" }, { status: 400 });
+          return Response.json(
+            { error: verification.error || "Verification failed" },
+            { status: 400 },
+          );
         }
 
         const now = Date.now();
@@ -143,16 +173,24 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
           lastUsedAt: now,
         });
 
-        return Response.json({ ok: true, message: "Passkey registered securely" });
+        return Response.json({
+          ok: true,
+          message: "Passkey registered securely",
+        });
       },
 
       [`${prefix}/passkey/auth-options`]: async (req: Request) => {
         const session = requestSession(req);
         if (!session) return unauthenticated();
-        const user = db.getUserById(session.activeAccountId) || db.getUserById(session.userId);
+        const user =
+          db.getUserById(session.activeAccountId) ||
+          db.getUserById(session.userId);
         const passkeys = user ? db.getPasskeysByUserId(user.id) : [];
 
-        const opts = createPasskeyAuthOptions(options.rpId, passkeys.map(pk => ({ id: pk.credentialId })));
+        const opts = createPasskeyAuthOptions(
+          options.rpId,
+          passkeys.map((pk) => ({ id: pk.credentialId })),
+        );
 
         const challengeKey = user?.id || "global_auth";
         activeChallenges.set(challengeKey, {
@@ -167,24 +205,39 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
       [`${prefix}/passkey/auth-verify`]: async (req: Request) => {
         const session = requestSession(req);
         if (!session) return unauthenticated();
-        const user = db.getUserById(session.activeAccountId) || db.getUserById(session.userId);
+        const user =
+          db.getUserById(session.activeAccountId) ||
+          db.getUserById(session.userId);
         const challengeKey = user?.id || "global_auth";
 
         const stored = activeChallenges.get(challengeKey);
         if (!stored || stored.expires < Date.now()) {
-          return Response.json({ error: "Challenge expired or invalid" }, { status: 400 });
+          return Response.json(
+            { error: "Challenge expired or invalid" },
+            { status: 400 },
+          );
         }
         activeChallenges.delete(challengeKey);
 
         const body = (await req.json().catch(() => ({}))) as ClientAuthResponse;
         const passkey = db.getPasskeyByCredentialId(body.id);
         if (!passkey) {
-          return Response.json({ error: "Unregistered passkey credential" }, { status: 400 });
+          return Response.json(
+            { error: "Unregistered passkey credential" },
+            { status: 400 },
+          );
         }
 
-        const verification = verifyPasskeyAuthResponse(body, stored.challenge, passkey.publicKey);
+        const verification = verifyPasskeyAuthResponse(
+          body,
+          stored.challenge,
+          passkey.publicKey,
+        );
         if (!verification.ok) {
-          return Response.json({ error: verification.error || "Authentication failed" }, { status: 400 });
+          return Response.json(
+            { error: verification.error || "Authentication failed" },
+            { status: 400 },
+          );
         }
 
         // Issue verified owner JWT token if user is owner
@@ -213,7 +266,9 @@ export function createBetterAuthServer(options: BetterAuthServerOptions = {}) {
       },
 
       [`${prefix}/owner-status`]: async (req: Request) => {
-        const verification = await verifyOwnerIdentity(req.headers, secret, { allowedOrigins: options.allowedOrigins });
+        const verification = await verifyOwnerIdentity(req.headers, secret, {
+          allowedOrigins: options.allowedOrigins,
+        });
         return Response.json({
           isOwner: verification.isOwner,
           claims: verification.claims || null,

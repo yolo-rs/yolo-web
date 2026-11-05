@@ -38,10 +38,10 @@ export type SignalCode = (typeof Signal)[keyof typeof Signal];
 
 export const SA_NOCLDSTOP = 0x00000001;
 export const SA_NOCLDWAIT = 0x00000002;
-export const SA_SIGINFO   = 0x00000004;
-export const SA_ONSTACK   = 0x08000000;
-export const SA_RESTART   = 0x10000000;
-export const SA_NODEFER   = 0x40000000;
+export const SA_SIGINFO = 0x00000004;
+export const SA_ONSTACK = 0x08000000;
+export const SA_RESTART = 0x10000000;
+export const SA_NODEFER = 0x40000000;
 export const SA_RESETHAND = 0x80000000;
 
 export class SigSet {

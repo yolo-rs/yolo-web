@@ -7,7 +7,10 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "files": ["src", "LICENSE-APACHE"],
+  "files": [
+    "src",
+    "LICENSE-APACHE"
+  ],
   "scripts": {
     "check": "bun check --no-script",
     "test": "bun test"

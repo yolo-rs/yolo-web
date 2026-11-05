@@ -46,32 +46,32 @@ agent-browser skills get core --ref references/authentication.md --ref templates
 
 `agent-browser skills get core --full` prints every reference and template at once, several times the size of this guide.
 
-| Load | When you need |
-| --- | --- |
-| `references/commands.md` | Any command or flag not shown here, global options, environment variables, `agent-browser.json` keys, the MCP server and its tool profiles, eve integration, network mocking and HAR, accessibility audits, React and Web Vitals, the dashboard, WebMCP commands, `doctor` |
-| `references/snapshot-refs.md` | How refs are assigned, kept, and invalidated |
-| `references/authentication.md` | Auth vault, `--no-navigate`, credential provider plugins, importing a logged-in browser |
-| `references/session-management.md` | Persistence, `--restore` policies, idle shutdown, tab pinning, parallel sessions |
-| `references/trust-boundaries.md` | Untrusted content, WebMCP metadata, secrets, `--allowed-domains`, project config trust |
-| `references/video-recording.md` | `record start` options, cursor overlay, contact sheets, frame rate |
-| `references/profiling.md` | Chrome DevTools tracing and profiling |
-| `references/streaming.md` | Live viewport streaming and remote input |
-| `references/proxy-support.md` | Proxies and CA certificates |
-| `references/webgpu.md` | WebGPU pages on headless, Linux, CI, and Windows |
-| `templates/*.sh` | Starter scripts for auth, capture, and form automation |
+| Load                               | When you need                                                                                                                                                                                                                                                              |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `references/commands.md`           | Any command or flag not shown here, global options, environment variables, `agent-browser.json` keys, the MCP server and its tool profiles, eve integration, network mocking and HAR, accessibility audits, React and Web Vitals, the dashboard, WebMCP commands, `doctor` |
+| `references/snapshot-refs.md`      | How refs are assigned, kept, and invalidated                                                                                                                                                                                                                               |
+| `references/authentication.md`     | Auth vault, `--no-navigate`, credential provider plugins, importing a logged-in browser                                                                                                                                                                                    |
+| `references/session-management.md` | Persistence, `--restore` policies, idle shutdown, tab pinning, parallel sessions                                                                                                                                                                                           |
+| `references/trust-boundaries.md`   | Untrusted content, WebMCP metadata, secrets, `--allowed-domains`, project config trust                                                                                                                                                                                     |
+| `references/video-recording.md`    | `record start` options, cursor overlay, contact sheets, frame rate                                                                                                                                                                                                         |
+| `references/profiling.md`          | Chrome DevTools tracing and profiling                                                                                                                                                                                                                                      |
+| `references/streaming.md`          | Live viewport streaming and remote input                                                                                                                                                                                                                                   |
+| `references/proxy-support.md`      | Proxies and CA certificates                                                                                                                                                                                                                                                |
+| `references/webgpu.md`             | WebGPU pages on headless, Linux, CI, and Windows                                                                                                                                                                                                                           |
+| `templates/*.sh`                   | Starter scripts for auth, capture, and form automation                                                                                                                                                                                                                     |
 
 Load another skill with `agent-browser skills get <name>` when the task is outside ordinary web pages:
 
-| Skill | When |
-| --- | --- |
-| `electron` | Electron desktop apps such as VS Code, Slack desktop, Discord, or Figma |
-| `slack` | Slack workspace tasks |
-| `dogfood` | Exploratory testing, QA, and bug hunts with a report |
-| `derive-client` | Record a HAR and generate a standalone API client for a site |
-| `webmcp-gen` | Build and validate WebMCP tools for a page |
-| `vercel-sandbox` | agent-browser inside Vercel Sandbox microVMs |
+| Skill                          | When                                                                    |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `electron`                     | Electron desktop apps such as VS Code, Slack desktop, Discord, or Figma |
+| `slack`                        | Slack workspace tasks                                                   |
+| `dogfood`                      | Exploratory testing, QA, and bug hunts with a report                    |
+| `derive-client`                | Record a HAR and generate a standalone API client for a site            |
+| `webmcp-gen`                   | Build and validate WebMCP tools for a page                              |
+| `vercel-sandbox`               | agent-browser inside Vercel Sandbox microVMs                            |
 | `protected-vercel-deployments` | Vercel deployments behind Authentication, SSO, or Deployment Protection |
-| `agentcore` | AWS Bedrock AgentCore cloud browsers |
+| `agentcore`                    | AWS Bedrock AgentCore cloud browsers                                    |
 
 ## Reading a page
 

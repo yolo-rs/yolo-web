@@ -26,4 +26,12 @@ CREATE TABLE IF NOT EXISTS crawl_results (
 );`;
 
 export type Job = { id: number; url: string; mode: "fetch" | "cdp" };
-export type Progress = { type: "progress"; worker: string; jobId: number; url: string; state: "start" | "done" | "error"; detail?: string; at: string };
+export type Progress = {
+  type: "progress";
+  worker: string;
+  jobId: number;
+  url: string;
+  state: "start" | "done" | "error";
+  detail?: string;
+  at: string;
+};

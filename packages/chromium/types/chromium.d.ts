@@ -27,7 +27,11 @@ declare module "bun:chromium" {
     private constructor();
     readonly closed: boolean;
     /** Send a CDP command, optionally addressing a flattened target session. */
-    send<T = unknown>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T>;
+    send<T = unknown>(
+      method: string,
+      params?: Record<string, unknown>,
+      sessionId?: string,
+    ): Promise<T>;
     /** Probe navigator.gpu in an attached secure target session. */
     gpu(sessionId: string): Promise<{
       available: boolean;
@@ -36,7 +40,10 @@ declare module "bun:chromium" {
       info: Record<string, unknown> | null;
     }>;
     /** Subscribe to a CDP event. Returns a function that removes the subscription. */
-    on(method: string, callback: (params: Record<string, unknown>, sessionId?: string) => void): () => void;
+    on(
+      method: string,
+      callback: (params: Record<string, unknown>, sessionId?: string) => void,
+    ): () => void;
     /** Close this connection. */
     close(): void;
   }
@@ -47,14 +54,18 @@ declare module "bun:chromium" {
     readonly userDataDir: string;
     readonly process: Bun.Subprocess;
     /** Actual termination mechanism; `single-process` does not guarantee child-process cleanup. */
-    readonly processTreeOwnership: "windows-job" | "linux-pidfd-group" | "single-process";
+    readonly processTreeOwnership:
+      "windows-job" | "linux-pidfd-group" | "single-process";
     /** Close the connection and terminate the browser launched by Bun. */
     close(): Promise<void>;
     [Symbol.asyncDispose](): Promise<void>;
   }
 
   /** Connect to a Chrome remote debugging endpoint. */
-  export function connect(endpoint: string, options?: ConnectOptions): Promise<ChromiumConnection>;
+  export function connect(
+    endpoint: string,
+    options?: ConnectOptions,
+  ): Promise<ChromiumConnection>;
   /** Launch Chrome with a dedicated profile and connect to its debugging endpoint. */
   export function launch(options?: LaunchOptions): Promise<ChromiumBrowser>;
   /** Discover an installed Chrome-compatible executable, or return null. */
@@ -62,12 +73,24 @@ declare module "bun:chromium" {
 
   /** Pure manifest helpers. These functions do not install browser extensions or PWAs. */
   export namespace manifests {
-    function validateExtension(manifest: Record<string, unknown>): Record<string, unknown>;
-    function createExtension(options: Record<string, unknown>): Record<string, unknown>;
-    function validateTheme(manifest: Record<string, unknown>): Record<string, unknown>;
-    function createTheme(options: Record<string, unknown>): Record<string, unknown>;
-    function validatePWA(manifest: Record<string, unknown>): Record<string, unknown>;
-    function createPWA(options: Record<string, unknown>): Record<string, unknown>;
+    function validateExtension(
+      manifest: Record<string, unknown>,
+    ): Record<string, unknown>;
+    function createExtension(
+      options: Record<string, unknown>,
+    ): Record<string, unknown>;
+    function validateTheme(
+      manifest: Record<string, unknown>,
+    ): Record<string, unknown>;
+    function createTheme(
+      options: Record<string, unknown>,
+    ): Record<string, unknown>;
+    function validatePWA(
+      manifest: Record<string, unknown>,
+    ): Record<string, unknown>;
+    function createPWA(
+      options: Record<string, unknown>,
+    ): Record<string, unknown>;
   }
 
   export interface Bookmark {
@@ -94,9 +117,16 @@ declare module "bun:chromium" {
       mode: "native-profile-application";
     }
     /** Validate an application command without reading or launching anything. Defaults to Default without metadata. */
-    function planApplication(options: OpenApplicationOptions & { executable: string; userDataDir: string }): string[];
+    function planApplication(
+      options: OpenApplicationOptions & {
+        executable: string;
+        userDataDir: string;
+      },
+    ): string[];
     /** Delegate an application window to the browser that owns its profile. No debugger, profile copy or process-tree ownership is introduced. */
-    function openApplication(options: OpenApplicationOptions): Promise<OpenApplicationResult>;
+    function openApplication(
+      options: OpenApplicationOptions,
+    ): Promise<OpenApplicationResult>;
     interface ImportSiteOptions {
       view: Bun.WebView;
       /** Explicit connected source browser; no encrypted profile files are read. */
@@ -135,7 +165,9 @@ declare module "bun:chromium" {
       isLastUsed: boolean;
     }
     /** Discover profile metadata on demand. No profile is opened for writing or copied. */
-    function discover(options?: { userDataDirs?: readonly string[] }): Promise<DiscoveredProfile[]>;
+    function discover(options?: {
+      userDataDirs?: readonly string[];
+    }): Promise<DiscoveredProfile[]>;
     /** Existing ownership boundaries; encrypted stores are not exported. */
     function capabilities(): Readonly<{
       discovery: "read-only-metadata";

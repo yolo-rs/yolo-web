@@ -11,7 +11,9 @@ export class MultiAccountManager {
   constructor(private db: AuthDatabase) {}
 
   public getPresence(session: Session): MultiAccountPresence {
-    const activeAccount = this.db.getUserById(session.activeAccountId) || this.db.getUserById(session.userId);
+    const activeAccount =
+      this.db.getUserById(session.activeAccountId) ||
+      this.db.getUserById(session.userId);
     if (!activeAccount) {
       throw new Error(`Account not found for session ${session.id}`);
     }
@@ -28,7 +30,10 @@ export class MultiAccountManager {
     };
   }
 
-  public switchActiveAccount(sessionToken: string, targetUserId: string): MultiAccountPresence {
+  public switchActiveAccount(
+    sessionToken: string,
+    targetUserId: string,
+  ): MultiAccountPresence {
     const session = this.db.getSessionByToken(sessionToken);
     if (!session) {
       throw new Error("Invalid or expired session");

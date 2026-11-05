@@ -6,7 +6,12 @@ type Link = {
   heading?: { id?: string; tabId?: string };
   bookmark?: { id?: string; tabId?: string };
 };
-type Style = { bold?: boolean; italic?: boolean; strikethrough?: boolean; link?: Link };
+type Style = {
+  bold?: boolean;
+  italic?: boolean;
+  strikethrough?: boolean;
+  link?: Link;
+};
 type Element = {
   textRun?: { content?: string; textStyle?: Style };
   richLink?: { richLinkProperties?: { title?: string; uri?: string } };
@@ -26,7 +31,14 @@ type Structural = {
 type Body = { content?: Structural[] };
 type TabContent = {
   body?: Body | null;
-  lists?: Record<string, { listProperties?: { nestingLevels?: { glyphType?: string; startNumber?: number }[] } }>;
+  lists?: Record<
+    string,
+    {
+      listProperties?: {
+        nestingLevels?: { glyphType?: string; startNumber?: number }[];
+      };
+    }
+  >;
   inlineObjects?: Record<
     string,
     {
@@ -57,7 +69,10 @@ export function normalizeMarkdown(markdown: string): string {
     .trimEnd()}\n`;
 }
 function label(text: string): string {
-  return text.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]");
+  return text
+    .replaceAll("\\", "\\\\")
+    .replaceAll("[", "\\[")
+    .replaceAll("]", "\\]");
 }
 function destination(url: string): string {
   return /[\s()]/.test(url) ? `<${url.replaceAll(">", "%3E")}>` : url;
@@ -66,25 +81,37 @@ function linkText(text: string, url: string): string {
   return `[${label(text)}](${destination(url)})`;
 }
 function style(text: string, marker: string): string {
-  return text.replace(/^(\s*)([\s\S]*?)(\s*)$/, (_all, start: string, content: string, end: string) =>
-    content ? `${start}${marker}${content}${marker}${end}` : text,
+  return text.replace(
+    /^(\s*)([\s\S]*?)(\s*)$/,
+    (_all, start: string, content: string, end: string) =>
+      content ? `${start}${marker}${content}${marker}${end}` : text,
   );
 }
 function inline(element: Element, tab: TabContent): string {
   if (element.richLink) {
     const rich = element.richLink.richLinkProperties;
-    if (!rich?.uri) throw new Error("Native rich link has no URI; content preserved in source snapshot");
+    if (!rich?.uri)
+      throw new Error(
+        "Native rich link has no URI; content preserved in source snapshot",
+      );
     return linkText(rich.title ?? rich.uri, rich.uri);
   }
   if (element.inlineObjectElement) {
     const object =
-      tab.inlineObjects?.[element.inlineObjectElement.inlineObjectId ?? ""]?.inlineObjectProperties?.embeddedObject;
-    const url = object?.imageProperties?.sourceUri ?? object?.imageProperties?.contentUri;
-    if (!url) throw new Error("Native inline object cannot be rendered losslessly");
+      tab.inlineObjects?.[element.inlineObjectElement.inlineObjectId ?? ""]
+        ?.inlineObjectProperties?.embeddedObject;
+    const url =
+      object?.imageProperties?.sourceUri ?? object?.imageProperties?.contentUri;
+    if (!url)
+      throw new Error("Native inline object cannot be rendered losslessly");
     return `!${linkText(object?.title ?? object?.description ?? "image", url)}`;
   }
-  if (element.footnoteReference) return `[^${element.footnoteReference.footnoteId}]`;
-  if (!element.textRun) throw new Error("Unsupported native element; source is preserved for agent review");
+  if (element.footnoteReference)
+    return `[^${element.footnoteReference.footnoteId}]`;
+  if (!element.textRun)
+    throw new Error(
+      "Unsupported native element; source is preserved for agent review",
+    );
   let text = element.textRun.content ?? "";
   const format = element.textRun.textStyle;
   if (format?.bold) text = style(text, "**");
@@ -104,7 +131,8 @@ function inline(element: Element, tab: TabContent): string {
     if (!url) throw new Error("Unsupported native link target");
     text = text.replace(
       /^(\s*)([\s\S]*?)(\s*)$/,
-      (_all, start: string, content: string, end: string) => `${start}${linkText(content, url)}${end}`,
+      (_all, start: string, content: string, end: string) =>
+        `${start}${linkText(content, url)}${end}`,
     );
   }
   return text;
@@ -116,26 +144,37 @@ function renderContent(content: Structural[], tab: TabContent): string {
     if (element.paragraph) {
       const p = element.paragraph;
       let text = (p.elements ?? [])
-        .map(item => inline(item, tab))
+        .map((item) => inline(item, tab))
         .join("")
         .replace(/\r\n?/g, "\n")
         .trimEnd();
-      const heading = /HEADING_(\d)/.exec(p.paragraphStyle?.namedStyleType ?? "");
-      if (heading && !/^#{1,6} /.test(text)) text = `${"#".repeat(Number(heading[1]))} ${text}`;
-      else if (p.paragraphStyle?.namedStyleType === "TITLE" && !text.startsWith("# ")) text = `# ${text}`;
+      const heading = /HEADING_(\d)/.exec(
+        p.paragraphStyle?.namedStyleType ?? "",
+      );
+      if (heading && !/^#{1,6} /.test(text))
+        text = `${"#".repeat(Number(heading[1]))} ${text}`;
+      else if (
+        p.paragraphStyle?.namedStyleType === "TITLE" &&
+        !text.startsWith("# ")
+      )
+        text = `# ${text}`;
       if (p.bullet) {
         const depth = p.bullet.nestingLevel ?? 0,
           key = `${p.bullet.listId}:${depth}`;
-        const nesting = tab.lists?.[p.bullet.listId ?? ""]?.listProperties?.nestingLevels?.[depth];
-        const ordered = nesting?.glyphType && /DECIMAL|ALPHA|ROMAN/.test(nesting.glyphType);
+        const nesting =
+          tab.lists?.[p.bullet.listId ?? ""]?.listProperties?.nestingLevels?.[
+            depth
+          ];
+        const ordered =
+          nesting?.glyphType && /DECIMAL|ALPHA|ROMAN/.test(nesting.glyphType);
         const n = counters.get(key) ?? nesting?.startNumber ?? 1;
         if (ordered) counters.set(key, n + 1);
         text = `${"  ".repeat(depth)}${ordered ? `${n}.` : "-"} ${text}`;
       }
       if (text) blocks.push(text);
     } else if (element.table) {
-      const rows = (element.table.tableRows ?? []).map(row =>
-        (row.tableCells ?? []).map(cell =>
+      const rows = (element.table.tableRows ?? []).map((row) =>
+        (row.tableCells ?? []).map((cell) =>
           renderContent(cell.content ?? [], tab)
             .trim()
             .replaceAll("|", "\\|")
@@ -143,17 +182,23 @@ function renderContent(content: Structural[], tab: TabContent): string {
         ),
       );
       if (rows.length) {
-        const width = Math.max(...rows.map(row => row.length));
+        const width = Math.max(...rows.map((row) => row.length));
         blocks.push(
           rows
             .map(
               (row, i) =>
                 `${i === 1 ? `| ${Array(width).fill("---").join(" | ")} |\n` : ""}| ${Array.from({ length: width }, (_, col) => row[col] ?? "").join(" | ")} |`,
             )
-            .join("\n") + (rows.length === 1 ? `\n| ${Array(width).fill("---").join(" | ")} |` : ""),
+            .join("\n") +
+            (rows.length === 1
+              ? `\n| ${Array(width).fill("---").join(" | ")} |`
+              : ""),
         );
       }
-    } else if (!element.sectionBreak) throw new Error("Unsupported native block; source retained for agent review");
+    } else if (!element.sectionBreak)
+      throw new Error(
+        "Unsupported native block; source retained for agent review",
+      );
   }
   return blocks.join("\n\n");
 }
@@ -165,7 +210,7 @@ export function nativeMarkdown(document: NativeDocument): string {
   }
   for (const tab of document.tabs ?? []) visit(tab);
   if (!tabs.length) tabs.push(document);
-  const rendered = tabs.map(tab => {
+  const rendered = tabs.map((tab) => {
     const body = tab.documentTab ?? tab;
     const title = tab.tabProperties?.title ?? tab.title;
     let text = renderContent(body.body?.content ?? [], body);
@@ -175,7 +220,10 @@ export function nativeMarkdown(document: NativeDocument): string {
   });
   return normalizeMarkdown(rendered.join("\n\n"));
 }
-export function projectionMarkdown(document: NativeDocument, localMarkdown: string): string {
+export function projectionMarkdown(
+  document: NativeDocument,
+  localMarkdown: string,
+): string {
   const local = normalizeMarkdown(localMarkdown),
     remote = normalizeMarkdown(nativeMarkdown(document)),
     localFrontmatter = /^---\n[\s\S]*?\n---\n/.exec(local)?.[0] ?? "";
@@ -183,7 +231,9 @@ export function projectionMarkdown(document: NativeDocument, localMarkdown: stri
   // frontmatter. Prefer it when present; only carry local profile metadata
   // forward when the remote Markdown has no frontmatter of its own.
   if (/^---\n[\s\S]*?\n---\n/.test(remote)) return remote;
-  return normalizeMarkdown(`${localFrontmatter}${localFrontmatter ? "\n" : ""}${remote}`);
+  return normalizeMarkdown(
+    `${localFrontmatter}${localFrontmatter ? "\n" : ""}${remote}`,
+  );
 }
 export function projectionAction(
   previous: { remoteHash: string; localHash: string } | undefined,

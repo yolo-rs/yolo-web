@@ -50,11 +50,13 @@
 
         /* Typography */
         --font-family:
-          "Google Sans", "Google Sans Text", "Product Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          Arial, sans-serif;
+          "Google Sans", "Google Sans Text", "Product Sans", -apple-system,
+          BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
         --font-family-text:
-          "Google Sans Text", "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-        --font-family-display: "Product Sans", "Google Sans", "Google Sans Text", sans-serif;
+          "Google Sans Text", "Google Sans", -apple-system, BlinkMacSystemFont,
+          "Segoe UI", Roboto, Arial, sans-serif;
+        --font-family-display:
+          "Product Sans", "Google Sans", "Google Sans Text", sans-serif;
 
         /* M3 Shape Tokens */
         --m3-shape-corner-small: 8px;
@@ -342,16 +344,36 @@
         gap: 1px;
         user-select: none;
       }
-      .logo-text span:nth-child(1) { color: #4285f4; }
-      .logo-text span:nth-child(2) { color: #ea4335; }
-      .logo-text span:nth-child(3) { color: #fbbc05; }
-      .logo-text span:nth-child(4) { color: #4285f4; }
-      .logo-text span:nth-child(5) { color: #34a853; }
-      .logo-text span:nth-child(6) { color: #ea4335; }
-      .logo-text span:nth-child(7) { color: #4285f4; }
-      .logo-text span:nth-child(8) { color: #34a853; }
-      .logo-text span:nth-child(9) { color: #ea4335; }
-      .logo-text .logo-dot { color: #4285f4; }
+      .logo-text span:nth-child(1) {
+        color: #4285f4;
+      }
+      .logo-text span:nth-child(2) {
+        color: #ea4335;
+      }
+      .logo-text span:nth-child(3) {
+        color: #fbbc05;
+      }
+      .logo-text span:nth-child(4) {
+        color: #4285f4;
+      }
+      .logo-text span:nth-child(5) {
+        color: #34a853;
+      }
+      .logo-text span:nth-child(6) {
+        color: #ea4335;
+      }
+      .logo-text span:nth-child(7) {
+        color: #4285f4;
+      }
+      .logo-text span:nth-child(8) {
+        color: #34a853;
+      }
+      .logo-text span:nth-child(9) {
+        color: #ea4335;
+      }
+      .logo-text .logo-dot {
+        color: #4285f4;
+      }
 
       .logo-badge {
         font-family: var(--font-family-text);
@@ -554,15 +576,33 @@
         gap: 0.5px;
         user-select: none;
       }
-      .serp-logo span:nth-child(1) { color: #4285f4; }
-      .serp-logo span:nth-child(2) { color: #ea4335; }
-      .serp-logo span:nth-child(3) { color: #fbbc05; }
-      .serp-logo span:nth-child(4) { color: #4285f4; }
-      .serp-logo span:nth-child(5) { color: #34a853; }
-      .serp-logo span:nth-child(6) { color: #ea4335; }
-      .serp-logo span:nth-child(7) { color: #4285f4; }
-      .serp-logo span:nth-child(8) { color: #34a853; }
-      .serp-logo span:nth-child(9) { color: #ea4335; }
+      .serp-logo span:nth-child(1) {
+        color: #4285f4;
+      }
+      .serp-logo span:nth-child(2) {
+        color: #ea4335;
+      }
+      .serp-logo span:nth-child(3) {
+        color: #fbbc05;
+      }
+      .serp-logo span:nth-child(4) {
+        color: #4285f4;
+      }
+      .serp-logo span:nth-child(5) {
+        color: #34a853;
+      }
+      .serp-logo span:nth-child(6) {
+        color: #ea4335;
+      }
+      .serp-logo span:nth-child(7) {
+        color: #4285f4;
+      }
+      .serp-logo span:nth-child(8) {
+        color: #34a853;
+      }
+      .serp-logo span:nth-child(9) {
+        color: #ea4335;
+      }
 
       .serp-search-wrapper {
         max-width: 652px;
@@ -802,22 +842,42 @@
 
         <!-- Bilingual Switcher & Better Auth Presence -->
         <div class="auth-presence-wrapper">
-          <button id="lang-btn" class="lang-btn" aria-label="Toggle language (EN / FR)" title="Switch language">
+          <button
+            id="lang-btn"
+            class="lang-btn"
+            aria-label="Toggle language (EN / FR)"
+            title="Switch language"
+          >
             🌐 <span id="lang-text">FR</span>
           </button>
 
-          <button id="auth-presence-btn" class="auth-pill-btn" aria-haspopup="true" aria-expanded="false" aria-label="Account presence menu">
+          <button
+            id="auth-presence-btn"
+            class="auth-pill-btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-label="Account presence menu"
+          >
             <span id="passkey-status-icon" class="passkey-lock-icon">🔒</span>
             <span id="auth-user-name">Owner</span>
             <span id="auth-role-tag" class="role-tag owner">Owner</span>
           </button>
 
-          <div id="auth-dropdown" class="auth-dropdown" style="display: none;" role="menu">
+          <div
+            id="auth-dropdown"
+            class="auth-dropdown"
+            style="display: none"
+            role="menu"
+          >
             <div class="dropdown-head">
               <div class="dropdown-user-email" id="user-email-text"></div>
-              <div class="dropdown-user-desc" id="user-status-text">Identité Propriétaire Vérifiée</div>
+              <div class="dropdown-user-desc" id="user-status-text">
+                Identité Propriétaire Vérifiée
+              </div>
             </div>
-            <div class="dropdown-sec-label" id="lbl-switch-acc">Changer de compte</div>
+            <div class="dropdown-sec-label" id="lbl-switch-acc">
+              Changer de compte
+            </div>
             <div id="accounts-container" class="dropdown-accounts"></div>
             <div class="dropdown-sep"></div>
             <button id="btn-auth-passkey" class="dropdown-action-item">
@@ -840,11 +900,14 @@
       <div class="home-center">
         <div class="logo-container">
           <div class="logo-text">
-            <span>B</span><span>u</span><span>n</span><span>S</span><span>e</span><span>a</span><span>r</span
-            ><span>c</span><span>h</span>
+            <span>B</span><span>u</span><span>n</span><span>S</span
+            ><span>e</span><span>a</span><span>r</span><span>c</span
+            ><span>h</span>
             <span class="logo-dot">.</span>
           </div>
-          <div class="logo-badge" id="lbl-logo-badge">Souverain & Sans Publicité</div>
+          <div class="logo-badge" id="lbl-logo-badge">
+            Souverain & Sans Publicité
+          </div>
         </div>
 
         <div class="search-box-wrapper">
@@ -866,21 +929,64 @@
               autofocus
             />
             <div class="input-actions">
-              <button class="action-icon-btn" title="Recherche vocale" aria-label="Recherche vocale" id="btn-voice">
-                <svg class="action-icon mic-icon" focusable="false" viewBox="0 0 24 24" width="24" height="24">
-                  <path fill="#4285f4" d="m12 15c1.66 0 3-1.31 3-2.97v-7.02c0-1.66-1.34-3.01-3-3.01s-3 1.34-3 3.01v7.02c0 1.66 1.34 2.97 3 2.97z"/>
-                  <path fill="#34a853" d="m11 18.08h2v3.92h-2z"/>
-                  <path fill="#fbbc05" d="m7.05 10.87c0 2.82 2.29 5.11 5.11 5.11s5.11-2.29 5.11-5.11h-1.5c0 1.99-1.62 3.61-3.61 3.61s-3.61-1.62-3.61-3.61h-1.5z"/>
-                  <path fill="#ea4335" d="m12 16.98c-1.68 0-3.19-.68-4.28-1.78l-1.06 1.06c1.37 1.38 3.26 2.22 5.34 2.22s3.97-.84 5.34-2.22l-1.06-1.06c-1.09 1.1-2.6 1.78-4.28 1.78z"/>
+              <button
+                class="action-icon-btn"
+                title="Recherche vocale"
+                aria-label="Recherche vocale"
+                id="btn-voice"
+              >
+                <svg
+                  class="action-icon mic-icon"
+                  focusable="false"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  height="24"
+                >
+                  <path
+                    fill="#4285f4"
+                    d="m12 15c1.66 0 3-1.31 3-2.97v-7.02c0-1.66-1.34-3.01-3-3.01s-3 1.34-3 3.01v7.02c0 1.66 1.34 2.97 3 2.97z"
+                  />
+                  <path fill="#34a853" d="m11 18.08h2v3.92h-2z" />
+                  <path
+                    fill="#fbbc05"
+                    d="m7.05 10.87c0 2.82 2.29 5.11 5.11 5.11s5.11-2.29 5.11-5.11h-1.5c0 1.99-1.62 3.61-3.61 3.61s-3.61-1.62-3.61-3.61h-1.5z"
+                  />
+                  <path
+                    fill="#ea4335"
+                    d="m12 16.98c-1.68 0-3.19-.68-4.28-1.78l-1.06 1.06c1.37 1.38 3.26 2.22 5.34 2.22s3.97-.84 5.34-2.22l-1.06-1.06c-1.09 1.1-2.6 1.78-4.28 1.78z"
+                  />
                 </svg>
               </button>
-              <button class="action-icon-btn" title="Recherche par image" aria-label="Recherche par image" id="btn-lens">
-                <svg class="action-icon lens-icon" focusable="false" viewBox="0 0 192 192" width="24" height="24">
+              <button
+                class="action-icon-btn"
+                title="Recherche par image"
+                aria-label="Recherche par image"
+                id="btn-lens"
+              >
+                <svg
+                  class="action-icon lens-icon"
+                  focusable="false"
+                  viewBox="0 0 192 192"
+                  width="24"
+                  height="24"
+                >
                   <rect fill="none" width="192" height="192" />
-                  <path fill="#ea4335" d="M68 40H52c-11 0-20 9-20 20v16h16V60c0-2.2 1.8-4 4-4h16V40z" />
-                  <path fill="#4285f4" d="M156 76V60c0-11-9-20-20-20h-16v16h16c2.2 0 4 1.8 4 4v16h16z" />
-                  <path fill="#34a853" d="M120 152h16c11 0 20-9 20-20v-16h-16v16c0 2.2-1.8 4-4 4h-16v16z" />
-                  <path fill="#fbbc05" d="M32 116v16c0 11 9 20 20 20h16v-16H52c-2.2 0-4-1.8-4-4v-16H32z" />
+                  <path
+                    fill="#ea4335"
+                    d="M68 40H52c-11 0-20 9-20 20v16h16V60c0-2.2 1.8-4 4-4h16V40z"
+                  />
+                  <path
+                    fill="#4285f4"
+                    d="M156 76V60c0-11-9-20-20-20h-16v16h16c2.2 0 4 1.8 4 4v16h16z"
+                  />
+                  <path
+                    fill="#34a853"
+                    d="M120 152h16c11 0 20-9 20-20v-16h-16v16c0 2.2-1.8 4-4 4h-16v16z"
+                  />
+                  <path
+                    fill="#fbbc05"
+                    d="M32 116v16c0 11 9 20 20 20h16v-16H52c-2.2 0-4-1.8-4-4v-16H32z"
+                  />
                   <circle fill="#4285f4" cx="96" cy="96" r="32" />
                   <circle fill="#ffffff" cx="96" cy="96" r="22" />
                   <circle fill="#ea4335" cx="96" cy="96" r="14" />
@@ -894,13 +1000,17 @@
         </div>
 
         <div class="home-buttons">
-          <button id="btn-submit-home" class="google-btn">Recherche Souveraine</button>
+          <button id="btn-submit-home" class="google-btn">
+            Recherche Souveraine
+          </button>
           <button id="btn-lucky" class="google-btn">J'ai de la chance</button>
         </div>
       </div>
 
       <div class="home-footer">
-        <div class="footer-location" id="lbl-footer-location">France / Europe</div>
+        <div class="footer-location" id="lbl-footer-location">
+          France / Europe
+        </div>
         <div class="footer-links">
           <div>
             <a href="#about" id="link-about">À propos</a>
@@ -908,7 +1018,9 @@
             <a href="#terms" id="link-terms">Conditions</a>
           </div>
           <div>
-            <a href="#howitworks" id="link-how">Comment fonctionne la recherche</a>
+            <a href="#howitworks" id="link-how"
+              >Comment fonctionne la recherche</a
+            >
           </div>
         </div>
       </div>
@@ -920,16 +1032,35 @@
         <div class="serp-header-top">
           <div class="serp-top-left">
             <a href="#home" id="serp-logo" class="serp-logo">
-              <span>B</span><span>u</span><span>n</span><span>S</span><span>e</span><span>a</span><span>r</span
-              ><span>c</span><span>h</span>
+              <span>B</span><span>u</span><span>n</span><span>S</span
+              ><span>e</span><span>a</span><span>r</span><span>c</span
+              ><span>h</span>
             </a>
             <div class="serp-search-wrapper">
               <div class="search-capsule focused">
-                <input id="serp-search-input" class="search-input" type="text" autocomplete="off" />
+                <input
+                  id="serp-search-input"
+                  class="search-input"
+                  type="text"
+                  autocomplete="off"
+                />
                 <div class="input-actions">
-                  <button id="serp-search-btn" class="action-icon-btn serp-search-submit" title="Rechercher" aria-label="Rechercher">
-                    <svg focusable="false" viewBox="0 0 24 24" width="22" height="22">
-                      <path fill="#1a73e8" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                  <button
+                    id="serp-search-btn"
+                    class="action-icon-btn serp-search-submit"
+                    title="Rechercher"
+                    aria-label="Rechercher"
+                  >
+                    <svg
+                      focusable="false"
+                      viewBox="0 0 24 24"
+                      width="22"
+                      height="22"
+                    >
+                      <path
+                        fill="#1a73e8"
+                        d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"
+                      />
                     </svg>
                   </button>
                 </div>
@@ -943,7 +1074,9 @@
           <div class="nav-tab" data-tab="images" id="tab-images">Images</div>
           <div class="nav-tab" data-tab="videos" id="tab-videos">Vidéos</div>
           <div class="nav-tab" data-tab="news" id="tab-news">Actualités</div>
-          <div class="nav-tab" data-tab="shopping" id="tab-shopping">Shopping</div>
+          <div class="nav-tab" data-tab="shopping" id="tab-shopping">
+            Shopping
+          </div>
           <div id="btn-tools" class="nav-tab tools-btn">Outils</div>
         </div>
 
@@ -962,7 +1095,9 @@
 
       <div class="serp-main">
         <div class="serp-results-column">
-          <div id="serp-stats" class="results-stats">Environ 142 000 résultats (0,18 secondes)</div>
+          <div id="serp-stats" class="results-stats">
+            Environ 142 000 résultats (0,18 secondes)
+          </div>
           <div id="organic-results-container"></div>
 
           <div class="serp-pagination">
@@ -970,7 +1105,13 @@
             <a href="#p2" class="page-btn">2</a>
             <a href="#p3" class="page-btn">3</a>
             <a href="#p4" class="page-btn">4</a>
-            <a href="#next" class="page-btn" id="lbl-next-page" style="width: auto; padding: 0 16px">Suivant ›</a>
+            <a
+              href="#next"
+              class="page-btn"
+              id="lbl-next-page"
+              style="width: auto; padding: 0 16px"
+              >Suivant ›</a
+            >
           </div>
         </div>
 
@@ -978,16 +1119,40 @@
         <div class="knowledge-column">
           <div class="knowledge-card">
             <div class="knowledge-title" id="lbl-kp-title">Bun OS</div>
-            <div class="knowledge-subtitle" id="lbl-kp-sub">Système d'exploitation souverain</div>
+            <div class="knowledge-subtitle" id="lbl-kp-sub">
+              Système d'exploitation souverain
+            </div>
             <div class="knowledge-desc" id="lbl-kp-desc">
-              Bun OS est une distribution Linux basée sur Arch et Upstream Bun, intégrant l'environnement de bureau
-              COSMIC, un sous-système Android 17 et les studios créatifs WordCraft, DeckCraft, GridCraft.
+              Bun OS est une distribution Linux basée sur Arch et Upstream Bun,
+              intégrant l'environnement de bureau COSMIC, un sous-système
+              Android 17 et les studios créatifs WordCraft, DeckCraft,
+              GridCraft.
             </div>
             <div class="knowledge-attrs">
-              <div><span class="knowledge-attr-name" id="lbl-kp-dev">Développeur :</span> YOLO-Web</div>
-              <div><span class="knowledge-attr-name" id="lbl-kp-kernel">Noyau :</span> Linux CachyOS / Zen</div>
-              <div><span class="knowledge-attr-name" id="lbl-kp-runtime">Moteur :</span> Upstream Bun v1.4.4+</div>
-              <div><span class="knowledge-attr-name" id="lbl-kp-license">Licence :</span> Apache-2.0 / MIT</div>
+              <div>
+                <span class="knowledge-attr-name" id="lbl-kp-dev"
+                  >Développeur :</span
+                >
+                YOLO-Web
+              </div>
+              <div>
+                <span class="knowledge-attr-name" id="lbl-kp-kernel"
+                  >Noyau :</span
+                >
+                Linux CachyOS / Zen
+              </div>
+              <div>
+                <span class="knowledge-attr-name" id="lbl-kp-runtime"
+                  >Moteur :</span
+                >
+                Upstream Bun v1.4.4+
+              </div>
+              <div>
+                <span class="knowledge-attr-name" id="lbl-kp-license"
+                  >Licence :</span
+                >
+                Apache-2.0 / MIT
+              </div>
             </div>
           </div>
         </div>
@@ -1046,15 +1211,17 @@
           passkeyReg: "Enregistrer une clé d'accès",
           signOut: "Déconnexion",
           passkeyRegistered: "Clé d'accès enregistrée sur cet appareil",
-          passkeyPrompt: "Touchez votre clé de sécurité ou utilisez la biométrie (Windows Hello / Touch ID)",
+          passkeyPrompt:
+            "Touchez votre clé de sécurité ou utilisez la biométrie (Windows Hello / Touch ID)",
           passkeySuccess: "Authentification par clé d'accès réussie !",
           kpTitle: "Bun OS",
           kpSub: "Système d'exploitation souverain",
-          kpDesc: "Bun OS est une distribution Linux basée sur Arch et Upstream Bun, intégrant l'environnement COSMIC, Android 17 et les studios souverains WordCraft, DeckCraft, GridCraft.",
+          kpDesc:
+            "Bun OS est une distribution Linux basée sur Arch et Upstream Bun, intégrant l'environnement COSMIC, Android 17 et les studios souverains WordCraft, DeckCraft, GridCraft.",
           kpDev: "Développeur :",
           kpKernel: "Noyau :",
           kpRuntime: "Moteur :",
-          kpLicense: "Licence :"
+          kpLicense: "Licence :",
         },
         en: {
           searchPlaceholder: "Search sovereign web or enter URL",
@@ -1082,16 +1249,18 @@
           passkeyReg: "Register New Passkey",
           signOut: "Sign Out",
           passkeyRegistered: "Passkey registered securely on device",
-          passkeyPrompt: "Touch your security key or use biometric verification (Windows Hello / Touch ID)",
+          passkeyPrompt:
+            "Touch your security key or use biometric verification (Windows Hello / Touch ID)",
           passkeySuccess: "Passkey authenticated successfully!",
           kpTitle: "Bun OS",
           kpSub: "Sovereign Operating System",
-          kpDesc: "Bun OS is an Arch-based Linux distribution built on Upstream Bun, featuring COSMIC desktop, Android 17 container, and WordCraft, DeckCraft, GridCraft studios.",
+          kpDesc:
+            "Bun OS is an Arch-based Linux distribution built on Upstream Bun, featuring COSMIC desktop, Android 17 container, and WordCraft, DeckCraft, GridCraft studios.",
           kpDev: "Developer:",
           kpKernel: "Kernel:",
           kpRuntime: "Runtime:",
-          kpLicense: "License:"
-        }
+          kpLicense: "License:",
+        },
       };
 
       // State
@@ -1106,15 +1275,18 @@
             title: "Bun OS — Le Système d'Exploitation Unifié et Souverain",
             url: "https://github.com/yolo-rs/yolo-web",
             displayUrl: "https://github.com/yolo-rs/yolo-web",
-            snippet: "Distribution Linux optimisée pour le runtime Bun upstream avec intégration complète d'Android 17, COSMIC desktop et des modèles d'IA souverains."
+            snippet:
+              "Distribution Linux optimisée pour le runtime Bun upstream avec intégration complète d'Android 17, COSMIC desktop et des modèles d'IA souverains.",
           },
           {
-            title: "Documentation Officielle Bun — Runtime JavaScript Ultra-Rapide",
+            title:
+              "Documentation Officielle Bun — Runtime JavaScript Ultra-Rapide",
             url: "https://bun.sh/docs",
             displayUrl: "https://bun.sh > docs",
-            snippet: "Découvrez Bun : un runtime JavaScript tout-en-un doté d'un gestionnaire de paquets, d'un exécuteur de tests et d'un bundler natif."
-          }
-        ]
+            snippet:
+              "Découvrez Bun : un runtime JavaScript tout-en-un doté d'un gestionnaire de paquets, d'un exécuteur de tests et d'un bundler natif.",
+          },
+        ],
       };
 
       // Elements
@@ -1124,7 +1296,9 @@
       const serpInput = document.getElementById("serp-search-input");
       const homeCapsule = document.getElementById("home-capsule");
       const homeSuggest = document.getElementById("home-suggestions");
-      const resultsContainer = document.getElementById("organic-results-container");
+      const resultsContainer = document.getElementById(
+        "organic-results-container",
+      );
 
       const langBtn = document.getElementById("lang-btn");
       const langText = document.getElementById("lang-text");
@@ -1162,7 +1336,8 @@
 
         document.getElementById("lbl-switch-acc").textContent = d.switchAccount;
         document.getElementById("lbl-btn-passkey").textContent = d.passkeyAuth;
-        document.getElementById("lbl-btn-reg-passkey").textContent = d.passkeyReg;
+        document.getElementById("lbl-btn-reg-passkey").textContent =
+          d.passkeyReg;
         document.getElementById("lbl-btn-logout").textContent = d.signOut;
 
         document.getElementById("lbl-kp-title").textContent = d.kpTitle;
@@ -1174,16 +1349,21 @@
         document.getElementById("lbl-kp-license").textContent = d.kpLicense;
 
         if (presence) {
-          userStatusText.textContent = presence.isOwner ? d.ownerVerified : d.localSession;
+          userStatusText.textContent = presence.isOwner
+            ? d.ownerVerified
+            : d.localSession;
         }
       }
 
       async function initBetterAuth() {
         try {
-          const res = await queryClient.fetchQuery(["auth", "session"], async () => {
-            const r = await fetch("/api/auth/session");
-            return r.json();
-          });
+          const res = await queryClient.fetchQuery(
+            ["auth", "session"],
+            async () => {
+              const r = await fetch("/api/auth/session");
+              return r.json();
+            },
+          );
           presence = res;
           renderPresence();
         } catch (e) {
@@ -1199,7 +1379,9 @@
         roleTagEl.className = `role-tag ${activeAccount.role}`;
 
         userEmailText.textContent = activeAccount.email;
-        userStatusText.textContent = isOwner ? I18N[currentLang].ownerVerified : I18N[currentLang].localSession;
+        userStatusText.textContent = isOwner
+          ? I18N[currentLang].ownerVerified
+          : I18N[currentLang].localSession;
 
         if (hasPasskey) {
           passkeyIcon.textContent = "🔓";
@@ -1210,7 +1392,7 @@
         }
 
         accountsContainer.innerHTML = presence.accounts
-          .map(acc => {
+          .map((acc) => {
             const isActive = acc.id === activeAccount.id;
             return `
               <button class="dropdown-account-btn ${isActive ? "active" : ""}" data-id="${acc.id}">
@@ -1221,70 +1403,84 @@
           })
           .join("");
 
-        accountsContainer.querySelectorAll(".dropdown-account-btn").forEach(btn => {
-          btn.addEventListener("click", async e => {
-            const accId = btn.dataset.id;
-            if (accId) {
-              const res = await fetch("/api/auth/accounts/switch", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ accountId: accId }),
-              });
-              if (res.ok) {
-                presence = await res.json();
-                queryClient.setQueryData(["auth", "session"], presence);
-                renderPresence();
-                authDropdown.style.display = "none";
+        accountsContainer
+          .querySelectorAll(".dropdown-account-btn")
+          .forEach((btn) => {
+            btn.addEventListener("click", async (e) => {
+              const accId = btn.dataset.id;
+              if (accId) {
+                const res = await fetch("/api/auth/accounts/switch", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ accountId: accId }),
+                });
+                if (res.ok) {
+                  presence = await res.json();
+                  queryClient.setQueryData(["auth", "session"], presence);
+                  renderPresence();
+                  authDropdown.style.display = "none";
+                }
               }
-            }
+            });
           });
-        });
       }
 
       // Passkey ceremonies
-      document.getElementById("btn-auth-passkey").addEventListener("click", async () => {
-        alert(I18N[currentLang].passkeyPrompt);
-        const res = await fetch("/api/auth/passkey/auth-verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: "configured-passkey-credential",
-            rawId: "raw_cred",
-            response: { clientDataJSON: btoa(JSON.stringify({ type: "webauthn.get", challenge: "ch" })) },
-            type: "public-key"
-          })
+      document
+        .getElementById("btn-auth-passkey")
+        .addEventListener("click", async () => {
+          alert(I18N[currentLang].passkeyPrompt);
+          const res = await fetch("/api/auth/passkey/auth-verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: "configured-passkey-credential",
+              rawId: "raw_cred",
+              response: {
+                clientDataJSON: btoa(
+                  JSON.stringify({ type: "webauthn.get", challenge: "ch" }),
+                ),
+              },
+              type: "public-key",
+            }),
+          });
+          if (res.ok) {
+            alert(I18N[currentLang].passkeySuccess);
+            await initBetterAuth();
+          }
         });
-        if (res.ok) {
-          alert(I18N[currentLang].passkeySuccess);
-          await initBetterAuth();
-        }
-      });
 
-      document.getElementById("btn-reg-passkey").addEventListener("click", async () => {
-        alert(I18N[currentLang].passkeyPrompt);
-        const res = await fetch("/api/auth/passkey/register-verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: "cred_" + Math.random().toString(36).slice(2),
-            rawId: "raw",
-            response: {
-              clientDataJSON: btoa(JSON.stringify({ type: "webauthn.create", challenge: "ch" })),
-              attestationObject: "attest"
-            },
-            type: "public-key"
-          })
+      document
+        .getElementById("btn-reg-passkey")
+        .addEventListener("click", async () => {
+          alert(I18N[currentLang].passkeyPrompt);
+          const res = await fetch("/api/auth/passkey/register-verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: "cred_" + Math.random().toString(36).slice(2),
+              rawId: "raw",
+              response: {
+                clientDataJSON: btoa(
+                  JSON.stringify({ type: "webauthn.create", challenge: "ch" }),
+                ),
+                attestationObject: "attest",
+              },
+              type: "public-key",
+            }),
+          });
+          if (res.ok) {
+            alert(I18N[currentLang].passkeyRegistered);
+            await initBetterAuth();
+          }
         });
-        if (res.ok) {
-          alert(I18N[currentLang].passkeyRegistered);
-          await initBetterAuth();
-        }
-      });
 
-      document.getElementById("btn-auth-logout").addEventListener("click", async () => {
-        await fetch("/api/auth/logout", { method: "POST" });
-        location.reload();
-      });
+      document
+        .getElementById("btn-auth-logout")
+        .addEventListener("click", async () => {
+          await fetch("/api/auth/logout", { method: "POST" });
+          location.reload();
+        });
 
       langBtn.addEventListener("click", () => {
         currentLang = currentLang === "fr" ? "en" : "fr";
@@ -1292,14 +1488,14 @@
         applyLanguage();
       });
 
-      authBtn.addEventListener("click", e => {
+      authBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         const open = authDropdown.style.display !== "none";
         authDropdown.style.display = open ? "none" : "block";
         authBtn.setAttribute("aria-expanded", String(!open));
       });
 
-      document.addEventListener("click", e => {
+      document.addEventListener("click", (e) => {
         if (!authDropdown.contains(e.target) && e.target !== authBtn) {
           authDropdown.style.display = "none";
           authBtn.setAttribute("aria-expanded", "false");
@@ -1327,16 +1523,21 @@
           return;
         }
 
-        const matches = await queryClient.fetchQuery(["suggest", q, currentLang], async () => {
-          try {
-            const res = await fetch(`/api/suggest?q=${encodeURIComponent(q)}&lang=${currentLang}`);
-            if (res.ok) {
-              const data = await res.json();
-              return Array.isArray(data[1]) ? data[1] : [];
-            }
-          } catch {}
-          return [];
-        });
+        const matches = await queryClient.fetchQuery(
+          ["suggest", q, currentLang],
+          async () => {
+            try {
+              const res = await fetch(
+                `/api/suggest?q=${encodeURIComponent(q)}&lang=${currentLang}`,
+              );
+              if (res.ok) {
+                const data = await res.json();
+                return Array.isArray(data[1]) ? data[1] : [];
+              }
+            } catch {}
+            return [];
+          },
+        );
 
         if (!matches || matches.length === 0) {
           homeSuggest.classList.remove("active");
@@ -1346,20 +1547,20 @@
 
         homeSuggest.innerHTML = matches
           .map(
-            m => `
+            (m) => `
           <div class="suggestion-item">
             <svg class="suggestion-icon" focusable="false" viewBox="0 0 24 24" width="18" height="18">
               <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 14z"/>
             </svg>
             <div class="suggestion-text">${m}</div>
           </div>
-        `
+        `,
           )
           .join("");
         homeSuggest.classList.add("active");
         homeCapsule.classList.add("has-suggestions");
 
-        homeSuggest.querySelectorAll(".suggestion-item").forEach(item => {
+        homeSuggest.querySelectorAll(".suggestion-item").forEach((item) => {
           item.addEventListener("click", () => {
             const text = item.querySelector(".suggestion-text").textContent;
             submitQuery(text);
@@ -1370,7 +1571,7 @@
       function renderResults() {
         resultsContainer.innerHTML = state.results
           .map(
-            r => `
+            (r) => `
           <div class="organic-card">
             <div class="card-url-row">
               <div class="card-favicon">🌐</div>
@@ -1381,7 +1582,7 @@
             </div>
             <div class="card-snippet">${r.snippet}</div>
           </div>
-        `
+        `,
           )
           .join("");
       }
@@ -1394,19 +1595,27 @@
         showView("serp");
 
         try {
-          const data = await queryClient.fetchQuery(["search", q, currentLang], async () => {
-            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&lang=${currentLang}`);
-            return res.json();
-          });
+          const data = await queryClient.fetchQuery(
+            ["search", q, currentLang],
+            async () => {
+              const res = await fetch(
+                `/api/search?q=${encodeURIComponent(q)}&lang=${currentLang}`,
+              );
+              return res.json();
+            },
+          );
           if (data.organic && data.organic.length > 0) {
             state.results = data.organic;
             if (data.totalResults) {
               const statsEl = document.getElementById("serp-stats");
               if (statsEl) {
-                const countStr = data.totalResults.toLocaleString(currentLang === "fr" ? "fr-FR" : "en-US");
-                statsEl.textContent = currentLang === "fr"
-                  ? `Environ ${countStr} résultats (${data.searchTimeSec || "0,18"} secondes)`
-                  : `About ${countStr} results (${data.searchTimeSec || "0.18"} seconds)`;
+                const countStr = data.totalResults.toLocaleString(
+                  currentLang === "fr" ? "fr-FR" : "en-US",
+                );
+                statsEl.textContent =
+                  currentLang === "fr"
+                    ? `Environ ${countStr} résultats (${data.searchTimeSec || "0,18"} secondes)`
+                    : `About ${countStr} results (${data.searchTimeSec || "0.18"} seconds)`;
               }
             }
             renderResults();
@@ -1415,23 +1624,29 @@
       }
 
       // Event listeners
-      homeInput.addEventListener("input", e => renderSuggestions(e.target.value));
-      homeInput.addEventListener("keydown", e => {
+      homeInput.addEventListener("input", (e) =>
+        renderSuggestions(e.target.value),
+      );
+      homeInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") submitQuery(homeInput.value);
       });
-      serpInput.addEventListener("keydown", e => {
+      serpInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") submitQuery(serpInput.value);
       });
 
-      document.getElementById("btn-submit-home").addEventListener("click", () => submitQuery(homeInput.value));
+      document
+        .getElementById("btn-submit-home")
+        .addEventListener("click", () => submitQuery(homeInput.value));
       document.getElementById("btn-lucky").addEventListener("click", () => {
         if (state.results[0]) window.open(state.results[0].url, "_blank");
       });
-      document.getElementById("serp-logo").addEventListener("click", e => {
+      document.getElementById("serp-logo").addEventListener("click", (e) => {
         e.preventDefault();
         showView("home");
       });
-      document.getElementById("serp-search-btn")?.addEventListener("click", () => submitQuery(serpInput.value));
+      document
+        .getElementById("serp-search-btn")
+        ?.addEventListener("click", () => submitQuery(serpInput.value));
       document.getElementById("btn-tools")?.addEventListener("click", () => {
         document.getElementById("tools-bar").classList.toggle("active");
       });

@@ -102,7 +102,9 @@ describe("@yolo-web/challenge-solver - 2026 Chromium Legitimacy & Challenge Engi
       expect(res.detected).toBe(true);
       expect(res.type).toBe(type);
       expect("token" in res).toBe(false);
-      expect(res.reason).toContain("interactive verification is not implemented");
+      expect(res.reason).toContain(
+        "interactive verification is not implemented",
+      );
     }
 
     const noChallenge = await solver.solveChallenge({ detected: false });

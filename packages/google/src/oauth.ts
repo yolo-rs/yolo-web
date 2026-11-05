@@ -10,7 +10,13 @@ const JWKS = "https://www.googleapis.com/oauth2/v3/certs";
 const FLOW_COOKIE = "__Host-yolo-web-google-flow";
 const SESSION_COOKIE = "__Host-yolo-web-google-session";
 const opaque = /^[A-Za-z0-9_-]{43}$/;
-const paths = new Set(["/auth/google/login", "/auth/google/callback", "/auth/session", "/auth/scopes", "/auth/logout"]);
+const paths = new Set([
+  "/auth/google/login",
+  "/auth/google/callback",
+  "/auth/session",
+  "/auth/scopes",
+  "/auth/logout",
+]);
 
 export interface GoogleOAuthUser {
   sub: string;
@@ -56,22 +62,36 @@ export interface GoogleOAuthOptions {
   allowedReturnPaths?: readonly string[];
   sessionTTLSeconds?: number;
   /** Trusted owner transport; production uses Bun's native fetch. */
-  fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  fetch?: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>;
   /** Protected token owner integration; tokens never enter public session responses. */
-  onTokens?: (user: GoogleOAuthUser, tokens: GoogleOAuthTokens) => Promise<void>;
+  onTokens?: (
+    user: GoogleOAuthUser,
+    tokens: GoogleOAuthTokens,
+  ) => Promise<void>;
   now?: () => number;
 }
 
 /** Explicit bounded single-process store; persistent/multi-worker deployments inject their owner store. */
-export function createMemoryGoogleOAuthStore(maxEntries = 4096): GoogleOAuthStore {
+export function createMemoryGoogleOAuthStore(
+  maxEntries = 4096,
+): GoogleOAuthStore {
   if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 100000)
     throw new TypeError("Invalid OAuth store capacity");
   const states = new Map<string, GoogleOAuthState>();
   const sessions = new Map<string, GoogleOAuthSession>();
-  function insert<T extends { expiresAt: number }>(map: Map<string, T>, key: string, value: T) {
+  function insert<T extends { expiresAt: number }>(
+    map: Map<string, T>,
+    key: string,
+    value: T,
+  ) {
     if (map.size >= maxEntries) {
-      for (const [id, entry] of map) if (entry.expiresAt <= Date.now()) map.delete(id);
-      if (map.size >= maxEntries && !map.has(key)) throw new Error("OAuth store capacity reached");
+      for (const [id, entry] of map)
+        if (entry.expiresAt <= Date.now()) map.delete(id);
+      if (map.size >= maxEntries && !map.has(key))
+        throw new Error("OAuth store capacity reached");
     }
     map.set(key, structuredClone(value));
   }
@@ -82,7 +102,9 @@ export function createMemoryGoogleOAuthStore(maxEntries = 4096): GoogleOAuthStor
     async consumeState(key, now) {
       const value = states.get(key);
       states.delete(key);
-      return value && value.expiresAt > now ? structuredClone(value) : undefined;
+      return value && value.expiresAt > now
+        ? structuredClone(value)
+        : undefined;
     },
     async putSession(key, value) {
       insert(sessions, key, value);
@@ -102,7 +124,9 @@ export function createMemoryGoogleOAuthStore(maxEntries = 4096): GoogleOAuthStor
 }
 
 function random() {
-  return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+  return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+    "base64url",
+  );
 }
 function hash(value: string) {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
@@ -115,8 +139,8 @@ function equal(a: string, b: string) {
 function cookie(request: Request, name: string) {
   const matches = (request.headers.get("cookie") ?? "")
     .split(";")
-    .map(part => part.trim())
-    .filter(part => part.startsWith(name + "="));
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(name + "="));
   if (matches.length !== 1) return undefined;
   const value = matches[0]!.slice(name.length + 1);
   return opaque.test(value) ? value : undefined;
@@ -166,7 +190,9 @@ async function jsonBody(result: Response) {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+  const value: unknown = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
+  );
   if (!object(value)) throw new Error("Invalid Google response");
   return value;
 }
@@ -174,7 +200,12 @@ async function jsonBody(result: Response) {
 export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
   const { clientId, clientSecret, store, onTokens } = options;
   const origin = new URL(options.publicOrigin);
-  if (origin.protocol !== "https:" || origin.username || origin.password || origin.href !== origin.origin + "/")
+  if (
+    origin.protocol !== "https:" ||
+    origin.username ||
+    origin.password ||
+    origin.href !== origin.origin + "/"
+  )
     throw new TypeError("Explicit Google OAuth public HTTPS origin required");
   const callback = new URL(options.callbackURL);
   if (
@@ -186,17 +217,25 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
     callback.password ||
     !options.allowedCallbackURLs.includes(callback.href)
   )
-    throw new TypeError("Google OAuth callback must exactly match its explicit allowlist");
+    throw new TypeError(
+      "Google OAuth callback must exactly match its explicit allowlist",
+    );
   const now = options.now ?? Date.now;
   const transport = options.fetch ?? globalThis.fetch;
   const ttl = options.sessionTTLSeconds ?? 3600;
-  if (!Number.isInteger(ttl) || ttl < 60 || ttl > 86400) throw new TypeError("Invalid OAuth session expiry");
-  const allowedScopes = new Set(options.allowedScopes ?? ["openid", "email", "profile"]);
+  if (!Number.isInteger(ttl) || ttl < 60 || ttl > 86400)
+    throw new TypeError("Invalid OAuth session expiry");
+  const allowedScopes = new Set(
+    options.allowedScopes ?? ["openid", "email", "profile"],
+  );
   if (
     !allowedScopes.has("openid") ||
     allowedScopes.size > 32 ||
     [...allowedScopes].some(
-      scope => !/^(openid|email|profile|https:\/\/www\.googleapis\.com\/auth\/[A-Za-z0-9._/-]+)$/.test(scope),
+      (scope) =>
+        !/^(openid|email|profile|https:\/\/www\.googleapis\.com\/auth\/[A-Za-z0-9._/-]+)$/.test(
+          scope,
+        ),
     )
   )
     throw new TypeError("Invalid explicit Google scope allowlist");
@@ -204,7 +243,7 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
   if (
     !returnPaths.size ||
     [...returnPaths].some(
-      path =>
+      (path) =>
         !path.startsWith("/") ||
         path.startsWith("//") ||
         path.includes("\\") ||
@@ -222,7 +261,8 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
     !/[\x00-\x20\x7f]/.test(options.clientSecret) &&
     !!options.store;
   let active = 0;
-  let keyCache: { keys: JsonWebKey[]; expires: number; fetched: number } | undefined;
+  let keyCache:
+    { keys: JsonWebKey[]; expires: number; fetched: number } | undefined;
   let keyRequest: Promise<void> | undefined;
   async function loadKeys(signal: AbortSignal) {
     if (keyRequest) return keyRequest;
@@ -230,10 +270,19 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       const result = await transport(JWKS, { redirect: "error", signal });
       const cacheAge = Math.min(
         86400,
-        Number(result.headers.get("cache-control")?.match(/(?:^|,)\s*max-age=(\d+)/i)?.[1] ?? 300),
+        Number(
+          result.headers
+            .get("cache-control")
+            ?.match(/(?:^|,)\s*max-age=(\d+)/i)?.[1] ?? 300,
+        ),
       );
       const value = await jsonBody(result);
-      if (!Array.isArray(value.keys) || !value.keys.length || value.keys.length > 10 || !value.keys.every(object))
+      if (
+        !Array.isArray(value.keys) ||
+        !value.keys.length ||
+        value.keys.length > 10 ||
+        !value.keys.every(object)
+      )
         throw new Error("Invalid Google signing keys");
       keyCache = {
         keys: value.keys as JsonWebKey[],
@@ -247,12 +296,20 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       keyRequest = undefined;
     }
   }
-  async function verify(token: string, nonce: string, signal: AbortSignal): Promise<GoogleOAuthUser> {
+  async function verify(
+    token: string,
+    nonce: string,
+    signal: AbortSignal,
+  ): Promise<GoogleOAuthUser> {
     if (token.length > 16384) throw new Error("Invalid ID token");
     const parts = token.split(".");
     if (parts.length !== 3) throw new Error("Invalid ID token");
-    const header: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decode(parts[0]!)));
-    const claims: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decode(parts[1]!)));
+    const header: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(decode(parts[0]!)),
+    );
+    const claims: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(decode(parts[1]!)),
+    );
     if (
       !object(header) ||
       header.alg !== "RS256" ||
@@ -264,10 +321,14 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
     )
       throw new Error("Invalid ID token");
     if (!keyCache || keyCache.expires <= now()) await loadKeys(signal);
-    let candidates = keyCache!.keys.filter(key => (key as JsonWebKey & { kid?: string }).kid === header.kid);
+    let candidates = keyCache!.keys.filter(
+      (key) => (key as JsonWebKey & { kid?: string }).kid === header.kid,
+    );
     if (!candidates.length && now() - keyCache!.fetched >= 30000) {
       await loadKeys(signal);
-      candidates = keyCache!.keys.filter(key => (key as JsonWebKey & { kid?: string }).kid === header.kid);
+      candidates = keyCache!.keys.filter(
+        (key) => (key as JsonWebKey & { kid?: string }).kid === header.kid,
+      );
     }
     const key = candidates[0];
     if (
@@ -278,9 +339,13 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       (key.alg && key.alg !== "RS256")
     )
       throw new Error("Invalid Google signing key");
-    const publicKey = await crypto.subtle.importKey("jwk", key, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, [
-      "verify",
-    ]);
+    const publicKey = await crypto.subtle.importKey(
+      "jwk",
+      key,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
     if (
       (publicKey.algorithm as RsaHashedKeyAlgorithm).modulusLength < 2048 ||
       !(await crypto.subtle.verify(
@@ -295,7 +360,8 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
     const audiences =
       typeof claims.aud === "string"
         ? [claims.aud]
-        : Array.isArray(claims.aud) && claims.aud.every(value => typeof value === "string")
+        : Array.isArray(claims.aud) &&
+            claims.aud.every((value) => typeof value === "string")
           ? claims.aud
           : [];
     if (
@@ -304,14 +370,17 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       (audiences.length > 1 && claims.azp !== clientId) ||
       (claims.azp !== undefined && claims.azp !== clientId) ||
       typeof claims.iss !== "string" ||
-      !["https://accounts.google.com", "accounts.google.com"].includes(claims.iss) ||
+      !["https://accounts.google.com", "accounts.google.com"].includes(
+        claims.iss,
+      ) ||
       !Number.isInteger(claims.exp) ||
       Number(claims.exp) <= seconds ||
       !Number.isInteger(claims.iat) ||
       Number(claims.iat) < 0 ||
       Number(claims.iat) > seconds + 60 ||
       Number(claims.iat) >= Number(claims.exp) ||
-      (claims.nbf !== undefined && (!Number.isInteger(claims.nbf) || Number(claims.nbf) > seconds)) ||
+      (claims.nbf !== undefined &&
+        (!Number.isInteger(claims.nbf) || Number(claims.nbf) > seconds)) ||
       typeof claims.nonce !== "string" ||
       !equal(claims.nonce, nonce) ||
       typeof claims.sub !== "string" ||
@@ -320,9 +389,14 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       throw new Error("Invalid ID token claims");
     return {
       sub: claims.sub,
-      ...(typeof claims.email === "string" && claims.email.length <= 320 ? { email: claims.email } : {}),
-      emailVerified: claims.email_verified === true || claims.email_verified === "true",
-      ...(typeof claims.name === "string" && claims.name.length <= 256 ? { name: claims.name } : {}),
+      ...(typeof claims.email === "string" && claims.email.length <= 320
+        ? { email: claims.email }
+        : {}),
+      emailVerified:
+        claims.email_verified === true || claims.email_verified === "true",
+      ...(typeof claims.name === "string" && claims.name.length <= 256
+        ? { name: claims.name }
+        : {}),
     };
   }
   async function session(request: Request) {
@@ -338,11 +412,22 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
       try {
         const url = new URL(request.url);
         if (!paths.has(url.pathname)) return undefined;
-        if (url.origin !== origin.origin) return response({ error: "untrusted_auth_origin" }, 403);
-        if (!configured) return response({ error: "google_oauth_not_configured", authenticated: false }, 503);
+        if (url.origin !== origin.origin)
+          return response({ error: "untrusted_auth_origin" }, 403);
+        if (!configured)
+          return response(
+            { error: "google_oauth_not_configured", authenticated: false },
+            503,
+          );
         if (url.pathname === "/auth/logout") {
-          if (request.method !== "POST") return response({ error: "method_not_allowed" }, 405, { allow: "POST" });
-          if (request.headers.get("origin") !== origin.origin || request.headers.get("sec-fetch-site") === "cross-site")
+          if (request.method !== "POST")
+            return response({ error: "method_not_allowed" }, 405, {
+              allow: "POST",
+            });
+          if (
+            request.headers.get("origin") !== origin.origin ||
+            request.headers.get("sec-fetch-site") === "cross-site"
+          )
             return response({ error: "untrusted_auth_origin" }, 403);
           const id = cookie(request, SESSION_COOKIE);
           if (id) await store!.deleteSession(hash(id));
@@ -350,8 +435,14 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
             "set-cookie": setCookie(SESSION_COOKIE, "", 0),
           });
         }
-        if (request.method !== "GET") return response({ error: "method_not_allowed" }, 405, { allow: "GET" });
-        if (url.pathname === "/auth/session" || url.pathname === "/auth/scopes") {
+        if (request.method !== "GET")
+          return response({ error: "method_not_allowed" }, 405, {
+            allow: "GET",
+          });
+        if (
+          url.pathname === "/auth/session" ||
+          url.pathname === "/auth/scopes"
+        ) {
           const value = await session(request);
           return response(
             value
@@ -365,16 +456,24 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
           );
         }
         if (url.pathname === "/auth/google/login") {
-          if (request.headers.has("origin") && request.headers.get("origin") !== origin.origin)
+          if (
+            request.headers.has("origin") &&
+            request.headers.get("origin") !== origin.origin
+          )
             return response({ error: "untrusted_auth_origin" }, 403);
-          if (url.searchParams.getAll("returnTo").length > 1 || url.searchParams.getAll("scope").length > 1)
+          if (
+            url.searchParams.getAll("returnTo").length > 1 ||
+            url.searchParams.getAll("scope").length > 1
+          )
             return response({ error: "invalid_auth_request" }, 400);
           const returnTo = url.searchParams.get("returnTo") ?? "/";
           const scopes = [
             ...new Set(
               (
                 url.searchParams.get("scope") ??
-                ["openid", "email", "profile"].filter(scope => allowedScopes.has(scope)).join(" ")
+                ["openid", "email", "profile"]
+                  .filter((scope) => allowedScopes.has(scope))
+                  .join(" ")
               )
                 .split(" ")
                 .filter(Boolean),
@@ -383,7 +482,7 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
           if (
             !returnPaths.has(returnTo) ||
             !scopes.includes("openid") ||
-            scopes.some(scope => !allowedScopes.has(scope))
+            scopes.some((scope) => !allowedScopes.has(scope))
           )
             return response({ error: "invalid_auth_request" }, 400);
           const state = random(),
@@ -410,16 +509,23 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
             scope: scopes.join(" "),
             state,
             nonce,
-            code_challenge: new Bun.CryptoHasher("sha256").update(verifier).digest("base64url"),
+            code_challenge: new Bun.CryptoHasher("sha256")
+              .update(verifier)
+              .digest("base64url"),
             code_challenge_method: "S256",
           }).toString();
           return redirect(target.href, [setCookie(FLOW_COOKIE, binding, 600)]);
         }
-        if (["state", "code", "error"].some(key => url.searchParams.getAll(key).length > 1))
+        if (
+          ["state", "code", "error"].some(
+            (key) => url.searchParams.getAll(key).length > 1,
+          )
+        )
           return response({ error: "invalid_oauth_callback" }, 400);
         const state = url.searchParams.get("state"),
           binding = cookie(request, FLOW_COOKIE);
-        if (!state || !opaque.test(state) || !binding) return response({ error: "invalid_oauth_callback" }, 400);
+        if (!state || !opaque.test(state) || !binding)
+          return response({ error: "invalid_oauth_callback" }, 400);
         const transaction = await store!.consumeState(hash(state), now());
         const clear = setCookie(FLOW_COOKIE, "", 0);
         if (
@@ -428,17 +534,27 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
           transaction.expiresAt <= now() ||
           !returnPaths.has(transaction.returnTo) ||
           !transaction.scopes.includes("openid") ||
-          transaction.scopes.some(scope => !allowedScopes.has(scope)) ||
+          transaction.scopes.some((scope) => !allowedScopes.has(scope)) ||
           url.searchParams.has("error")
         )
-          return response({ error: "invalid_oauth_callback" }, 400, { "set-cookie": clear });
+          return response({ error: "invalid_oauth_callback" }, 400, {
+            "set-cookie": clear,
+          });
         const code = url.searchParams.get("code");
         if (!code || code.length > 4096 || /[\x00-\x20\x7f]/.test(code))
-          return response({ error: "invalid_oauth_callback" }, 400, { "set-cookie": clear });
-        if (active >= 4) return response({ error: "auth_capacity_reached" }, 503, { "set-cookie": clear });
+          return response({ error: "invalid_oauth_callback" }, 400, {
+            "set-cookie": clear,
+          });
+        if (active >= 4)
+          return response({ error: "auth_capacity_reached" }, 503, {
+            "set-cookie": clear,
+          });
         active++;
         try {
-          const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10000)]);
+          const signal = AbortSignal.any([
+            request.signal,
+            AbortSignal.timeout(10000),
+          ]);
           const result = await jsonBody(
             await transport(TOKEN, {
               method: "POST",
@@ -455,14 +571,19 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
               }),
             }),
           );
-          if (typeof result.id_token !== "string") throw new Error("Missing Google ID token");
+          if (typeof result.id_token !== "string")
+            throw new Error("Missing Google ID token");
           if (
             (result.access_token !== undefined &&
-              (typeof result.access_token !== "string" || !result.access_token || result.token_type !== "Bearer")) ||
+              (typeof result.access_token !== "string" ||
+                !result.access_token ||
+                result.token_type !== "Bearer")) ||
             (result.refresh_token !== undefined &&
-              (typeof result.refresh_token !== "string" || !result.refresh_token)) ||
+              (typeof result.refresh_token !== "string" ||
+                !result.refresh_token)) ||
             (result.expires_in !== undefined &&
-              (!Number.isSafeInteger(result.expires_in) || Number(result.expires_in) <= 0))
+              (!Number.isSafeInteger(result.expires_in) ||
+                Number(result.expires_in) <= 0))
           )
             throw new Error("Invalid Google token response");
           const user = await verify(result.id_token, transaction.nonce, signal);
@@ -477,29 +598,48 @@ export function createGoogleOAuthServer(options: GoogleOAuthOptions) {
                     result.scope
                       .split(" ")
                       .filter(Boolean)
-                      .map(scope => aliases[scope] ?? scope),
+                      .map((scope) => aliases[scope] ?? scope),
                   ),
                 ]
               : ["openid"];
           if (
             !scopes.includes("openid") ||
-            scopes.some(scope => !transaction.scopes.includes(scope) || !allowedScopes.has(scope))
+            scopes.some(
+              (scope) =>
+                !transaction.scopes.includes(scope) ||
+                !allowedScopes.has(scope),
+            )
           )
             throw new Error("Unexpected Google scopes");
           if (onTokens)
             await onTokens(user, {
-              ...(typeof result.access_token === "string" ? { accessToken: result.access_token } : {}),
-              ...(typeof result.refresh_token === "string" ? { refreshToken: result.refresh_token } : {}),
-              ...(typeof result.expires_in === "number" ? { expiresIn: result.expires_in } : {}),
+              ...(typeof result.access_token === "string"
+                ? { accessToken: result.access_token }
+                : {}),
+              ...(typeof result.refresh_token === "string"
+                ? { refreshToken: result.refresh_token }
+                : {}),
+              ...(typeof result.expires_in === "number"
+                ? { expiresIn: result.expires_in }
+                : {}),
               scopes,
             });
           const id = random();
-          await store!.putSession(hash(id), { user, scopes, expiresAt: now() + ttl * 1000 });
+          await store!.putSession(hash(id), {
+            user,
+            scopes,
+            expiresAt: now() + ttl * 1000,
+          });
           const prior = cookie(request, SESSION_COOKIE);
           if (prior) await store!.deleteSession(hash(prior));
-          return redirect(new URL(transaction.returnTo, origin).href, [clear, setCookie(SESSION_COOKIE, id, ttl)]);
+          return redirect(new URL(transaction.returnTo, origin).href, [
+            clear,
+            setCookie(SESSION_COOKIE, id, ttl),
+          ]);
         } catch {
-          return response({ error: "google_oauth_failed" }, 400, { "set-cookie": clear });
+          return response({ error: "google_oauth_failed" }, 400, {
+            "set-cookie": clear,
+          });
         } finally {
           active--;
         }

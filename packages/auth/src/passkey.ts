@@ -4,12 +4,17 @@
  * Native FIDO2 / WebAuthn challenge generation, options construction, and verification.
  */
 
-import type { PasskeyAuthenticationOptions, PasskeyRegistrationOptions, User } from "./types.ts";
+import type {
+  PasskeyAuthenticationOptions,
+  PasskeyRegistrationOptions,
+  User,
+} from "./types.ts";
 
 function resolveRpId(explicit?: string): string {
   const configured = explicit ?? process.env.YOLO_WEB_AUTH_RP_ID;
   if (configured) return configured;
-  if (process.env.NODE_ENV === "production") throw new Error("YOLO_WEB_AUTH_RP_ID must be configured in production");
+  if (process.env.NODE_ENV === "production")
+    throw new Error("YOLO_WEB_AUTH_RP_ID must be configured in production");
   return "localhost";
 }
 
@@ -59,7 +64,7 @@ export function createPasskeyAuthOptions(
     rpId,
     timeout: 60000,
     userVerification: "preferred",
-    allowCredentials: allowCredentials?.map(c => ({
+    allowCredentials: allowCredentials?.map((c) => ({
       id: c.id,
       type: "public-key",
       transports: c.transports,
@@ -98,20 +103,38 @@ export function verifyPasskeyRegistrationResponse(
   expectedChallenge: string,
 ): { ok: boolean; credentialId: string; publicKey: string; error?: string } {
   try {
-    const clientDataJsonStr = Buffer.from(clientResponse.response.clientDataJSON, "base64").toString("utf-8");
-    const clientData = JSON.parse(clientDataJsonStr) as { challenge?: string; type?: string };
+    const clientDataJsonStr = Buffer.from(
+      clientResponse.response.clientDataJSON,
+      "base64",
+    ).toString("utf-8");
+    const clientData = JSON.parse(clientDataJsonStr) as {
+      challenge?: string;
+      type?: string;
+    };
 
     if (clientData.type !== "webauthn.create") {
-      return { ok: false, credentialId: "", publicKey: "", error: "Invalid clientData type" };
+      return {
+        ok: false,
+        credentialId: "",
+        publicKey: "",
+        error: "Invalid clientData type",
+      };
     }
 
     if (clientData.challenge !== expectedChallenge) {
-      return { ok: false, credentialId: "", publicKey: "", error: "Challenge mismatch" };
+      return {
+        ok: false,
+        credentialId: "",
+        publicKey: "",
+        error: "Challenge mismatch",
+      };
     }
 
     const credentialId = clientResponse.id;
     // Derive public key representation from attestation object or client credential ID
-    const publicKey = clientResponse.response.attestationObject.slice(0, 128) || clientResponse.id;
+    const publicKey =
+      clientResponse.response.attestationObject.slice(0, 128) ||
+      clientResponse.id;
 
     return {
       ok: true,
@@ -132,8 +155,14 @@ export function verifyPasskeyAuthResponse(
   storedPublicKey: string,
 ): { ok: boolean; error?: string } {
   try {
-    const clientDataJsonStr = Buffer.from(clientResponse.response.clientDataJSON, "base64").toString("utf-8");
-    const clientData = JSON.parse(clientDataJsonStr) as { challenge?: string; type?: string };
+    const clientDataJsonStr = Buffer.from(
+      clientResponse.response.clientDataJSON,
+      "base64",
+    ).toString("utf-8");
+    const clientData = JSON.parse(clientDataJsonStr) as {
+      challenge?: string;
+      type?: string;
+    };
 
     if (clientData.type !== "webauthn.get") {
       return { ok: false, error: "Invalid clientData type" };

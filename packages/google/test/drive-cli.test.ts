@@ -23,12 +23,15 @@ test("Drive sync help returns before option validation or credential access", as
 });
 
 test("standalone Google CLI dispatches Drive help without reading credentials", async () => {
-  const child = Bun.spawn([bunExe(), resolve(import.meta.dir, "../src/cli.ts"), "drive", "--help"], {
-    env: bunEnv,
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  });
+  const child = Bun.spawn(
+    [bunExe(), resolve(import.meta.dir, "../src/cli.ts"), "drive", "--help"],
+    {
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+    },
+  );
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),

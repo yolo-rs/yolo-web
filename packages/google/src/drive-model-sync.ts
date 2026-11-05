@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 /* eslint-disable no-await-in-loop -- Resumable chunks and state transitions must execute sequentially. */
 /** Resumable, upload-only backup of protected dbfr training artifacts. */
-import { chmod, mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { googleHome } from "./client.ts";
 import { gcloudUserClient, googleApi } from "./api.ts";
@@ -18,7 +26,12 @@ type Entry = {
   id?: string;
   session?: string;
 };
-type State = { version: 1; parentId: string; folderId?: string; files: Record<string, Entry> };
+type State = {
+  version: 1;
+  parentId: string;
+  folderId?: string;
+  files: Record<string, Entry>;
+};
 
 export function resumeOffset(range: string | null, size: number): number {
   if (!range) return 0;
@@ -31,25 +44,38 @@ export function resumeOffset(range: string | null, size: number): number {
 }
 export function safeArtifactName(name: string): boolean {
   return (
-    name.split("/").every(part => Boolean(part) && part !== "." && part !== "..") &&
+    name
+      .split("/")
+      .every((part) => Boolean(part) && part !== "." && part !== "..") &&
     EXTENSIONS.test(name) &&
     !name
       .split("/")
-      .some(part => /^(?:credentials?|secrets?|cookies?|(?:oauth-)?tokens?)(?:[._-]|$)|^\.env(?:\.|$)/i.test(part))
+      .some((part) =>
+        /^(?:credentials?|secrets?|cookies?|(?:oauth-)?tokens?)(?:[._-]|$)|^\.env(?:\.|$)/i.test(
+          part,
+        ),
+      )
   );
 }
 async function artifacts(root: string, prefix: string): Promise<Artifact[]> {
   const found: Artifact[] = [];
   async function visit(path: string, name: string): Promise<void> {
     for (const entry of await readdir(path, { withFileTypes: true })) {
-      if (entry.isSymbolicLink()) throw new Error("Training artifact scope contains a symlink");
+      if (entry.isSymbolicLink())
+        throw new Error("Training artifact scope contains a symlink");
       const full = join(path, entry.name),
         relative = `${name}/${entry.name}`;
       if (entry.isDirectory()) await visit(full, relative);
       else if (entry.isFile()) {
-        if (!safeArtifactName(relative)) throw new Error(`Out-of-scope training artifact: ${relative}`);
+        if (!safeArtifactName(relative))
+          throw new Error(`Out-of-scope training artifact: ${relative}`);
         const info = await stat(full);
-        found.push({ path: full, name: relative, bytes: info.size, mtimeMs: info.mtimeMs });
+        found.push({
+          path: full,
+          name: relative,
+          bytes: info.size,
+          mtimeMs: info.mtimeMs,
+        });
       }
     }
   }
@@ -75,7 +101,9 @@ async function save(path: string, data: unknown): Promise<void> {
 
 export async function syncTrainedArtifacts(): Promise<void> {
   const home = googleHome();
-  const parentId = process.env.YOLO_WEB_GOOGLE_DRIVE_FOLDER_ID ?? process.env.APHRODY_GOOGLE_DRIVE_FOLDER_ID;
+  const parentId =
+    process.env.YOLO_WEB_GOOGLE_DRIVE_FOLDER_ID ??
+    process.env.APHRODY_GOOGLE_DRIVE_FOLDER_ID;
   if (!parentId) throw new Error("YOLO_WEB_GOOGLE_DRIVE_FOLDER_ID is required");
   const statePath = join(home, "drive-sync/dbfr-trained-artifacts.json");
   const lock = `${statePath}.lock`;
@@ -92,7 +120,9 @@ export async function syncTrainedArtifacts(): Promise<void> {
     if (pid > 1) {
       try {
         process.kill(pid, 0);
-        throw new Error("Trained artifact sync is already running", { cause: error });
+        throw new Error("Trained artifact sync is already running", {
+          cause: error,
+        });
       } catch (probe) {
         if ((probe as NodeJS.ErrnoException).code !== "ESRCH") throw probe;
       }
@@ -111,9 +141,14 @@ export async function syncTrainedArtifacts(): Promise<void> {
     const folders = new Map<string, string>();
     let refreshedAt = Date.now();
     const headers = async () => {
-      if ((process.env.YOLO_WEB_GOOGLE_DRIVE_AUTH ?? process.env.APHRODY_GOOGLE_DRIVE_AUTH) === "gcloud-user" && Date.now() - refreshedAt > 20 * 60_000) {
+      if (
+        (process.env.YOLO_WEB_GOOGLE_DRIVE_AUTH ??
+          process.env.APHRODY_GOOGLE_DRIVE_AUTH) === "gcloud-user" &&
+        Date.now() - refreshedAt > 20 * 60_000
+      ) {
         const fresh = await gcloudUserClient();
-        if ("setCredentials" in service.auth) service.auth.setCredentials(fresh.credentials);
+        if ("setCredentials" in service.auth)
+          service.auth.setCredentials(fresh.credentials);
         refreshedAt = Date.now();
       }
       return new Headers(await service.auth.getRequestHeaders());
@@ -127,7 +162,7 @@ export async function syncTrainedArtifacts(): Promise<void> {
         pageSize: 1000,
       });
       const files = listed.data.files ?? [];
-      if (files.length > 1 || files.some(file => file.mimeType !== FOLDER))
+      if (files.length > 1 || files.some((file) => file.mimeType !== FOLDER))
         throw new Error("Ambiguous training backup folder");
       let id = files[0]?.id;
       if (!id)
@@ -146,13 +181,20 @@ export async function syncTrainedArtifacts(): Promise<void> {
     const files = [
       ...(await artifacts(join(home, "private/shenron/home/models"), "models")),
       ...(await artifacts(join(home, "private/training/shenron"), "training")),
-      ...(await artifacts(join(home, "train/train-1790476607"), "checkpoints/train-1790476607")),
+      ...(await artifacts(
+        join(home, "train/train-1790476607"),
+        "checkpoints/train-1790476607",
+      )),
     ].toSorted((a, b) => a.bytes - b.bytes || a.name.localeCompare(b.name));
     let uploaded = 0,
       unchanged = 0;
     for (const file of files) {
       let entry = state.files[file.name];
-      if (!entry || entry.bytes !== file.bytes || entry.mtimeMs !== file.mtimeMs) {
+      if (
+        !entry ||
+        entry.bytes !== file.bytes ||
+        entry.mtimeMs !== file.mtimeMs
+      ) {
         const hashes = await digests(file.path);
         entry = { ...hashes, bytes: file.bytes, mtimeMs: file.mtimeMs };
         state.files[file.name] = entry;
@@ -163,7 +205,11 @@ export async function syncTrainedArtifacts(): Promise<void> {
           fileId: entry.id,
           fields: "id,size,md5Checksum,trashed",
         });
-        if (!remote.data.trashed && Number(remote.data.size) === entry.bytes && remote.data.md5Checksum === entry.md5) {
+        if (
+          !remote.data.trashed &&
+          Number(remote.data.size) === entry.bytes &&
+          remote.data.md5Checksum === entry.md5
+        ) {
           unchanged++;
           continue;
         }
@@ -171,7 +217,8 @@ export async function syncTrainedArtifacts(): Promise<void> {
       }
       let parent = state.folderId;
       const parts = file.name.split("/");
-      for (const part of parts.slice(0, -1)) parent = await folder(parent, part);
+      for (const part of parts.slice(0, -1))
+        parent = await folder(parent, part);
       if (!entry.session) {
         const h = await headers();
         h.set("Content-Type", "application/json; charset=UTF-8");
@@ -190,12 +237,15 @@ export async function syncTrainedArtifacts(): Promise<void> {
           },
         );
         if (!response.ok || !response.headers.get("location"))
-          throw new Error(`Training resumable initialization failed (${response.status})`);
+          throw new Error(
+            `Training resumable initialization failed (${response.status})`,
+          );
         entry.session = response.headers.get("location")!;
         await save(statePath, state);
       }
       const sessionUrl = new URL(entry.session);
-      if (sessionUrl.origin !== "https://www.googleapis.com") throw new Error("Invalid training upload session origin");
+      if (sessionUrl.origin !== "https://www.googleapis.com")
+        throw new Error("Invalid training upload session origin");
       const h = await headers();
       h.set("Content-Length", "0");
       h.set("Content-Range", `bytes */${entry.bytes}`);
@@ -208,19 +258,33 @@ export async function syncTrainedArtifacts(): Promise<void> {
       if (response.status === 404 || response.status === 410) {
         delete entry.session;
         await save(statePath, state);
-        throw new Error("Training upload session expired; next sync recreates it");
+        throw new Error(
+          "Training upload session expired; next sync recreates it",
+        );
       }
-      let offset = response.status === 308 ? resumeOffset(response.headers.get("range"), entry.bytes) : entry.bytes;
+      let offset =
+        response.status === 308
+          ? resumeOffset(response.headers.get("range"), entry.bytes)
+          : entry.bytes;
       const handle = await open(file.path, "r");
       try {
         while (offset < entry.bytes) {
           const chunk = Buffer.alloc(Math.min(CHUNK, entry.bytes - offset));
-          const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
-          if (bytesRead !== chunk.length) throw new Error("Training artifact changed during upload");
+          const { bytesRead } = await handle.read(
+            chunk,
+            0,
+            chunk.length,
+            offset,
+          );
+          if (bytesRead !== chunk.length)
+            throw new Error("Training artifact changed during upload");
           const headersChunk = await headers();
           headersChunk.set("Content-Type", "application/octet-stream");
           headersChunk.set("Content-Length", String(chunk.length));
-          headersChunk.set("Content-Range", `bytes ${offset}-${offset + chunk.length - 1}/${entry.bytes}`);
+          headersChunk.set(
+            "Content-Range",
+            `bytes ${offset}-${offset + chunk.length - 1}/${entry.bytes}`,
+          );
           response = await fetch(entry.session, {
             method: "PUT",
             headers: headersChunk,
@@ -228,23 +292,37 @@ export async function syncTrainedArtifacts(): Promise<void> {
             redirect: "manual",
           });
           if (response.status === 308) {
-            const next = resumeOffset(response.headers.get("range"), entry.bytes);
-            if (next <= offset) throw new Error("Training upload made no progress");
+            const next = resumeOffset(
+              response.headers.get("range"),
+              entry.bytes,
+            );
+            if (next <= offset)
+              throw new Error("Training upload made no progress");
             offset = next;
           } else if (response.ok) offset = entry.bytes;
-          else throw new Error(`Training upload failed (${response.status}); private session retained for resume`);
+          else
+            throw new Error(
+              `Training upload failed (${response.status}); private session retained for resume`,
+            );
         }
       } finally {
         await handle.close();
       }
-      if (!response.ok) throw new Error(`Training upload completion failed (${response.status})`);
+      if (!response.ok)
+        throw new Error(
+          `Training upload completion failed (${response.status})`,
+        );
       const completed = (await response.json()) as { id?: string };
-      if (!completed.id) throw new Error("Training upload has no completed file id");
+      if (!completed.id)
+        throw new Error("Training upload has no completed file id");
       const remote = await service.drive.files.get({
         fileId: completed.id,
         fields: "id,size,md5Checksum",
       });
-      if (Number(remote.data.size) !== entry.bytes || remote.data.md5Checksum !== entry.md5)
+      if (
+        Number(remote.data.size) !== entry.bytes ||
+        remote.data.md5Checksum !== entry.md5
+      )
         throw new Error("Training backup checksum/size mismatch");
       const after = await stat(file.path);
       if (after.size !== file.bytes || after.mtimeMs !== file.mtimeMs)

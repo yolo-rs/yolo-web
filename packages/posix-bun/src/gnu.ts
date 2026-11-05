@@ -28,7 +28,7 @@ export type GetoptItem =
 export function getoptLong(
   args: string[],
   optstring: string,
-  longopts: LongOption[]
+  longopts: LongOption[],
 ): GetoptItem[] {
   const results: GetoptItem[] = [];
   let i = 0;

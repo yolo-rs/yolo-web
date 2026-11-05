@@ -15,6 +15,6 @@ import { StandardsLoader } from "@yolo-web/standards";
 
 const loader = new StandardsLoader();
 const tc39 = await loader.loadTC39();
-const stage3 = tc39.proposals.filter(p => p.stage === 3);
-console.log(`Stage 3 proposals: ${stage3.map(p => p.name).join(", ")}`);
+const stage3 = tc39.proposals.filter((p) => p.stage === 3);
+console.log(`Stage 3 proposals: ${stage3.map((p) => p.name).join(", ")}`);
 ```

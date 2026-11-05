@@ -35,14 +35,18 @@ function csv(text: string): ChromePasswordCredential[] {
     column();
     if (rows.length === 0) {
       const header = row.join(",");
-      if (header !== "name,url,username,password" && header !== "name,url,username,password,note")
+      if (
+        header !== "name,url,username,password" &&
+        header !== "name,url,username,password,note"
+      )
         throw new Error("Invalid Chrome password CSV header");
       width = row.length;
     }
     if (row.length !== width) throw new Error("Invalid Chrome password CSV");
     rows.push(row);
     row = [];
-    if (rows.length > MAX_ROWS + 1) throw new Error("Chrome password CSV exceeds limit");
+    if (rows.length > MAX_ROWS + 1)
+      throw new Error("Chrome password CSV exceeds limit");
   }
   for (let index = 0; index < text.length; index++) {
     const character = text[index]!;
@@ -63,7 +67,8 @@ function csv(text: string): ChromePasswordCredential[] {
     } else if (character === ",") column();
     else if (character === "\n" || character === "\r") {
       if (character === "\r") {
-        if (text[index + 1] !== "\n") throw new Error("Invalid Chrome password CSV");
+        if (text[index + 1] !== "\n")
+          throw new Error("Invalid Chrome password CSV");
         index++;
       }
       line();
@@ -71,7 +76,8 @@ function csv(text: string): ChromePasswordCredential[] {
       if (closed) throw new Error("Invalid Chrome password CSV");
       cell += character;
     }
-    if (cell.length > MAX_CELL) throw new Error("Chrome password CSV exceeds limit");
+    if (cell.length > MAX_CELL)
+      throw new Error("Chrome password CSV exceeds limit");
   }
   if (quoted) throw new Error("Invalid Chrome password CSV");
   if (cell || row.length || closed) line();
@@ -86,7 +92,12 @@ function csv(text: string): ChromePasswordCredential[] {
 function webOrigin(value: string): string | undefined {
   try {
     const url = new URL(value);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return;
+    if (
+      !["https:", "http:"].includes(url.protocol) ||
+      url.username ||
+      url.password
+    )
+      return;
     return url.origin;
   } catch {
     return;
@@ -98,11 +109,15 @@ function canonical(value: string) {
 }
 
 export function createConfiguredChromePasswordProvider(
-  options: Pick<Parameters<typeof createChromePasswordProvider>[0], "allowedPaths" | "assertProtectedPath">,
+  options: Pick<
+    Parameters<typeof createChromePasswordProvider>[0],
+    "allowedPaths" | "assertProtectedPath"
+  >,
   env: Record<string, string | undefined> = process.env,
 ) {
   const filename = env.BUN_BROWSER_PASSWORDS_FILE;
-  if (!filename) throw new Error("Private Chrome password source is not configured");
+  if (!filename)
+    throw new Error("Private Chrome password source is not configured");
   return createChromePasswordProvider({ ...options, filename });
 }
 
@@ -118,16 +133,21 @@ export function createChromePasswordProvider(options: {
     !Array.isArray(options.allowedPaths) ||
     options.allowedPaths.length < 1 ||
     options.allowedPaths.length > 8 ||
-    options.allowedPaths.some(path => !isAbsolute(path)) ||
-    !options.allowedPaths.some(path => canonical(path) === canonical(options.filename)) ||
+    options.allowedPaths.some((path) => !isAbsolute(path)) ||
+    !options.allowedPaths.some(
+      (path) => canonical(path) === canonical(options.filename),
+    ) ||
     typeof options.assertProtectedPath !== "function"
   )
-    throw new TypeError("An explicitly allowlisted private Chrome password file is required");
+    throw new TypeError(
+      "An explicitly allowlisted private Chrome password file is required",
+    );
   const filename = resolve(options.filename);
   function load() {
     for (let current = dirname(filename); ; current = dirname(current)) {
       const stat = lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe Chrome password path");
+      if (!stat.isDirectory() || stat.isSymbolicLink())
+        throw new Error("Unsafe Chrome password path");
       if (dirname(current) === current) break;
     }
     options.assertProtectedPath(filename);
@@ -136,7 +156,8 @@ export function createChromePasswordProvider(options: {
       !before.isFile() ||
       before.isSymbolicLink() ||
       before.nlink !== 1 ||
-      (process.platform !== "win32" && ((before.mode & 0o077) !== 0 || before.uid !== process.getuid!()))
+      (process.platform !== "win32" &&
+        ((before.mode & 0o077) !== 0 || before.uid !== process.getuid!()))
     )
       throw new Error("Unsafe Chrome password file");
     const descriptor = openSync(filename, "r");
@@ -153,17 +174,29 @@ export function createChromePasswordProvider(options: {
       const bytes = Buffer.alloc(stat.size + 1);
       let total = 0;
       while (total < bytes.length) {
-        const count = readSync(descriptor, bytes, total, bytes.length - total, null);
+        const count = readSync(
+          descriptor,
+          bytes,
+          total,
+          bytes.length - total,
+          null,
+        );
         if (count === 0) break;
         total += count;
       }
       const after = fstatSync(descriptor);
-      if (total !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs)
+      if (
+        total !== stat.size ||
+        after.size !== stat.size ||
+        after.mtimeMs !== stat.mtimeMs
+      )
         throw new Error("Chrome password file changed during read");
       options.assertProtectedPath(filename);
       let text: string;
       try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, total));
+        text = new TextDecoder("utf-8", { fatal: true }).decode(
+          bytes.subarray(0, total),
+        );
       } catch {
         throw new Error("Invalid Chrome password CSV encoding");
       } finally {
@@ -196,23 +229,28 @@ export function createChromePasswordProvider(options: {
     /** Callback is a privileged local consumer. Its return value is discarded; this is not an OAuth grant. */
     async withCredential(
       selector: { url: string; username?: string },
-      callback: (credential: Readonly<ChromePasswordCredential>) => void | Promise<void>,
+      callback: (
+        credential: Readonly<ChromePasswordCredential>,
+      ) => void | Promise<void>,
     ): Promise<void> {
       const origin = webOrigin(selector.url);
       if (
         !origin ||
         typeof callback !== "function" ||
         (selector.username !== undefined &&
-          (typeof selector.username !== "string" || selector.username.length > MAX_CELL))
+          (typeof selector.username !== "string" ||
+            selector.username.length > MAX_CELL))
       )
         throw new TypeError("Invalid Chrome credential selector");
       const matches = load().filter(
-        row =>
+        (row) =>
           webOrigin(row.url) === origin &&
           row.password &&
-          (selector.username === undefined || row.username === selector.username),
+          (selector.username === undefined ||
+            row.username === selector.username),
       );
-      if (matches.length !== 1) throw new Error("Chrome credential selection requires one match");
+      if (matches.length !== 1)
+        throw new Error("Chrome credential selection requires one match");
       try {
         await callback(Object.freeze(matches[0]!));
       } catch {

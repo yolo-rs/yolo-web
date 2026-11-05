@@ -981,7 +981,8 @@ export async function handleUnifiedWebToolCall(
                 {
                   detection,
                   solution,
-                  engine: "YOLO-Web challenge detector (resolution unsupported)",
+                  engine:
+                    "YOLO-Web challenge detector (resolution unsupported)",
                   profile: CHROMIUM_2026_DEFAULT_PROFILE,
                 },
                 null,
@@ -993,7 +994,8 @@ export async function handleUnifiedWebToolCall(
       }
 
       case "browser_chromium_legitimacy_script": {
-        const script = defaultChallengeSolver.generateChromiumLegitimacyScript();
+        const script =
+          defaultChallengeSolver.generateChromiumLegitimacyScript();
         return {
           content: [
             {
@@ -1036,7 +1038,9 @@ export async function handleUnifiedWebToolCall(
           throw new Error(`Unknown web tool '${name}'.`);
         }
         const result = await executeBrowserTool(name, args);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
       }
     }
   } catch (error) {

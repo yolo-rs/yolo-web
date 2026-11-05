@@ -72,12 +72,12 @@ jq '.log.entries[] | select(.request.url | test("api/search"))
 
 Call every generated function against the live API and compare the response shape with the recording. Common failures:
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| 401/403 | Expired or missing session | Re-login via agent-browser, re-export cookies |
-| 403/419 on writes | CSRF token is per-session or per-form | Fetch the token endpoint first, or keep that flow browser-driven |
-| Works then breaks | Signed/expiring request params | Fall back to the browser for that step; derive the rest |
-| Different shape than HAR | A/B tests or geo-dependent responses | Re-record and treat the union as optional fields |
+| Symptom                  | Cause                                 | Fix                                                              |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------------------- |
+| 401/403                  | Expired or missing session            | Re-login via agent-browser, re-export cookies                    |
+| 403/419 on writes        | CSRF token is per-session or per-form | Fetch the token endpoint first, or keep that flow browser-driven |
+| Works then breaks        | Signed/expiring request params        | Fall back to the browser for that step; derive the rest          |
+| Different shape than HAR | A/B tests or geo-dependent responses  | Re-record and treat the union as optional fields                 |
 
 ## Caveats
 

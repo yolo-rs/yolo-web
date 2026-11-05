@@ -6,18 +6,23 @@ import type { ListToolsRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createDnsRebindingGuard } from './rebinding.js';
 
 const genericServerError = () =>
-  Response.json({
-    id: null,
-    jsonrpc: '2.0',
-    error: { code: -32603, message: 'Internal server error' },
-  }, { status: 500 });
+  Response.json(
+    {
+      id: null,
+      jsonrpc: '2.0',
+      error: { code: -32603, message: 'Internal server error' },
+    },
+    { status: 500 }
+  );
 
 const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
 const isListToolsRequest = (value: unknown): value is ListToolsRequest =>
   ListToolsRequestSchema.safeParse(value).success;
 
-const getTransport = async (request: Request): Promise<WebStandardStreamableHTTPServerTransport> => {
+const getTransport = async (
+  request: Request
+): Promise<WebStandardStreamableHTTPServerTransport> => {
   // Check for an existing session
   const sessionId = request.headers.get('mcp-session-id');
 
@@ -71,8 +76,8 @@ const getTransport = async (request: Request): Promise<WebStandardStreamableHTTP
 };
 
 const guardRequest = createDnsRebindingGuard({
-      allowedHosts: config.allowedHosts,
-      allowedOrigins: config.allowedOrigins,
+  allowedHosts: config.allowedHosts,
+  allowedOrigins: config.allowedOrigins,
 });
 
 export const createApp = async (request: Request): Promise<Response> => {

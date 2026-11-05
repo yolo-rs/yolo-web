@@ -10,7 +10,8 @@ export const authQueryKeys = {
   session: () => [...authQueryKeys.all, "session"] as const,
   presence: () => [...authQueryKeys.all, "presence"] as const,
   accounts: () => [...authQueryKeys.all, "accounts"] as const,
-  passkeys: (userId: string) => [...authQueryKeys.all, "passkeys", userId] as const,
+  passkeys: (userId: string) =>
+    [...authQueryKeys.all, "passkeys", userId] as const,
 };
 
 export interface QueryCacheEntry<T> {
@@ -58,7 +59,10 @@ export class SovereignQueryClient {
     }
   }
 
-  public subscribe<T>(key: readonly unknown[], observer: QueryObserver<T>): () => void {
+  public subscribe<T>(
+    key: readonly unknown[],
+    observer: QueryObserver<T>,
+  ): () => void {
     const sKey = this.serializeKey(key);
     if (!this.observers.has(sKey)) {
       this.observers.set(sKey, new Set());
@@ -111,8 +115,13 @@ export class SovereignQueryClient {
     // If cached but stale, return stale while revalidating in background
     if (entry) {
       fetcher()
-        .then(fresh => this.setQueryData(key, fresh))
-        .catch(err => console.warn("[TanStack QueryClient] Background refetch failed:", err));
+        .then((fresh) => this.setQueryData(key, fresh))
+        .catch((err) =>
+          console.warn(
+            "[TanStack QueryClient] Background refetch failed:",
+            err,
+          ),
+        );
       return entry.data as T;
     }
 

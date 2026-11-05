@@ -150,7 +150,10 @@ export const formatOpeningHours = (
   if (today.length > 0) {
     const todayName = today[0]?.full_name.toLowerCase();
     if (todayName) {
-      dayHours.push([`today (${todayName})`, today.map(({ opens, closes }) => `${opens}-${closes}`)]);
+      dayHours.push([
+        `today (${todayName})`,
+        today.map(({ opens, closes }) => `${opens}-${closes}`),
+      ]);
     }
   }
 

@@ -1,5 +1,9 @@
 import { adcCredentialProvider } from "./adc.ts";
-import { googleAuthStatus, googleGenerate, googleGenerateStream } from "./auth.ts";
+import {
+  googleAuthStatus,
+  googleGenerate,
+  googleGenerateStream,
+} from "./auth.ts";
 import { googleRuntime, type GoogleRuntime } from "./runtime.ts";
 
 export interface GoogleGeminiRequest {
@@ -23,8 +27,14 @@ interface GenerateContentResponse {
 }
 
 /** Vertex AI `generateContent` endpoint for a publisher model; `global` uses the location-less host. */
-export function vertexGenerateContentUrl(runtime: Pick<GoogleRuntime, "project" | "location">, model: string): string {
-  const host = runtime.location === "global" ? "aiplatform.googleapis.com" : `${runtime.location}-aiplatform.googleapis.com`;
+export function vertexGenerateContentUrl(
+  runtime: Pick<GoogleRuntime, "project" | "location">,
+  model: string,
+): string {
+  const host =
+    runtime.location === "global"
+      ? "aiplatform.googleapis.com"
+      : `${runtime.location}-aiplatform.googleapis.com`;
   const path = `v1/projects/${encodeURIComponent(runtime.project)}/locations/${encodeURIComponent(runtime.location)}`;
   return `https://${host}/${path}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
 }
@@ -39,7 +49,8 @@ export function createGoogleGeminiClient(
 
   return {
     async complete({ prompt, signal, model = "gemini-2.5-flash" }) {
-      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      if (signal?.aborted)
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
       const nativeAuth =
         Bun.env.APHRODY_GOOGLE_AUTH === "antigravity" ||
         (!Bun.env.APHRODY_GOOGLE_AUTH &&
@@ -49,25 +60,39 @@ export function createGoogleGeminiClient(
           )));
       if (nativeAuth) {
         const result = await googleGenerate(prompt, model);
-        const content = (result as GenerateContentResponse).candidates?.[0]?.content?.parts
-          ?.map(part => part.text ?? "")
+        const content = (
+          result as GenerateContentResponse
+        ).candidates?.[0]?.content?.parts
+          ?.map((part) => part.text ?? "")
           .join("");
         return content ?? "";
       }
       const response = await doFetch(vertexGenerateContentUrl(runtime, model), {
         method: "POST",
-        headers: { authorization: `Bearer ${await token(signal)}`, "content-type": "application/json" },
-        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+        headers: {
+          authorization: `Bearer ${await token(signal)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+        }),
         signal,
       });
       if (!response.ok) {
-        throw new Error(`Vertex AI generateContent failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
+        throw new Error(
+          `Vertex AI generateContent failed (${response.status}): ${(await response.text()).slice(0, 500)}`,
+        );
       }
       const body = (await response.json()) as GenerateContentResponse;
-      return body.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("") ?? "";
+      return (
+        body.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text ?? "")
+          .join("") ?? ""
+      );
     },
     stream({ prompt, signal, model = "gemini-2.5-flash" }) {
-      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      if (signal?.aborted)
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
       return googleGenerateStream(prompt, model, signal);
     },
   };

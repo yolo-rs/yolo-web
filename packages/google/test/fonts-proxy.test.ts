@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fontsRoute, gstaticId, requestedFamilies, staticFile, staticFromRoots } from "../src/fonts-proxy.ts";
+import {
+  fontsRoute,
+  gstaticId,
+  requestedFamilies,
+  staticFile,
+  staticFromRoots,
+} from "../src/fonts-proxy.ts";
 
 test("the CDN release tree is served with its type, cache and CORS headers", async () => {
   const root = await mkdtemp(join(tmpdir(), "cdn-release-"));
@@ -16,16 +22,22 @@ test("the CDN release tree is served with its type, cache and CORS headers", asy
 
     const ico = await staticFile(root, "/h/0123456789abcdef.ico");
     expect(ico?.headers.get("content-type")).toBe("image/x-icon");
-    expect(ico?.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(ico?.headers.get("cache-control")).toBe(
+      "public, max-age=31536000, immutable",
+    );
     expect(ico?.headers.get("access-control-allow-origin")).toBe("*");
     expect(await ico?.text()).toBe("ico");
     const font = await staticFile(root, "/h/0123456789abcdef.woff2");
     expect(font?.headers.get("content-type")).toBe("font/woff2");
     const css = await staticFile(root, "/s/aphrody/brand/aphrody-fonts.css");
     expect(css?.headers.get("content-type")).toBe("text/css; charset=utf-8");
-    expect(css?.headers.get("cache-control")).toStartWith("public, max-age=3600");
+    expect(css?.headers.get("cache-control")).toStartWith(
+      "public, max-age=3600",
+    );
     const manifest = await staticFile(root, "/s/manifest.json");
-    expect(manifest?.headers.get("cache-control")).toBe("public, max-age=60, must-revalidate");
+    expect(manifest?.headers.get("cache-control")).toBe(
+      "public, max-age=60, must-revalidate",
+    );
 
     expect(await staticFile(root, "/s/aphrody/brand")).toBeNull();
     expect(await staticFile(root, "/s/robotoflex/v30/abc.woff2")).toBeNull();
@@ -50,12 +62,22 @@ test("several release roots are tried in order", async () => {
     await Bun.write(join(symbols, "s/symbols/material-symbols.css"), "css");
     const roots = [join(base, "missing"), catalog, symbols];
 
-    expect(await (await staticFromRoots(roots, "/h/aaaaaaaaaaaaaaaa.css"))?.text()).toBe("catalog");
+    expect(
+      await (await staticFromRoots(roots, "/h/aaaaaaaaaaaaaaaa.css"))?.text(),
+    ).toBe("catalog");
     const ttf = await staticFromRoots(roots, "/h/bbbbbbbbbbbbbbbb.ttf");
     expect(ttf?.headers.get("content-type")).toBe("font/ttf");
-    expect(ttf?.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
-    expect(await (await staticFromRoots(roots, "/s/symbols/material-symbols.css"))?.text()).toBe("css");
-    expect(await staticFromRoots(roots, "/h/cccccccccccccccc.woff2")).toBeNull();
+    expect(ttf?.headers.get("cache-control")).toBe(
+      "public, max-age=31536000, immutable",
+    );
+    expect(
+      await (
+        await staticFromRoots(roots, "/s/symbols/material-symbols.css")
+      )?.text(),
+    ).toBe("css");
+    expect(
+      await staticFromRoots(roots, "/h/cccccccccccccccc.woff2"),
+    ).toBeNull();
     expect(await staticFromRoots([], "/h/aaaaaaaaaaaaaaaa.css")).toBeNull();
   } finally {
     await rm(base, { recursive: true, force: true });
@@ -68,12 +90,17 @@ const route = (path: string, families?: string[] | null) =>
 
 test("family names from css2 and css v1 queries", () => {
   expect(
-    requestedFamilies(new URLSearchParams("family=Roboto+Flex:opsz,wght@8..144,100..1000&family=Noto+Sans+JP")),
+    requestedFamilies(
+      new URLSearchParams(
+        "family=Roboto+Flex:opsz,wght@8..144,100..1000&family=Noto+Sans+JP",
+      ),
+    ),
   ).toEqual(["Roboto Flex", "Noto Sans JP"]);
-  expect(requestedFamilies(new URLSearchParams("family=Roboto+Mono:400,700|M+PLUS+1+Code"))).toEqual([
-    "Roboto Mono",
-    "M PLUS 1 Code",
-  ]);
+  expect(
+    requestedFamilies(
+      new URLSearchParams("family=Roboto+Mono:400,700|M+PLUS+1+Code"),
+    ),
+  ).toEqual(["Roboto Mono", "M PLUS 1 Code"]);
   expect(gstaticId("M PLUS 1 Code")).toBe("mplus1code");
 });
 
@@ -85,9 +112,11 @@ test("css2 for M3 families goes to fonts.googleapis.com and rewrites gstatic", (
   expect(r.kind).toBe("text");
   expect(r.cacheKey).toMatch(/^css\/css2\/[0-9a-f]{32}\.css$/);
   expect(r.headers?.["user-agent"]).toContain("Chrome/");
-  expect(r.transform!("src: url(https://fonts.gstatic.com/s/googlesansflex/v1/a.woff2)")).toBe(
-    "src: url(https://cdn.aphrody.com/s/googlesansflex/v1/a.woff2)",
-  );
+  expect(
+    r.transform!(
+      "src: url(https://fonts.gstatic.com/s/googlesansflex/v1/a.woff2)",
+    ),
+  ).toBe("src: url(https://cdn.aphrody.com/s/googlesansflex/v1/a.woff2)");
 });
 
 test("non-M3 families are refused unless every family is allowed", () => {
@@ -101,12 +130,20 @@ test("non-M3 families are refused unless every family is allowed", () => {
 test("gstatic font files and Material Symbols SVGs map to the same path", () => {
   const font = route("/s/robotoflex/v30/abcDEF_-12.woff2");
   if (!font || font instanceof Response) throw new Error("expected a route");
-  expect(font.upstream.href).toBe("https://fonts.gstatic.com/s/robotoflex/v30/abcDEF_-12.woff2");
+  expect(font.upstream.href).toBe(
+    "https://fonts.gstatic.com/s/robotoflex/v30/abcDEF_-12.woff2",
+  );
   expect(font.kind).toBe("immutable");
-  const svg = route("/s/i/short-term/release/materialsymbolsoutlined/home/wght300fill1/24px.svg");
+  const svg = route(
+    "/s/i/short-term/release/materialsymbolsoutlined/home/wght300fill1/24px.svg",
+  );
   if (!svg || svg instanceof Response) throw new Error("expected a route");
-  expect(svg.cacheKey).toBe("s/i/short-term/release/materialsymbolsoutlined/home/wght300fill1/24px.svg");
-  expect((route("/s/i/materialicons/home/v12/24px.svg") as Response).status).toBe(403);
+  expect(svg.cacheKey).toBe(
+    "s/i/short-term/release/materialsymbolsoutlined/home/wght300fill1/24px.svg",
+  );
+  expect(
+    (route("/s/i/materialicons/home/v12/24px.svg") as Response).status,
+  ).toBe(403);
   expect(route("/s/robotoflex/../../etc/passwd")).toBeNull();
   expect(route("/favicon.ico")).toBeNull();
 });

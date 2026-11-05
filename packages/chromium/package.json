@@ -8,7 +8,12 @@
   "bin": {
     "yolo-web-chromium": "./src/cli.ts"
   },
-  "files": ["src", "types", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./bun-plugin": "./src/bun-plugin.ts",

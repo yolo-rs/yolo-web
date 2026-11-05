@@ -16,7 +16,10 @@ const SYS = {
   x64: { pidfd_open: 434, pidfd_send_signal: 424 },
   arm64: { pidfd_open: 434, pidfd_send_signal: 424 },
   riscv64: { pidfd_open: 434, pidfd_send_signal: 424 },
-} as Record<string, { pidfd_open: number; pidfd_send_signal: number } | undefined>;
+} as Record<
+  string,
+  { pidfd_open: number; pidfd_send_signal: number } | undefined
+>;
 
 const constants = Object.freeze({
   PIDFD_SIGNAL_THREAD: 1,
@@ -24,7 +27,13 @@ const constants = Object.freeze({
   PIDFD_SIGNAL_PROCESS_GROUP: 4,
 });
 
-const ERRNO: Record<number, string> = { 1: "EPERM", 3: "ESRCH", 9: "EBADF", 22: "EINVAL", 38: "ENOSYS" };
+const ERRNO: Record<number, string> = {
+  1: "EPERM",
+  3: "ESRCH",
+  9: "EBADF",
+  22: "EINVAL",
+  38: "ENOSYS",
+};
 
 export interface LinuxProcessGroup {
   constants: typeof constants;
@@ -38,9 +47,13 @@ let cached: LinuxProcessGroup | undefined;
 export function linuxProcessGroup(): LinuxProcessGroup {
   if (cached) return cached;
   const numbers = SYS[process.arch];
-  if (!numbers) throw new Error(`pidfd syscalls are not mapped for ${process.arch}`);
+  if (!numbers)
+    throw new Error(`pidfd syscalls are not mapped for ${process.arch}`);
   const libc = dlopen("libc.so.6", {
-    syscall: { args: [FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64], returns: FFIType.i64 },
+    syscall: {
+      args: [FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64, FFIType.i64],
+      returns: FFIType.i64,
+    },
     __errno_location: { args: [], returns: FFIType.ptr },
   }).symbols;
   const { read } = require("bun:ffi") as typeof import("bun:ffi");
@@ -62,10 +75,20 @@ export function linuxProcessGroup(): LinuxProcessGroup {
       return fd < 0 ? fail("pidfd_open") : fd;
     },
     pidfdForProcess(proc) {
-      return Number.isSafeInteger(proc?.pid) ? cached!.pidfdOpen(proc.pid) : null;
+      return Number.isSafeInteger(proc?.pid)
+        ? cached!.pidfdOpen(proc.pid)
+        : null;
     },
     pidfdSendSignal(pidfd, signal, flags = 0) {
-      const rc = Number(libc.syscall(numbers.pidfd_send_signal, pidfd, signalNumber(signal), 0, flags));
+      const rc = Number(
+        libc.syscall(
+          numbers.pidfd_send_signal,
+          pidfd,
+          signalNumber(signal),
+          0,
+          flags,
+        ),
+      );
       if (rc < 0) fail("pidfd_send_signal");
     },
   };
@@ -74,15 +97,22 @@ export function linuxProcessGroup(): LinuxProcessGroup {
 
 interface WindowsJob {
   setLimits(limits: { killOnClose: boolean }): void;
-  spawn(args: string[], options: object): Bun.Subprocess<"ignore", "ignore", "pipe">;
+  spawn(
+    args: string[],
+    options: object,
+  ): Bun.Subprocess<"ignore", "ignore", "pipe">;
   terminate(): void;
   close(): void;
 }
 
 /** Mechanism used to terminate an owned browser process tree. */
-export type ProcessTreeOwnership = "windows-job" | "linux-pidfd-group" | "single-process";
+export type ProcessTreeOwnership =
+  "windows-job" | "linux-pidfd-group" | "single-process";
 
-export function processTreeOwnership(hasJob: boolean, hasLinuxGroup: boolean): ProcessTreeOwnership {
+export function processTreeOwnership(
+  hasJob: boolean,
+  hasLinuxGroup: boolean,
+): ProcessTreeOwnership {
   if (hasJob) return "windows-job";
   if (hasLinuxGroup) return "linux-pidfd-group";
   return "single-process";
@@ -93,12 +123,20 @@ type WindowsModule = {
   default?: { Job?: new (name?: string) => WindowsJob };
 };
 
-export function windowsJob(load: () => WindowsModule = () => require("bun:windows")): WindowsJob | undefined {
+export function windowsJob(
+  load: () => WindowsModule = () => require("bun:windows"),
+): WindowsJob | undefined {
   let windows: WindowsModule;
   try {
     windows = load();
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "MODULE_NOT_FOUND" && /^Cannot find module ['"]bun:windows['"](?:\s|$)/.test(error.message)) return undefined;
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "MODULE_NOT_FOUND" &&
+      /^Cannot find module ['"]bun:windows['"](?:\s|$)/.test(error.message)
+    )
+      return undefined;
     throw error;
   }
   const Job = windows.Job ?? windows.default?.Job;

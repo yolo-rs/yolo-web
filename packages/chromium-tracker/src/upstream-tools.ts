@@ -8,20 +8,25 @@ export async function runUpstreamTool(
   mode: UpstreamOutputMode = "capture",
 ): Promise<string> {
   const env = { ...process.env, DEPOT_TOOLS_UPDATE: "0" };
-  const windowsBatch = process.platform === "win32" && /\.(?:bat|cmd)$/i.test(program);
+  const windowsBatch =
+    process.platform === "win32" && /\.(?:bat|cmd)$/i.test(program);
   const command = windowsBatch
     ? [
-      Bun.which("powershell.exe") ?? "powershell.exe",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "$ErrorActionPreference = 'Stop'; $toolArgs = ConvertFrom-Json -InputObject $env:YOLO_WEB_TOOL_ARGS; & $env:YOLO_WEB_TOOL_PROGRAM @toolArgs; exit $LASTEXITCODE",
-    ]
+        Bun.which("powershell.exe") ?? "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; $toolArgs = ConvertFrom-Json -InputObject $env:YOLO_WEB_TOOL_ARGS; & $env:YOLO_WEB_TOOL_PROGRAM @toolArgs; exit $LASTEXITCODE",
+      ]
     : [program, ...args];
   const child = Bun.spawn(command, {
     cwd,
     env: windowsBatch
-      ? { ...env, YOLO_WEB_TOOL_PROGRAM: program, YOLO_WEB_TOOL_ARGS: JSON.stringify(args) }
+      ? {
+          ...env,
+          YOLO_WEB_TOOL_PROGRAM: program,
+          YOLO_WEB_TOOL_ARGS: JSON.stringify(args),
+        }
       : env,
     stdin: "ignore",
     stdout: mode === "capture" ? "pipe" : "inherit",
@@ -31,7 +36,8 @@ export async function runUpstreamTool(
 
   if (mode === "inherit") {
     const exitCode = await child.exited;
-    if (exitCode !== 0) throw new Error(`${program} exited with status ${exitCode}.`);
+    if (exitCode !== 0)
+      throw new Error(`${program} exited with status ${exitCode}.`);
     return "";
   }
 
@@ -45,7 +51,9 @@ export async function runUpstreamTool(
     child.exited,
   ]);
   if (exitCode !== 0) {
-    throw new Error(`${program} ${args.join(" ")} failed (${exitCode}): ${stderr.trim() || stdout.trim()}`);
+    throw new Error(
+      `${program} ${args.join(" ")} failed (${exitCode}): ${stderr.trim() || stdout.trim()}`,
+    );
   }
   return stdout.trim();
 }

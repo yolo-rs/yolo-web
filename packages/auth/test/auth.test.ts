@@ -23,7 +23,12 @@ describe("@yolo-web/auth - session and identity API", () => {
   const secret = "test-secret-key-that-is-at-least-32-chars-long!";
   const now = Date.now();
 
-  function addUser(db: AuthDatabase, id: string, email: string, role: "owner" | "developer" | "guest") {
+  function addUser(
+    db: AuthDatabase,
+    id: string,
+    email: string,
+    role: "owner" | "developer" | "guest",
+  ) {
     const user = {
       id,
       email,
@@ -113,17 +118,27 @@ describe("@yolo-web/auth - session and identity API", () => {
     headers.set("cookie", `yolo_web_session=${encodeURIComponent(token)}`);
     headers.set("origin", "https://app.yolo-web.test");
 
-    const ownerCheck = await verifyOwnerIdentity(headers, secret, { allowedOrigins: ["https://app.yolo-web.test"] });
+    const ownerCheck = await verifyOwnerIdentity(headers, secret, {
+      allowedOrigins: ["https://app.yolo-web.test"],
+    });
     expect(ownerCheck.isOwner).toBe(true);
     expect(ownerCheck.claims?.role).toBe("owner");
   });
 
   test("requires an explicit production session key and uses an ephemeral development key", () => {
-    expect(() => resolveSessionSecret(undefined, { NODE_ENV: "production" })).toThrow("must be configured");
-    expect(resolveSessionSecret(secret, { NODE_ENV: "production" })).toBe(secret);
-    const ephemeral = resolveSessionSecret(undefined, { NODE_ENV: "development" });
+    expect(() =>
+      resolveSessionSecret(undefined, { NODE_ENV: "production" }),
+    ).toThrow("must be configured");
+    expect(resolveSessionSecret(secret, { NODE_ENV: "production" })).toBe(
+      secret,
+    );
+    const ephemeral = resolveSessionSecret(undefined, {
+      NODE_ENV: "development",
+    });
     expect(ephemeral).toHaveLength(64);
-    expect(resolveSessionSecret(undefined, { NODE_ENV: "development" })).toBe(ephemeral);
+    expect(resolveSessionSecret(undefined, { NODE_ENV: "development" })).toBe(
+      ephemeral,
+    );
   });
 
   test("passkey registration and authentication options generation", () => {
@@ -137,13 +152,19 @@ describe("@yolo-web/auth - session and identity API", () => {
       updatedAt: now,
     };
 
-    const regOpts = createPasskeyRegistrationOptions(owner, "app.yolo-web.test", "YOLO-Web");
+    const regOpts = createPasskeyRegistrationOptions(
+      owner,
+      "app.yolo-web.test",
+      "YOLO-Web",
+    );
     expect(regOpts.challenge.length).toBeGreaterThan(20);
     expect(regOpts.rp.name).toBe("YOLO-Web");
     expect(regOpts.rp.id).toBe("app.yolo-web.test");
     expect(regOpts.user.name).toBe("owner@yolo-web.test");
 
-    const authOpts = createPasskeyAuthOptions("app.yolo-web.test", [{ id: "cred_123" }]);
+    const authOpts = createPasskeyAuthOptions("app.yolo-web.test", [
+      { id: "cred_123" },
+    ]);
     expect(authOpts.challenge.length).toBeGreaterThan(20);
     expect(authOpts.allowCredentials?.[0]?.id).toBe("cred_123");
   });
@@ -158,19 +179,26 @@ describe("@yolo-web/auth - session and identity API", () => {
     expect(t("filterAll", "en")).toBe("All");
     expect(t("filterAll", "fr")).toBe("Tous");
 
-    expect(t("searchPlaceholder", "fr")).toContain("Rechercher fichiers locaux");
+    expect(t("searchPlaceholder", "fr")).toContain(
+      "Rechercher fichiers locaux",
+    );
   });
 
   test("TanStack query client provides caching, subscriptions, and stale-while-revalidate", async () => {
     const queryClient = new SovereignQueryClient({ defaultStaleTime: 1000 });
     let notifications = 0;
 
-    const unsubscribe = queryClient.subscribe(authQueryKeys.session(), data => {
-      notifications++;
-    });
+    const unsubscribe = queryClient.subscribe(
+      authQueryKeys.session(),
+      (data) => {
+        notifications++;
+      },
+    );
 
     queryClient.setQueryData(authQueryKeys.session(), { user: "owner" });
-    expect(queryClient.getQueryData(authQueryKeys.session())).toEqual({ user: "owner" });
+    expect(queryClient.getQueryData(authQueryKeys.session())).toEqual({
+      user: "owner",
+    });
     expect(notifications).toBe(1);
 
     // Fetch with cache
@@ -194,14 +222,22 @@ describe("@yolo-web/auth - session and identity API", () => {
     const dev = addUser(db, "test-dev", "dev@yolo-web.test", "developer");
     addUser(db, "test-guest", "guest@yolo-web.test", "guest");
     addSession(db, owner.id, "test-session-token");
-    const authServer = createBetterAuthServer({ db, secret, rpId: "app.yolo-web.test" });
+    const authServer = createBetterAuthServer({
+      db,
+      secret,
+      rpId: "app.yolo-web.test",
+    });
     const cookie = createSessionCookie("test-session-token", 3600, false);
 
-    const anonymous = await authServer.routes["/api/auth/session"](new Request("http://localhost/api/auth/session"));
+    const anonymous = await authServer.routes["/api/auth/session"](
+      new Request("http://localhost/api/auth/session"),
+    );
     expect(anonymous.status).toBe(401);
 
     // Authenticated session endpoint.
-    const sessionReq = new Request("http://localhost/api/auth/session", { headers: { cookie } });
+    const sessionReq = new Request("http://localhost/api/auth/session", {
+      headers: { cookie },
+    });
     const sessionRes = await authServer.routes["/api/auth/session"](sessionReq);
     expect(sessionRes.status).toBe(200);
     const sessionData = await sessionRes.json();
@@ -209,8 +245,11 @@ describe("@yolo-web/auth - session and identity API", () => {
     expect(sessionRes.headers.get("Set-Cookie")).toContain("yolo_web_session=");
 
     // 2. Accounts endpoint
-    const accountsReq = new Request("http://localhost/api/auth/accounts", { headers: { cookie } });
-    const accountsRes = await authServer.routes["/api/auth/accounts"](accountsReq);
+    const accountsReq = new Request("http://localhost/api/auth/accounts", {
+      headers: { cookie },
+    });
+    const accountsRes =
+      await authServer.routes["/api/auth/accounts"](accountsReq);
     expect(accountsRes.status).toBe(200);
     const accountsData = await accountsRes.json();
     expect(accountsData.accounts.length).toBe(3);
@@ -221,7 +260,8 @@ describe("@yolo-web/auth - session and identity API", () => {
       body: JSON.stringify({ accountId: dev.id }),
       headers: { cookie },
     });
-    const switchRes = await authServer.routes["/api/auth/accounts/switch"](switchReq);
+    const switchRes =
+      await authServer.routes["/api/auth/accounts/switch"](switchReq);
     expect(switchRes.status).toBe(200);
     const switchData = await switchRes.json();
     expect(switchData.activeAccount.id).toBe(dev.id);

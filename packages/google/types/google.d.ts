@@ -6,14 +6,19 @@ declare module "bun:google" {
     auth: string;
   }
   /** Public configuration only. This function never discovers credentials. */
-  export function googleRuntime(env?: Record<string, string | undefined>): GoogleRuntime;
+  export function googleRuntime(
+    env?: Record<string, string | undefined>,
+  ): GoogleRuntime;
   export interface GoogleClientOptions {
     /** Called for each request. Keep token storage and refresh in its existing owner. */
     credentialProvider: (signal?: AbortSignal) => string | Promise<string>;
     /** Google HTTPS endpoint, or loopback HTTP(S) for local testing. */
     baseURL?: string | URL;
     /** Optional trusted transport for local testing. Must honor redirect: "error" and AbortSignal. */
-    fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+    fetch?: (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => Promise<Response>;
   }
   export interface GoogleClient {
     /**

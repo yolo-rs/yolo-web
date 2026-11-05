@@ -17,7 +17,7 @@ const server = Bun.serve({
     "/": searchHtml,
     "/search": searchHtml,
     ...authServer.routes,
-    "/api/suggest": req => {
+    "/api/suggest": (req) => {
       const url = new URL(req.url);
       const q = (url.searchParams.get("q") || "").toLowerCase();
       const lang = url.searchParams.get("lang") || "en";
@@ -55,17 +55,22 @@ const server = Bun.serve({
             "vectorcraft",
           ];
 
-      const matches = defaultSuggestions.filter(s => s.includes(q));
+      const matches = defaultSuggestions.filter((s) => s.includes(q));
       return Response.json([q, matches]);
     },
-    "/api/search": async req => {
+    "/api/search": async (req) => {
       const url = new URL(req.url);
       const q = url.searchParams.get("q") || "";
       const lang = url.searchParams.get("lang") || "en";
       const isFr = lang === "fr";
 
       if (!q.trim()) {
-        return Response.json({ query: "", totalResults: 0, searchTimeSec: 0, organic: [] });
+        return Response.json({
+          query: "",
+          totalResults: 0,
+          searchTimeSec: 0,
+          organic: [],
+        });
       }
 
       try {
@@ -75,7 +80,7 @@ const server = Bun.serve({
             query: q,
             totalResults: page.organic.length * 1000,
             searchTimeSec: 0.12,
-            organic: page.organic.map(item => ({
+            organic: page.organic.map((item) => ({
               title: item.title,
               url: item.url,
               displayUrl: item.url,
@@ -100,7 +105,8 @@ const server = Bun.serve({
                 snippet: "Documentation et outils du workspace YOLO-Web.",
               },
               {
-                title: "Documentation Officielle Bun — Runtime JavaScript Ultra-Rapide",
+                title:
+                  "Documentation Officielle Bun — Runtime JavaScript Ultra-Rapide",
                 url: "https://bun.sh/docs",
                 displayUrl: "https://bun.sh > docs",
                 snippet:
@@ -115,7 +121,8 @@ const server = Bun.serve({
                 snippet: "Documentation and tools from the YOLO-Web workspace.",
               },
               {
-                title: "Official Bun Documentation — Ultra-fast JavaScript Runtime",
+                title:
+                  "Official Bun Documentation — Ultra-fast JavaScript Runtime",
                 url: "https://bun.sh/docs",
                 displayUrl: "https://bun.sh > docs",
                 snippet:

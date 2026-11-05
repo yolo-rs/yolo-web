@@ -27,12 +27,14 @@ export const AUTH_TRANSLATIONS = {
     passkeys: "Passkeys",
     signInWithPasskey: "Sign in with Passkey",
     registerPasskey: "Register New Passkey",
-    passkeyPrompt: "Touch your security key or use biometric verification (Windows Hello / Touch ID)",
+    passkeyPrompt:
+      "Touch your security key or use biometric verification (Windows Hello / Touch ID)",
     passkeySuccess: "Passkey authenticated successfully",
     passkeyRegistered: "Passkey registered securely on device",
     passkeyNoneRegistered: "No passkeys registered for this account",
     passkeyError: "Passkey verification failed or cancelled",
-    passkeyNotSupported: "WebAuthn / Passkeys not supported in this environment",
+    passkeyNotSupported:
+      "WebAuthn / Passkeys not supported in this environment",
 
     // Search & Spotlight
     searchPlaceholder: "Search local files, apps, or type a query...",
@@ -88,12 +90,14 @@ export const AUTH_TRANSLATIONS = {
     passkeys: "Clés d'accès",
     signInWithPasskey: "Connexion avec Clé d'accès (Passkey)",
     registerPasskey: "Enregistrer une nouvelle clé d'accès",
-    passkeyPrompt: "Touchez votre clé de sécurité ou utilisez la biométrie (Windows Hello / Touch ID)",
+    passkeyPrompt:
+      "Touchez votre clé de sécurité ou utilisez la biométrie (Windows Hello / Touch ID)",
     passkeySuccess: "Authentification par clé d'accès réussie",
     passkeyRegistered: "Clé d'accès enregistrée sur cet appareil",
     passkeyNoneRegistered: "Aucune clé d'accès enregistrée pour ce compte",
     passkeyError: "Échec ou annulation de l'authentification passkey",
-    passkeyNotSupported: "WebAuthn / Passkeys non pris en charge dans cet environnement",
+    passkeyNotSupported:
+      "WebAuthn / Passkeys non pris en charge dans cet environnement",
 
     // Search & Spotlight
     searchPlaceholder: "Rechercher fichiers locaux, applications, calculs...",
@@ -115,9 +119,11 @@ export const AUTH_TRANSLATIONS = {
     cancel: "Annuler",
     settings: "Configuration & Stockage",
     copilotKey: "Intercepteur Touche Copilot Matériel",
-    copilotKeyDesc: "Intercepte la touche Windows 11 Copilot pour ouvrir Spotcraft",
+    copilotKeyDesc:
+      "Intercepte la touche Windows 11 Copilot pour ouvrir Spotcraft",
     localFts: "Indexation Locale SQLite FTS5",
-    localFtsDesc: "Indexe les dossiers utilisateur en temps réel sans transfert distant",
+    localFtsDesc:
+      "Indexe les dossiers utilisateur en temps réel sans transfert distant",
     indexedDirs: "Dossiers Indexés",
     managePaths: "Gérer les chemins",
 
@@ -126,14 +132,18 @@ export const AUTH_TRANSLATIONS = {
     ariaResultsList: "Liste des résultats de recherche",
     ariaAccountMenu: "Menu du compte utilisateur et présence de session",
     ariaLangToggle: "Basculer la langue entre Français et Anglais",
-    ariaPasskeyButton: "S'authentifier avec une clé de sécurité biométrique ou matérielle",
+    ariaPasskeyButton:
+      "S'authentifier avec une clé de sécurité biométrique ou matérielle",
     ariaFilterChip: "Filtrer les résultats par catégorie",
   },
 } as const;
 
 export type TranslationKey = keyof (typeof AUTH_TRANSLATIONS)["en"];
 
-export function getTranslation(key: TranslationKey, lang: AuthLanguage = "en"): string {
+export function getTranslation(
+  key: TranslationKey,
+  lang: AuthLanguage = "en",
+): string {
   const dict = AUTH_TRANSLATIONS[lang] || AUTH_TRANSLATIONS.en;
   return dict[key] || AUTH_TRANSLATIONS.en[key] || key;
 }

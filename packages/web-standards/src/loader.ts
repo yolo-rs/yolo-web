@@ -1,5 +1,15 @@
-import type { MCPSchema2026, MDNCompatSchema, TC39ProposalsSchema, WebAssemblySchema } from "./types.ts";
-import { validateMCP2026, validateMDNCompat, validateTC39, validateWebAssembly } from "./validators.ts";
+import type {
+  MCPSchema2026,
+  MDNCompatSchema,
+  TC39ProposalsSchema,
+  WebAssemblySchema,
+} from "./types.ts";
+import {
+  validateMCP2026,
+  validateMDNCompat,
+  validateTC39,
+  validateWebAssembly,
+} from "./validators.ts";
 
 function joinPath(...parts: string[]): string {
   const separator = parts[0]?.includes("\\") ? "\\" : "/";
@@ -17,27 +27,37 @@ export class StandardsLoader {
   readonly schemaDir: string;
 
   constructor(options: StandardsLoaderOptions = {}) {
-    this.schemaDir = options.schemaDir ?? joinPath(import.meta.dir, "..", "..", "..", "data", "standards", "web");
+    this.schemaDir =
+      options.schemaDir ??
+      joinPath(import.meta.dir, "..", "..", "..", "data", "standards", "web");
   }
 
   private async loadJson(category: string, filename: string): Promise<unknown> {
     for (const suffix of ["current", "default"]) {
-      const path = joinPath(this.schemaDir, category, `${filename}.${suffix}.json`);
+      const path = joinPath(
+        this.schemaDir,
+        category,
+        `${filename}.${suffix}.json`,
+      );
       const file = Bun.file(path);
       if (await file.exists()) return await file.json();
     }
-    throw new Error(`Standard not found: category=${category}, name=${filename}`);
+    throw new Error(
+      `Standard not found: category=${category}, name=${filename}`,
+    );
   }
 
   async loadWebAssembly(): Promise<WebAssemblySchema> {
     const data = await this.loadJson("webassembly", "webassembly");
-    if (!validateWebAssembly(data)) throw new Error("Invalid WebAssembly schema data");
+    if (!validateWebAssembly(data))
+      throw new Error("Invalid WebAssembly schema data");
     return data;
   }
 
   async loadMDNCompat(): Promise<MDNCompatSchema> {
     const data = await this.loadJson("mdn", "mdn-compat");
-    if (!validateMDNCompat(data)) throw new Error("Invalid MDN compatibility data");
+    if (!validateMDNCompat(data))
+      throw new Error("Invalid MDN compatibility data");
     return data;
   }
 

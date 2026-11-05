@@ -9,15 +9,28 @@ export interface ChromiumPasswordProvider {
   withCredential(
     selector: { url: string; username?: string },
     consumer: (
-      credential: Readonly<{ name: string; url: string; username: string; password: string }>,
+      credential: Readonly<{
+        name: string;
+        url: string;
+        username: string;
+        password: string;
+      }>,
     ) => void | Promise<void>,
   ): Promise<void>;
 }
 
 /** Reuse the explicitly allowlisted owner provider; this does not import credentials into a browser. */
-export function createChromiumPasswordConnection(provider: ChromiumPasswordProvider) {
-  if (!provider || typeof provider.audit !== "function" || typeof provider.withCredential !== "function")
-    throw new TypeError("An explicit shared Chrome password provider is required");
+export function createChromiumPasswordConnection(
+  provider: ChromiumPasswordProvider,
+) {
+  if (
+    !provider ||
+    typeof provider.audit !== "function" ||
+    typeof provider.withCredential !== "function"
+  )
+    throw new TypeError(
+      "An explicit shared Chrome password provider is required",
+    );
   return Object.freeze({
     importPlan() {
       const audit = provider.audit();

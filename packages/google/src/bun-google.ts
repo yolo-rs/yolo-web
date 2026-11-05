@@ -10,10 +10,21 @@ import { adcCredentialProvider } from "./adc.ts";
 import { createClient, googleRuntime } from "./client.ts";
 
 export { createClient, googleRuntime } from "./client.ts";
-export type { GoogleClient, GoogleClientOptions, GoogleRuntime } from "./client.ts";
+export type {
+  GoogleClient,
+  GoogleClientOptions,
+  GoogleRuntime,
+} from "./client.ts";
 export { chromium, obscura };
 export const dns = Bun.dns;
 
 export { adcCredentialProvider };
 
-export default { googleRuntime, createClient, chromium, obscura, dns, adcCredentialProvider };
+export default {
+  googleRuntime,
+  createClient,
+  chromium,
+  obscura,
+  dns,
+  adcCredentialProvider,
+};

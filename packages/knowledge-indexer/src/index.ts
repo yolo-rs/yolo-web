@@ -50,7 +50,10 @@ export class KnowledgeIndexDb {
   constructor(customPath?: string) {
     this.dbPath =
       customPath ??
-      join(import.meta.dir, "../../../data/knowledge/yolo_web_knowledge.sqlite");
+      join(
+        import.meta.dir,
+        "../../../data/knowledge/yolo_web_knowledge.sqlite",
+      );
     this.db = new Database(this.dbPath, { create: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA synchronous = NORMAL;");
@@ -239,7 +242,10 @@ export class KnowledgeIndexDb {
    * Synchronizes verified test findings into Documentation and Skill Reference files.
    */
   async syncToDocsAndSkill(
-    docsPath = join(import.meta.dir, "../../../docs/VERIFIED_TEST_KNOWLEDGE_BASE.md"),
+    docsPath = join(
+      import.meta.dir,
+      "../../../docs/VERIFIED_TEST_KNOWLEDGE_BASE.md",
+    ),
     skillRefPath = join(
       import.meta.dir,
       "../../../packages/web-plugin/skills/web/references/verified-targets-knowledge.md",

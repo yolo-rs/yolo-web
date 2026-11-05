@@ -42,7 +42,10 @@ export interface ApiMethod {
   path: string;
   httpMethod: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   description?: string;
-  parameters?: Record<string, { type: string; required?: boolean; description?: string }>;
+  parameters?: Record<
+    string,
+    { type: string; required?: boolean; description?: string }
+  >;
   request?: { $ref: string };
   response?: { $ref: string };
 }
@@ -53,14 +56,20 @@ const DISCOVERY_CACHE = new Map<string, ApiDiscoveryDoc>();
  * Fetch and cache the Google Discovery Document for a given Google Workspace API.
  * e.g., service: "drive", version: "v3"
  */
-export async function getDiscoveryDoc(service: string, version?: string): Promise<ApiDiscoveryDoc> {
+export async function getDiscoveryDoc(
+  service: string,
+  version?: string,
+): Promise<ApiDiscoveryDoc> {
   const v = version ?? defaultVersion(service);
   const key = `${service}:${v}`;
   if (DISCOVERY_CACHE.has(key)) return DISCOVERY_CACHE.get(key)!;
 
   const url = `https://www.googleapis.com/discovery/v1/apis/${service}/${v}/rest`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Google Discovery error for ${key}: ${res.status} ${res.statusText}`);
+  if (!res.ok)
+    throw new Error(
+      `Google Discovery error for ${key}: ${res.status} ${res.statusText}`,
+    );
 
   const doc = (await res.json()) as ApiDiscoveryDoc;
   DISCOVERY_CACHE.set(key, doc);
@@ -102,7 +111,9 @@ export async function resolveAuthToken(options?: GwsOptions): Promise<string> {
 
   // 1. Check the configured backend broker
   const brokerUrl =
-    options?.tokenBrokerUrl ?? Bun.env.BUN_GOOGLE_TOKEN_BROKER ?? "http://127.0.0.1:8790/api/google/token";
+    options?.tokenBrokerUrl ??
+    Bun.env.BUN_GOOGLE_TOKEN_BROKER ??
+    "http://127.0.0.1:8790/api/google/token";
   try {
     const res = await fetch(brokerUrl, {
       headers: {
@@ -118,7 +129,10 @@ export async function resolveAuthToken(options?: GwsOptions): Promise<string> {
   }
 
   // 2. Check environment tokens
-  const envToken = Bun.env.GOOGLE_OAUTH_TOKEN ?? Bun.env.GWS_TOKEN ?? Bun.env.GOOGLE_ACCESS_TOKEN;
+  const envToken =
+    Bun.env.GOOGLE_OAUTH_TOKEN ??
+    Bun.env.GWS_TOKEN ??
+    Bun.env.GOOGLE_ACCESS_TOKEN;
   if (envToken) return envToken;
 
   throw new Error(
@@ -138,10 +152,16 @@ export async function executeGwsCommand(
 ): Promise<unknown> {
   const doc = await getDiscoveryDoc(serviceName);
   const resource = doc.resources?.[resourceName];
-  if (!resource) throw new Error(`Unknown resource '${resourceName}' on Google Workspace service '${serviceName}'`);
+  if (!resource)
+    throw new Error(
+      `Unknown resource '${resourceName}' on Google Workspace service '${serviceName}'`,
+    );
 
   const method = resource.methods?.[methodName];
-  if (!method) throw new Error(`Unknown method '${methodName}' on '${serviceName}.${resourceName}'`);
+  if (!method)
+    throw new Error(
+      `Unknown method '${methodName}' on '${serviceName}.${resourceName}'`,
+    );
 
   const token = await resolveAuthToken(options);
 
@@ -149,7 +169,9 @@ export async function executeGwsCommand(
   let path = method.path;
   const queryParams = new URLSearchParams();
   const bodyPayload: Record<string, any> =
-    typeof options.body === "object" && options.body !== null ? { ...(options.body as Record<string, any>) } : {};
+    typeof options.body === "object" && options.body !== null
+      ? { ...(options.body as Record<string, any>) }
+      : {};
 
   for (const [k, v] of Object.entries(params)) {
     const placeholder = `{${k}}`;
@@ -179,15 +201,22 @@ export async function executeGwsCommand(
     },
   };
 
-  if (method.httpMethod !== "GET" && method.httpMethod !== "DELETE" && Object.keys(bodyPayload).length > 0) {
+  if (
+    method.httpMethod !== "GET" &&
+    method.httpMethod !== "DELETE" &&
+    Object.keys(bodyPayload).length > 0
+  ) {
     reqInit.body = JSON.stringify(bodyPayload);
-    (reqInit.headers as Record<string, string>)["content-type"] = "application/json";
+    (reqInit.headers as Record<string, string>)["content-type"] =
+      "application/json";
   }
 
   const res = await fetch(fullUrl, reqInit);
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Google Workspace API error (${res.status} ${res.statusText}): ${errorText}`);
+    throw new Error(
+      `Google Workspace API error (${res.status} ${res.statusText}): ${errorText}`,
+    );
   }
 
   const contentType = res.headers.get("content-type") ?? "";
@@ -209,8 +238,14 @@ export async function startGwsMcpServer(): Promise<void> {
       inputSchema: {
         type: "object",
         properties: {
-          q: { type: "string", description: "Drive search query (e.g. name contains 'notes')" },
-          pageSize: { type: "number", description: "Max results to return (default 20)" },
+          q: {
+            type: "string",
+            description: "Drive search query (e.g. name contains 'notes')",
+          },
+          pageSize: {
+            type: "number",
+            description: "Max results to return (default 20)",
+          },
         },
       },
     },
@@ -220,7 +255,10 @@ export async function startGwsMcpServer(): Promise<void> {
       inputSchema: {
         type: "object",
         properties: {
-          documentId: { type: "string", description: "Google Docs Document ID" },
+          documentId: {
+            type: "string",
+            description: "Google Docs Document ID",
+          },
         },
         required: ["documentId"],
       },
@@ -232,20 +270,34 @@ export async function startGwsMcpServer(): Promise<void> {
         type: "object",
         properties: {
           spreadsheetId: { type: "string", description: "Google Sheets ID" },
-          range: { type: "string", description: "A1 notation range (e.g. Sheet1!A1:D10)" },
+          range: {
+            type: "string",
+            description: "A1 notation range (e.g. Sheet1!A1:D10)",
+          },
         },
         required: ["spreadsheetId", "range"],
       },
     },
     {
       name: "gws_api_execute",
-      description: "Execute any dynamic Google Workspace API call via gws discovery",
+      description:
+        "Execute any dynamic Google Workspace API call via gws discovery",
       inputSchema: {
         type: "object",
         properties: {
-          service: { type: "string", description: "Service name (drive, docs, sheets, slides, gmail, calendar)" },
-          resource: { type: "string", description: "Resource name (e.g. files, documents, messages)" },
-          method: { type: "string", description: "Method name (e.g. list, get, create, export)" },
+          service: {
+            type: "string",
+            description:
+              "Service name (drive, docs, sheets, slides, gmail, calendar)",
+          },
+          resource: {
+            type: "string",
+            description: "Resource name (e.g. files, documents, messages)",
+          },
+          method: {
+            type: "string",
+            description: "Method name (e.g. list, get, create, export)",
+          },
           params: { type: "object", description: "Query and path parameters" },
         },
         required: ["service", "resource", "method"],
@@ -259,7 +311,9 @@ export async function startGwsMcpServer(): Promise<void> {
     try {
       const msg = JSON.parse(line);
       if (msg.method === "tools/list") {
-        console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools } }));
+        console.log(
+          JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools } }),
+        );
       } else if (msg.method === "tools/call") {
         const { name, arguments: args } = msg.params;
         let result: unknown;
@@ -268,9 +322,19 @@ export async function startGwsMcpServer(): Promise<void> {
         } else if (name === "gws_docs_get") {
           result = await executeGwsCommand("docs", "documents", "get", args);
         } else if (name === "gws_sheets_get_values") {
-          result = await executeGwsCommand("sheets", "spreadsheets.values", "get", args);
+          result = await executeGwsCommand(
+            "sheets",
+            "spreadsheets.values",
+            "get",
+            args,
+          );
         } else if (name === "gws_api_execute") {
-          result = await executeGwsCommand(args.service, args.resource, args.method, args.params ?? {});
+          result = await executeGwsCommand(
+            args.service,
+            args.resource,
+            args.method,
+            args.params ?? {},
+          );
         } else {
           throw new Error(`Tool not found: ${name}`);
         }
@@ -278,7 +342,11 @@ export async function startGwsMcpServer(): Promise<void> {
           JSON.stringify({
             jsonrpc: "2.0",
             id: msg.id,
-            result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            result: {
+              content: [
+                { type: "text", text: JSON.stringify(result, null, 2) },
+              ],
+            },
           }),
         );
       } else if (msg.method === "initialize") {

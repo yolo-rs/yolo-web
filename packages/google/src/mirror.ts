@@ -3,7 +3,11 @@ import { Database } from "bun:sqlite";
 import { createClient, type GoogleClientOptions } from "./client.ts";
 import { closeSync, lstatSync, openSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { GoogleOAuthSession, GoogleOAuthState, GoogleOAuthStore } from "./oauth";
+import type {
+  GoogleOAuthSession,
+  GoogleOAuthState,
+  GoogleOAuthStore,
+} from "./oauth";
 
 const READONLY = "https://www.googleapis.com/auth/gmail.readonly";
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
@@ -39,7 +43,10 @@ export function openProtectedGoogleStore(options: {
   assertProtectedPath: (filename: string) => void;
   maxEntries?: number;
 }) {
-  if (!isAbsolute(options.filename) || typeof options.assertProtectedPath !== "function")
+  if (
+    !isAbsolute(options.filename) ||
+    typeof options.assertProtectedPath !== "function"
+  )
     throw new TypeError("An explicit protected Google store is required");
   const filename = resolve(options.filename);
   const maximum = options.maxEntries ?? 4096;
@@ -47,21 +54,24 @@ export function openProtectedGoogleStore(options: {
     throw new TypeError("Invalid Google store capacity");
   for (let current = dirname(filename); ; current = dirname(current)) {
     const stat = lstatSync(current);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe Google store path");
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error("Unsafe Google store path");
     if (dirname(current) === current) break;
   }
   options.assertProtectedPath(filename);
   try {
     closeSync(openSync(filename, "wx", 0o600));
   } catch (error) {
-    if ((error as { code?: string }).code !== "EEXIST") throw new Error("Google store unavailable");
+    if ((error as { code?: string }).code !== "EEXIST")
+      throw new Error("Google store unavailable");
   }
   const stat = lstatSync(filename);
   if (
     !stat.isFile() ||
     stat.nlink !== 1 ||
     stat.isSymbolicLink() ||
-    (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid!()))
+    (process.platform !== "win32" &&
+      ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid!()))
   )
     throw new Error("Unsafe Google store file");
   options.assertProtectedPath(filename);
@@ -77,21 +87,35 @@ export function openProtectedGoogleStore(options: {
     "SELECT value,expires FROM google_oauth WHERE kind=? AND key=?",
   );
   const remove = db.query("DELETE FROM google_oauth WHERE kind=? AND key=?");
-  const put = db.transaction((kind: string, key: string, value: { expiresAt: number }) => {
-    if (!oauthKey.test(key) || !Number.isFinite(value.expiresAt)) throw new TypeError("Invalid OAuth entry");
-    const serialized = JSON.stringify(value);
-    if (Buffer.byteLength(serialized) > 16384) throw new Error("OAuth entry exceeds limit");
-    db.query("DELETE FROM google_oauth WHERE expires<=?").run(Date.now());
-    const count = db
-      .query<{ count: number }, [string]>("SELECT count(*) AS count FROM google_oauth WHERE kind=?")
-      .get(kind)!.count;
-    if (count >= maximum && !find.get(kind, key)) throw new Error("OAuth store capacity reached");
-    db.query("INSERT OR REPLACE INTO google_oauth VALUES (?,?,?,?)").run(kind, key, serialized, value.expiresAt);
-  });
+  const put = db.transaction(
+    (kind: string, key: string, value: { expiresAt: number }) => {
+      if (!oauthKey.test(key) || !Number.isFinite(value.expiresAt))
+        throw new TypeError("Invalid OAuth entry");
+      const serialized = JSON.stringify(value);
+      if (Buffer.byteLength(serialized) > 16384)
+        throw new Error("OAuth entry exceeds limit");
+      db.query("DELETE FROM google_oauth WHERE expires<=?").run(Date.now());
+      const count = db
+        .query<{ count: number }, [string]>(
+          "SELECT count(*) AS count FROM google_oauth WHERE kind=?",
+        )
+        .get(kind)!.count;
+      if (count >= maximum && !find.get(kind, key))
+        throw new Error("OAuth store capacity reached");
+      db.query("INSERT OR REPLACE INTO google_oauth VALUES (?,?,?,?)").run(
+        kind,
+        key,
+        serialized,
+        value.expiresAt,
+      );
+    },
+  );
   const consume = db.transaction((key: string, now: number) => {
     const value = find.get("state", key);
     remove.run("state", key);
-    return value && value.expires > now ? (JSON.parse(value.value) as GoogleOAuthState) : undefined;
+    return value && value.expires > now
+      ? (JSON.parse(value.value) as GoogleOAuthState)
+      : undefined;
   });
   const readSession = db.transaction((key: string, now: number) => {
     const value = find.get("session", key);
@@ -137,20 +161,31 @@ export function openProtectedGoogleStore(options: {
       replace: boolean,
     ) => {
       const current = checkpoint(subject);
-      if (current?.revision !== previous?.revision || current?.historyId !== previous?.historyId)
+      if (
+        current?.revision !== previous?.revision ||
+        current?.historyId !== previous?.historyId
+      )
         throw new Error("Gmail checkpoint changed");
-      if (!historyIdentifier.test(next)) throw new Error("Invalid Gmail checkpoint");
-      if (current && BigInt(next) < BigInt(current.historyId)) throw new Error("Gmail checkpoint moved backwards");
-      if (replace) db.query("DELETE FROM google_gmail_message WHERE subject=?").run(subject);
-      for (const id of deleted) db.query("DELETE FROM google_gmail_message WHERE subject=? AND id=?").run(subject, id);
-      for (const message of messages)
-        db.query("INSERT OR REPLACE INTO google_gmail_message VALUES (?,?,?)").run(
+      if (!historyIdentifier.test(next))
+        throw new Error("Invalid Gmail checkpoint");
+      if (current && BigInt(next) < BigInt(current.historyId))
+        throw new Error("Gmail checkpoint moved backwards");
+      if (replace)
+        db.query("DELETE FROM google_gmail_message WHERE subject=?").run(
           subject,
-          message.id,
-          JSON.stringify(message),
         );
+      for (const id of deleted)
+        db.query(
+          "DELETE FROM google_gmail_message WHERE subject=? AND id=?",
+        ).run(subject, id);
+      for (const message of messages)
+        db.query(
+          "INSERT OR REPLACE INTO google_gmail_message VALUES (?,?,?)",
+        ).run(subject, message.id, JSON.stringify(message));
       const count = db
-        .query<{ count: number }, [string]>("SELECT count(*) AS count FROM google_gmail_message WHERE subject=?")
+        .query<{ count: number }, [string]>(
+          "SELECT count(*) AS count FROM google_gmail_message WHERE subject=?",
+        )
         .get(subject)!.count;
       if (count > maximum) throw new Error("Gmail store capacity reached");
       db.query("INSERT OR REPLACE INTO google_gmail_cursor VALUES (?,?,?)").run(
@@ -172,13 +207,14 @@ export function openProtectedGoogleStore(options: {
     /** Private owner access only; never expose this projection through a public capability endpoint. */
     readMessages(subject: string, limit = 100): GmailMetadata[] {
       subjectId(subject);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new TypeError("Invalid Gmail read limit");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+        throw new TypeError("Invalid Gmail read limit");
       return db
         .query<{ value: string }, [string, number]>(
           "SELECT value FROM google_gmail_message WHERE subject=? ORDER BY id LIMIT ?",
         )
         .all(subject, limit)
-        .map(row => JSON.parse(row.value) as GmailMetadata);
+        .map((row) => JSON.parse(row.value) as GmailMetadata);
     },
     close() {
       db.close();
@@ -194,16 +230,19 @@ function subjectId(subject: string) {
     throw new TypeError("Invalid Google account subject");
 }
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid Gmail response");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid Gmail response");
   return value as Record<string, unknown>;
 }
 function string(value: unknown, pattern: RegExp) {
-  if (typeof value !== "string" || !pattern.test(value)) throw new Error("Invalid Gmail response");
+  if (typeof value !== "string" || !pattern.test(value))
+    throw new Error("Invalid Gmail response");
   return value;
 }
 function array(value: unknown, maximum: number): unknown[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > maximum) throw new Error("Invalid Gmail response");
+  if (!Array.isArray(value) || value.length > maximum)
+    throw new Error("Invalid Gmail response");
   return value;
 }
 async function boundedJSON(response: Response) {
@@ -224,17 +263,24 @@ async function boundedJSON(response: Response) {
     reader.releaseLock();
   }
   try {
-    return record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))));
+    return record(
+      JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
+      ),
+    );
   } catch {
     throw new Error("Invalid Gmail response");
   }
 }
-function metadata(value: Record<string, unknown>, expected: string): GmailMetadata {
+function metadata(
+  value: Record<string, unknown>,
+  expected: string,
+): GmailMetadata {
   const id = string(value.id, identifier);
   if (id !== expected) throw new Error("Gmail message identity mismatch");
   const payload = value.payload === undefined ? {} : record(value.payload);
   const allowed = new Set(["from", "to", "subject", "date"]);
-  const headers = array(payload.headers, 100).map(value => {
+  const headers = array(payload.headers, 100).map((value) => {
     const header = record(value);
     if (
       typeof header.name !== "string" ||
@@ -250,7 +296,9 @@ function metadata(value: Record<string, unknown>, expected: string): GmailMetada
     threadId: string(value.threadId, identifier),
     historyId: string(value.historyId, historyIdentifier),
     internalDate: string(value.internalDate, /^[0-9]{1,20}$/),
-    labelIds: array(value.labelIds, 100).map(value => string(value, identifier)),
+    labelIds: array(value.labelIds, 100).map((value) =>
+      string(value, identifier),
+    ),
     headers,
   };
 }
@@ -290,24 +338,34 @@ export function createReadonlyGmailMirror(options: {
         fetch: options.fetch,
         credentialProvider: async () => {
           const authorization = await options.authorization(subject, signal);
-          if (authorization.subject !== subject || !authorization.scopes.includes(READONLY))
+          if (
+            authorization.subject !== subject ||
+            !authorization.scopes.includes(READONLY)
+          )
             throw new Error("Gmail readonly authorization required");
           return authorization.accessToken;
         },
       });
       async function get(path: string) {
-        return boundedJSON(await client.request(path, { method: "GET", signal }));
+        return boundedJSON(
+          await client.request(path, { method: "GET", signal }),
+        );
       }
       const previous = options.store.checkpoint(subject);
       let replace = !previous,
         next = previous?.historyId ?? "";
       const ids = new Set<string>(),
         deleted = new Set<string>();
-      async function pages(path: string, consume: (page: Record<string, unknown>) => void) {
+      async function pages(
+        path: string,
+        consume: (page: Record<string, unknown>) => void,
+      ) {
         let token: string | undefined;
         const seen = new Set<string>();
         for (let page = 0; page < maxPages; page++) {
-          const result = await get(path + (token ? "&pageToken=" + encodeURIComponent(token) : ""));
+          const result = await get(
+            path + (token ? "&pageToken=" + encodeURIComponent(token) : ""),
+          );
           consume(result);
           if (result.nextPageToken === undefined) return;
           token = string(result.nextPageToken, /^[\x21-\x7e]{1,2048}$/);
@@ -318,34 +376,53 @@ export function createReadonlyGmailMirror(options: {
       }
       function add(id: string) {
         ids.add(id);
-        if (ids.size > maxMessages) throw new Error("Gmail message limit reached");
+        if (ids.size > maxMessages)
+          throw new Error("Gmail message limit reached");
       }
       if (previous) {
         try {
-          await pages("history?maxResults=100&startHistoryId=" + previous.historyId, page => {
-            const historyId = string(page.historyId, historyIdentifier);
-            if (BigInt(historyId) < BigInt(next)) throw new Error("Gmail checkpoint moved backwards");
-            next = historyId;
-            for (const entry of array(page.history, 100)) {
-              const history = record(entry);
-              for (const message of array(history.messages, 1000)) add(string(record(message).id, identifier));
-              for (const field of ["messagesAdded", "labelsAdded", "labelsRemoved", "messagesDeleted"])
-                for (const change of array(history[field], 1000)) {
-                  const id = string(record(record(change).message).id, identifier);
-                  add(id);
-                }
-            }
-          });
+          await pages(
+            "history?maxResults=100&startHistoryId=" + previous.historyId,
+            (page) => {
+              const historyId = string(page.historyId, historyIdentifier);
+              if (BigInt(historyId) < BigInt(next))
+                throw new Error("Gmail checkpoint moved backwards");
+              next = historyId;
+              for (const entry of array(page.history, 100)) {
+                const history = record(entry);
+                for (const message of array(history.messages, 1000))
+                  add(string(record(message).id, identifier));
+                for (const field of [
+                  "messagesAdded",
+                  "labelsAdded",
+                  "labelsRemoved",
+                  "messagesDeleted",
+                ])
+                  for (const change of array(history[field], 1000)) {
+                    const id = string(
+                      record(record(change).message).id,
+                      identifier,
+                    );
+                    add(id);
+                  }
+              }
+            },
+          );
         } catch (error) {
-          if (!(error instanceof Error) || error.message !== "Google request failed (HTTP 404)") throw error;
+          if (
+            !(error instanceof Error) ||
+            error.message !== "Google request failed (HTTP 404)"
+          )
+            throw error;
           replace = true;
           ids.clear();
         }
       }
       if (replace) {
         next = string((await get("profile")).historyId, historyIdentifier);
-        await pages("messages?maxResults=100&includeSpamTrash=true", page => {
-          for (const message of array(page.messages, 100)) add(string(record(message).id, identifier));
+        await pages("messages?maxResults=100&includeSpamTrash=true", (page) => {
+          for (const message of array(page.messages, 100))
+            add(string(record(message).id, identifier));
         });
       }
       const messages: GmailMetadata[] = [];
@@ -362,12 +439,23 @@ export function createReadonlyGmailMirror(options: {
             ),
           );
         } catch (error) {
-          if (!(error instanceof Error) || error.message !== "Google request failed (HTTP 404)") throw error;
+          if (
+            !(error instanceof Error) ||
+            error.message !== "Google request failed (HTTP 404)"
+          )
+            throw error;
           deleted.add(id);
         }
       }
       signal.throwIfAborted();
-      options.store.commit(subject, previous, next, messages, [...deleted], replace);
+      options.store.commit(
+        subject,
+        previous,
+        next,
+        messages,
+        [...deleted],
+        replace,
+      );
       return {
         mode: replace ? "full" : "history",
         updated: messages.length,

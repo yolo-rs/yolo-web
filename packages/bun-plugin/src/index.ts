@@ -31,9 +31,12 @@ function isRuntimeBuiltin(specifier: string): boolean {
 
 function resolvesFrom(specifier: string, dir: string): boolean {
   const parts = specifier.split("/");
-  const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+  const name = specifier.startsWith("@")
+    ? parts.slice(0, 2).join("/")
+    : parts[0]!;
   for (let current = resolve(dir); ; current = dirname(current)) {
-    if (existsSync(join(current, "node_modules", name, "package.json"))) return true;
+    if (existsSync(join(current, "node_modules", name, "package.json")))
+      return true;
     if (dirname(current) === current) return false;
   }
 }
@@ -45,8 +48,13 @@ export function defineBunPlugin(spec: BunPluginSpec): BunPlugin {
     target: "bun",
     async setup(build) {
       for (const [specifier, target] of Object.entries(spec.modules ?? {})) {
-        if (specifier.startsWith("bun:") && isRuntimeBuiltin(specifier)) continue;
-        if (!specifier.startsWith("bun:") && resolvesFrom(specifier, process.cwd())) continue;
+        if (specifier.startsWith("bun:") && isRuntimeBuiltin(specifier))
+          continue;
+        if (
+          !specifier.startsWith("bun:") &&
+          resolvesFrom(specifier, process.cwd())
+        )
+          continue;
         const contents = forwarder(targetPath(target));
         build.module(specifier, () => ({ contents, loader: "js" }));
       }

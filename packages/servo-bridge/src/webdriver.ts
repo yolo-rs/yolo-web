@@ -12,28 +12,42 @@ export class ServoWebDriver {
     private readonly timeoutMs: number,
   ) {}
 
-  static async connect(options: ServoWebDriverOptions = {}): Promise<ServoWebDriver> {
+  static async connect(
+    options: ServoWebDriverOptions = {},
+  ): Promise<ServoWebDriver> {
     const client = new ServoWebDriver(
       (options.endpoint ?? "http://127.0.0.1:7002").replace(/\/$/, ""),
       options.timeoutMs ?? 30_000,
     );
-    const created = await client.request<{ sessionId: string }>("POST", "/session", {
-      capabilities: { alwaysMatch: {} },
-    });
+    const created = await client.request<{ sessionId: string }>(
+      "POST",
+      "/session",
+      {
+        capabilities: { alwaysMatch: {} },
+      },
+    );
     client.sessionId = created.sessionId;
     return client;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const response = await fetch(this.endpoint + path, {
       method,
       headers: { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    const payload = (await response.json()) as { value: T & { error?: string; message?: string } };
+    const payload = (await response.json()) as {
+      value: T & { error?: string; message?: string };
+    };
     if (!response.ok || payload.value?.error) {
-      throw new Error(`WebDriver ${method} ${path}: ${payload.value?.error ?? response.status} ${payload.value?.message ?? ""}`.trim());
+      throw new Error(
+        `WebDriver ${method} ${path}: ${payload.value?.error ?? response.status} ${payload.value?.message ?? ""}`.trim(),
+      );
     }
     return payload.value;
   }
@@ -60,7 +74,10 @@ export class ServoWebDriver {
   }
 
   async execute<T = unknown>(script: string, args: unknown[] = []): Promise<T> {
-    return this.request("POST", this.session("/execute/sync"), { script, args });
+    return this.request("POST", this.session("/execute/sync"), {
+      script,
+      args,
+    });
   }
 
   async close(): Promise<void> {
@@ -70,4 +87,3 @@ export class ServoWebDriver {
     await this.request("DELETE", path);
   }
 }
-

@@ -20,7 +20,13 @@ export {
 } from "./auth.ts";
 
 /** The `bun:google` surface (also served as the `bun:google` specifier by ./bun-plugin). */
-export { createClient, adcCredentialProvider, chromium, obscura, dns } from "./bun-google.ts";
+export {
+  createClient,
+  adcCredentialProvider,
+  chromium,
+  obscura,
+  dns,
+} from "./bun-google.ts";
 export type { GoogleClient, GoogleClientOptions } from "./client.ts";
 export * from "./services.ts";
 export { createGooglePublicSearch } from "./search.ts";
@@ -38,8 +44,11 @@ export {
   type AntigravityCredentialOptions,
   type AntigravityCredentialProvider,
 } from "./credentials.ts";
-export { createAntigravityServices, type AntigravityServicesOptions, type AntigravityModel } from "./antigravity.ts";
+export {
+  createAntigravityServices,
+  type AntigravityServicesOptions,
+  type AntigravityModel,
+} from "./antigravity.ts";
 export * from "./gws.ts";
 export * from "./docs-wordcraft.ts";
 export * from "./slides-deckcraft.ts";
-

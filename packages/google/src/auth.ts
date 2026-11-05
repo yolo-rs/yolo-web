@@ -1,5 +1,8 @@
 import type { GoogleClientOptions } from "./client.ts";
-import { createAntigravityServices, type AntigravityServicesOptions } from "./antigravity.ts";
+import {
+  createAntigravityServices,
+  type AntigravityServicesOptions,
+} from "./antigravity.ts";
 import { createAntigravityCredentialProvider } from "./credentials.ts";
 
 export interface GoogleNativeAuthOptions {
@@ -13,7 +16,10 @@ export interface GoogleNativeAuthOptions {
 }
 
 function nativeProvider(options: GoogleNativeAuthOptions) {
-  return options.credentialProvider ?? createAntigravityCredentialProvider({ target: "gemini:antigravity" });
+  return (
+    options.credentialProvider ??
+    createAntigravityCredentialProvider({ target: "gemini:antigravity" })
+  );
 }
 
 export interface GoogleProfile {
@@ -29,13 +35,18 @@ export interface GoogleModel {
   capabilities?: unknown;
 }
 
-export function resolveGoogleCommand(which: typeof Bun.which = Bun.which): string[] {
+export function resolveGoogleCommand(
+  which: typeof Bun.which = Bun.which,
+): string[] {
   const configured = Bun.env.YOLO_WEB_GOOGLE_BIN ?? Bun.env.APHRODY_GOOGLE_BIN;
   if (configured) return [configured];
   const owner = which("yolo-web");
   if (owner) return [owner, "google"];
   const binary = which("yolo-web-google") ?? which("google");
-  if (!binary) throw new Error("Google CLI not found; install yolo-web-google or set YOLO_WEB_GOOGLE_BIN");
+  if (!binary)
+    throw new Error(
+      "Google CLI not found; install yolo-web-google or set YOLO_WEB_GOOGLE_BIN",
+    );
   return [binary];
 }
 
@@ -69,13 +80,17 @@ export function googleLogin(): Promise<void> {
 }
 
 /** Check credential availability without returning credential material. */
-export async function googleAuthStatus(options: GoogleNativeAuthOptions = {}): Promise<string> {
+export async function googleAuthStatus(
+  options: GoogleNativeAuthOptions = {},
+): Promise<string> {
   await nativeProvider(options)(options.signal);
   return "available";
 }
 
 /** Return the signed-in account's non-secret OpenID profile. */
-export async function googleWhoami(options: GoogleNativeAuthOptions = {}): Promise<GoogleProfile> {
+export async function googleWhoami(
+  options: GoogleNativeAuthOptions = {},
+): Promise<GoogleProfile> {
   return createAntigravityServices({
     ...options,
     credentialProvider: nativeProvider(options),
@@ -83,7 +98,9 @@ export async function googleWhoami(options: GoogleNativeAuthOptions = {}): Promi
 }
 
 /** List Gemini models exposed to the signed-in account. */
-export function googleModels(options: GoogleNativeAuthOptions = {}): Promise<GoogleModel[]> {
+export function googleModels(
+  options: GoogleNativeAuthOptions = {},
+): Promise<GoogleModel[]> {
   return createAntigravityServices({
     ...options,
     credentialProvider: nativeProvider(options),
@@ -123,8 +140,11 @@ export async function verifyOwnerSession(
   headers: Headers,
   secret?: string,
 ): Promise<boolean> {
-  const { resolveSessionSecret, verifyOwnerIdentity } = await import("@yolo-web/auth");
-  const check = await verifyOwnerIdentity(headers, resolveSessionSecret(secret));
+  const { resolveSessionSecret, verifyOwnerIdentity } =
+    await import("@yolo-web/auth");
+  const check = await verifyOwnerIdentity(
+    headers,
+    resolveSessionSecret(secret),
+  );
   return check.isOwner;
 }
-
