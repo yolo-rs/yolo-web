@@ -1,0 +1,103 @@
+{
+ "/": [
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 555193,
+   "avatarUrls": [
+    "/api/avatar/1302024339776081971/2b04e66292b20c31a938fb211d2bf8f1.webp?s=64",
+    "/api/avatar/1319440645605167168/73c2ac9f74a775710cdd2753914a9cf7.webp?s=64",
+    "/api/avatar/772907850350985217/f28f9372f4e44e8e3ada45c372a02dc9.webp?s=64",
+    "/api/avatar/1014634989305995266/b422f3874f0c87cd125b26c26e194e78.webp?s=64",
+    "/api/avatar/default/4.png"
+   ],
+   "discord": [
+    "cdn.discordapp.com",
+    "cdn.discordapp.com\\",
+    "cdn.discordapp.com/avatars/1497194276025663680/1c6ec6f2239cbde2fb3c9e501a8ad16b.webp?size=256\\"
+   ]
+  },
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 555193,
+   "avatarUrls": [
+    "/api/avatar/1302024339776081971/2b04e66292b20c31a938fb211d2bf8f1.webp?s=64",
+    "/api/avatar/1319440645605167168/73c2ac9f74a775710cdd2753914a9cf7.webp?s=64",
+    "/api/avatar/772907850350985217/f28f9372f4e44e8e3ada45c372a02dc9.webp?s=64",
+    "/api/avatar/1014634989305995266/b422f3874f0c87cd125b26c26e194e78.webp?s=64",
+    "/api/avatar/default/4.png"
+   ],
+   "discord": [
+    "cdn.discordapp.com",
+    "cdn.discordapp.com\\",
+    "cdn.discordapp.com/avatars/1497194276025663680/1c6ec6f2239cbde2fb3c9e501a8ad16b.webp?size=256\\"
+   ]
+  }
+ ],
+ "/wiki": [
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 168781
+  },
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 168781
+  },
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 168781
+  }
+ ],
+ "/api/local/health": [
+  {
+   "status": 200,
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "no-store",
+   "content-type": "application/json;charset=utf-8",
+   "content-encoding": "zstd",
+   "bytes": 646,
+   "body": "{\"ok\":true,\"service\":\"shenron-server\",\"version\":\"1.4.5\",\"release\":\"64a12ab1\",\"profile\":\"production\",\"home\":\"/var/lib/shenron\",\"localRag\":true,\"site\":true,\"buildId\":\"QZ0zBZ7sV_o1kPUe6lLxu\",\"groups\":{\"wiki\":{\"available\":false,\"reason\":\"wiki servi par le site\"},\"rag\":{\"available\":true},\"chat\":{\"available\":true},\"conversations\":{\"available\":true},\"sync\":{\"available\":true},\"vfs\":{\"available\":true},\"ocr\":{\"available\":false,\"reason\":\"aphrody introuvable : OCR indisponible\"},\"mcp\":{\"available\":true},\"models\":{\"available\":true},\"memory\":{\"available\":true},\"auth\":{\"available\":true},\"koharu\":{\"available\":false,\"reason\":\"désactivé en production\"}}}"
+  }
+ ],
+ "/wiki/cards": [
+  {
+   "status": 200,
+   "x-shenron-release": "64a12ab1",
+   "cf-cache-status": "DYNAMIC",
+   "cache-control": "public, max-age=0, s-maxage=60, stale-while-revalidate=600",
+   "content-type": "text/html; charset=utf-8",
+   "content-encoding": "zstd",
+   "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+   "bytes": 310153
+  }
+ ]
+}
