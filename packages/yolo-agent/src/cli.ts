@@ -188,7 +188,7 @@ async function setup(flags: Flags): Promise<Runtime> {
       url: typeof flags.url === "string" ? flags.url : undefined,
       extraArgs:
         typeof flags["browser-args"] === "string"
-          ? flags["browser-args"].split(/s+/).filter(Boolean)
+          ? flags["browser-args"].split(/\s+/).filter(Boolean)
           : undefined,
       port:
         typeof flags["cdp-port"] === "string"
