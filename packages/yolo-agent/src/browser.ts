@@ -6,7 +6,7 @@
  */
 import { type CdpResult, type CdpTransport, waitForEvent } from "./cdp.ts";
 import { type AxNode, type Observation, compactAxTree } from "./observe.ts";
-import { PageSession } from "./page.ts";
+import { type DialogInfo, PageSession } from "./page.ts";
 import { type BatchStep, ACTION_NAMES } from "./spec.ts";
 
 export interface TargetInfo {
@@ -222,6 +222,22 @@ export class Browser {
     options: { screenshot?: boolean; maxLines?: number },
   ): Promise<Observation> {
     const t0 = performance.now();
+    if (page.dialog) {
+      // The renderer is blocked by the dialog: AX and evaluate would hang.
+      const tabs = await this.backend.list().catch(() => [] as TargetInfo[]);
+      const current = tabs.find((t) => t.id === page.targetId);
+      return {
+        url: current?.url ?? "",
+        title: current?.title ?? "",
+        tree: ["(page is blocked by a JavaScript dialog; use browser_dialog)"],
+        refs: 0,
+        truncated: false,
+        flagged: [],
+        dialog: { type: page.dialog.type, message: page.dialog.message },
+        tabs: tabs.map((t) => ({ ...t, active: t.id === page.targetId })),
+        timings: { axMs: 0, totalMs: Math.round(performance.now() - t0) },
+      };
+    }
     const infoExpr = `({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:Math.round(scrollX),sy:Math.round(scrollY),ph:document.documentElement.scrollHeight})`;
     const shot = options.screenshot ? this.shoot(page) : undefined;
     const [ax, info, tabs] = await Promise.all([
@@ -266,9 +282,9 @@ export class Browser {
         scrollY: info.sy,
         pageHeight: info.ph,
       },
-      dialog: page.dialog
-        ? { type: page.dialog.type, message: page.dialog.message }
-        : undefined,
+      dialog: ((d) => (d ? { type: d.type, message: d.message } : undefined))(
+        page.dialog as DialogInfo | undefined,
+      ),
       screenshot: screenshot
         ? { mime: "image/jpeg", data: screenshot }
         : undefined,

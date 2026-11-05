@@ -67,16 +67,22 @@ export async function provisionExtension(
   const target = await findExtensionWorker(endpoint);
   const transport = await WsCdpTransport.connect(target.webSocketDebuggerUrl);
   try {
-    const res = await transport.send("Runtime.evaluate", {
-      expression: `chrome.storage.session.set(${JSON.stringify(config)}).then(() => "ok")`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (res.exceptionDetails) {
-      throw new Error(
-        `provisioning failed: ${res.exceptionDetails.exception?.description ?? res.exceptionDetails.text}`,
-      );
+    // The worker's execution context can exist a moment before `chrome` is injected.
+    let failure = "";
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const res = await transport.send("Runtime.evaluate", {
+        expression: `chrome.storage.session.set(${JSON.stringify(config)}).then(() => "ok")`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (!res.exceptionDetails) return target;
+      failure =
+        res.exceptionDetails.exception?.description ??
+        res.exceptionDetails.text;
+      if (!failure.includes("chrome is not defined")) break;
+      await new Promise((r) => setTimeout(r, 200));
     }
+    throw new Error(`provisioning failed: ${failure}`);
   } finally {
     transport.close();
   }

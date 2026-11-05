@@ -29,6 +29,7 @@
   const doc = document as Document & { modelContext?: unknown };
   const nav = navigator as Navigator & { modelContext?: unknown };
   if (doc.modelContext !== undefined) return; // native implementation present
+  if (!isSecureContext) return; // the draft exposes ModelContext in secure contexts only
 
   class YoloModelContext extends EventTarget {
     #tools = new Map<string, Tool>();

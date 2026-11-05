@@ -372,7 +372,7 @@ async function launchOnly(flags: Flags): Promise<void> {
   await launched.exited;
 }
 
-if (import.meta.main) {
+async function main(): Promise<void> {
   const flags = parseFlags(Bun.argv.slice(2));
   const command = flags._[0];
   try {
@@ -390,3 +390,5 @@ if (import.meta.main) {
     process.exit(1);
   }
 }
+
+if (import.meta.main) void main();
