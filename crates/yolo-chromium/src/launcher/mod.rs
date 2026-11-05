@@ -41,6 +41,11 @@ Shell switches (forwarded to the host):
   --initial-show-state=normal|minimized|maximized
   --use-alloy-style           Alloy runtime style instead of Chrome style
   --use-native                Native window instead of the Views framework
+  --headless                  Chromium headless mode: Chrome style, no window on screen
+  --windowless                CEF off-screen rendering (Alloy style; blocks chrome://settings,
+                              chrome://extensions, chrome://flags and other Chrome-UI pages)
+  --webui-patch-dir=<dir>     Inject <host>.css / <host>.js into chrome://<host> pages
+                              (privileged WebUI context: user-owned directory only)
   --lang=<locale> --log-file=<path> --log-severity=<level> --no-sandbox
   --smoke                     Load the page, print and write a receipt, exit
   --smoke-timeout-ms=<n>      Smoke timeout (default 30000)
@@ -142,7 +147,12 @@ impl Default for LauncherOptions {
 
 /// Switches whose values are paths resolved against the launcher's working
 /// directory before the host changes directory.
-const PATH_SWITCHES: &[&str] = &["--receipt", "--cache-path", "--log-file"];
+const PATH_SWITCHES: &[&str] = &[
+    "--receipt",
+    "--cache-path",
+    "--log-file",
+    "--webui-patch-dir",
+];
 
 /// Parses launcher arguments; `cwd` anchors relative path switches.
 pub fn parse_args(args: &[String], cwd: &Path) -> Result<LauncherOptions, String> {

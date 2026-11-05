@@ -77,6 +77,7 @@ const SHUTDOWN_GRACE_MS: u64 = 5_000;
 fn build_settings(config: &ShellConfig) -> Settings {
     let mut settings = Settings {
         no_sandbox: (config.no_sandbox || !crate::engine_info::SANDBOX) as c_int,
+        windowless_rendering_enabled: c_int::from(config.windowless),
         ..Default::default()
     };
     if let Some(path) = &config.cache_path {

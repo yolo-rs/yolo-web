@@ -46,6 +46,9 @@ pub struct ShellInfo {
     pub cache_path: Option<String>,
     pub remote_debugging_port: Option<u16>,
     pub host_executable: String,
+    /// `--headless` (windowless rendering); omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub headless: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -167,6 +170,7 @@ mod tests {
                 matches_build: true,
             },
             shell: ShellInfo {
+                headless: false,
                 runtime_style: "chrome",
                 views: true,
                 sandbox: true,

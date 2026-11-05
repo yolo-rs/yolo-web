@@ -16,7 +16,7 @@ use crate::{
     engine_info,
     receipt::{self, Receipt, ShellInfo, SmokeError, SmokeResult},
     theme::{self, Theme},
-    version,
+    version, webui_patch,
 };
 
 /// Process exit code: success.
@@ -29,6 +29,11 @@ pub const EXIT_LOAD_ERROR: i32 = 2;
 pub const EXIT_TIMEOUT: i32 = 3;
 
 const WINDOW_TITLE: &str = "YOLO-Web Chromium";
+/// Frame rate for `--windowless` browsers.
+const HEADLESS_FRAME_RATE: i32 = 30;
+/// Opaque white page background for windowless browsers, so screenshots are
+/// not transparent (`0xAARRGGBB`).
+const HEADLESS_BACKGROUND: u32 = 0xFFFF_FFFF;
 /// Grace period between closing the shell's browsers and forcing the quit.
 const QUIT_FALLBACK_MS: i64 = 3_000;
 
@@ -270,6 +275,7 @@ impl ShellState {
             build: engine_info::build_info(),
             runtime: version::runtime_info(),
             shell: ShellInfo {
+                headless: self.config.headless,
                 runtime_style: self.runtime_style_name(),
                 views: self.config.use_views,
                 sandbox: engine_info::SANDBOX && !self.config.no_sandbox,
@@ -339,6 +345,10 @@ fn cef_string(value: Option<&CefString>) -> String {
 
 /// Creates a browser window for `url`. Must run on the CEF UI thread.
 pub fn create_browser_window(state: &Shared, url: &str) {
+    if lock(state).config.windowless {
+        create_windowless_browser(state, url);
+        return;
+    }
     let (runtime_style, use_views, show_state, size, theme) = {
         let guard = lock(state);
         (
@@ -390,6 +400,39 @@ pub fn create_browser_window(state: &Shared, url: &str) {
             None,
         );
     }
+}
+
+/// Creates a windowless (off-screen rendered) browser for `--windowless`.
+///
+/// CEF renders windowless browsers through the client's `RenderHandler` and
+/// always gives them the Alloy runtime style (`cef_types_runtime.h`:
+/// "Windowless rendering will always use Alloy style"), so there is no Chrome
+/// toolbar or tab strip. The page itself, chrome:// WebUI included, is the
+/// same Chromium content as in a window, and DevTools
+/// (`--remote-debugging-port`) sees it as a normal page target.
+fn create_windowless_browser(state: &Shared, url: &str) {
+    let mut client = YoloClient::new(state.clone());
+    let settings = BrowserSettings {
+        windowless_frame_rate: HEADLESS_FRAME_RATE,
+        background_color: HEADLESS_BACKGROUND,
+        ..Default::default()
+    };
+    // No parent window; shared textures stay off so OnPaint receives CPU
+    // buffers and Page.captureScreenshot works without a GPU surface.
+    let window_info = WindowInfo {
+        shared_texture_enabled: 0,
+        ..Default::default()
+    }
+    .set_as_windowless(Default::default());
+    let url = CefString::from(url);
+    browser_host_create_browser(
+        Some(&window_info),
+        Some(&mut client),
+        Some(&url),
+        Some(&settings),
+        None,
+        None,
+    );
 }
 
 wrap_app! {
@@ -460,6 +503,96 @@ wrap_client! {
 
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(YoloLoadHandler::new(self.state.clone()))
+        }
+
+        fn render_handler(&self) -> Option<RenderHandler> {
+            let size = {
+                let guard = lock(&self.state);
+                guard.config.windowless.then_some(guard.config.window_size)
+            };
+            size.map(|(width, height)| YoloRenderHandler::new(width, height))
+        }
+
+        fn request_handler(&self) -> Option<RequestHandler> {
+            Some(YoloRequestHandler::new())
+        }
+    }
+}
+
+wrap_render_handler! {
+    struct YoloRenderHandler {
+        width: i32,
+        height: i32,
+    }
+
+    impl RenderHandler {
+        fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
+            if let Some(rect) = rect {
+                *rect = Rect {
+                    x: 0,
+                    y: 0,
+                    width: self.width,
+                    height: self.height,
+                };
+            }
+        }
+
+        fn screen_info(
+            &self,
+            _browser: Option<&mut Browser>,
+            screen_info: Option<&mut ScreenInfo>,
+        ) -> i32 {
+            let Some(screen_info) = screen_info else {
+                return 0;
+            };
+            let rect = Rect {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            };
+            screen_info.device_scale_factor = 1.0;
+            screen_info.depth = 24;
+            screen_info.depth_per_component = 8;
+            screen_info.rect = rect.clone();
+            screen_info.available_rect = rect;
+            1
+        }
+
+        fn on_paint(
+            &self,
+            _browser: Option<&mut Browser>,
+            _type_: PaintElementType,
+            _dirty_rects: Option<&[Rect]>,
+            _buffer: *const u8,
+            _width: i32,
+            _height: i32,
+        ) {
+            // Frames are dropped: screenshots go through DevTools
+            // (Page.captureScreenshot), which reads the compositor directly.
+        }
+    }
+}
+
+wrap_request_handler! {
+    struct YoloRequestHandler;
+
+    impl RequestHandler {
+        fn on_render_process_terminated(
+            &self,
+            browser: Option<&mut Browser>,
+            status: TerminationStatus,
+            error_code: i32,
+            _error_string: Option<&CefString>,
+        ) {
+            let url = browser
+                .and_then(|browser| browser.main_frame())
+                .map(|frame| CefString::from(&frame.url()).to_string())
+                .unwrap_or_default();
+            eprintln!(
+                "yolo-chromium: renderer terminated (status {}, code {error_code}) on {url}",
+                sys::cef_termination_status_t::from(status) as i32
+            );
         }
     }
 }
@@ -537,6 +670,19 @@ wrap_load_handler! {
                 return;
             }
             let url = CefString::from(&frame.url()).to_string();
+            let patch_dir = lock(&self.state).config.webui_patch_dir.clone();
+            if let Some(script) = patch_dir
+                .as_deref()
+                .and_then(|dir| webui_patch::find(dir, &url))
+                .and_then(|files| webui_patch::load_script(&files))
+            {
+                let script_url = CefString::from("yolo-webui-patch://inject.js");
+                frame.execute_java_script(
+                    Some(&CefString::from(script.as_str())),
+                    Some(&script_url),
+                    1,
+                );
+            }
             let actions = lock(&self.state).on_main_frame_loaded(&url, http_status_code);
             actions.run(&self.state);
         }

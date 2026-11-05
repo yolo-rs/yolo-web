@@ -62,6 +62,16 @@ pub struct ShellConfig {
     /// Registry key (Windows) or directory (Linux) read for managed policies.
     pub policy_id: Option<String>,
     pub smoke: Option<SmokeConfig>,
+    /// `--headless`: Chromium's own headless mode. The Chrome runtime style,
+    /// its WebUI, and DevTools stay intact, but no window reaches the screen.
+    pub headless: bool,
+    /// `--windowless`: CEF windowless (off-screen) rendering through a
+    /// `CefRenderHandler`. CEF always uses the Alloy runtime style for
+    /// windowless browsers, and Alloy style blocks Chrome-UI WebUI hosts such
+    /// as chrome://settings, chrome://extensions, and chrome://flags.
+    pub windowless: bool,
+    /// `--webui-patch-dir=<dir>`: persistent CSS/JS edits for chrome:// pages.
+    pub webui_patch_dir: Option<PathBuf>,
 }
 
 impl ShellConfig {
@@ -101,10 +111,11 @@ impl ShellConfig {
             Some(default_cache_path())
         };
 
+        let windowless = has("windowless");
         Self {
             url,
-            alloy_style: has("use-alloy-style"),
-            use_views: !has("use-native"),
+            alloy_style: windowless || has("use-alloy-style"),
+            use_views: !windowless && !has("use-native"),
             initial_show_state: match value("initial-show-state").as_deref() {
                 Some("minimized") => InitialShowState::Minimized,
                 Some("maximized") => InitialShowState::Maximized,
@@ -126,6 +137,9 @@ impl ShellConfig {
                 Some(value("policy-id").unwrap_or_else(|| DEFAULT_POLICY_ID.to_string()))
             },
             smoke,
+            headless: has("headless"),
+            windowless,
+            webui_patch_dir: value("webui-patch-dir").map(PathBuf::from),
         }
     }
 }

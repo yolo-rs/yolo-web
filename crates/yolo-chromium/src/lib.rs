@@ -19,6 +19,7 @@ pub mod receipt;
 pub mod shell;
 pub mod theme;
 pub mod version;
+pub mod webui_patch;
 
 pub use entry::{run, run_in_process};
 pub use shell::{EXIT_INIT_FAILED, EXIT_LOAD_ERROR, EXIT_OK, EXIT_TIMEOUT};

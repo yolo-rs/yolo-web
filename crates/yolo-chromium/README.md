@@ -99,10 +99,81 @@ switch is passed to Chromium unchanged.
 | `--window-size=WxH`                                 | Initial window size.                                                                                |
 | `--initial-show-state=normal\|minimized\|maximized` | Initial window show state.                                                                          |
 | `--no-sandbox`                                      | Disable Chromium's sandbox. Diagnostics only; the receipt records `shell.sandbox`.                  |
+| `--headless`                                        | Chromium's own headless mode. Chrome runtime style, every WebUI host, and DevTools work; no window reaches the screen. See "Headless mode and chrome:// pages". |
+| `--windowless`                                      | CEF windowless (off-screen) rendering through a `CefRenderHandler`. CEF forces the Alloy style for it, and Alloy style blocks Chrome-UI WebUI hosts. |
+| `--webui-patch-dir=<dir>`                           | Persistent edits: inject `<dir>/<host>.css` and `<dir>/<host>.js` into every `chrome://<host>` main frame on load. Privileged; see the security note below. |
 | `--smoke`                                           | Load the page, write the receipt, close the browser, and exit: `0` ok, `2` load error, `3` timeout. |
 | `--smoke-timeout-ms=<n>`                            | Smoke timeout. Default `30000`.                                                                     |
 | `--smoke-hold-ms=<n>`                               | Keep the page open `n` ms after it loaded so external probes can observe it. The launcher sets `1500` automatically when `--smoke` and `--remote-debugging-port` are both given; the DevTools probe result is recorded under `cdp` in the receipt. |
 | `--receipt=<path>`                                  | Receipt path, for example `engines/cef.lock.json`.                                                  |
+
+## Headless mode and chrome:// pages
+
+chrome:// WebUI pages exist only in real Chromium, so they are crawled and
+edited here rather than in Obscura's own V8 engine. Obscura's Bun-side CDP
+client, `packages/obscura-chrome` (built on `@yolo-web/cdp-client`), drives a
+headless yolo-chromium over DevTools.
+
+Two headless paths exist, and only one of them reaches every page:
+
+| Switch         | Mechanism                                                                                   | Runtime style | chrome:// coverage |
+| -------------- | ------------------------------------------------------------------------------------------- | ------------- | ------------------ |
+| `--headless`   | Chromium's own headless mode (`--headless` is also read by Chromium); Views window never shown | Chrome        | All WebUI hosts    |
+| `--windowless` | CEF `windowless_rendering_enabled`, `RenderHandler` with `GetViewRect`/`OnPaint` (frames dropped), `shared_texture_enabled = 0` | Alloy (forced) | Alloy-safe hosts only |
+
+CEF 156 documents that "Windowless rendering will always use Alloy style"
+(`include/internal/cef_types_runtime.h`), and Alloy-style browsers refuse
+navigations to Chrome-UI hosts (`alloy_browser_host_impl.cc`: "Navigation to
+chrome://extensions/ is blocked in Alloy-style browser", CEF issue #3859,
+closed as not planned). Measured on 2026-11-05: chrome://settings fails with
+`net::ERR_ABORTED` under `--windowless` and loads under `--headless`. So
+`--headless` is the crawler's default; `--windowless` stays for embedders that
+need the paint buffers. DevTools and `Page.captureScreenshot` work in both.
+
+```sh
+# Crawl every page listed by chrome://chrome-urls (internal debugging pages
+# enabled first) into dist/chrome-crawl/<chromium version>/index.json.
+bun packages/obscura-chrome/src/cli.ts crawl --exe=<target>/debug/yolo-chromium.exe
+bun packages/obscura-chrome/src/cli.ts crawl --only=version,gpu,flags --out=<dir>
+bun packages/obscura-chrome/src/cli.ts crawl --endpoint=http://127.0.0.1:9222   # attach
+
+# Live edits on a running browser (lost on reload).
+bun packages/obscura-chrome/src/cli.ts edit css --url=chrome://version/ --file=patch.css \
+  --check="body:color=rgb(10, 20, 30)" --endpoint=http://127.0.0.1:9222
+bun packages/obscura-chrome/src/cli.ts edit js --url=chrome://flags/ --file=patch.js --endpoint=...
+bun packages/obscura-chrome/src/cli.ts edit html --url=chrome://version/ --selector=#copy-content --file=x.html ...
+
+# Persistent edits: applied by the shell on every load of chrome://<host>.
+yolo-chromium --headless --webui-patch-dir=<dir> --remote-debugging-port=9222
+```
+
+Per page the crawler stores `page.json` (final URL, title, load status,
+console error count, patch marker), `dom-snapshot.json`
+(`DOMSnapshot.captureSnapshot`), `page.html` (open shadow roots serialized as
+declarative shadow DOM), `text.txt` (rendered text of the composed tree),
+`ax-tree.json` (`Accessibility.getFullAXTree`), `screenshot.png`, and
+`console.json`. chrome:// pages have no HTTP status; the load status is
+`loaded`, `error` (with the `net::` code), `timeout`, `crashed`, `closed`
+(the page closed its own tab), or `browser-exited` (the page closed the
+browser window; the crawler restarts the browser and continues). URLs that
+crash, hang, kill, exhaust memory, quit, or restart by design
+(chrome://crash, kill, hang, gpucrash, inducebrowsercrashforrealz, quit,
+restart, memory-exhaust, v8-oom, blink-oom, uithreadhang, and the rest of
+`DENIED_HOSTS` in `packages/obscura-chrome/src/urls.ts`) are never visited
+and are listed under `denied` in `index.json`.
+
+Security of `--webui-patch-dir`: chrome:// pages are privileged. Script that
+runs there can call `chrome.send` and Mojo interfaces that change settings,
+install or remove extensions, read history, and more, so a patch file has the
+authority of Chromium's own UI. Point the switch only at a directory that you
+own and that only you can write (never a shared, synced, or downloaded
+directory). The shell loads only `<host>.css` and `<host>.js` for plain
+host names, and refuses symlinks that leave the directory, non-regular files,
+files over 1 MiB, and, on Unix, group- or world-writable files and
+directories. Windows ACLs are not inspected. CSS goes in as a
+constructed stylesheet on `document.adoptedStyleSheets`, so it styles the
+document tree; content inside WebUI shadow roots is reached through inherited
+properties and CSS custom properties (`--cr-*`, `--google-*`).
 
 ## Themes and managed policies
 
