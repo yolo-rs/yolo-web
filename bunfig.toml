@@ -6,7 +6,7 @@ linker = "hoisted"
 [test]
 coverage = false
 timeout = 15000
-path-ignore-patterns = ["crates/**"]
+pathIgnorePatterns = ["crates/**", "src/yolo-vendor/**", "vendor/**", "third_party/**", "engines/**"]
 
 [run]
 bun = true

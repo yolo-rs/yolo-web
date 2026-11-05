@@ -15,6 +15,29 @@ import {
   type TargetDomain,
 } from "@yolo-web/knowledge-indexer";
 
+const tempRoot = (
+  Bun.env.TMPDIR ??
+  Bun.env.TEMP ??
+  Bun.env.TMP ??
+  `${process.cwd()}/.tmp`
+).replace(/[/]$/, "");
+
+// Fixture HTML is synthetic: write only to per-run temp files, never to the
+// tracked knowledge database, docs, or skill references.
+const RUN_ID = crypto.randomUUID();
+const TEST_DB = `${tempRoot}/yolo-web-recursive-targets-${RUN_ID}.sqlite`;
+const TEST_DOCS = `${tempRoot}/yolo-web-recursive-targets-${RUN_ID}-docs.md`;
+const TEST_SKILL = `${tempRoot}/yolo-web-recursive-targets-${RUN_ID}-skill.md`;
+
+async function removeIfPresent(path: string): Promise<void> {
+  try {
+    await Bun.file(path).delete();
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code !== "ENOENT" && code !== "EBUSY" && code !== "EPERM") throw error;
+  }
+}
+
 interface TargetSeed {
   domain: TargetDomain;
   rootUrl: string;
@@ -253,13 +276,18 @@ describe("Recursive Web Target Test Matrix (Google, Cloudflare, Chromium, Chromi
   const fp = new BraveFingerprintProtection();
 
   beforeAll(() => {
-    db = new KnowledgeIndexDb();
+    db = new KnowledgeIndexDb(TEST_DB);
   });
 
   afterAll(async () => {
-    // Synchronize test findings into Docs and Skill
-    await db.syncToDocsAndSkill();
+    await db.syncToDocsAndSkill(TEST_DOCS, TEST_SKILL);
+    expect(await Bun.file(TEST_DOCS).text()).toContain("recursive-target-matrix");
     db.close();
+    await Promise.all(
+      [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`, TEST_DOCS, TEST_SKILL].map(
+        removeIfPresent,
+      ),
+    );
   });
 
   for (const target of TARGETS) {
