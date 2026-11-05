@@ -14,7 +14,7 @@ use cef::*;
 use crate::{
     config::{InitialShowState, ShellConfig},
     engine_info,
-    receipt::{self, Receipt, ShellInfo, SmokeError, SmokeResult},
+    receipt::{self, ColorCheck, Receipt, ShellInfo, SmokeError, SmokeResult, ThemeReceipt},
     theme::{self, Theme},
     version, webui_patch,
 };
@@ -28,7 +28,6 @@ pub const EXIT_LOAD_ERROR: i32 = 2;
 /// Process exit code: the smoke page did not load before the timeout.
 pub const EXIT_TIMEOUT: i32 = 3;
 
-const WINDOW_TITLE: &str = "YOLO-Web Chromium";
 /// Frame rate for `--windowless` browsers.
 const HEADLESS_FRAME_RATE: i32 = 30;
 /// Opaque white page background for windowless browsers, so screenshots are
@@ -95,6 +94,10 @@ impl Actions {
 pub struct ShellState {
     config: ShellConfig,
     theme: Theme,
+    /// Read-back of the theme colors from the first Views window.
+    theme_check: Option<Vec<ColorCheck>>,
+    /// Latest window title as read back from the Views window.
+    window_title: String,
     browsers: Vec<Browser>,
     exit_code: i32,
     smoke_started: Option<Instant>,
@@ -114,7 +117,12 @@ pub struct ShellState {
 impl ShellState {
     /// Creates the shared state for one browser process.
     pub fn new(config: ShellConfig) -> Shared {
-        let theme = match config.theme.as_deref().map(theme::resolve) {
+        let resolved = match (config.theme_pack.as_deref(), config.theme.as_deref()) {
+            (Some(path), _) => Some(theme::load_pack(path)),
+            (None, Some(spec)) => Some(theme::resolve(spec)),
+            (None, None) => None,
+        };
+        let theme = match resolved {
             Some(Ok(theme)) => {
                 eprintln!("yolo-chromium: theme {}", theme.name);
                 theme
@@ -128,6 +136,8 @@ impl ShellState {
         Arc::new(Mutex::new(Self {
             config,
             theme,
+            theme_check: None,
+            window_title: String::new(),
             browsers: Vec::new(),
             exit_code: EXIT_OK,
             smoke_started: None,
@@ -200,11 +210,7 @@ impl ShellState {
 
     fn on_title_change(&mut self, title: &str) -> String {
         self.last_title = title.to_string();
-        if title.is_empty() {
-            WINDOW_TITLE.to_string()
-        } else {
-            format!("{title} - {WINDOW_TITLE}")
-        }
+        self.theme.window_title(title)
     }
 
     /// Extensions passed with `--load-extension` register asynchronously after
@@ -288,6 +294,24 @@ impl ShellState {
         Actions::default()
     }
 
+    /// Theme section of the receipt; absent when no theme is active.
+    fn theme_receipt(&self) -> Option<ThemeReceipt> {
+        if self.theme.colors.is_empty() && self.theme.pack.is_none() {
+            return None;
+        }
+        let colors = self.theme_check.clone().unwrap_or_default();
+        Some(ThemeReceipt {
+            name: self.theme.name.clone(),
+            pack: self.theme.pack.clone(),
+            titles: self.theme.titles.clone(),
+            window_created: self.theme_check.is_some(),
+            applied: colors.len(),
+            verified: colors.iter().filter(|check| check.matches).count(),
+            window_title: self.window_title.clone(),
+            colors,
+        })
+    }
+
     fn on_smoke_timeout(&mut self) -> Actions {
         if self.smoke_pending.is_some() {
             // The page loaded; only the hold was still running.
@@ -351,6 +375,7 @@ impl ShellState {
             // The DevTools HTTP endpoint answers on the UI thread, so the
             // probe must not run here; the launcher process fills this in.
             cdp: None,
+            theme: self.theme_receipt(),
         };
         let json = receipt.to_json();
         println!("{json}");
@@ -428,6 +453,7 @@ pub fn create_browser_window(state: &Shared, url: &str) {
             Some(&mut delegate),
         );
         let mut window_delegate = YoloWindowDelegate::new(
+            state.clone(),
             RefCell::new(browser_view),
             runtime_style,
             show_state,
@@ -441,7 +467,7 @@ pub fn create_browser_window(state: &Shared, url: &str) {
             ..Default::default()
         };
         #[cfg(target_os = "windows")]
-        let window_info = window_info.set_as_popup(Default::default(), WINDOW_TITLE);
+        let window_info = window_info.set_as_popup(Default::default(), &theme.window_title(""));
         browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
@@ -668,6 +694,8 @@ wrap_display_handler! {
                 browser_view_get_for_browser(browser.as_mut()).and_then(|view| view.window())
             {
                 window.set_title(Some(&CefString::from(title.as_str())));
+                let read_back = CefString::from(&window.title()).to_string();
+                lock(&self.state).window_title = read_back;
             }
         }
 
@@ -847,6 +875,7 @@ wrap_task! {
 
 wrap_window_delegate! {
     struct YoloWindowDelegate {
+        state: Shared,
         browser_view: RefCell<Option<BrowserView>>,
         runtime_style: RuntimeStyle,
         initial_show_state: ShowState,
@@ -870,10 +899,18 @@ wrap_window_delegate! {
             };
             let mut view = View::from(browser_view);
             window.add_child_view(Some(&mut view));
-            window.set_title(Some(&CefString::from(WINDOW_TITLE)));
+            let title = self.theme.window_title("");
+            window.set_title(Some(&CefString::from(title.as_str())));
             if apply_theme_colors(window, &self.theme) {
                 window.theme_changed();
             }
+            let checks = read_back_theme(window, &self.theme);
+            let read_title = CefString::from(&window.title()).to_string();
+            let mut guard = lock(&self.state);
+            if guard.theme_check.is_none() && !checks.is_empty() {
+                guard.theme_check = Some(checks);
+            }
+            guard.window_title = read_title;
             if self.initial_show_state != ShowState::HIDDEN {
                 window.show();
             }
@@ -952,6 +989,7 @@ wrap_browser_view_delegate! {
                 )
             };
             let mut window_delegate = YoloWindowDelegate::new(
+                self.state.clone(),
                 RefCell::new(popup_browser_view.cloned()),
                 self.runtime_style,
                 ShowState::NORMAL,
@@ -975,4 +1013,25 @@ fn apply_theme_colors(window: &Window, theme: &Theme) -> bool {
         window.set_theme_color(token.color_id(), *color);
     }
     !theme.colors.is_empty()
+}
+
+/// Reads every themed color back from `window` (the resolved Chromium color
+/// provider, not the values that were set) and compares it with the theme.
+fn read_back_theme(window: &Window, theme: &Theme) -> Vec<ColorCheck> {
+    theme
+        .colors
+        .iter()
+        .map(|(token, expected)| {
+            let color_id = token.color_id();
+            let actual = window.theme_color(color_id);
+            ColorCheck {
+                token: token.key(),
+                color_id,
+                role: token.role(),
+                expected: format!("#{expected:08x}"),
+                actual: format!("#{actual:08x}"),
+                matches: actual == *expected,
+            }
+        })
+        .collect()
 }

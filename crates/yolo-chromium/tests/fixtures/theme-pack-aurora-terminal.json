@@ -1,0 +1,247 @@
+{
+  "content_hash": "7270dcd70df7de460eaccfbb0935c89fb27b667a1ee6d448bf4ce4cbe3ca85c7",
+  "schema_version": 1,
+  "theme": {
+    "clamped_roles": [],
+    "contrast": 0.2,
+    "contrast_warnings": [],
+    "dark": true,
+    "glass_blur": 24,
+    "icon_set": "phosphor",
+    "icon_style": "outlined",
+    "icon_weight": 300,
+    "layout": "dock",
+    "logo": null,
+    "motion": [
+      350,
+      "cubic-bezier(0.34, 1.56, 0.64, 1)"
+    ],
+    "pack": "aurora-terminal",
+    "pet": null,
+    "radius": [
+      6,
+      12,
+      20
+    ],
+    "roles": [
+      [
+        "primary",
+        "#00daf2"
+      ],
+      [
+        "on-primary",
+        "#002d33"
+      ],
+      [
+        "primary-container",
+        "#006f7c"
+      ],
+      [
+        "on-primary-container",
+        "#eafbff"
+      ],
+      [
+        "inverse-primary",
+        "#00616c"
+      ],
+      [
+        "secondary",
+        "#a6ccdf"
+      ],
+      [
+        "on-secondary",
+        "#002c3a"
+      ],
+      [
+        "secondary-container",
+        "#44697a"
+      ],
+      [
+        "on-secondary-container",
+        "#f1f9ff"
+      ],
+      [
+        "tertiary",
+        "#a0cbf2"
+      ],
+      [
+        "on-tertiary",
+        "#002a44"
+      ],
+      [
+        "tertiary-container",
+        "#3c688b"
+      ],
+      [
+        "on-tertiary-container",
+        "#f5f8ff"
+      ],
+      [
+        "error",
+        "#ffb4ab"
+      ],
+      [
+        "on-error",
+        "#580003"
+      ],
+      [
+        "error-container",
+        "#c32220"
+      ],
+      [
+        "on-error-container",
+        "#fff6f5"
+      ],
+      [
+        "background",
+        "#091517"
+      ],
+      [
+        "on-background",
+        "#d7e5e8"
+      ],
+      [
+        "surface",
+        "#091517"
+      ],
+      [
+        "on-surface",
+        "#dce9ec"
+      ],
+      [
+        "surface-variant",
+        "#39494c"
+      ],
+      [
+        "on-surface-variant",
+        "#b8cacd"
+      ],
+      [
+        "surface-dim",
+        "#091517"
+      ],
+      [
+        "surface-bright",
+        "#334042"
+      ],
+      [
+        "surface-container-lowest",
+        "#030d10"
+      ],
+      [
+        "surface-container-low",
+        "#121e20"
+      ],
+      [
+        "surface-container",
+        "#192527"
+      ],
+      [
+        "surface-container-high",
+        "#232f32"
+      ],
+      [
+        "surface-container-highest",
+        "#2e3a3d"
+      ],
+      [
+        "surface-tint",
+        "#00daf2"
+      ],
+      [
+        "outline",
+        "#88999d"
+      ],
+      [
+        "outline-variant",
+        "#57676a"
+      ],
+      [
+        "inverse-surface",
+        "#d7e5e8"
+      ],
+      [
+        "inverse-on-surface",
+        "#263235"
+      ],
+      [
+        "shadow",
+        "#000000"
+      ],
+      [
+        "scrim",
+        "#000000"
+      ],
+      [
+        "primary-fixed",
+        "#99f0ff"
+      ],
+      [
+        "primary-fixed-dim",
+        "#00daf2"
+      ],
+      [
+        "on-primary-fixed",
+        "#001f24"
+      ],
+      [
+        "on-primary-fixed-variant",
+        "#004d57"
+      ],
+      [
+        "secondary-fixed",
+        "#c1e8fc"
+      ],
+      [
+        "secondary-fixed-dim",
+        "#a6ccdf"
+      ],
+      [
+        "on-secondary-fixed",
+        "#001f2a"
+      ],
+      [
+        "on-secondary-fixed-variant",
+        "#244a5a"
+      ],
+      [
+        "tertiary-fixed",
+        "#cce5ff"
+      ],
+      [
+        "tertiary-fixed-dim",
+        "#a0cbf2"
+      ],
+      [
+        "on-tertiary-fixed",
+        "#001e31"
+      ],
+      [
+        "on-tertiary-fixed-variant",
+        "#18496a"
+      ],
+      [
+        "focus-ring",
+        "#00daf2"
+      ]
+    ],
+    "seed": "#2f8f9d",
+    "spacing": 6,
+    "title": {
+      "ntp_heading": "Yolo",
+      "product_name": "Yolo",
+      "window_title_template": "{page} - Yolo"
+    },
+    "typography": {
+      "body": "Google Sans Flex",
+      "display": "Google Sans Flex",
+      "mono": "Google Sans Code"
+    },
+    "variant": "vibrant",
+    "wallpaper": {
+      "kind": "generated",
+      "seed": "#2f8f9d",
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 2560 1600\" preserveAspectRatio=\"xMidYMid slice\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#091517\"/><stop offset=\"1\" stop-color=\"#030d10\"/></linearGradient><filter id=\"b\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feGaussianBlur stdDeviation=\"180\"/></filter></defs><rect width=\"2560\" height=\"1600\" fill=\"url(#g)\"/><g filter=\"url(#b)\"><ellipse cx=\"841\" cy=\"1261\" rx=\"814\" ry=\"634\" fill=\"#006f7c\" opacity=\"0.85\"/><ellipse cx=\"1858\" cy=\"627\" rx=\"566\" ry=\"506\" fill=\"#3c688b\" opacity=\"0.85\"/><ellipse cx=\"1122\" cy=\"1404\" rx=\"471\" ry=\"691\" fill=\"#44697a\" opacity=\"0.85\"/><ellipse cx=\"433\" cy=\"924\" rx=\"364\" ry=\"299\" fill=\"#00daf2\" opacity=\"0.35\"/></g></svg>"
+    }
+  }
+}

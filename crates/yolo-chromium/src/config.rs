@@ -59,6 +59,9 @@ pub struct ShellConfig {
     pub no_sandbox: bool,
     /// `--theme=<preset|path.json>`; `None` keeps Chromium defaults.
     pub theme: Option<String>,
+    /// `--theme-pack=<path>`: resolved theme-pack v1.1 JSON (colors and
+    /// title); takes precedence over `--theme`.
+    pub theme_pack: Option<String>,
     /// Registry key (Windows) or directory (Linux) read for managed policies.
     pub policy_id: Option<String>,
     pub smoke: Option<SmokeConfig>,
@@ -131,6 +134,7 @@ impl ShellConfig {
             locale: value("lang"),
             no_sandbox: has("no-sandbox"),
             theme: value("theme"),
+            theme_pack: value("theme-pack"),
             policy_id: if has("no-policies") {
                 None
             } else {

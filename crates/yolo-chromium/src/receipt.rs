@@ -85,6 +85,38 @@ pub struct Receipt {
     pub smoke: SmokeResult,
     /// DevTools probe when `--remote-debugging-port` was set.
     pub cdp: Option<crate::cdp::CdpProbe>,
+    /// Active theme and the read-back of its colors; omitted without a theme.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeReceipt>,
+}
+
+/// One themed color: what the theme asked for and what the Chromium color
+/// provider of the window returned afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorCheck {
+    pub token: &'static str,
+    pub color_id: i32,
+    pub role: &'static str,
+    /// `#AARRGGBB`.
+    pub expected: String,
+    pub actual: String,
+    pub matches: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeReceipt {
+    pub name: String,
+    pub pack: Option<crate::theme::PackInfo>,
+    pub titles: Option<crate::theme::Titles>,
+    /// False when no Views window existed to read the colors back from.
+    pub window_created: bool,
+    pub applied: usize,
+    pub verified: usize,
+    /// Window title read back from the window.
+    pub window_title: String,
+    pub colors: Vec<ColorCheck>,
 }
 
 impl Receipt {
@@ -189,6 +221,7 @@ mod tests {
                 exit_code: 0,
             },
             cdp: None,
+            theme: None,
         };
         let json = receipt.to_json();
         assert!(json.contains("\"schemaVersion\": 1"));

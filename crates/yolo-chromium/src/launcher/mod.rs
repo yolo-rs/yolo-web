@@ -52,6 +52,7 @@ Shell switches (forwarded to the host):
   --smoke-hold-ms=<n>         Keep the page open n ms after load (default 1500 with a DevTools port)
   --receipt=<path>            Receipt file for --smoke (e.g. engines/cef.lock.json)
   --theme=<preset|file.json>  Brand theme: neutral (Chromium default), m3, fluent, apple, omarchy, hyprland, aphrody
+  --theme-pack=<path>         Resolved yolo-theme-pack v1.1 JSON: 50 roles mapped to Chromium colors, plus window title
   --policy-id=<key> --no-policies   Managed policy source (default HKCU key from POLICY_KEY)
 
 Managed policies written by the launcher (Windows registry, HKCU):
