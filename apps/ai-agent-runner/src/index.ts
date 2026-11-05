@@ -138,5 +138,11 @@ async function runCli(): Promise<void> {
 }
 
 if (import.meta.main) {
+  if (Bun.argv.includes("--help") || Bun.argv.includes("-h")) {
+    console.log(
+      "Usage: yolo-agent-runner\n\nRuns the offline Brave Shields agent pipeline demo and prints the JSON transcript.",
+    );
+    process.exit(0);
+  }
   void runCli();
 }

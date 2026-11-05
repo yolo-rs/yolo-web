@@ -365,6 +365,12 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
 }
 
 if (import.meta.main) {
+  if (Bun.argv.includes("--help") || Bun.argv.includes("-h")) {
+    console.log(
+      "Usage: yolo-human-browser [cdpPort] [httpPort]\n\nEnvironment: YOLO_CDP_PORT, YOLO_HTTP_PORT",
+    );
+    process.exit(0);
+  }
   const cdpPort = Number(Bun.argv[2] ?? process.env.YOLO_CDP_PORT ?? 9222);
   const httpPort = Number(Bun.argv[3] ?? process.env.YOLO_HTTP_PORT ?? 8080);
   const { server } = startHumanBrowserServer({

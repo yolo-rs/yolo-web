@@ -29,8 +29,6 @@ import {
   BunHostRuntimeInfo,
   V8PageIsolateConfig,
 } from "@yolo-web/bun-v8-bridge";
-import { createWebMcpServer } from "../../web-mcp/src/server.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Errno, strerror } from "@yolo-web/posix-bun";
 import { crawl, inspectGitRemote, listGitHubRepositories, synthesizeMarkdown } from "@yolo-web/web-crawler";
 
@@ -351,6 +349,10 @@ export function createWebCli(): Command {
     .option("-t, --transport <type>", "Transport type: stdio or http", "stdio")
     .option("-p, --port <number>", "HTTP port", "3000")
     .action(async (_opts: { transport: string; port: string }) => {
+      const [{ createWebMcpServer }, { StdioServerTransport }] = await Promise.all([
+        import("../../web-mcp/src/server.js"),
+        import("@modelcontextprotocol/sdk/server/stdio.js"),
+      ]);
       const server = createWebMcpServer();
       const transport = new StdioServerTransport();
       await server.connect(transport);
