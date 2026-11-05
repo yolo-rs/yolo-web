@@ -297,13 +297,32 @@ export class Browser {
   }
 
   private async shoot(page: PageSession, fullPage = false): Promise<string> {
-    const res = await page.send("Page.captureScreenshot", {
-      format: "jpeg",
-      quality: 55,
-      optimizeForSpeed: true,
-      captureBeyondViewport: fullPage,
-    });
-    return res.data as string;
+    // Headless Chromium can leave the first capture after a viewport change
+    // waiting for a compositor frame that never comes; a retry then succeeds.
+    let lastError = "timed out";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), 4000);
+      });
+      try {
+        const res = await Promise.race([
+          page.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 55,
+            optimizeForSpeed: true,
+            captureBeyondViewport: fullPage,
+          }),
+          timeout,
+        ]);
+        if (res !== "timeout") return res.data as string;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error(`screenshot failed: ${lastError}`);
   }
 
   // ------------------------------------------------------ element access
