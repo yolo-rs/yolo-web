@@ -87,6 +87,10 @@ Browser:
   --profile <dir>          profile directory (default ~/.yolo-web/agent-profile)
   --extension <dir>        unpacked extension (default: embedded or dist/extension)
   --no-extension           do not load the extension
+  --url <url>              first page (default about:blank); chrome-extension:// pages
+                           are navigated after the extension has loaded
+  --browser-args "<args>"  extra browser switches, space separated
+                           (e.g. "--ozone-platform=headless")
 
 Agent:
   --driver cdp|extension   who executes tools (default cdp)
@@ -177,6 +181,11 @@ async function setup(flags: Flags): Promise<Runtime> {
       profileDir: join(profileDir, "browser"),
       headless: flags.headless === true,
       noSandbox: flags["no-sandbox"] === true,
+      url: typeof flags.url === "string" ? flags.url : undefined,
+      extraArgs:
+        typeof flags["browser-args"] === "string"
+          ? flags["browser-args"].split(/s+/).filter(Boolean)
+          : undefined,
       port:
         typeof flags["cdp-port"] === "string"
           ? Number(flags["cdp-port"])
