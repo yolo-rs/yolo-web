@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @yolo-web/brave-shields
  *
  * Pure Bun TypeScript implementation of:
@@ -837,6 +837,30 @@ export interface BraveMcpToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+/** Keyless built-in search used when no Brave API key is configured (DuckDuckGo HTML endpoint, no tracking params). */
+export async function yoloSearch(query: string, count = 10, fetchImpl: typeof fetch = fetch): Promise<BraveSearchResultItem[]> {
+  const res = await fetchImpl("https://html.duckduckgo.com/html/", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) yolo-search/1.0", accept: "text/html" },
+    body: new URLSearchParams({ q: query, kl: "wt-wt" }).toString(),
+  });
+  if (!res.ok) throw new Error(`yolo-search error (${res.status})`);
+  const html = await res.text();
+  const decode = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+  const out: BraveSearchResultItem[] = [];
+  for (const block of html.split('class="result__a"').slice(1)) {
+    if (out.length >= count) break;
+    const a = block.match(/href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!a) continue;
+    let url = a[1];
+    const u = url.match(/[?&]uddg=([^&]+)/);
+    if (u) url = decodeURIComponent(u[1]);
+    else if (url.startsWith("//")) url = "https:" + url;
+    const s = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/);
+    out.push({ title: decode(a[2]), url, description: decode(s?.[1] ?? "") });
+  }
+  return out;
+}
 export class BraveSearchMcpBridge {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -928,6 +952,7 @@ export class BraveSearchMcpBridge {
   public async webSearch(
     args: BraveWebSearchArgs,
   ): Promise<BraveSearchResultItem[]> {
+    if (!this.apiKey) return yoloSearch(args.query, args.count ?? 10, this.fetchImpl);
     const url = new URL(`${this.baseUrl}/web/search`);
     url.searchParams.set("q", args.query);
     url.searchParams.set(
@@ -977,6 +1002,7 @@ export class BraveSearchMcpBridge {
   public async newsSearch(
     args: BraveNewsSearchArgs,
   ): Promise<BraveSearchResultItem[]> {
+    if (!this.apiKey) return yoloSearch(`${args.query} news`, args.count ?? 10, this.fetchImpl);
     const url = new URL(`${this.baseUrl}/news/search`);
     url.searchParams.set("q", args.query);
     url.searchParams.set(
@@ -1054,3 +1080,5 @@ export class BraveSearchMcpBridge {
     };
   }
 }
+
+
