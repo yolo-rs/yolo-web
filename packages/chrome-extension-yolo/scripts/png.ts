@@ -153,7 +153,9 @@ export function decodePng(bytes: Bytes): PngImage {
     );
     const data = bytes.subarray(offset + 8, offset + 8 + length);
     const expectedCrc = readU32be(bytes, offset + 8 + length);
-    if (crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== expectedCrc) {
+    if (
+      crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== expectedCrc
+    ) {
       throw new Error(`bad CRC in ${type} chunk`);
     }
     if (type === "IHDR") {

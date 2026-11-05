@@ -329,7 +329,11 @@ export function buildStyleSheet(): string {
       padding: GRID * 2,
     }),
     rule(".yw-popup-title", { margin: 0, fontSize: 16, fontWeight: 500 }),
-    rule(".yw-section", { display: "flex", flexDirection: "column", gap: GRID }),
+    rule(".yw-section", {
+      display: "flex",
+      flexDirection: "column",
+      gap: GRID,
+    }),
     rule(".yw-section-title", {
       margin: 0,
       fontSize: 12,

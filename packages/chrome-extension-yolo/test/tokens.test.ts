@@ -77,7 +77,11 @@ describe("design tokens", () => {
     for (const { id, colors } of THEMES) {
       const pairs: Array<[string, string, string]> = [
         ["onSurface/surface", colors.onSurface, colors.surface],
-        ["onSurface/surfaceContainer", colors.onSurface, colors.surfaceContainer],
+        [
+          "onSurface/surfaceContainer",
+          colors.onSurface,
+          colors.surfaceContainer,
+        ],
         ["onSurface/background", colors.onSurface, colors.background],
         ["onSurfaceVariant/surface", colors.onSurfaceVariant, colors.surface],
         [

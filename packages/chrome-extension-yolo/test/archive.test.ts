@@ -34,8 +34,9 @@ describe("png", () => {
   test("encodes and decodes RGBA pixels", () => {
     const width = 3;
     const height = 2;
-    const rgba = Uint8Array.from({ length: width * height * 4 }, (_, i) =>
-      (i * 37) & 0xff,
+    const rgba = Uint8Array.from(
+      { length: width * height * 4 },
+      (_, i) => (i * 37) & 0xff,
     );
     const png = encodePng(width, height, rgba);
     expect(Array.from(png.subarray(0, 8))).toEqual([...PNG_SIGNATURE]);

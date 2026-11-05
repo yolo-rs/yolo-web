@@ -86,29 +86,37 @@ describe("manifest.json", () => {
     expect(manifest.host_permissions ?? []).toEqual([]);
   });
 
-  test("forbids eval in the policy and in the bundles", async () => {
-    const policy = manifest.content_security_policy?.extension_pages ?? "";
-    expect(policy).not.toContain("unsafe-eval");
-    await ensureBuilt();
-    for (const file of ["newtab.js", "popup.js", "service-worker.js"]) {
-      const code = await Bun.file(join(DIST_DIR, file)).text();
-      expect(code).not.toMatch(/\beval\s*\(/);
-      expect(code).not.toMatch(/new\s+Function\s*\(/);
-    }
-  }, BUILD_TIMEOUT_MS);
+  test(
+    "forbids eval in the policy and in the bundles",
+    async () => {
+      const policy = manifest.content_security_policy?.extension_pages ?? "";
+      expect(policy).not.toContain("unsafe-eval");
+      await ensureBuilt();
+      for (const file of ["newtab.js", "popup.js", "service-worker.js"]) {
+        const code = await Bun.file(join(DIST_DIR, file)).text();
+        expect(code).not.toMatch(/\beval\s*\(/);
+        expect(code).not.toMatch(/new\s+Function\s*\(/);
+      }
+    },
+    BUILD_TIMEOUT_MS,
+  );
 
-  test("every file the manifest references exists after the build", async () => {
-    await ensureBuilt();
-    const referenced = [
-      ...Object.values(manifest.icons ?? {}),
-      ...Object.values(manifest.action?.default_icon ?? {}),
-      manifest.action?.default_popup,
-      manifest.background?.service_worker,
-      manifest.chrome_url_overrides?.newtab,
-    ].filter((path): path is string => typeof path === "string");
-    expect(referenced.length).toBeGreaterThanOrEqual(7);
-    for (const path of referenced) {
-      expect(await Bun.file(join(DIST_DIR, path)).exists()).toBe(true);
-    }
-  }, BUILD_TIMEOUT_MS);
+  test(
+    "every file the manifest references exists after the build",
+    async () => {
+      await ensureBuilt();
+      const referenced = [
+        ...Object.values(manifest.icons ?? {}),
+        ...Object.values(manifest.action?.default_icon ?? {}),
+        manifest.action?.default_popup,
+        manifest.background?.service_worker,
+        manifest.chrome_url_overrides?.newtab,
+      ].filter((path): path is string => typeof path === "string");
+      expect(referenced.length).toBeGreaterThanOrEqual(7);
+      for (const path of referenced) {
+        expect(await Bun.file(join(DIST_DIR, path)).exists()).toBe(true);
+      }
+    },
+    BUILD_TIMEOUT_MS,
+  );
 });

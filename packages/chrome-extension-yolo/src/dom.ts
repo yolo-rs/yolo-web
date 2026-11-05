@@ -6,13 +6,7 @@
  */
 
 export type Child =
-  | Node
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | readonly Child[];
+  Node | string | number | boolean | null | undefined | readonly Child[];
 
 export interface EventProps {
   onClick?: (event: MouseEvent) => void;
@@ -39,8 +33,9 @@ export interface BaseProps<E extends Element> extends EventProps {
   children?: Child;
 }
 
-export interface HtmlProps<E extends HTMLElement = HTMLElement>
-  extends BaseProps<E> {
+export interface HtmlProps<
+  E extends HTMLElement = HTMLElement,
+> extends BaseProps<E> {
   href?: string;
   target?: string;
   rel?: string;

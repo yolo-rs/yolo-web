@@ -241,7 +241,8 @@ export const THEMES: readonly ThemeTokens[] = [
 
 export function isThemeId(value: unknown): value is ThemeId {
   return (
-    typeof value === "string" && (THEME_IDS as readonly string[]).includes(value)
+    typeof value === "string" &&
+    (THEME_IDS as readonly string[]).includes(value)
   );
 }
 

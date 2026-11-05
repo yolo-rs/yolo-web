@@ -32,10 +32,7 @@ declare namespace chrome {
 
   namespace runtime {
     type OnInstalledReason =
-      | "install"
-      | "update"
-      | "chrome_update"
-      | "shared_module_update";
+      "install" | "update" | "chrome_update" | "shared_module_update";
 
     interface InstalledDetails {
       reason: OnInstalledReason;
