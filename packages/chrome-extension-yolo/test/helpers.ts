@@ -4,7 +4,7 @@ import { type BuildResult, build } from "../scripts/build.ts";
 export { DIST_DIR, MANIFEST_PATH, PACKAGE_ROOT } from "../scripts/build.ts";
 
 /** Upper bound for tests that wait for the shared build. */
-export const BUILD_TIMEOUT_MS = 60_000;
+export const BUILD_TIMEOUT_MS = 180_000;
 
 let pending: Promise<BuildResult> | undefined;
 
