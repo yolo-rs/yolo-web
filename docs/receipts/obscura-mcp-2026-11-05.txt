@@ -1,0 +1,16 @@
+date 2026-11-05T04:13:12.0717028+01:00
+cmd bun scripts/browser/obscura-attach-check.ts (before fix: attach FAIL Target not found; web-mcp ensureCdp patched)
+cmd bun scripts/browser/mcp-engine-check.ts http://127.0.0.1:9225
+endpoint http://127.0.0.1:9225
+{"content":[{"type":"text","text":"{\n  \"frameId\": \"page-1\",\n  \"loaderId\": \"loader-d0794cab-b5f8-4bd5-ba3f-28e8ae868e68\",\n  \"url\": \"https://example.com/\"\n}"}]}
+{"content":[{"type":"text","text":"{\n  \"result\": {\n    \"type\": \"string\",\n    \"description\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\",\n    \"value\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\
+{"content":[{"type":"text","text":"\"# Example Domain\\n\\nSource: https://example.com/\\n\\nThis domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.\\n\\n+çÏ¦Ïº Ïº+ä+åÏÀÏº+é +à+ÅÏ«ÏÁÏÁ +ä+äÏºÏ¦Ï¬Ï«Ï»Ïº+à +ü+è Ïú+àÏ½+äÏ® Ïº+äÏ¬+êÏ½+è+é Ï»+ê+å Ïº+äÏ¡ÏºÏ¼Ï® ÏÑ+ä+ë ÏÑÏ¦+å. +çÏ¦+ç +ä+èÏ¦Ï¬ Ï«Ï»+àÏ®Ïî +è
+{"content":[{"type":"text","text":"[\n  {\n    \"text\": \"Learn more\",\n    \"href\": \"https://iana.org/help/example-domains\",\n    \"title\": \"\"\n  }\n]"}]}
+
+--- engines-check ---
+servo:7002 WebDriver down
+chrome:9222 CDP Chrome/157.0.8103.38 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 180ms
+edge:9223 CDP Edg/159.0.4382.0 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 2231ms
+firefox:9224 down
+obscura:9225 CDP Chrome/145.0.0.0 | recon https://example.com/ title="Example Domain" nodes=22 scripts=1 sheets=2 140ms
+lightpanda:9226 down

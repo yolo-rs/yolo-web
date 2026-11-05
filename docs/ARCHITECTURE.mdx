@@ -2,6 +2,8 @@
 
 This document is the source of truth for repository boundaries and the browser-engine integration plan. It describes what exists separately from what remains planned.
 
+See [ENGINES.md](ENGINES.md) for the measured engine matrix (versions, ports, build flags, blockers).
+
 ## Product boundary
 
 YOLO-Web is a browser distribution and research monorepo. Its current product includes Bun-hosted developer tools, a Rust workspace rooted in Obscura and Servo-derived components, Vercel Labs' native Rust browser-agent source absorbed as the `yolo-web` page automation CLI, and a CDP service that exposes browser APIs and media to external clients. The human-browser frontend is owned and hosted by `yolo-ui/apps/yolo-browser-workbench`. The Rust workspace does not yet provide one embedded engine across products.

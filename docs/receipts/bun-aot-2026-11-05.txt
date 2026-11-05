@@ -1,0 +1,42 @@
+date 2026-11-05T03:09:30.725Z
+bun 1.4.4 cdfa19bba93e147da0b706482c85fdfaf5d7d96e
+$ bun build --compile --aot packages/web-mcp/src/index.ts --outfile C:/src/yolo-web/.aot/web-mcp.exe  [exit 0, 4308ms]
+[537ms]  bundle  267 modules
+[3.736s] compile  C:/src/yolo-web/.aot/web-mcp.exe  1 file compiled without types
+        build id  0571bb1e7b1ef868c8be67d0da273004
+warn: TS100009: '@yolo-web/brave-shields' has 5 type errors (the first at C:/src/yolo-web/packages/brave-shields/src/index.ts:856:15), so 1 of its 1 files are compiled without their types. They still work, but run slower.
+
+856 |     const u = url.match(/[?&]uddg=([^&]+)/);
+                    ^
+note: TS18048: 'url' is possibly 'undefined'.
+   at C:/src/yolo-web/packages/brave-shields/src/index.ts:856:15
+
+201 |         new RegExp(str);
+                  ^
+warn: TS100058: this regular expression runs in the interpreter (reason 6)
+   at C:/src/yolo-web/node_modules/ajv-formats/dist/formats.js:201:13
+
+23 | const defaultRegExp = (str, flags) => new RegExp(str, flags);
+                                               ^
+warn: TS100058: this regular expression runs in the interpreter (reason 6)
+   at C:/src/yolo-web/node_modules/ajv/dist/core.js:23:43
+
+388 |             format = new RegExp(format);
+                               ^
+warn: TS100058: this regular expression runs in the interpreter (reason 6)
+   at C:/src/yolo-web/node_modules/ajv/dist/core.js:388:26
+
+44 |                 if (new RegExp(pat).test(prop)) {
+                             ^
+warn: TS100058: this regular expression runs in the interpreter (reason 6)
+   at C:/src/yolo-web/node_modules/ajv/dist/vocabularies/applicator/patternProperties.js:44:25
+
+391 |     c
+web-mcp: 82.3 MiB sha256 ee48aadc6cc0ab820ed7eb34cbd9c317b7b831cd359b9ca2953b491b8807fd15
+$ bun build --compile --aot packages/web-cluster/src/coordinator.ts --outfile C:/src/yolo-web/.aot/web-cluster-coordinator.exe  [exit 0, 1437ms]
+[557ms]  bundle  2 modules
+ [844ms] compile  C:/src/yolo-web/.aot/web-cluster-coordinator.exe
+        build id  93942877c8f4bc3bca3f09351165d5ea
+web-cluster-coordinator: 75.1 MiB sha256 837c3ca72dede6c8fabc5931b8ddc54309659db4f4b2bfd2dbb676b9cd95f611
+web-mcp.exe initialize -> {"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"io.github.yolo-rs/web-mcp-server","version":"1.0.0"}},"jsonrpc":"2.0","id":1}
+

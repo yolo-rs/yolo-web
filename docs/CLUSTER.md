@@ -43,9 +43,9 @@ Start everything: `powershell -File install-services.ps1 -Start`. Remote workers
 | Google Chrome 157 | CDP 9222 | live, recon OK, yolo-web MCP OK |
 | Microsoft Edge Canary 159 | CDP 9223 | live as scheduled task, recon OK, MCP OK (stable Edge binary is absent on this PC; Canary is installed) |
 | Firefox Nightly 161.0a1 | BiDi 9224 | `session.status` ready=true; Firefox no longer serves CDP, so CDP recon and MCP do not apply |
-| Obscura 0.2.0-dev | CDP 9225 | built (`cargo build --release -p obscura-cli --features render`, 6m43s, sccache bypassed) ; recon OK; MCP tool calls fail with "Target not found" (its `/json/list` ids are not attachable) |
+| Obscura 0.2.0-dev | CDP 9225 | built (`cargo build --release -p obscura-cli --features render`, 6m43s, sccache bypassed) ; recon OK; MCP navigate/evaluate/markdown/links OK after the attach fix (recreates a target when `/json/list` ids are stale) |
 | Lightpanda 1.1.0-nightly | CDP 9226 (vps, tunnelled) | recon OK, MCP navigate/markdown/links OK after the empty-target-list fix; no Windows build exists, so it runs on vps |
-| Servo | none | `crates/servo-*` are library components only (no `Cargo.toml` at `servo-engine`, no shell or CDP/WebDriver server): not runnable, see BLOCKED |
+| Servo 0.7.0 | WebDriver 7002 | upstream release `servoshell` runs headless with `--webdriver`; no CDP; see [ENGINES.md](ENGINES.md) |
 
 ## Fixes made along the way
 

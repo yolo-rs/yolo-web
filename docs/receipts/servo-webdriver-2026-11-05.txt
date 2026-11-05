@@ -1,0 +1,8 @@
+date 2026-11-05T03:08:03.433Z
+servo v0.7.0 (official release binary)
+cmd servoshell.exe --headless --webdriver=7002 about:blank
+status {"status":200,"body":{"value":{"ready":true,"message":"Ready for a new session"}}}
+session {"status":200,"body":{"value":{"sessionId":"f4b75873-3345-4da6-94ac-90d908a22eb3","capabilities":{"proxy":{},"acceptInsecureCerts":false,"unhandledPromptBehavior":"dismiss and notify","pageLoadStrategy":"normal","strictFileInteractability":false,"timeouts":{"script":30000,"pageLoad":300000,"implicit":0},"browserName":"servo","browserVersion":"0.0.1","platformName":"windows","setWindowRect":true,"u
+navigate {"status":200,"body":{"value":null}}
+title {"status":200,"body":{"value":"Example Domain"}}
+userAgent {"status":200,"body":{"value":"Mozilla/5.0 (Windows NT 10.0; Win64; x86_64; rv:153.0) Servo/0.7.0 Firefox/153.0"}}

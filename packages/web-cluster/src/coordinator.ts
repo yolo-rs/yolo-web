@@ -12,7 +12,7 @@ async function status() {
   return { queued, workers: workers.size, observers: observers.size, jobs: Object.fromEntries(rows.map((r: any) => [r.status, r.n])) };
 }
 
-const server = Bun.serve({
+const server = Bun.serve<{ role: string }>({
   hostname: process.env.YOLO_COORD_HOST ?? "127.0.0.1",
   port: COORD_PORT,
   async fetch(req, srv) {
@@ -47,3 +47,4 @@ const server = Bun.serve({
   },
 });
 console.error(`coordinator listening on ${server.hostname}:${server.port}`);
+

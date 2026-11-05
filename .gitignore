@@ -19,3 +19,5 @@ out/
 
 # Chromium Embedded Framework binary distribution cache (see crates/yolo-chromium/README.md)
 /.cef/
+/.servo/
+/.aot/

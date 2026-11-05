@@ -898,3 +898,5 @@ export const SERVO_CONSOLIDATED_CRATES: readonly ServoCrateEntry[] = [
       "Serde serialization support for hyper, http, cookie, and mime types",
   },
 ] as const;
+
+export * from "./webdriver.ts";

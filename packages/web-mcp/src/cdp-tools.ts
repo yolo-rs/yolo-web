@@ -55,7 +55,14 @@ async function ensureCdp() {
   }
   if (activeTargetId !== target.targetId || !cdp.activeSessionId) {
     activeTargetId = target.targetId;
-    await cdp.attachToTarget(target.targetId, true);
+    try {
+      await cdp.attachToTarget(target.targetId, true);
+    } catch (error) {
+      // Obscura lists /json/list pages that exist only for a previous connection; create one on this connection.
+      if (!/Target not found/i.test((error as Error).message)) throw error;
+      activeTargetId = await cdp.createTarget("about:blank");
+      await cdp.attachToTarget(activeTargetId, true);
+    }
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("DOM.enable");
