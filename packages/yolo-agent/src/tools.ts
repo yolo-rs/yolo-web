@@ -158,7 +158,7 @@ export class AgentSession {
   readonly browser: Browser;
   readonly audit: AuditLog;
   autonomy: Autonomy;
-  private readonly approve?: ApprovalHandler;
+  private approve?: ApprovalHandler;
 
   constructor(options: SessionOptions) {
     this.id = options.id;
@@ -172,6 +172,30 @@ export class AgentSession {
     return allTools();
   }
 
+  setApprover(handler: ApprovalHandler | undefined): void {
+    this.approve = handler;
+  }
+
+  /** Approval + audit for tools implemented outside this session (the desktop proxy). */
+  async authorize(
+    action: string,
+    name: string,
+    summary: string,
+  ): Promise<boolean> {
+    if (decideApproval(this.autonomy, action) === "allow") return true;
+    const approved = this.approve
+      ? await this.approve({ action, summary })
+      : false;
+    await this.audit.record({
+      session: this.id,
+      autonomy: this.autonomy,
+      action: name,
+      summary,
+      outcome: approved ? "approved" : "denied",
+    });
+    return approved;
+  }
+
   /** Actions a call will perform, for approval: a batch is as strict as its strictest step. */
   private actionsOf(name: string, args: Record<string, unknown>): string[] {
     if (name === "browser_batch")
@@ -181,6 +205,20 @@ export class AgentSession {
     if (name.startsWith("browser_")) return [name.slice("browser_".length)];
     if (name === "webmcp_call") return ["webmcp_call"];
     return [name];
+  }
+
+  /** Names used for approval: listing tabs only observes. */
+  private gateNames(name: string, args: Record<string, unknown>): string[] {
+    const steps =
+      name === "browser_batch"
+        ? ((args.steps as Record<string, unknown>[] | undefined) ?? [])
+        : name === "browser_tabs"
+          ? [{ action: "tabs", ...args }]
+          : [];
+    if (steps.length === 0) return this.actionsOf(name, args);
+    return steps.map((s) =>
+      s.action === "tabs" && s.op === "list" ? "tabs_list" : String(s.action),
+    );
   }
 
   private summarize(name: string, args: Record<string, unknown>): string {
@@ -222,7 +260,7 @@ export class AgentSession {
       );
       if (unknown)
         throw new AgentError(`unknown tool or action "${unknown}"`, "invalid");
-      const gated = actions.find(
+      const gated = this.gateNames(name, args).find(
         (a) => decideApproval(this.autonomy, a) === "ask",
       );
       if (gated) {

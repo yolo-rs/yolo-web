@@ -9,7 +9,6 @@
  * Flagging is advisory: it never removes content, it warns the model and the
  * human. The model system prompt (see `SYSTEM_PROMPT`) states the same rule.
  */
-import { appendFile } from "node:fs/promises";
 
 export const UNTRUSTED_OPEN = "<untrusted_page_content>";
 export const UNTRUSTED_CLOSE = "</untrusted_page_content>";
@@ -187,7 +186,8 @@ export interface AuditEntry {
 export class AuditLog {
   readonly entries: AuditEntry[] = [];
 
-  constructor(private readonly filePath?: string) {}
+  /** `sink` receives one JSON line per entry (file, storage, socket); entries are already redacted. */
+  constructor(private readonly sink?: (line: string) => void | Promise<void>) {}
 
   async record(entry: Omit<AuditEntry, "ts">): Promise<void> {
     const full: AuditEntry = {
@@ -197,7 +197,6 @@ export class AuditLog {
     };
     this.entries.push(full);
     if (this.entries.length > 5000) this.entries.shift();
-    if (this.filePath)
-      await appendFile(this.filePath, `${JSON.stringify(full)}\n`);
+    if (this.sink) await this.sink(`${JSON.stringify(full)}\n`);
   }
 }

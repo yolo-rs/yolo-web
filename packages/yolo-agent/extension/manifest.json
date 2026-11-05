@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "YOLO Agent",
+  "version": "0.1.0",
+  "description": "Browser use agent for yolo-chromium and Chrome: side panel, WebMCP, bridge to MCP clients. Not a theme switcher.",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "storage", "offscreen", "sidePanel"],
+  "host_permissions": ["https://api.anthropic.com/*"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "YOLO Agent" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["webmcp-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["webmcp-relay.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

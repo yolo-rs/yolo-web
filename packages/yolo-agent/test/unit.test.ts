@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileAuditSink } from "../src/audit-file.ts";
 import {
   auditAxNodes,
   summarizeTrace,
@@ -213,7 +214,7 @@ describe("autonomy and audit", () => {
   test("secrets are redacted before they reach the audit log file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yolo-audit-"));
     const file = join(dir, "audit.jsonl");
-    const log = new AuditLog(file);
+    const log = new AuditLog(fileAuditSink(file));
     await log.record({
       session: "s",
       autonomy: "auto",

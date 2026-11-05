@@ -153,6 +153,9 @@ export async function* parseSse(
   }
 }
 
+const env = (): Record<string, string | undefined> =>
+  typeof Bun === "undefined" ? {} : Bun.env;
+
 export interface AnthropicOptions {
   /** Returns the API key at request time. Defaults to `ANTHROPIC_API_KEY`. */
   getApiKey?: () => string | undefined;
@@ -169,14 +172,13 @@ export class AnthropicClient implements ModelClient {
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: AnthropicOptions = {}) {
-    this.getApiKey = options.getApiKey ?? (() => Bun.env.ANTHROPIC_API_KEY);
+    this.getApiKey = options.getApiKey ?? (() => env().ANTHROPIC_API_KEY);
     this.baseUrl = (
       options.baseUrl ??
-      Bun.env.ANTHROPIC_BASE_URL ??
+      env().ANTHROPIC_BASE_URL ??
       "https://api.anthropic.com"
     ).replace(/\/$/, "");
-    this.model =
-      options.model ?? Bun.env.YOLO_AGENT_MODEL ?? "claude-sonnet-5-5";
+    this.model = options.model ?? env().YOLO_AGENT_MODEL ?? "claude-sonnet-5-5";
     this.fetchImpl = options.fetch ?? fetch;
   }
 

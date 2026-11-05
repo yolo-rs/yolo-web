@@ -191,9 +191,15 @@ export function compactAxTree(
     return true;
   };
 
-  const visit = (node: AxNode, depth: number, parentName: string): void => {
+  const visit = (
+    node: AxNode,
+    depth: number,
+    parentName: string,
+    parentRole = "",
+  ): void => {
     if (truncated) return;
     const role = str(node.role);
+    if (role === "ListMarker") return;
     const name = sanitizeUntrusted(
       str(node.name).replace(/\s+/g, " ").trim(),
       maxText,
@@ -202,7 +208,12 @@ export function compactAxTree(
     let childParentName = parentName;
 
     if (!node.ignored && role === "StaticText") {
-      if (name && name !== parentName && !parentName.includes(name)) {
+      if (
+        name &&
+        parentRole !== "LabelText" &&
+        name !== parentName &&
+        !parentName.includes(name)
+      ) {
         for (const hit of scanInjection(name)) flagged.add(hit);
         printed = emit(depth, JSON.stringify(name));
       }
@@ -238,13 +249,14 @@ export function compactAxTree(
         const state = stateText(node);
         if (state) bits.push(state);
         printed = emit(depth, bits.join(" "));
-        childParentName = name || parentName;
+        childParentName =
+          [name, str(node.value)].filter(Boolean).join("\n") || parentName;
       }
     }
     const nextDepth = printed ? depth + 1 : depth;
     for (const childId of node.childIds ?? []) {
       const child = byId.get(childId);
-      if (child) visit(child, nextDepth, childParentName);
+      if (child) visit(child, nextDepth, childParentName, role);
     }
   };
 
