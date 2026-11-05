@@ -7,8 +7,12 @@
 export interface ExtensionApi {
   storage?: {
     sync?: chrome.storage.StorageArea;
+    local?: chrome.storage.StorageArea;
     onChanged?: typeof chrome.storage.onChanged;
   };
+  topSites?: typeof chrome.topSites;
+  history?: typeof chrome.history;
+  permissions?: typeof chrome.permissions;
   tabs?: typeof chrome.tabs;
   runtime?: typeof chrome.runtime;
 }

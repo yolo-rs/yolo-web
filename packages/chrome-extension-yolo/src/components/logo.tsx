@@ -10,7 +10,7 @@ export interface LogoProps {
   id?: string;
 }
 
-/** Inline SVG of the YOLO-Web mark, drawn from the shared geometry. */
+/** Inline SVG of the Aphrody mark, drawn from the shared geometry. */
 export function Logo(props: LogoProps): Node {
   const size = props.size ?? 32;
   const gradientId = `yw-mark-${props.id ?? "default"}`;

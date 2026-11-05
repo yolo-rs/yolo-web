@@ -23,5 +23,6 @@ out/
 /.aot/
 
 # replica reference screenshots: never shipped
+# replica reference and clone screenshots: never shipped, regenerate with bun run capture
 docs/replica/*/screens/
 docs/replica/*/clone-screens/

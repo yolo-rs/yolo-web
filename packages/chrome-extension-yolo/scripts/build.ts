@@ -2,9 +2,10 @@
 /**
  * Builds the unpacked extension into `dist/`: bundles each entry with
  * `Bun.build` (`target: "browser"`), generates the two entry documents,
- * copies `manifest.json`, and renders the icons.
+ * copies `manifest.json` and the self-hosted font with its license, and
+ * renders the icons.
  */
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { entryDocument } from "./html.ts";
 import { writeIcons } from "./icons.ts";
@@ -12,6 +13,8 @@ import { writeIcons } from "./icons.ts";
 export const PACKAGE_ROOT = resolve(import.meta.dir, "..");
 export const DIST_DIR = join(PACKAGE_ROOT, "dist");
 export const MANIFEST_PATH = join(PACKAGE_ROOT, "manifest.json");
+/** Copied verbatim into `dist/`: the font and its OFL license. */
+export const ASSETS_DIR = join(PACKAGE_ROOT, "assets");
 
 /** Bundle entry points, keyed by output base name. */
 export const ENTRY_SOURCES = {
@@ -80,6 +83,18 @@ export async function build(outDir: string = DIST_DIR): Promise<BuildResult> {
   await Bun.write(manifestOut, Bun.file(MANIFEST_PATH));
   files.push(manifestOut);
   files.push(...(await writeIcons(join(outDir, "icons"))));
+  for (const entry of await readdir(ASSETS_DIR, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const source = join(entry.parentPath, entry.name);
+    const target = join(outDir, relative(ASSETS_DIR, source));
+    await Bun.write(target, Bun.file(source));
+    files.push(target);
+  }
   return { outDir, files };
 }
 

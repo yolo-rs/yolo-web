@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YOLO-Web",
   "version": "0.2.0",
-  "description": "Aphrody search, a themed new tab page, and YOLO brand presets for yolo-chromium and Chrome.",
+  "description": "Aphrody search and a new tab page with live suggestions, shortcuts and recently opened pages, for yolo-chromium and Chrome.",
   "homepage_url": "https://aphrody.com/",
   "minimum_chrome_version": "120",
   "icons": {
@@ -37,8 +37,9 @@
       "is_default": true
     }
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "topSites", "favicon"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
-  }
+  },
+  "optional_permissions": ["history"]
 }

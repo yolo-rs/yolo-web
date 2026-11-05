@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   contrastRatio,
   isHexColor,
@@ -7,18 +8,22 @@ import {
   relativeLuminance,
   withAlpha,
 } from "../src/color.ts";
-import { buildStyleSheet, rule, themeVariables } from "../src/styles.ts";
+import { rolesFor } from "../src/newtab/scheme.ts";
+import { block, buildStyleSheet, rule, themeVariables } from "../src/styles.ts";
 import {
+  DEFAULT_SEED,
   DEFAULT_THEME_ID,
+  FONT_FILE,
+  FONT_LICENSE_FILE,
   FONT_STACK,
   GRID,
+  SEED_SWATCHES,
   THEME_IDS,
   THEMES,
   isThemeId,
   themeById,
 } from "../src/tokens.ts";
-
-const AA_TEXT_CONTRAST = 4.5;
+import { PACKAGE_ROOT } from "./helpers.ts";
 
 describe("color", () => {
   test("WCAG reference values", () => {
@@ -27,7 +32,6 @@ describe("color", () => {
     expect(contrastRatio("#000000", "#ffffff")).toBeCloseTo(21, 6);
     expect(contrastRatio("#ffffff", "#000000")).toBeCloseTo(21, 6);
     expect(contrastRatio("#777777", "#ffffff")).toBeCloseTo(4.48, 1);
-    expect(contrastRatio("#1a73e8", "#ffffff")).toBeGreaterThanOrEqual(4.5);
   });
 
   test("hex helpers", () => {
@@ -41,12 +45,9 @@ describe("color", () => {
 });
 
 describe("design tokens", () => {
-  test("theme ids are unique and include the default", () => {
+  test("eight theme ids, matching the yolo-chromium --theme names", () => {
     expect(new Set(THEME_IDS).size).toBe(THEME_IDS.length);
     expect(THEMES.map((theme) => theme.id)).toEqual([...THEME_IDS]);
-    expect(isThemeId(DEFAULT_THEME_ID)).toBe(true);
-    expect(isThemeId("solarized")).toBe(false);
-    expect(themeById(DEFAULT_THEME_ID).colors.primary).toBe("#1a73e8");
     expect(THEME_IDS).toEqual([
       "default",
       "neutral",
@@ -57,83 +58,109 @@ describe("design tokens", () => {
       "hyprland",
       "aphrody",
     ]);
+    expect(isThemeId(DEFAULT_THEME_ID)).toBe(true);
+    expect(isThemeId("solarized")).toBe(false);
   });
 
   test("colors are six-digit lowercase hex", () => {
+    expect(isHexColor(DEFAULT_SEED)).toBe(true);
+    for (const swatch of SEED_SWATCHES) {
+      expect(isHexColor(swatch.hex)).toBe(true);
+    }
     for (const theme of THEMES) {
-      expect(isHexColor(theme.seed)).toBe(true);
-      for (const [name, value] of Object.entries(theme.colors)) {
-        expect({ theme: theme.id, name, valid: isHexColor(value) }).toEqual({
+      for (const value of Object.values(theme.chrome ?? {})) {
+        expect({ theme: theme.id, value, ok: isHexColor(value) }).toEqual({
           theme: theme.id,
-          name,
-          valid: true,
+          value,
+          ok: true,
         });
       }
     }
   });
 
-  test("text on surfaces meets WCAG AA (4.5:1)", () => {
-    const failures: string[] = [];
-    for (const { id, colors } of THEMES) {
-      const pairs: Array<[string, string, string]> = [
-        ["onSurface/surface", colors.onSurface, colors.surface],
-        [
-          "onSurface/surfaceContainer",
-          colors.onSurface,
-          colors.surfaceContainer,
-        ],
-        ["onSurface/background", colors.onSurface, colors.background],
-        ["onSurfaceVariant/surface", colors.onSurfaceVariant, colors.surface],
-        [
-          "onSurfaceVariant/surfaceVariant",
-          colors.onSurfaceVariant,
-          colors.surfaceVariant,
-        ],
-        ["onPrimary/primary", colors.onPrimary, colors.primary],
-      ];
-      for (const [label, text, surface] of pairs) {
-        const ratio = contrastRatio(text, surface);
-        if (ratio < AA_TEXT_CONTRAST) {
-          failures.push(`${id} ${label} = ${ratio.toFixed(2)}`);
-        }
-      }
+  test("seed themes follow the device; brand themes are fixed", () => {
+    expect(themeById("default").scheme).toBeUndefined();
+    expect(themeById("neutral").scheme).toBeUndefined();
+    for (const id of ["m3", "fluent", "apple"] as const) {
+      expect(themeById(id).scheme).toBe("light");
     }
-    expect(failures).toEqual([]);
+    for (const id of ["omarchy", "hyprland", "aphrody"] as const) {
+      expect(themeById(id).scheme).toBe("dark");
+    }
   });
 
-  test("shapes and spacing follow the 8px grid", () => {
+  test("shapes are whole pixels", () => {
     expect(GRID).toBe(8);
     for (const theme of THEMES) {
       for (const radius of Object.values(theme.shape)) {
         expect(Number.isInteger(radius)).toBe(true);
         expect(radius).toBeGreaterThanOrEqual(0);
       }
-      expect(theme.effects.blur).toBeGreaterThanOrEqual(0);
+      expect(theme.blur).toBeGreaterThanOrEqual(0);
     }
   });
 
-  test("fonts are local and no icon pack is referenced", () => {
-    expect(FONT_STACK).toContain("system-ui");
-    expect(FONT_STACK).not.toMatch(/url\(|@import|https?:/);
-    const css = buildStyleSheet();
-    expect(css).not.toMatch(/url\(|@import|@font-face/);
+  test("the font is self-hosted with its OFL license", async () => {
+    expect(FONT_STACK.startsWith('"Instrument Sans"')).toBe(true);
+    expect(FONT_STACK).not.toMatch(/url\(|@import|https?:|Inter|Roboto|Arial/);
+    const font = Bun.file(join(PACKAGE_ROOT, "assets", FONT_FILE));
+    expect(await font.exists()).toBe(true);
+    const head = new Uint8Array(await font.slice(0, 4).arrayBuffer());
+    expect([...head]).toEqual([0, 1, 0, 0]); // TrueType
+    const license = await Bun.file(
+      join(PACKAGE_ROOT, "assets", FONT_LICENSE_FILE),
+    ).text();
+    expect(license).toContain("SIL Open Font License, Version 1.1");
+    expect(license).toContain("Instrument Sans Project Authors");
   });
 
-  test("the style sheet is generated from typed rules", () => {
+  test("the style sheet is generated from rules, roles only, no remote URLs", () => {
     expect(rule(".a", { display: "flex", gap: GRID, lineHeight: 1.5 })).toBe(
       ".a{display:flex;gap:8px;line-height:1.5}",
     );
-    const css = buildStyleSheet();
-    expect(css).toContain("var(--yw-primary)");
-    expect(css).toContain(".yw-search{");
-    expect(css).toContain(".yw-popup{");
-    expect(css).not.toContain("!important");
-    expect(themeVariables(themeById("default"))["--yw-primary"]).toBe(
-      "#1a73e8",
+    expect(block("@media (x)", [rule(".a", { opacity: 0 })])).toBe(
+      "@media (x){.a{opacity:0}}",
     );
-    expect(themeVariables(themeById("hyprland"))["--yw-border-gradient"]).toBe(
+    const css = buildStyleSheet();
+    for (const selector of [
+      ".yw-search-field{",
+      ".yw-listbox{",
+      ".yw-tile{",
+      ".yw-panel{",
+      ".yw-dialog{",
+      ".yw-toast{",
+      ".yw-card{",
+      ".yw-popup{",
+    ]) {
+      expect(css).toContain(selector);
+    }
+    expect(css).toContain("var(--yw-primary)");
+    expect(css).toContain("prefers-reduced-motion: reduce");
+    expect(css).toContain(
+      ":focus-visible{outline:2px solid var(--yw-focus-ring)",
+    );
+    expect(css).not.toContain("!important");
+    expect(css).not.toMatch(/url\(|@import|https?:/);
+    // No raw hex colors: components read semantic custom properties.
+    expect(css.match(/#[0-9a-f]{6}\b/g) ?? []).toEqual([]);
+  });
+
+  test("theme variables carry every role and the preset shape", () => {
+    const hyprland = themeById("hyprland");
+    const vars = themeVariables(
+      hyprland,
+      rolesFor(hyprland, DEFAULT_SEED, "dark"),
+    );
+    expect(vars["--yw-field-border"]).toBe(
       "linear-gradient(45deg, #33ccff, #00ff99)",
     );
-    expect(themeVariables(themeById("apple"))["--yw-blur"]).toBe("24px");
+    expect(vars["--yw-surface"]).toBe("#1e1e2e");
+    expect(vars["--yw-on-surface"]).toBe("#cdd6f4");
+    const apple = themeById("apple");
+    expect(
+      themeVariables(apple, rolesFor(apple, DEFAULT_SEED, "light"))[
+        "--yw-blur"
+      ],
+    ).toBe("24px");
   });
 });

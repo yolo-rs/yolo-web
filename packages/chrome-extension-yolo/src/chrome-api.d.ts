@@ -71,4 +71,40 @@ declare namespace chrome {
     function create(properties: CreateProperties): Promise<Tab>;
     function update(properties: UpdateProperties): Promise<Tab | undefined>;
   }
+
+  namespace topSites {
+    interface MostVisitedURL {
+      url: string;
+      title: string;
+    }
+    function get(): Promise<MostVisitedURL[]>;
+  }
+
+  namespace history {
+    interface HistoryItem {
+      id: string;
+      url?: string;
+      title?: string;
+      lastVisitTime?: number;
+      visitCount?: number;
+      typedCount?: number;
+    }
+    interface SearchQuery {
+      text: string;
+      startTime?: number;
+      endTime?: number;
+      maxResults?: number;
+    }
+    function search(query: SearchQuery): Promise<HistoryItem[]>;
+  }
+
+  namespace permissions {
+    interface Permissions {
+      permissions?: string[];
+      origins?: string[];
+    }
+    function contains(permissions: Permissions): Promise<boolean>;
+    function request(permissions: Permissions): Promise<boolean>;
+    function remove(permissions: Permissions): Promise<boolean>;
+  }
 }

@@ -15,14 +15,14 @@ assets, logos, copy or network calls is reused.
 
 ## Sources
 
-| Source | URL | Gives |
-| --- | --- | --- |
-| Live home page | https://www.google.com/ | S01, S02 |
-| Live results page | https://www.google.com/search?q=chromium+browser | S03 |
-| Help: customize NTP | https://support.google.com/chrome/answer/11032183 | shortcuts, most visited, footer, cards, Customize Chrome panel |
-| Help: change theme | linked from the article above | colors, background image, follow device theme |
-| Chrome theme manifest docs | https://developer.chrome.com/docs/extensions/reference/manifest/theme | theme keys for the emitter |
-| chrome_url_overrides docs | https://developer.chrome.com/docs/extensions/reference/manifest/chrome-url-overrides | how an extension replaces the NTP |
+| Source                     | URL                                                                                  | Gives                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| Live home page             | https://www.google.com/                                                              | S01, S02                                                       |
+| Live results page          | https://www.google.com/search?q=chromium+browser                                     | S03                                                            |
+| Help: customize NTP        | https://support.google.com/chrome/answer/11032183                                    | shortcuts, most visited, footer, cards, Customize Chrome panel |
+| Help: change theme         | linked from the article above                                                        | colors, background image, follow device theme                  |
+| Chrome theme manifest docs | https://developer.chrome.com/docs/extensions/reference/manifest/theme                | theme keys for the emitter                                     |
+| chrome_url_overrides docs  | https://developer.chrome.com/docs/extensions/reference/manifest/chrome-url-overrides | how an extension replaces the NTP                              |
 
 The owner's `chrome://newtab` could not be read: the browser tool refuses internal pages. NTP facts come
 from the help article and the Chromium source tree (`chrome/browser/resources/new_tab_page`, BSD-licensed,
@@ -30,14 +30,14 @@ readable for behavior; not copied).
 
 ## Screens
 
-| ID | Screen | Route | Purpose | Key components | States seen |
-| --- | --- | --- | --- | --- | --- |
-| S01 | Search home | `/` | start a query | top bar (links, apps grid, account), wordmark, search box (add, voice, image, AI mode), suggestion chips, footer (locale, legal) | filled (dark theme) |
-| S02 | Suggestions | `/` focused, typing | complete the query | expanded box, 10 suggestion rows with search glyph, bolded completion, submit button, report link | typing |
-| S03 | Results | `/search?q=` | answer | compact header with box, vertical tabs (AI, All, Images, News, Videos...), AI overview card, organic results (favicon, site, breadcrumb, title, snippet), knowledge panel | filled |
-| S04 | New tab page | `chrome://newtab` | start or resume | logo, search box, shortcut tiles (my shortcuts or most visited, edit/remove), cards (resume browsing, Drive), footer, Customize Chrome button | from help only |
-| S05 | Customize Chrome panel | side panel from S04 | personalize | theme/background picker, color seeds, follow device, shortcuts toggle and mode, cards toggles, footer toggle | from help only |
-| S06 | Edit shortcut dialog | S04 tile menu | edit tile | name and URL fields, save/cancel, remove | from help only |
+| ID  | Screen                 | Route               | Purpose            | Key components                                                                                                                                                            | States seen         |
+| --- | ---------------------- | ------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| S01 | Search home            | `/`                 | start a query      | top bar (links, apps grid, account), wordmark, search box (add, voice, image, AI mode), suggestion chips, footer (locale, legal)                                          | filled (dark theme) |
+| S02 | Suggestions            | `/` focused, typing | complete the query | expanded box, 10 suggestion rows with search glyph, bolded completion, submit button, report link                                                                         | typing              |
+| S03 | Results                | `/search?q=`        | answer             | compact header with box, vertical tabs (AI, All, Images, News, Videos...), AI overview card, organic results (favicon, site, breadcrumb, title, snippet), knowledge panel | filled              |
+| S04 | New tab page           | `chrome://newtab`   | start or resume    | logo, search box, shortcut tiles (my shortcuts or most visited, edit/remove), cards (resume browsing, Drive), footer, Customize Chrome button                             | from help only      |
+| S05 | Customize Chrome panel | side panel from S04 | personalize        | theme/background picker, color seeds, follow device, shortcuts toggle and mode, cards toggles, footer toggle                                                              | from help only      |
+| S06 | Edit shortcut dialog   | S04 tile menu       | edit tile          | name and URL fields, save/cancel, remove                                                                                                                                  | from help only      |
 
 ## Flows
 
@@ -54,19 +54,19 @@ F06 Resume browsing                     S04 card -> site      1 click
 
 ## Components
 
-| Component | Variants | States | Screens |
-| --- | --- | --- | --- |
-| Search box | hero, compact header | idle, focused, typing, with suggestions, voice listening | S01-S04 |
-| Suggestion list | text, entity with thumbnail | hover, keyboard-selected | S02 |
-| Chip | action suggestion, tab | default, hover, selected | S01, S03 |
-| Shortcut tile | site, add | default, hover with menu, dragging | S04 |
-| Card | resume browsing, file list | loading, empty, filled, dismissed | S04 |
-| Result item | web, with sitelinks, with thumbnail | visited | S03 |
-| Overview card | collapsed, expanded | loading, filled | S03 |
-| Side panel | customize | open, closed | S05 |
-| Dialog | edit shortcut | valid, invalid URL | S06 |
-| Toast | undo | shown, dismissed | S04 |
-| Top bar | home, results | signed in, signed out | S01, S03 |
+| Component       | Variants                            | States                                                   | Screens  |
+| --------------- | ----------------------------------- | -------------------------------------------------------- | -------- |
+| Search box      | hero, compact header                | idle, focused, typing, with suggestions, voice listening | S01-S04  |
+| Suggestion list | text, entity with thumbnail         | hover, keyboard-selected                                 | S02      |
+| Chip            | action suggestion, tab              | default, hover, selected                                 | S01, S03 |
+| Shortcut tile   | site, add                           | default, hover with menu, dragging                       | S04      |
+| Card            | resume browsing, file list          | loading, empty, filled, dismissed                        | S04      |
+| Result item     | web, with sitelinks, with thumbnail | visited                                                  | S03      |
+| Overview card   | collapsed, expanded                 | loading, filled                                          | S03      |
+| Side panel      | customize                           | open, closed                                             | S05      |
+| Dialog          | edit shortcut                       | valid, invalid URL                                       | S06      |
+| Toast           | undo                                | shown, dismissed                                         | S04      |
+| Top bar         | home, results                       | signed in, signed out                                    | S01, S03 |
 
 ## Inferred data model
 

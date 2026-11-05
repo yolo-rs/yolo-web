@@ -28,6 +28,7 @@ interface Manifest {
     search_provider?: Record<string, unknown>;
   };
   permissions?: string[];
+  optional_permissions?: string[];
   host_permissions?: string[];
   content_security_policy?: { extension_pages?: string };
 }
@@ -77,12 +78,13 @@ describe("manifest.json", () => {
     );
   });
 
-  test("requests minimal permissions", () => {
-    const allowed = new Set(["storage", "tabs"]);
-    expect(manifest.permissions?.length ?? 0).toBeGreaterThan(0);
-    for (const permission of manifest.permissions ?? []) {
-      expect(allowed.has(permission)).toBe(true);
-    }
+  test("requests minimal permissions; history only on demand", () => {
+    expect([...(manifest.permissions ?? [])].sort()).toEqual([
+      "favicon",
+      "storage",
+      "topSites",
+    ]);
+    expect(manifest.optional_permissions ?? []).toEqual(["history"]);
     expect(manifest.host_permissions ?? []).toEqual([]);
   });
 

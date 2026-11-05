@@ -25,6 +25,8 @@ describe("build", () => {
         "popup.js",
         "service-worker.js",
         ...ICON_SIZES.map((size) => join("icons", iconFileName(size))),
+        join("fonts", "InstrumentSans-Variable.ttf"),
+        join("fonts", "OFL.txt"),
       ];
       for (const name of expected) {
         expect(await Bun.file(join(DIST_DIR, name)).exists()).toBe(true);

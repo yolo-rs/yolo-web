@@ -14,6 +14,20 @@ export interface EventProps {
   onChange?: (event: Event) => void;
   onSubmit?: (event: SubmitEvent) => void;
   onKeydown?: (event: KeyboardEvent) => void;
+  onFocus?: (event: FocusEvent) => void;
+  onBlur?: (event: FocusEvent) => void;
+  onPointerdown?: (event: PointerEvent) => void;
+  onMousedown?: (event: MouseEvent) => void;
+  onMouseenter?: (event: MouseEvent) => void;
+  onMousemove?: (event: MouseEvent) => void;
+  onDragstart?: (event: DragEvent) => void;
+  onDragend?: (event: DragEvent) => void;
+  onDragover?: (event: DragEvent) => void;
+  onDragleave?: (event: DragEvent) => void;
+  onDrop?: (event: DragEvent) => void;
+  onError?: (event: Event) => void;
+  onClose?: (event: Event) => void;
+  onToggle?: (event: Event) => void;
 }
 
 export interface BaseProps<E extends Element> extends EventProps {
@@ -24,11 +38,11 @@ export interface BaseProps<E extends Element> extends EventProps {
   tabindex?: number;
   hidden?: boolean;
   lang?: string;
-  "aria-label"?: string;
-  "aria-hidden"?: "true" | "false";
-  "aria-pressed"?: "true" | "false";
-  "aria-live"?: "off" | "polite" | "assertive";
-  "aria-current"?: string;
+  draggable?: "true" | "false";
+  /** Any ARIA state or property. */
+  [aria: `aria-${string}`]: string | undefined;
+  /** Any data attribute. */
+  [data: `data-${string}`]: string | undefined;
   ref?: (element: E) => void;
   children?: Child;
 }
@@ -54,6 +68,18 @@ export interface HtmlProps<
   inputmode?: string;
   datetime?: string;
   maxlength?: number;
+  accept?: string;
+  alt?: string;
+  checked?: boolean;
+  decoding?: "async" | "sync" | "auto";
+  form?: string;
+  loading?: "lazy" | "eager";
+  novalidate?: boolean;
+  popover?: "auto" | "manual";
+  required?: boolean;
+  src?: string;
+  width?: number | string;
+  height?: number | string;
 }
 
 export interface SvgProps extends BaseProps<SVGElement> {
@@ -173,6 +199,10 @@ function applyProp(element: Element, name: string, value: unknown): void {
       name.slice(2).toLowerCase(),
       value as EventListener,
     );
+    return;
+  }
+  if (name === "checked" && element instanceof HTMLInputElement) {
+    element.checked = Boolean(value);
     return;
   }
   if (
