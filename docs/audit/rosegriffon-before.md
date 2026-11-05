@@ -1,5 +1,7 @@
 # rosegriffon.fr audit, "before" baseline
 
+**Correction pending (10:35 UTC).** The Lighthouse runs in this report sent a custom `X-Audit-Agent` request header, which made cross-origin calls fail CORS preflight. Console error counts, best-practices scores (73) and findings 5 and 6 below are therefore measurement artifacts and are being re-measured; do not act on them. The tool no longer sends the header. Crawl-based findings are unaffected.
+
 Measured 2026-11-05 about 10:05-10:25 UTC from bunos, after the owner reported deploy 972fc663 (BUILD_ID ekHHwPMKZgZb-p8jStMCl, 10:03:40 UTC). Build identity was reported by the owner and not verified by this tool. Tool: `bun tools/site-audit/run.ts rosegriffon --allow-rosegriffon --name rosegriffon-before --max-pages 100`. Raw: [rosegriffon-before.json](rosegriffon-before.json), tables: [rosegriffon-before.measured.md](rosegriffon-before.measured.md).
 Limits: GET only, 2 concurrent, 250 ms gap, robots honoured, 101 pages crawled (cap 100, depth 2, sitemap sample plus links), 150 of 491 internal link targets and 120 of 340 own-host assets checked. Lighthouse on 9 URLs (home mobile and desktop, 5 heaviest by HTML size, 2 sitemap sample). INP is not measurable in lab. The crawl is a subset: `/wiki/chara`, `/iergday?campagne=*` and `/feed?reseau=x&compte=*` from the owner's earlier audit (`C:\src\rosegriffon\docs\audits\2026-11-05-crawl.md`) were not in this sample.
 

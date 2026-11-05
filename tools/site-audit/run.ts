@@ -8,6 +8,7 @@
 // robots.txt honoured for crawling. Lighthouse drives a real browser, so a single page load can
 // open more than 2 connections; runs are sequential and the number of pages is capped.
 //
+// Lighthouse sends no custom request header: an extra header triggers CORS preflight failures on cross-origin calls and fakes console errors.
 // --name <n> overrides the output basename (e.g. rosegriffon-before).
 // Lighthouse: set SITE_AUDIT_LH to the launcher command (default "bun x lighthouse") and
 // CHROME_PATH to a Chrome/Chromium binary. SITE_AUDIT_CHROME_FLAGS overrides the chrome flags.
@@ -406,12 +407,11 @@ else {
     ...[...heavy, ...smp].map(url => ({ url, forms: flag("--lh-desktop-all") ? (["mobile", "desktop"] as const).slice() : (["mobile"] as Array<"mobile">) })),
   ];
   const tmp = `${OUT}/.tmp-${siteName}`;
-  await Bun.write(`${tmp}/h.json`, JSON.stringify({ "X-Audit-Agent": UA }));
   const lhCmd = (process.env.SITE_AUDIT_LH ?? "bun x lighthouse").split(" ");
   const chromeFlags = process.env.SITE_AUDIT_CHROME_FLAGS ?? "--headless=new --no-sandbox --disable-gpu";
   for (const t of targets) for (const form of t.forms) {
     const out = `${tmp}/${form}-${lh.length}.json`;
-    const args = [...lhCmd, t.url, "--output=json", `--output-path=${out}`, "--quiet", "--only-categories=performance,accessibility,best-practices,seo", `--extra-headers=${tmp}/h.json`, `--chrome-flags=${chromeFlags}`, "--max-wait-for-load=60000"];
+    const args = [...lhCmd, t.url, "--output=json", `--output-path=${out}`, "--quiet", "--only-categories=performance,accessibility,best-practices,seo", `--chrome-flags=${chromeFlags}`, "--max-wait-for-load=60000"];
     if (form === "desktop") args.push("--preset=desktop");
     const r: Lh = { url: t.url, form, ok: false };
     try {
