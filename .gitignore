@@ -26,3 +26,9 @@ out/
 # replica reference and clone screenshots: never shipped, regenerate with bun run capture
 docs/replica/*/screens/
 docs/replica/*/clone-screens/
+
+# Large vendored source checkouts and local agent worktrees
+/third_party/curl-source/
+/third_party/lightpanda-browser-source/
+/third_party/wget2-source/
+/.claude/worktrees/
