@@ -186,3 +186,15 @@ launcher already passes it.
 - `chrome.debugger` refusing the Tracing domain (assumed, so `trace_performance`
   is only offered on the raw CDP driver).
 - Behaviour under real prompt-injection attacks beyond the fixture bait.
+
+## Merged extension proof (2026-11-05)
+
+`packages/chrome-extension-yolo` now bundles this extension (one service
+worker, side panel, offscreen document, WebMCP content scripts, `debugger`
+permission). `scripts/prove-extension.ts` builds it, launches yolo-chromium
+headless with a `chrome-extension://<id>/newtab.html` start URL, and drives a
+fixture page through `navigate`, `observe`, `click`, `extract`, `screenshot`
+and `webmcp_list` via the extension tool path. Receipt:
+`docs/yolo-agent-extension-receipt-2026-11-05.json` (Linux x64 vps, 12 of 12
+steps ok). Not covered: a live model run, the docked side-panel UI, a
+non-fixture site.

@@ -403,7 +403,10 @@ try {
     steps,
     cliStderr: stderrLines.slice(0, 40),
   };
-  await Bun.write(outPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  // The bridge token and pid belong to a session that is already over; keep them out of the file.
+  const redact = (key: string, value: unknown) =>
+    key === "token" || key === "pid" ? "<redacted>" : value;
+  await Bun.write(outPath, `${JSON.stringify(receipt, redact, 2)}\n`);
   await rm(work, { recursive: true, force: true }).catch(() => undefined);
   console.log(`receipt: ${outPath} passed=${receipt.passed}`);
   for (const s of steps)
