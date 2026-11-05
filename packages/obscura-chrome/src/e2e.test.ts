@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -26,11 +26,17 @@ let session: PageSession | undefined;
 beforeAll(async () => {
   if (!exe) return;
   const patchDir = join(work, "patches");
-  mkdirSync(patchDir, { recursive: true });
+  // The shell refuses group- or world-writable patch files on Unix.
+  mkdirSync(patchDir, { recursive: true, mode: 0o700 });
+  const patchFile = join(patchDir, "version.css");
   await Bun.write(
-    join(patchDir, "version.css"),
+    patchFile,
     "body { border-top: 7px solid rgb(1, 2, 3) !important; }\n",
   );
+  if (process.platform !== "win32") {
+    chmodSync(patchDir, 0o700);
+    chmodSync(patchFile, 0o600);
+  }
   browser = await launchHeadless({
     exe,
     port: Number(Bun.env.OBSCURA_CHROME_E2E_PORT ?? 9347),
