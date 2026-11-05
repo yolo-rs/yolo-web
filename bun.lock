@@ -76,7 +76,7 @@
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.32.2",
-        "commander": "15.0.0",
+        "@yolo-web/cli-native": "workspace:*",
         "zod": "4.6.7",
       },
     },
@@ -144,6 +144,10 @@
         "@yolo-web/shared": "workspace:*",
       },
     },
+    "packages/cli-native": {
+      "name": "@yolo-web/cli-native",
+      "version": "0.1.0",
+    },
     "packages/google": {
       "name": "@yolo-web/google",
       "version": "0.2.0",
@@ -181,6 +185,13 @@
         "@yolo-web/shared": "workspace:*",
       },
     },
+    "packages/mcp-native": {
+      "name": "@yolo-web/mcp-native",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@modelcontextprotocol/sdk": "^1.32.2",
+      },
+    },
     "packages/posix-bun": {
       "name": "@yolo-web/posix-bun",
       "version": "0.1.2",
@@ -200,7 +211,6 @@
         "web": "./src/index.ts",
       },
       "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.32.2",
         "@yolo-web/brave-search-mcp": "workspace:*",
         "@yolo-web/brave-shields": "workspace:*",
         "@yolo-web/browser-sdk": "workspace:*",
@@ -208,13 +218,18 @@
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/challenge-solver": "workspace:*",
         "@yolo-web/chromium-tracker": "workspace:*",
+        "@yolo-web/cli-native": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
+        "@yolo-web/mcp-native": "workspace:*",
         "@yolo-web/posix-bun": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
         "@yolo-web/shared": "workspace:*",
         "@yolo-web/web-crawler": "workspace:*",
-        "commander": "^15.0.0",
       },
+    },
+    "packages/web-cluster": {
+      "name": "@yolo-web/web-cluster",
+      "version": "0.1.0",
     },
     "packages/web-crawler": {
       "name": "@yolo-web/web-crawler",
@@ -227,7 +242,6 @@
         "web-mcp": "./src/index.ts",
       },
       "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.32.2",
         "@yolo-web/brave-search-mcp": "workspace:*",
         "@yolo-web/brave-shields": "workspace:*",
         "@yolo-web/browser-sdk": "workspace:*",
@@ -235,12 +249,12 @@
         "@yolo-web/cdp-client": "workspace:*",
         "@yolo-web/challenge-solver": "workspace:*",
         "@yolo-web/chromium-tracker": "workspace:*",
+        "@yolo-web/cli-native": "workspace:*",
         "@yolo-web/mcp-client": "workspace:*",
+        "@yolo-web/mcp-native": "workspace:*",
         "@yolo-web/servo-bridge": "workspace:*",
         "@yolo-web/shared": "workspace:*",
         "@yolo-web/standards": "workspace:*",
-        "commander": "15.0.0",
-        "zod": "4.6.7",
       },
     },
     "packages/web-standards": {
@@ -753,6 +767,8 @@
 
     "@yolo-web/chromium-tracker": ["@yolo-web/chromium-tracker@workspace:packages/chromium-tracker"],
 
+    "@yolo-web/cli-native": ["@yolo-web/cli-native@workspace:packages/cli-native"],
+
     "@yolo-web/google": ["@yolo-web/google@workspace:packages/google"],
 
     "@yolo-web/human-browser": ["@yolo-web/human-browser@workspace:apps/human-browser"],
@@ -760,6 +776,8 @@
     "@yolo-web/knowledge-indexer": ["@yolo-web/knowledge-indexer@workspace:packages/knowledge-indexer"],
 
     "@yolo-web/mcp-client": ["@yolo-web/mcp-client@workspace:packages/mcp-client"],
+
+    "@yolo-web/mcp-native": ["@yolo-web/mcp-native@workspace:packages/mcp-native"],
 
     "@yolo-web/posix-bun": ["@yolo-web/posix-bun@workspace:packages/posix-bun"],
 
@@ -770,6 +788,8 @@
     "@yolo-web/standards": ["@yolo-web/standards@workspace:packages/web-standards"],
 
     "@yolo-web/web-cli": ["@yolo-web/web-cli@workspace:packages/web-cli"],
+
+    "@yolo-web/web-cluster": ["@yolo-web/web-cluster@workspace:packages/web-cluster"],
 
     "@yolo-web/web-crawler": ["@yolo-web/web-crawler@workspace:packages/web-crawler"],
 
@@ -886,8 +906,6 @@
     "color-convert": ["color-convert@2.0.1", "", { "dependencies": { "color-name": "~1.1.4" } }, "sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ=="],
 
     "color-name": ["color-name@1.1.4", "", {}, "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA=="],
-
-    "commander": ["commander@15.0.0", "", {}, "sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg=="],
 
     "compressible": ["compressible@2.0.18", "", { "dependencies": { "mime-db": ">= 1.43.0 < 2" } }, "sha512-AF3r7P5dWxL8MxyITRMlORQNaOA2IkAFaTr4k7BUumjPtRpGDTZpl0Pb1XCO6JeDCBdp126Cgs9sMxqSjgYyRg=="],
 

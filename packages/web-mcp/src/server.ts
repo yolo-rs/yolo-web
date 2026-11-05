@@ -1,13 +1,5 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@yolo-web/mcp-native";
 import { StandardsLoader } from "@yolo-web/standards";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
 import {
   createUnifiedWebTools,
   handleUnifiedWebToolCall,
@@ -33,8 +25,8 @@ async function readWebStandard(uri: string): Promise<unknown | undefined> {
   }
 }
 
-export function createWebMcpServer(): Server {
-  const server = new Server(
+export function createWebMcpServer(): McpServer {
+  const server = new McpServer(
     {
       name: "io.github.yolo-rs/web-mcp-server",
       version: "1.0.0",
@@ -50,7 +42,7 @@ export function createWebMcpServer(): Server {
 
   const tools = createUnifiedWebTools();
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler("tools/list", async () => {
     return {
       tools: tools.map((t) => ({
         name: t.name,
@@ -60,23 +52,18 @@ export function createWebMcpServer(): Server {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return await handleUnifiedWebToolCall(
-      request.params.name,
-      request.params.arguments ?? {},
-    );
+  server.setRequestHandler("tools/call", async (params) => {
+    return await handleUnifiedWebToolCall(params.name, params.arguments ?? {});
   });
 
-  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  server.setRequestHandler("prompts/list", async () => {
     return { prompts: UNIFIED_WEB_PROMPTS };
   });
 
-  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
-    const prompt = UNIFIED_WEB_PROMPTS.find(
-      (p) => p.name === request.params.name,
-    );
+  server.setRequestHandler("prompts/get", async (params) => {
+    const prompt = UNIFIED_WEB_PROMPTS.find((p) => p.name === params.name);
     if (!prompt) {
-      throw new Error(`Unknown prompt: ${request.params.name}`);
+      throw new Error(`Unknown prompt: ${params.name}`);
     }
     return {
       messages: [
@@ -84,19 +71,19 @@ export function createWebMcpServer(): Server {
           role: "user",
           content: {
             type: "text",
-            text: `Execute unified web task: ${prompt.description} with arguments: ${JSON.stringify(request.params.arguments ?? {})}`,
+            text: `Execute unified web task: ${prompt.description} with arguments: ${JSON.stringify(params.arguments ?? {})}`,
           },
         },
       ],
     };
   });
 
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  server.setRequestHandler("resources/list", async () => {
     return { resources: [...UNIFIED_WEB_RESOURCES, ...WEB_STANDARD_RESOURCES] };
   });
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    const uri = request.params.uri;
+  server.setRequestHandler("resources/read", async (params) => {
+    const uri = params.uri;
     const standard = await readWebStandard(uri);
     if (standard !== undefined) {
       const resource = WEB_STANDARD_RESOURCES.find((item) => item.uri === uri)!;
@@ -106,7 +93,7 @@ export function createWebMcpServer(): Server {
     }
     const res = UNIFIED_WEB_RESOURCES.find((r) => r.uri === uri);
     if (!res) {
-      throw new Error(`Unknown resource: ${request.params.uri}`);
+      throw new Error(`Unknown resource: ${params.uri}`);
     }
     return {
       contents: [

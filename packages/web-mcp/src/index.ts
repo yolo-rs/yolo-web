@@ -3,9 +3,7 @@
  * @yolo-web/web-mcp entrypoint
  */
 
-import { Command } from "commander";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { Command } from "@yolo-web/cli-native";
 import { createWebMcpServer } from "./server.js";
 
 async function main(): Promise<void> {
@@ -22,9 +20,8 @@ async function main(): Promise<void> {
       const server = createWebMcpServer();
 
       if (options.transport === "stdio") {
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
         console.error("Unified Web MCP server running on stdio");
+        await server.serveStdio();
         return;
       }
 
@@ -37,39 +34,30 @@ async function main(): Promise<void> {
         throw new Error(`Invalid HTTP port '${options.port}'.`);
       }
 
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: () => crypto.randomUUID(),
-      });
-      await server.connect(transport);
-
       const httpServer = Bun.serve({
         hostname: options.host,
         port,
-        fetch: async (request) => {
-          const path = new URL(request.url).pathname;
-          if (path === "/health") {
-            return Response.json({ status: "ok", service: "yolo-web-mcp", transport: "streamable-http" });
-          }
-          if (path !== "/mcp") return new Response("Not Found", { status: 404 });
-          try {
-            return await transport.handleRequest(request);
-          } catch (error) {
-            console.error("MCP HTTP request failed:", error);
-            return Response.json(
-              { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal MCP server error" } },
-              { status: 500 },
-            );
-          }
+        routes: {
+          "/health": () => Response.json({ status: "ok", service: "yolo-web-mcp", transport: "streamable-http" }),
+          "/mcp": async (request) => {
+            try {
+              return await server.fetch(request);
+            } catch (error) {
+              console.error("MCP HTTP request failed:", error);
+              return Response.json(
+                { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal MCP server error" } },
+                { status: 500 },
+              );
+            }
+          },
         },
+        fetch: () => new Response("Not Found", { status: 404 }),
       });
 
       console.error(`Unified Web MCP Streamable HTTP server listening at http://${options.host}:${httpServer.port}/mcp`);
-      const shutdown = async () => {
-        await transport.close();
-        httpServer.stop(true);
-      };
-      process.once("SIGINT", () => void shutdown());
-      process.once("SIGTERM", () => void shutdown());
+      const shutdown = () => void httpServer.stop(true);
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
     });
 
   await program.parseAsync(process.argv);

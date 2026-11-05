@@ -1,6 +1,6 @@
 import { LoggingLevelSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { LoggingLevel } from '@modelcontextprotocol/sdk/types.js';
-import { Command } from 'commander';
+import { Command } from '@yolo-web/cli-native';
 import { parseDelimitedList, parsePort, readBraveApiKeyFromFile } from './utils.js';
 
 function parseToolNameList(value: string | string[] | undefined | null): string[] {

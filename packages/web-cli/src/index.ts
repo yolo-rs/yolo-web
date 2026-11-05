@@ -6,7 +6,7 @@
  * Servo, Bun, Deno, Chromium & V8 into a single command for AI agents and humans.
  */
 
-import { Command } from "commander";
+import { Command } from "@yolo-web/cli-native";
 import {
   BraveSearchMcpBridge,
   BraveShieldsEngine,
@@ -349,14 +349,10 @@ export function createWebCli(): Command {
     .option("-t, --transport <type>", "Transport type: stdio or http", "stdio")
     .option("-p, --port <number>", "HTTP port", "3000")
     .action(async (_opts: { transport: string; port: string }) => {
-      const [{ createWebMcpServer }, { StdioServerTransport }] = await Promise.all([
-        import("../../web-mcp/src/server.js"),
-        import("@modelcontextprotocol/sdk/server/stdio.js"),
-      ]);
+      const { createWebMcpServer } = await import("../../web-mcp/src/server.js");
       const server = createWebMcpServer();
-      const transport = new StdioServerTransport();
-      await server.connect(transport);
       console.error("Unified Web MCP server connected over stdio");
+      await server.serveStdio();
     });
 
   // 7. web serve (CDP WebSocket Server)

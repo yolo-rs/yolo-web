@@ -1,0 +1,17 @@
+{
+  "name": "@yolo-web/cli-native",
+  "version": "0.1.0",
+  "description": "Zero-dependency commander-compatible subset for YOLO-Web CLIs",
+  "license": "Apache-2.0 OR MPL-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check"
+  }
+}
