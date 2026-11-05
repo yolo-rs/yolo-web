@@ -1,0 +1,25 @@
+# receipt: agent-browser headless smoke via CDP (Chrome Canary, throwaway profile)
+# host: APHRODY  date: 2026-11-05 00:04:48 +01:00
+# chrome: C:\Users\aphro\AppData\Local\Google\Chrome SxS\Application\chrome.exe  version: 159.0.8142.0
+# bun: 1.4.4   helper: scripts/browsers/cdp-screenshot.ts
+# throwaway profile (marker ab-smoke): C:\Users\aphro\AppData\Local\Temp\ab-smoke\profile  -- no user profile/User Data read
+
+## launch headless + CDP endpoint
+cmd: chrome --headless=new --user-data-dir=<tmp> --remote-debugging-port=9465 --remote-allow-origins=* about:blank
+/json/version ->
+{
+   "Browser": "Chrome/159.0.8142.0",
+   "File-Path-Style": "windows",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/159.0.0.0 Safari/537.36",
+   "V8-Version": "15.9.83",
+   "WebKit-Version": "537.36 (@454503016bc2f0f438e6b0f01bc6f9cd9a015d22)",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9465/devtools/browser/441259a1-b0ff-428b-94cc-3fc3b9ebca92"
+}
+
+## screenshot via CDP helper (navigate local page -> PNG)
+cmd: bun scripts/browsers/cdp-screenshot.ts 9465 file:///C:/Users/aphro/AppData/Local/Temp/ab-smoke/page.html render.png
+bun: OK wrote 23259 bytes -> C:\Users\aphro\AppData\Local\Temp\ab-smoke\render.png
+screenshot: OK 23259 bytes, signature=PNG (PNG)
+
+# teardown: killed 14 marked headless proc(s); temp dir cleaned next step. User's Chrome untouched.

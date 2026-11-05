@@ -1,0 +1,25 @@
+# receipt: pwsh -File scripts/browsers/chromium-windows-detect.ps1 (read-only)
+=== Chromium-on-Windows toolchain detection ===
+date                       2026-11-05 00:08:17 +01:00
+host                       APHRODY
+visual studio              Visual Studio Build Tools 2026 (18.11.12324.101)
+vs installPath             C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+msvc toolset               14.51.36231
+cl.exe                     True
+ATL/MFC (VC.ATLMFC)        False
+windows 11 SDKs            10.0.26100.0, 10.0.28000.0
+SDK Debugging Tools        True
+depot_tools on PATH        C:\src\depot_tools
+depot_tools fetch/gn       True
+env DEPOT_TOOLS_WIN_TOOLCHAIN process='0' user='' machine='0'
+env vs2026_install         process='' user='' machine=''
+env GYP_MSVS_OVERRIDE_PATH process='' user='' machine=''
+checkout C:\src\chromium   True
+C: free (GB)               46,1
+C: required (GB)           100 (NTFS)
+
+=== verdict ===
+BLOCKED:
+ - DISK: C: has 46.1GB free, Chromium needs >=100GB (build on another volume)
+ - COMPONENT: VC.ATLMFC missing (required)
+ - ENV: vs2026_install not set persistently

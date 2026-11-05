@@ -1,0 +1,76 @@
+# receipt: scripts/browsers/vps-aosp-cros-prereq.sh executed on vps (read-only, nothing installed)
+# transfer: cat script | tr -d CR | ssh vps 'cat > ~/src/yolo-work/browsers-prereq/prereq.sh; bash it'
+# host: vps   date: 2026-11-05 00:11:49 +0100
+
+=== vps AOSP + ChromiumOS prereq check (read-only) ===
+date                         2026-11-04 23:11:50 +0000
+host                         vps-203bea89
+arch                         x86_64
+kernel                       7.3.0-9-generic
+os                           Ubuntu 26.10 (VERSION_ID=26.10)
+glibc                        2.44
+cpus                         12
+ram                          45 GiB total, 37 GiB avail
+home_free                    333
+
+--- toolchain ---
+git                          /usr/bin/git  git version 2.55.0
+python3                      /home/ubuntu/.local/bin/python3  Python 3.12.15
+java                         /usr/bin/java  openjdk version "25.0.4.1" 2026-08-18
+depot_tools                  /home/ubuntu/depot_tools
+tool:repo                    /home/ubuntu/depot_tools/repo (depot_tools, not on PATH)
+tool:gn                      /home/ubuntu/depot_tools/gn (depot_tools, not on PATH)
+tool:ninja                   /usr/bin/ninja
+tool:ccache                  /usr/bin/ccache
+tool:cros_sdk                /home/ubuntu/depot_tools/cros_sdk (depot_tools, not on PATH)
+tool:gclient                 /home/ubuntu/depot_tools/gclient (depot_tools, not on PATH)
+tool:fetch                   /home/ubuntu/depot_tools/fetch (depot_tools, not on PATH)
+
+--- AOSP apt packages (source.android.com/docs/setup/start/initializing) ---
+  MISSING  git-core
+  ok       gnupg
+  ok       flex
+  ok       bison
+  ok       build-essential
+  ok       zip
+  ok       curl
+  ok       zlib1g-dev
+  MISSING  libc6-dev-i386
+  MISSING  x11proto-core-dev
+  ok       libx11-dev
+  MISSING  lib32z1-dev
+  MISSING  libgl1-mesa-dev
+  ok       libxml2-utils
+  ok       xsltproc
+  ok       unzip
+  ok       fontconfig
+aosp_missing                  git-core libc6-dev-i386 x11proto-core-dev lib32z1-dev libgl1-mesa-dev
+
+--- ChromiumOS host tools (developer-library) ---
+  ok       git
+  MISSING  gitk
+  MISSING  git-gui
+  ok       curl
+  ok       util-linux
+  ok       util-linux-extra
+
+=== official budgets ===
+AOSP_ram                     >=64 GB
+AOSP_disk                    >=400 GB (250 checkout + 150 build)
+AOSP_repo                    repo launcher >=2.4
+AOSP_tc                      OpenJDK/Make/Python3 come prebuilt in the release branch
+CrOS_disk                    practical ~90-120 GB (doc: initial dl ~2GB, pkgs ~3GB, each image <=8GB)
+CrOS_ram                     many GB (Chrome link 8-28 GB); 45 GB ample
+CrOS_os                      official Ubuntu 22.04 (Jammy); Debian trixie common
+
+=== verdict (this vps) ===
+AOSP:
+  BLOCKED  ram 45GB < 64GB (under-spec)
+  BLOCKED  home 333GB < 400GB (under-spec)
+  repo: via ~/depot_tools or 'apt-get install repo' / manual launcher (NOT installed here)
+ChromiumOS:
+  FEASIBLE disk 333GB (>=~120 GB practical)
+  ok       ram 45GB; depot_tools provides repo + cros_sdk
+  note     OS is not Ubuntu 22.04 (official) - verify toolchain compatibility
+
+# NOT run: apt-get install, repo init/sync, fetch, cros_sdk. Detection only.
