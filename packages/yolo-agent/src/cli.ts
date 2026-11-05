@@ -55,8 +55,9 @@ export function parseFlags(argv: string[]): Flags {
       if (inline !== undefined) flags[key] = inline;
       else if (
         argv[i + 1] !== undefined &&
-        !(argv[i + 1] as string).startsWith("--") &&
-        !BOOLEAN_FLAGS.has(key)
+        (RAW_VALUE_FLAGS.has(key) ||
+          (!(argv[i + 1] as string).startsWith("--") &&
+            !BOOLEAN_FLAGS.has(key)))
       )
         flags[key] = argv[++i] as string;
       else flags[key] = true;
@@ -64,6 +65,9 @@ export function parseFlags(argv: string[]): Flags {
   }
   return flags;
 }
+
+/** Flags whose value is a list of switches and may itself start with "--". */
+const RAW_VALUE_FLAGS = new Set(["browser-args"]);
 
 const BOOLEAN_FLAGS = new Set([
   "headless",
