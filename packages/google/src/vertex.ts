@@ -1,5 +1,4 @@
-import { createVertex } from "@ai-sdk/google-vertex";
-import { generateText } from "ai";
+import { adcCredentialProvider } from "./adc.ts";
 import { googleAuthStatus, googleGenerate, googleGenerateStream } from "./auth.ts";
 import { googleRuntime, type GoogleRuntime } from "./runtime.ts";
 
@@ -14,9 +13,29 @@ export interface GoogleGeminiClient {
   stream(request: GoogleGeminiRequest): ReadableStream<string>;
 }
 
+export interface GoogleGeminiTransport {
+  fetch?: typeof fetch;
+  credentialProvider?: (signal?: AbortSignal) => Promise<string>;
+}
+
+interface GenerateContentResponse {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+}
+
+/** Vertex AI `generateContent` endpoint for a publisher model; `global` uses the location-less host. */
+export function vertexGenerateContentUrl(runtime: Pick<GoogleRuntime, "project" | "location">, model: string): string {
+  const host = runtime.location === "global" ? "aiplatform.googleapis.com" : `${runtime.location}-aiplatform.googleapis.com`;
+  const path = `v1/projects/${encodeURIComponent(runtime.project)}/locations/${encodeURIComponent(runtime.location)}`;
+  return `https://${host}/${path}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+}
+
 /** Create an ADC-backed Vertex Gemini client from the shared runtime contract. */
-export function createGoogleGeminiClient(runtime: GoogleRuntime = googleRuntime()): GoogleGeminiClient {
-  const vertex = createVertex({ project: runtime.project, location: runtime.location });
+export function createGoogleGeminiClient(
+  runtime: GoogleRuntime = googleRuntime(),
+  transport: GoogleGeminiTransport = {},
+): GoogleGeminiClient {
+  const doFetch = transport.fetch ?? fetch;
+  const token = transport.credentialProvider ?? adcCredentialProvider();
 
   return {
     async complete({ prompt, signal, model = "gemini-2.5-flash" }) {
@@ -30,21 +49,22 @@ export function createGoogleGeminiClient(runtime: GoogleRuntime = googleRuntime(
           )));
       if (nativeAuth) {
         const result = await googleGenerate(prompt, model);
-        const content = (
-          result as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
-        ).candidates?.[0]?.content?.parts
+        const content = (result as GenerateContentResponse).candidates?.[0]?.content?.parts
           ?.map(part => part.text ?? "")
           .join("");
         return content ?? "";
       }
-      const result = await generateText({
-        // Vertex 5 exposes the runtime-compatible model as V4 while the
-        // workspace AI SDK type currently resolves to V3/V2.
-        model: vertex(model) as unknown as Parameters<typeof generateText>[0]["model"],
-        prompt,
-        abortSignal: signal,
+      const response = await doFetch(vertexGenerateContentUrl(runtime, model), {
+        method: "POST",
+        headers: { authorization: `Bearer ${await token(signal)}`, "content-type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+        signal,
       });
-      return result.text;
+      if (!response.ok) {
+        throw new Error(`Vertex AI generateContent failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
+      }
+      const body = (await response.json()) as GenerateContentResponse;
+      return body.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("") ?? "";
     },
     stream({ prompt, signal, model = "gemini-2.5-flash" }) {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
