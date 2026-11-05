@@ -132,7 +132,7 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
         browserTargetId = targetId;
         browserSessionId = sessionId;
         cdpError = null;
-        screenshotTimer = setInterval(async () => {
+        const captureFrame = async () => {
           if (
             !cdp ||
             (sseClients.size === 0 && frameClients.size === 0) ||
@@ -152,6 +152,11 @@ export function startHumanBrowserServer(config: WorkbenchConfig) {
           } finally {
             screenshotInFlight = false;
           }
+        };
+        screenshotTimer = setInterval(() => {
+          void captureFrame().catch((error) => {
+            cdpError = error instanceof Error ? error.message : String(error);
+          });
         }, 1000);
         return client;
       } catch (error) {

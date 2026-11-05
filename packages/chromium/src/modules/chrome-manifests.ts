@@ -5,14 +5,25 @@ const ObjectGetPrototypeOf = Object.getPrototypeOf;
 const ObjectDefineProperty = Object.defineProperty;
 const ObjectPrototype = Object.prototype;
 const NumberIsFinite = Number.isFinite;
-const RegExpExec = RegExp.prototype.exec;
-const StringSplit = String.prototype.split as (
+const RegExpExec = Reflect.get(RegExp.prototype, "exec") as (
+  this: RegExp,
+  string: string,
+) => RegExpExecArray | null;
+const StringSplit = Reflect.get(String.prototype, "split") as (
   this: string,
   separator: string,
 ) => string[];
-const StringTrim = String.prototype.trim;
-const StringStartsWith = String.prototype.startsWith;
-const ArrayIncludes = Array.prototype.includes;
+const StringTrim = Reflect.get(String.prototype, "trim") as (
+  this: string,
+) => string;
+const StringStartsWith = Reflect.get(String.prototype, "startsWith") as (
+  this: string,
+  searchString: string,
+) => boolean;
+const ArrayIncludes = Array.prototype.includes as (
+  this: readonly unknown[],
+  searchElement: unknown,
+) => boolean;
 const URLConstructor = URL;
 
 function matches(pattern: RegExp, value: string) {
