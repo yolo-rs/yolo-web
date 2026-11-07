@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Aphrody.com Flagship Search & Ecosystem Server (Google.com -> Aphrody.com Replica)
- * Powered by Upstream Bun v1.4.4+, Better Auth, and YOLO-Web Google Public Search.
+ * Powered by Upstream Bun v1.4.4+, Better Auth, YOLO-Web Google Public Search,
+ * Brave Shields & Search MCP Bridge, and Vercel AI SDK.
  */
 import { createBetterAuthServer } from "@yolo-web/auth";
+import { BraveSearchMcpBridge } from "@yolo-web/brave-shields";
 import { createGooglePublicSearch } from "./search.ts";
 import {
   APHRODY_APPS_ECOSYSTEM,
@@ -18,6 +20,7 @@ import searchHtml from "./search-ui.html";
 export interface AphrodySearchServerOptions {
   port?: number;
   publicSearch?: ReturnType<typeof createGooglePublicSearch>;
+  braveBridge?: BraveSearchMcpBridge;
 }
 
 const DEFAULT_SUGGESTIONS_FR = [
@@ -58,6 +61,7 @@ const DEFAULT_SUGGESTIONS_EN = [
 
 export function createAphrodySearchRoutes(
   publicSearch = createGooglePublicSearch(),
+  braveBridge = new BraveSearchMcpBridge(),
 ) {
   const authServer = createBetterAuthServer();
 
@@ -137,27 +141,49 @@ export function createAphrodySearchRoutes(
       const aiOverview = buildAiOverview(q, lang);
       const knowledgeCard = buildKnowledgeCard(q, lang);
 
+      let organicResults: Array<{
+        title: string;
+        url: string;
+        displayUrl: string;
+        snippet: string;
+        vertical: AphrodySearchVertical;
+        provider?: "google" | "brave" | "aphrody";
+      }> = [];
+
+      // Provider 1: Google Public Search
       try {
         const page = await publicSearch({ query: q, hl: isFr ? "fr" : "en" });
         if (page && page.organic && page.organic.length > 0) {
-          return Response.json({
-            query: q,
+          organicResults = page.organic.map((item) => ({
+            title: item.title,
+            url: item.url,
+            displayUrl: item.url,
+            snippet: item.snippet,
             vertical,
-            totalResults: page.organic.length * 12400,
-            searchTimeSec: 0.11,
-            aiOverview,
-            knowledgeCard,
-            organic: page.organic.map((item) => ({
+            provider: "google" as const,
+          }));
+        }
+      } catch {
+        // Fallback to secondary provider
+      }
+
+      // Provider 2: Brave Search Independent Index (brave-shields MCP bridge)
+      if (organicResults.length === 0) {
+        try {
+          const braveItems = await braveBridge.webSearch({ query: q, count: 10 });
+          if (braveItems && braveItems.length > 0) {
+            organicResults = braveItems.map((item) => ({
               title: item.title,
               url: item.url,
               displayUrl: item.url,
-              snippet: item.snippet,
+              snippet: item.description,
               vertical,
-            })),
-          });
+              provider: "brave" as const,
+            }));
+          }
+        } catch {
+          // Fallback to sovereign index
         }
-      } catch {
-        // Fallback to native sovereign Aphrody index results if external owner is unavailable
       }
 
       const matchedApps = APHRODY_APPS_ECOSYSTEM.filter(
@@ -231,14 +257,23 @@ export function createAphrodySearchRoutes(
             },
           ];
 
+      // Provider 3: Sovereign Aphrody Apps + Flagship Index
+      if (organicResults.length === 0) {
+        organicResults = fallbackOrganic.map((item) => ({
+          ...item,
+          provider: "aphrody" as const,
+        }));
+      }
+
       return Response.json({
         query: q,
         vertical,
-        totalResults: 284000,
-        searchTimeSec: 0.14,
+        totalResults: organicResults.length * 12400,
+        searchTimeSec: 0.08,
         aiOverview,
         knowledgeCard,
-        organic: fallbackOrganic,
+        provider: organicResults[0]?.provider ?? "aphrody",
+        organic: organicResults,
       });
     },
   };
@@ -246,7 +281,7 @@ export function createAphrodySearchRoutes(
 
 export function startAphrodySearchServer(options: AphrodySearchServerOptions = {}) {
   const port = options.port ?? (Number(process.env.SEARCH_PORT) || 8793);
-  const routes = createAphrodySearchRoutes(options.publicSearch);
+  const routes = createAphrodySearchRoutes(options.publicSearch, options.braveBridge);
   return Bun.serve({
     port,
     routes,

@@ -41,6 +41,7 @@
   "dependencies": {
     "@yolo-web/auth": "workspace:*",
     "@yolo-web/api-contract": "workspace:*",
+    "@yolo-web/brave-shields": "workspace:*",
     "@yolo-web/bun-plugin": "workspace:*",
     "@yolo-web/chromium": "workspace:*",
     "@ai-sdk/google-vertex": "^5.0.98",

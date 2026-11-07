@@ -156,4 +156,61 @@ describe("Aphrody Flagship Ecosystem & Search Server", () => {
     expect(searchJson.aiOverview.summary).toContain("googlebook");
     expect(searchJson.knowledgeCard?.title).toContain("GoogleBook");
   });
+
+  test("Brave Search and Sovereign Aphrody multi-provider fallbacks", async () => {
+    // Failing public search to trigger secondary provider
+    const failingPublicSearch = async () => {
+      throw new Error("Google upstream unavailable");
+    };
+
+    const mockBraveBridge = {
+      webSearch: async ({ query }: { query: string }) => [
+        {
+          title: `Brave Indexed Result for ${query}`,
+          url: `https://brave.com/search?q=${encodeURIComponent(query)}`,
+          description: `Independent web crawl index result for ${query}.`,
+        },
+      ],
+    };
+
+    // Test Provider 2: Brave Search fallback
+    const braveRoutes = createAphrodySearchRoutes(
+      failingPublicSearch as unknown as Parameters<typeof createAphrodySearchRoutes>[0],
+      mockBraveBridge as unknown as Parameters<typeof createAphrodySearchRoutes>[1],
+    );
+
+    const braveRes = await braveRoutes["/api/search"](
+      new Request("http://localhost/api/search?q=chromium&lang=en"),
+    );
+    expect(braveRes.status).toBe(200);
+    const braveJson = (await braveRes.json()) as {
+      provider: string;
+      organic: Array<{ title: string; provider: string }>;
+    };
+    expect(braveJson.provider).toBe("brave");
+    expect(braveJson.organic[0]?.title).toContain("Brave Indexed Result");
+
+    // Test Provider 3: Sovereign Aphrody fallback when both fail
+    const failingBraveBridge = {
+      webSearch: async () => {
+        throw new Error("Brave API rate limit");
+      },
+    };
+    const sovereignRoutes = createAphrodySearchRoutes(
+      failingPublicSearch as unknown as Parameters<typeof createAphrodySearchRoutes>[0],
+      failingBraveBridge as unknown as Parameters<typeof createAphrodySearchRoutes>[1],
+    );
+
+    const sovereignRes = await sovereignRoutes["/api/search"](
+      new Request("http://localhost/api/search?q=wordcraft&lang=fr"),
+    );
+    expect(sovereignRes.status).toBe(200);
+    const sovereignJson = (await sovereignRes.json()) as {
+      provider: string;
+      organic: Array<{ title: string; provider: string }>;
+    };
+    expect(sovereignJson.provider).toBe("aphrody");
+    expect(sovereignJson.organic.length).toBeGreaterThan(0);
+    expect(sovereignJson.organic.some((item) => item.title.includes("WordCraft"))).toBe(true);
+  });
 });
