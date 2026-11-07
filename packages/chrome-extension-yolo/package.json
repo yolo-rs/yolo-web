@@ -1,6 +1,6 @@
 {
   "name": "@yolo-web/chrome-extension-yolo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "YOLO-Web Manifest V3 extension: aphrody.com search and new tab page, YOLO brand theme presets, built with Bun for yolo-chromium and Chrome",
   "license": "Apache-2.0",
   "private": true,

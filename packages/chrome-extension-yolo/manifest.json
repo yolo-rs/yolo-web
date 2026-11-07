@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YOLO-Web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Browser-use and computer-use agent for yolo-chromium: side panel, WebMCP, debugger driver. Aphrody search and new tab.",
   "homepage_url": "https://aphrody.com/",
   "minimum_chrome_version": "120",

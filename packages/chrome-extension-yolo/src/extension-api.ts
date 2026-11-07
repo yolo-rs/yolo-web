@@ -20,3 +20,5 @@ export interface ExtensionApi {
 export function extensionApi(): ExtensionApi | undefined {
   return (globalThis as { chrome?: ExtensionApi }).chrome;
 }
+
+export * from "./gemini-carbon-bridge.ts";

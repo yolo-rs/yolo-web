@@ -4,8 +4,25 @@
  * default theme in `chrome.storage.sync` and opens the new tab page once.
  * No state is kept in module variables; the worker is ephemeral.
  */
+import {
+  GeminiCarbonBridge,
+  YOLO_EXTENSION_DOMAINS,
+} from "./gemini-carbon-bridge.ts";
 import { THEME_STORAGE_KEY } from "./storage.ts";
 import { DEFAULT_THEME_ID, isThemeId } from "./tokens.ts";
+
+(
+  globalThis as {
+    __yoloCarbonBridge?: GeminiCarbonBridge;
+    __yoloDomains?: typeof YOLO_EXTENSION_DOMAINS;
+  }
+).__yoloCarbonBridge = new GeminiCarbonBridge();
+(
+  globalThis as {
+    __yoloCarbonBridge?: GeminiCarbonBridge;
+    __yoloDomains?: typeof YOLO_EXTENSION_DOMAINS;
+  }
+).__yoloDomains = YOLO_EXTENSION_DOMAINS;
 
 /** Opened directly so the first run does not depend on `chrome://newtab`. */
 const FIRST_RUN_PAGE = "newtab.html";
