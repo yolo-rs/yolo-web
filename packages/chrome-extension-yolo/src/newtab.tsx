@@ -228,6 +228,7 @@ async function main(): Promise<void> {
 
   const page = (
     <div>
+      <a href="#yw-query" class="yw-visually-hidden" style="position: absolute; left: -9999px; top: 8px; z-index: 9999; padding: 8px 12px; background: var(--yw-color-primary, #1a73e8); color: #fff; border-radius: 6px; text-decoration: none;">Skip to search</a>
       <main class="yw-page">
         <h1 class="yw-brand">
           <Logo size={48} id="newtab" />
