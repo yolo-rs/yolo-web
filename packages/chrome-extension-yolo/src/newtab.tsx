@@ -58,6 +58,7 @@ import {
   queryCandidates,
   type QueryStat,
   recordQuery,
+  removeQuery,
   RemoteSuggestions,
   QUERIES_KEY,
   coerceQueries,
@@ -139,6 +140,11 @@ async function main(): Promise<void> {
     },
     onSubmitQuery: async (text) => {
       await recordQuery(local, text);
+    },
+    onRemoveQuery: async (text) => {
+      await removeQuery(local, text);
+      queries = await loadQueries(local);
+      announce(`Removed ${text} from search history.`);
     },
     navigate,
   });

@@ -30,6 +30,8 @@ export interface SearchBoxOptions {
   readonly asyncCandidates: (query: string) => Promise<readonly Candidate[]>;
   /** Called with the final query text before navigating. */
   readonly onSubmitQuery: (text: string) => Promise<void> | void;
+  /** Optional callback to remove a local history query suggestion. */
+  readonly onRemoveQuery?: (text: string) => Promise<void> | void;
   readonly navigate: (url: string) => void;
   /** Host shown in the accessible name ("Search with aphrody.com"). */
   readonly host: () => string;
@@ -138,6 +140,22 @@ export function SearchBox(options: SearchBoxOptions): SearchBox {
           {renderText(suggestion)}
           {suggestion.kind === "page" && suggestion.url ? (
             <span class="yw-option-url">{hostOf(suggestion.url)}</span>
+          ) : null}
+          {suggestion.kind === "history-query" && options.onRemoveQuery ? (
+            <button
+              type="button"
+              class="yw-icon-button"
+              aria-label={`Remove ${suggestion.text} from search history`}
+              onMousedown={(event) => event.preventDefault()}
+              onClick={(event) => {
+                event.stopPropagation();
+                void Promise.resolve(
+                  options.onRemoveQuery!(suggestion.text),
+                ).then(() => recompute());
+              }}
+            >
+              <Icon name="close" />
+            </button>
           ) : null}
         </li>
       )),

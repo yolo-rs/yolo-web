@@ -380,7 +380,36 @@ export function createAphrodySearchRoutes(
       );
       const combined = [...new Set([...defaultSuggestions, ...appSuggestions, ...top1Suggestions])];
       const matches = combined.filter((s) => s.includes(q)).slice(0, 10);
-      return Response.json([q, matches]);
+      return Response.json([q, matches], {
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET, OPTIONS",
+        },
+      });
+    },
+    "/suggest": (req: Request) => {
+      const url = new URL(req.url);
+      const q = (url.searchParams.get("q") || "").toLowerCase();
+      const lang = url.searchParams.get("lang") || "en";
+      const isFr = lang === "fr";
+
+      const defaultSuggestions = isFr
+        ? DEFAULT_SUGGESTIONS_FR
+        : DEFAULT_SUGGESTIONS_EN;
+      const appSuggestions = APHRODY_APPS_ECOSYSTEM.map((a) =>
+        `${a.name.toLowerCase()} (${a.url.replace("https://", "")})`,
+      );
+      const top1Suggestions = APHRODY_TOP1_RUST_BUN_CATALOG.map(
+        (a) => `${a.subdomain}.aphrody.app — ${a.title.toLowerCase()}`,
+      );
+      const combined = [...new Set([...defaultSuggestions, ...appSuggestions, ...top1Suggestions])];
+      const matches = combined.filter((s) => s.includes(q)).slice(0, 10);
+      return Response.json([q, matches], {
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET, OPTIONS",
+        },
+      });
     },
     "/api/search": async (req: Request) => {
       const url = new URL(req.url);

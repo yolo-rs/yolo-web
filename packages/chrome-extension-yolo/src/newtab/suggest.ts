@@ -300,6 +300,26 @@ export async function clearQueries(area: KeyValueArea): Promise<void> {
   await area.remove(QUERIES_KEY);
 }
 
+/** Removes one query (case- and accent-insensitively) from a query list. */
+export function removeQueryIn(
+  list: readonly QueryStat[],
+  text: string,
+): QueryStat[] {
+  const key = fold(text);
+  if (!key) {
+    return [...list];
+  }
+  return list.filter((item) => fold(item.text) !== key);
+}
+
+export async function removeQuery(
+  area: KeyValueArea,
+  text: string,
+): Promise<void> {
+  const list = await loadQueries(area);
+  await area.set({ [QUERIES_KEY]: removeQueryIn(list, text) });
+}
+
 export function queryCandidates(list: readonly QueryStat[]): Candidate[] {
   return list.map((item) => ({
     kind: "history-query",

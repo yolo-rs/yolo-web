@@ -17,6 +17,8 @@ import {
   rankSuggestions,
   recordQuery,
   recordQueryIn,
+  removeQuery,
+  removeQueryIn,
   REMOTE_BACKOFF_MS,
   RemoteSuggestions,
 } from "../src/newtab/suggest.ts";
@@ -198,10 +200,16 @@ describe("search history", () => {
     const area = memoryArea();
     await recordQuery(area, "bun test");
     await recordQuery(area, "bun test");
+    await recordQuery(area, "yolo chromium");
     expect((await loadQueries(area))[0]).toMatchObject({
-      text: "bun test",
-      count: 2,
+      text: "yolo chromium",
+      count: 1,
     });
+    expect(removeQueryIn(await loadQueries(area), "BUN TEST").length).toBe(1);
+    await removeQuery(area, "bun test");
+    expect((await loadQueries(area)).map((q) => q.text)).toEqual([
+      "yolo chromium",
+    ]);
     await clearQueries(area);
     expect(await loadQueries(area)).toEqual([]);
   });
