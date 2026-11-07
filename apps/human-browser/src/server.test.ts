@@ -31,7 +31,7 @@ describe("@yolo-web/human-browser CDP service", () => {
 
   test("service exposes health and reports CDP connection failures through its API", async () => {
     const workbench = startHumanBrowserServer({
-      cdpPort: 9222,
+      cdpPort: 59999,
       httpPort: 0,
       stealth: true,
       braveShields: true,
