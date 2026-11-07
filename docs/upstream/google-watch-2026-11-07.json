@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-07",
+  "results": [
+    {
+      "target": "aosp",
+      "baseline": false,
+      "fetchedAt": "2026-11-07T00:42:30.383Z",
+      "changes": [
+        {
+          "source": "aosp",
+          "key": "page:build-numbers",
+          "kind": "moved",
+          "detail": "1502261648 -> 1461339723"
+        }
+      ],
+      "refs": {
+        "latest-android-tag": "android-17.0.0_r1",
+        "branches": "3597",
+        "tags": "3061"
+      },
+      "errors": []
+    }
+  ]
+}

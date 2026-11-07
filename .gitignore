@@ -32,3 +32,5 @@ docs/replica/*/clone-screens/
 /third_party/lightpanda-browser-source/
 /third_party/wget2-source/
 /.claude/worktrees/
+
+data/upstream-watch.sqlite*

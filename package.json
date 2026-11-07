@@ -23,6 +23,7 @@
     "agent": "bun run --cwd apps/ai-agent-runner start",
     "live-view": "bun tools/live-view.ts",
     "test": "bun test",
+    "upstream:watch": "bun run packages/chromium-tracker/src/upstream-watch-cli.ts",
     "check": "bun --filter '*' check",
     "fmt": "bun fmt",
     "fmt:check": "bun fmt --check",
