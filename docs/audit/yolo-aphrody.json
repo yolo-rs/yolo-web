@@ -1,0 +1,1036 @@
+{
+  "site": "yolo-aphrody-after",
+  "origin": "https://yolo.aphrody.com",
+  "ua": "YoloWebAudit/1.0 (+https://github.com/yolo-rs/yolo-web; read-only)",
+  "startedAt": "2026-11-05T12:27:30.827Z",
+  "durationS": 107,
+  "limits": {
+    "maxPages": 60,
+    "depth": 2,
+    "linkChecks": 150,
+    "assetChecks": 120,
+    "concurrency": 2,
+    "gapMs": 250,
+    "method": "GET"
+  },
+  "robots": {
+    "status": 200,
+    "disallow": [],
+    "sitemaps": [
+      "https://yolo.aphrody.com/sitemap.xml"
+    ],
+    "body": "User-agent: *\nAllow: /\n\nSitemap: https://yolo.aphrody.com/sitemap.xml\n"
+  },
+  "sitemap": {
+    "url": "https://yolo.aphrody.com/sitemap.xml",
+    "status": 200,
+    "urls": 9
+  },
+  "probes": {
+    "/robots.txt": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/sitemap.xml": {
+      "status": 200,
+      "redirects": 0
+    },
+    "/favicon.ico": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/.well-known/security.txt": {
+      "status": 404,
+      "redirects": 0
+    },
+    "/__audit-404-probe__": {
+      "status": 404,
+      "redirects": 0
+    }
+  },
+  "http": {
+    "hops": [
+      {
+        "url": "http://yolo.aphrody.com/",
+        "status": 301,
+        "location": "https://yolo.aphrody.com/"
+      },
+      {
+        "url": "https://yolo.aphrody.com/",
+        "status": 200
+      }
+    ]
+  },
+  "www": null,
+  "homeRedirects": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "status": 200
+    }
+  ],
+  "headers": {
+    "strict-transport-security": "max-age=63072000",
+    "content-security-policy": "default-src 'none'; script-src 'sha256-C5huALnBlVKccu7dEeyXvT3UpHvZcIjDQbMyD+qBhgY='; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; manifest-src 'self'",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": null,
+    "cache-control": "public, max-age=0, must-revalidate",
+    "content-encoding": "zstd",
+    "server": "cloudflare",
+    "cf-cache-status": "HIT"
+  },
+  "tls": {
+    "protocol": "TLSv1.3",
+    "cipher": null,
+    "verify": "0 (ok)",
+    "subject": "CN=aphrody.com",
+    "issuer": "C=US, O=Google Trust Services, CN=WE1",
+    "notBefore": "Nov  4 08:32:12 2026 GMT",
+    "notAfter": "Feb  2 09:32:08 2027 GMT",
+    "san": null
+  },
+  "crawl": {
+    "pages": 10,
+    "statuses": {
+      "200": 10
+    },
+    "linkChecked": 0,
+    "linkTargets": 0,
+    "assetChecked": 2,
+    "assetTargets": 2
+  },
+  "brokenLinks": [],
+  "badAssets": [],
+  "checks": [
+    {
+      "name": "missing <title>",
+      "urls": []
+    },
+    {
+      "name": "duplicate-looking title (equal to home)",
+      "urls": [
+        "https://yolo.aphrody.com/fr/"
+      ]
+    },
+    {
+      "name": "title > 70 chars",
+      "urls": []
+    },
+    {
+      "name": "missing meta description",
+      "urls": []
+    },
+    {
+      "name": "h1 count != 1",
+      "urls": []
+    },
+    {
+      "name": "missing canonical",
+      "urls": []
+    },
+    {
+      "name": "canonical differs from final URL",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "missing html lang",
+      "urls": []
+    },
+    {
+      "name": "missing viewport meta",
+      "urls": []
+    },
+    {
+      "name": "missing og:title/og:image",
+      "urls": [
+        "https://yolo.aphrody.com/"
+      ]
+    },
+    {
+      "name": "noindex",
+      "urls": []
+    },
+    {
+      "name": "mixed content",
+      "urls": []
+    },
+    {
+      "name": "images without alt attribute",
+      "urls": []
+    },
+    {
+      "name": "copy heuristics hit",
+      "urls": []
+    }
+  ],
+  "lighthouse": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 942.0810338439942,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 942.0810338439942,
+      "si": 942.0810338439942,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "redirects (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/",
+      "form": "desktop",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 268.269,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 268.269,
+      "si": 268.269,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "redirects (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/ja/apps/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 98,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 836.049,
+      "cls": 0,
+      "tbt": 7,
+      "fcp": 836.049,
+      "si": 836.049,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "heading-order (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/apps/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 98,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 834.091,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 834.091,
+      "si": 834.091,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "heading-order (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/en/apps/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 98,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 823.685,
+      "cls": 0,
+      "tbt": 0,
+      "fcp": 823.685,
+      "si": 823.685,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "heading-order (0)",
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/ja/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 910.3,
+      "cls": 0,
+      "tbt": 2.5,
+      "fcp": 910.3,
+      "si": 910.3,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 937.598,
+      "cls": 0,
+      "tbt": 0.5,
+      "fcp": 937.598,
+      "si": 937.598,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/about/",
+      "form": "mobile",
+      "ok": true,
+      "perf": 100,
+      "a11y": 100,
+      "bp": 100,
+      "seo": 100,
+      "lcp": 862.565,
+      "cls": 0,
+      "tbt": 5.5,
+      "fcp": 862.565,
+      "si": 862.565,
+      "consoleErrors": 0,
+      "consoleSample": [],
+      "fails": [
+        "network-dependency-tree-insight (0)",
+        "render-blocking-insight (50)"
+      ]
+    }
+  ],
+  "lighthouseNote": "",
+  "pages": [
+    {
+      "url": "https://yolo.aphrody.com/",
+      "depth": 0,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 310,
+      "htmlBytes": 3001,
+      "lang": "fr",
+      "title": "YOLO, le hub de l'écosystème Aphrody",
+      "description": "Le hub web de l'écosystème YOLO d'Aphrody : un annuaire des projets, rendu en Rust et habillé par huit préréglages de marque.",
+      "canonical": "https://yolo.aphrody.com/fr/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {},
+      "twitterCard": null,
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/en/",
+        "https://yolo.aphrody.com/ja/"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/fr/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/fr/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 273,
+      "htmlBytes": 7370,
+      "lang": "fr",
+      "title": "YOLO, le hub de l'écosystème Aphrody",
+      "description": "Le hub web de l'écosystème YOLO d'Aphrody : un annuaire des projets, rendu en Rust et habillé par huit préréglages de marque.",
+      "canonical": "https://yolo.aphrody.com/fr/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/fr/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "YOLO, le hub de l'écosystème Aphrody",
+        "og:description": "Le hub web de l'écosystème YOLO d'Aphrody : un annuaire des projets, rendu en Rust et habillé par huit préréglages de marque.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "fr_FR"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/fr/apps/",
+        "https://yolo.aphrody.com/fr/about/",
+        "https://yolo.aphrody.com/en/",
+        "https://yolo.aphrody.com/ja/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/en/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/en/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/en/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 318,
+      "htmlBytes": 7246,
+      "lang": "en",
+      "title": "YOLO, the hub of the Aphrody ecosystem",
+      "description": "The web hub of Aphrody's YOLO ecosystem: a directory of the projects, rendered in Rust and dressed by eight brand presets.",
+      "canonical": "https://yolo.aphrody.com/en/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/en/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "YOLO, the hub of the Aphrody ecosystem",
+        "og:description": "The web hub of Aphrody's YOLO ecosystem: a directory of the projects, rendered in Rust and dressed by eight brand presets.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "en_US"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/en/",
+        "https://yolo.aphrody.com/en/apps/",
+        "https://yolo.aphrody.com/en/about/",
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/ja/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/ja/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/ja/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/ja/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 296,
+      "htmlBytes": 7759,
+      "lang": "ja",
+      "title": "YOLO - Aphrodyエコシステムのハブ",
+      "description": "AphrodyのYOLOエコシステムのウェブハブ。プロジェクトの一覧をRustで描画し、8つのブランドプリセットで着せ替えられます。",
+      "canonical": "https://yolo.aphrody.com/ja/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/ja/",
+        "og:locale:alternate": "en_US",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "YOLO - Aphrodyエコシステムのハブ",
+        "og:description": "AphrodyのYOLOエコシステムのウェブハブ。プロジェクトの一覧をRustで描画し、8つのブランドプリセットで着せ替えられます。",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "ja_JP"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/ja/",
+        "https://yolo.aphrody.com/ja/apps/",
+        "https://yolo.aphrody.com/ja/about/",
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/en/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/apps/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/fr/apps/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/fr/apps/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 294,
+      "htmlBytes": 8056,
+      "lang": "fr",
+      "title": "Applications - YOLO",
+      "description": "Les dépôts de l'écosystème YOLO, du système de design au runtime Bun. Les projets publics s'ouvrent sur GitHub, les autres sont indiqués comme privés.",
+      "canonical": "https://yolo.aphrody.com/fr/apps/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/fr/apps/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "Applications - YOLO",
+        "og:description": "Les dépôts de l'écosystème YOLO, du système de design au runtime Bun. Les projets publics s'ouvrent sur GitHub, les autres sont indiqués comme privés.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "fr_FR"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/apps/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/apps/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/fr/apps/",
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/fr/about/",
+        "https://yolo.aphrody.com/en/apps/",
+        "https://yolo.aphrody.com/ja/apps/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/en/apps/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/en/apps/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/en/apps/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 301,
+      "htmlBytes": 7885,
+      "lang": "en",
+      "title": "Apps - YOLO",
+      "description": "The repositories of the YOLO ecosystem, from the design system to the Bun runtime. Public projects open on GitHub; the others are marked as private.",
+      "canonical": "https://yolo.aphrody.com/en/apps/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/en/apps/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "Apps - YOLO",
+        "og:description": "The repositories of the YOLO ecosystem, from the design system to the Bun runtime. Public projects open on GitHub; the others are marked as private.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "en_US"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/apps/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/apps/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/en/apps/",
+        "https://yolo.aphrody.com/en/",
+        "https://yolo.aphrody.com/en/about/",
+        "https://yolo.aphrody.com/fr/apps/",
+        "https://yolo.aphrody.com/ja/apps/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/ja/apps/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/ja/apps/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/ja/apps/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 304,
+      "htmlBytes": 8552,
+      "lang": "ja",
+      "title": "アプリ - YOLO",
+      "description": "デザインシステムからBunランタイムまで、YOLOエコシステムのリポジトリです。公開中のプロジェクトはGitHubで開き、それ以外は非公開と表示しています。",
+      "canonical": "https://yolo.aphrody.com/ja/apps/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/ja/apps/",
+        "og:locale:alternate": "en_US",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "アプリ - YOLO",
+        "og:description": "デザインシステムからBunランタイムまで、YOLOエコシステムのリポジトリです。公開中のプロジェクトはGitHubで開き、それ以外は非公開と表示しています。",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "ja_JP"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/apps/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/apps/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/apps/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/ja/apps/",
+        "https://yolo.aphrody.com/ja/",
+        "https://yolo.aphrody.com/ja/about/",
+        "https://yolo.aphrody.com/fr/apps/",
+        "https://yolo.aphrody.com/en/apps/",
+        "https://github.com/yolo-rs/yolo-ui",
+        "https://github.com/yolo-rs/yolo-web",
+        "https://github.com/yolo-rs/yolo-bun"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/fr/about/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/fr/about/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/fr/about/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 313,
+      "htmlBytes": 6751,
+      "lang": "fr",
+      "title": "À propos - YOLO",
+      "description": "YOLO est le hub web de l'écosystème Aphrody : pages statiques rendues par Leptos, couleurs calculées par yolo-tokens, huit préréglages de marque.",
+      "canonical": "https://yolo.aphrody.com/fr/about/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/fr/about/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "À propos - YOLO",
+        "og:description": "YOLO est le hub web de l'écosystème Aphrody : pages statiques rendues par Leptos, couleurs calculées par yolo-tokens, huit préréglages de marque.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "fr_FR"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/about/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/about/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/fr/about/",
+        "https://yolo.aphrody.com/fr/",
+        "https://yolo.aphrody.com/fr/apps/",
+        "https://yolo.aphrody.com/en/about/",
+        "https://yolo.aphrody.com/ja/about/"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/en/about/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/en/about/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/en/about/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 342,
+      "htmlBytes": 6584,
+      "lang": "en",
+      "title": "About - YOLO",
+      "description": "YOLO is the web hub of the Aphrody ecosystem: static pages rendered by Leptos, colours computed by yolo-tokens, eight brand presets.",
+      "canonical": "https://yolo.aphrody.com/en/about/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/en/about/",
+        "og:locale:alternate": "ja_JP",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "About - YOLO",
+        "og:description": "YOLO is the web hub of the Aphrody ecosystem: static pages rendered by Leptos, colours computed by yolo-tokens, eight brand presets.",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "en_US"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/about/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/about/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/en/about/",
+        "https://yolo.aphrody.com/en/",
+        "https://yolo.aphrody.com/en/apps/",
+        "https://yolo.aphrody.com/fr/about/",
+        "https://yolo.aphrody.com/ja/about/"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    },
+    {
+      "url": "https://yolo.aphrody.com/ja/about/",
+      "depth": 1,
+      "status": 200,
+      "finalUrl": "https://yolo.aphrody.com/ja/about/",
+      "hops": [
+        {
+          "url": "https://yolo.aphrody.com/ja/about/",
+          "status": 200
+        }
+      ],
+      "contentType": "text/html",
+      "ms": 276,
+      "htmlBytes": 6979,
+      "lang": "ja",
+      "title": "概要 - YOLO",
+      "description": "YOLOはAphrodyエコシステムのウェブハブです。Leptosで描画した静的ページ、yolo-tokensで算出した配色、8つのブランドプリセット。",
+      "canonical": "https://yolo.aphrody.com/ja/about/",
+      "robotsMeta": null,
+      "viewport": true,
+      "h1Count": 1,
+      "og": {
+        "og:url": "https://yolo.aphrody.com/ja/about/",
+        "og:locale:alternate": "en_US",
+        "og:type": "website",
+        "og:site_name": "YOLO",
+        "og:title": "概要 - YOLO",
+        "og:description": "YOLOはAphrodyエコシステムのウェブハブです。Leptosで描画した静的ページ、yolo-tokensで算出した配色、8つのブランドプリセット。",
+        "og:image": "https://yolo.aphrody.com/og/yolo-hub.png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:locale": "ja_JP"
+      },
+      "twitterCard": "summary_large_image",
+      "hreflang": [
+        {
+          "lang": "fr",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        },
+        {
+          "lang": "en",
+          "href": "https://yolo.aphrody.com/en/about/"
+        },
+        {
+          "lang": "ja",
+          "href": "https://yolo.aphrody.com/ja/about/"
+        },
+        {
+          "lang": "x-default",
+          "href": "https://yolo.aphrody.com/fr/about/"
+        }
+      ],
+      "jsonLd": 0,
+      "links": [
+        "https://yolo.aphrody.com/ja/about/",
+        "https://yolo.aphrody.com/ja/",
+        "https://yolo.aphrody.com/ja/apps/",
+        "https://yolo.aphrody.com/fr/about/",
+        "https://yolo.aphrody.com/en/about/"
+      ],
+      "assets": [
+        "https://yolo.aphrody.com/favicon.svg",
+        "https://yolo.aphrody.com/assets/yolo-hub.3abe859b08.css"
+      ],
+      "mixed": [],
+      "imgNoAlt": 0,
+      "imgNoDims": 0,
+      "copy": []
+    }
+  ]
+}
