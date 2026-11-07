@@ -31,6 +31,7 @@
     "lint": "bun lint"
   },
   "dependencies": {
+    "@yolo-web/auth": "workspace:*",
     "@yolo-web/brave-search-mcp": "workspace:*",
     "@yolo-web/brave-shields": "workspace:*",
     "@yolo-web/browser-sdk": "workspace:*",
@@ -39,6 +40,7 @@
     "@yolo-web/challenge-solver": "workspace:*",
     "@yolo-web/chromium-tracker": "workspace:*",
     "@yolo-web/cli-native": "workspace:*",
+    "@yolo-web/knowledge-indexer": "workspace:*",
     "@yolo-web/mcp-client": "workspace:*",
     "@yolo-web/mcp-native": "workspace:*",
     "@yolo-web/servo-bridge": "workspace:*",

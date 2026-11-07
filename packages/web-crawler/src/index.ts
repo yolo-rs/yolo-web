@@ -673,3 +673,6 @@ export function synthesizeMarkdown(
   );
   return lines.join("\n");
 }
+
+export * from "./registry-indexer.ts";
+
