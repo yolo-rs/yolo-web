@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<script src="../testing.js"></script>
+
+<script id=model_context_exists>
+  testing.expectTrue(document.modelContext instanceof ModelContext);
+  testing.expectTrue(document.modelContext instanceof EventTarget);
+  testing.expectEqual(document.modelContext, document.modelContext);
+  testing.diverges('navigator.modelContext is the pre-spec location, kept for older pages', () => {
+    testing.expectEqual(document.modelContext, navigator.modelContext);
+  });
+</script>
+
+<script id=register_resolves type=module>
+{
+  const state = await testing.async();
+  const result = await document.modelContext.registerTool({
+    name: 'minimal',
+    description: 'minimal tool',
+    execute: async () => ({ ok: true }),
+  });
+  state.resolve(result);
+  await state.done((v) => {
+    testing.expectEqual(undefined, v);
+  });
+}
+</script>
+
+<script id=register_duplicate type=module>
+{
+  const state = await testing.async();
+  const tool = { name: 'duplicate', description: 'd', execute: () => {} };
+  await document.modelContext.registerTool(tool);
+  const err = await document.modelContext.registerTool(tool).catch((e) => e);
+  state.resolve(err);
+  await state.done((err) => {
+    testing.expectEqual('InvalidStateError', err.name);
+  });
+}
+</script>
+
+<script id=register_invalid type=module>
+{
+  const state = await testing.async();
+  const register = (tool) => document.modelContext.registerTool(tool).then(() => 'ok', (e) => e.name);
+  const results = [];
+  for (const name of ['', 'a'.repeat(129), 'has space', 'has@symbol', 'has/slash', 'has!bang']) {
+    results.push(await register({ name, description: 'd', execute: () => {} }));
+  }
+  results.push(await register({ name: 'empty_desc', description: '', execute: () => {} }));
+  for (const inputSchema of [{ toJSON: () => undefined }, BigInt(42), 'string']) {
+    results.push(await register({ name: 'bad_schema', description: 'd', inputSchema, execute: () => {} }));
+  }
+  const circular = {};
+  circular.self = circular;
+  // Schema errors win over an aborted signal.
+  results.push(await document.modelContext.registerTool(
+    { name: 'circular', description: 'd', inputSchema: circular, execute: () => {} },
+    { signal: AbortSignal.abort('aborted') },
+  ).then(() => 'ok', (e) => e.name));
+  state.resolve(results);
+  await state.done((results) => {
+    testing.expectEqual([
+      'InvalidStateError', 'InvalidStateError', 'InvalidStateError', 'InvalidStateError',
+      'InvalidStateError', 'InvalidStateError', 'InvalidStateError',
+      'TypeError', 'TypeError', 'TypeError', 'TypeError',
+    ], results);
+  });
+}
+</script>
+
+<script id=register_valid_names type=module>
+{
+  const state = await testing.async();
+  for (const name of ['a', 'A', '0', 'tool_with-various.chars123', 'b'.repeat(128)]) {
+    await document.modelContext.registerTool({ name, description: 'd', execute: () => {} });
+  }
+  state.resolve(true);
+  await state.done((v) => testing.expectTrue(v));
+}
+</script>
+
+<script id=register_toolchange_before_resolve type=module>
+{
+  const state = await testing.async();
+  const events = [];
+  document.modelContext.addEventListener('toolchange', (e) => {
+    events.push(e.constructor.name + ':' + e.isTrusted);
+  }, { once: true });
+  const p = document.modelContext.registerTool({ name: 'toolchange', description: 'd', execute: () => {} });
+  p.then(() => events.push('resolve'));
+  await p;
+  state.resolve(events);
+  await state.done((events) => {
+    testing.expectEqual(['Event:true', 'resolve'], events);
+  });
+}
+</script>
+
+<script id=ontoolchange type=module>
+{
+  const state = await testing.async();
+  // Other module scripts register tools concurrently, so count types only.
+  const fired = new Set();
+  document.modelContext.ontoolchange = (e) => fired.add(e.type);
+  await document.modelContext.registerTool({ name: 'ontoolchange', description: 'd', execute: () => {} });
+  document.modelContext.ontoolchange = null;
+  state.resolve([...fired]);
+  await state.done((fired) => testing.expectEqual(['toolchange'], fired));
+}
+</script>
+
+<script id=register_signal type=module>
+{
+  const state = await testing.async();
+  const tool = { name: 'abortable', description: 'd', execute: () => {} };
+  const results = [];
+
+  // Aborting before the registration settles rejects it with the reason.
+  let controller = new AbortController();
+  let p = document.modelContext.registerTool(tool, { signal: controller.signal });
+  controller.abort();
+  results.push(await p.catch((e) => e.name));
+
+  controller = new AbortController();
+  p = document.modelContext.registerTool(tool, { signal: controller.signal });
+  const reason = new Error('custom');
+  controller.abort(reason);
+  results.push(await p.catch((e) => e === reason));
+
+  results.push(await document.modelContext.registerTool(tool, { signal: AbortSignal.abort('pre') }).catch((e) => e));
+
+  // Aborting after registration unregisters the tool, and fires toolchange.
+  controller = new AbortController();
+  await document.modelContext.registerTool(tool, { signal: controller.signal });
+  results.push((await document.modelContext.getTools()).some((t) => t.name === 'abortable'));
+  const change = new Promise((resolve) => document.modelContext.addEventListener('toolchange', resolve, { once: true }));
+  controller.abort();
+  results.push((await document.modelContext.getTools()).some((t) => t.name === 'abortable'));
+  await change;
+
+  // A signal from AbortSignal.any() unregisters too.
+  controller = new AbortController();
+  await document.modelContext.registerTool(tool, { signal: AbortSignal.any([controller.signal]) });
+  controller.abort();
+  results.push((await document.modelContext.getTools()).some((t) => t.name === 'abortable'));
+
+  state.resolve(results);
+  await state.done((results) => {
+    testing.expectEqual(['AbortError', true, 'pre', true, false, false], results);
+  });
+}
+</script>

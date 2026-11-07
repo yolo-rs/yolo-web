@@ -1,0 +1,42 @@
+# Plumber overlay: inherits every control from the CLI's built-in
+# baseline, only the differences for this repository are written here.
+# Run 'plumber config resolve' to see the full effective config.
+extends: plumber:default
+version: '2.0'
+
+github:
+  controls:
+    githubActionMustComeFromAuthorizedSources:
+      # Keep the curated default list and trust the actions this
+      # repository uses on top of it, all pinned by commit.
+      includePlumberDefaults: true
+      trustedGithubActions:
+        - DeterminateSystems/nix-installer-action
+        - Swatinem/rust-cache
+        - contributor-assistant/github-action
+        - docker/login-action
+        - dtolnay/rust-toolchain
+        - getplumber/plumber
+        - mlugg/setup-zig
+        - ncipollo/release-action
+        - slackapi/slack-github-action
+
+    # perf-fmt is the organisation's own image and tracks :latest on
+    # purpose, so it is exempt while on that tag. Every other image is
+    # still checked, and pinned by digest.
+    containerImageMustNotUseForbiddenTags:
+      exemptImages:
+        - ghcr.io/lightpanda-io/perf-fmt
+
+    # The Rust toolchain action in .github/actions/install installs Rust
+    # through rustup's own installer, which the control flags as an
+    # unverified download. It is the standard way to get a toolchain in
+    # CI, pinned by commit there, so the check is off.
+    actionsMustNotExecuteMutableRemoteCode:
+      enabled: false
+
+    # cla.yml depends on contributor-assistant/github-action, archived
+    # upstream in March 2026 and pinned to a commit in the meantime.
+    # Enable once the CLA flow moves to a maintained action.
+    actionsMustNotBeArchived:
+      enabled: false

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<script src="../testing.js"></script>
+
+<script id=one-shot-limit>
+  // One-shot timers pile up legitimately: a fan-out of async tasks that each
+  // yield through `new Promise((r) => setTimeout(r))` queues one per task, and
+  // none of them can run until the microtask queue drains.
+  const timeouts = [];
+  for (let i = 0; i < 1000; i++) {
+    timeouts.push(window.setTimeout(() => {}, 100000));
+  }
+  testing.expectEqual(1000, timeouts.length);
+
+  for (const id of timeouts) {
+    window.clearTimeout(id);
+  }
+</script>
+
+<script id=interval-limit>
+  const intervals = [];
+  let threw = false;
+  try {
+    for (let i = 0; i < 2100; i++) {
+      intervals.push(window.setInterval(() => {}, 100000));
+    }
+  } catch (e) {
+    threw = true;
+  }
+  testing.expectEqual(true, threw);
+  testing.expectEqual(2048, intervals.length);
+
+  window.clearInterval(intervals.pop());
+  intervals.push(window.setInterval(() => {}, 100000));
+  testing.expectEqual(2048, intervals.length);
+
+  for (const id of intervals) {
+    window.clearInterval(id);
+  }
+</script>
+
+<script id=zero-delay-burst>
+{
+  // An event bus that relays each event through setTimeout(fn, 0) queues
+  // thousands from a single task, all pending at once. Clear them rather than
+  // run them: 10k callbacks blow the test timeout on slow (TSAN) CI builds.
+  const timeouts = [];
+  for (let i = 0; i < 10000; i++) {
+    timeouts.push(window.setTimeout(() => {}, 0));
+  }
+  testing.expectEqual(10000, timeouts.length);
+
+  for (const id of timeouts) {
+    window.clearTimeout(id);
+  }
+}
+</script>

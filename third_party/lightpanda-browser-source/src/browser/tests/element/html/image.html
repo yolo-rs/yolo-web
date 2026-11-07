@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<meta name=lp-mode content=test>
+<script src="../../testing.js"></script>
+
+<script id="Image">
+{
+    let i1 = new Image()
+    testing.expectEqual(0, i1.width);
+    testing.expectEqual(null, i1.getAttribute('width'));
+    testing.expectEqual(0, i1.height);
+    testing.expectEqual(null, i1.getAttribute('height'));
+
+    let i2 = new Image(10)
+    testing.expectEqual(10, i2.width);
+    testing.expectEqual('10', i2.getAttribute('width'));
+    testing.expectEqual(0, i2.height);
+    testing.expectEqual(null, i2.getAttribute('height'));
+
+    let i3 = new Image(10, 20)
+    testing.expectEqual(10, i3.width);
+    testing.expectEqual('10', i3.getAttribute('width'));
+    testing.expectEqual(20, i3.height);
+    testing.expectEqual('20', i3.getAttribute('height'));
+}
+</script>
+
+<script id="src_alt">
+{
+    const img = document.createElement('img');
+
+    testing.expectEqual('', img.src);
+    testing.expectEqual('', img.alt);
+    testing.expectEqual('', img.currentSrc);
+
+    img.src = 'test.png';
+    // src property returns resolved absolute URL
+    testing.expectEqual(testing.BASE_URL + 'element/html/test.png', img.src);
+    // getAttribute returns the raw attribute value
+    testing.expectEqual('test.png', img.getAttribute('src'));
+
+    img.src = '/absolute/path.png';
+    testing.expectEqual(testing.ORIGIN + '/absolute/path.png', img.src);
+    testing.expectEqual('/absolute/path.png', img.getAttribute('src'));
+
+    // browsers fetch this even though the image is detached: keep it local
+    img.src = 'http://localhost:9582/image.png';
+    testing.expectEqual('http://localhost:9582/image.png', img.src);
+    testing.expectEqual('http://localhost:9582/image.png', img.getAttribute('src'));
+
+    img.alt = 'Test image';
+    testing.expectEqual('Test image', img.alt);
+    testing.expectEqual('Test image', img.getAttribute('alt'));
+}
+</script>
+
+<script id="sizes">
+{
+    const img = document.createElement('img');
+    testing.expectEqual('', img.sizes);
+
+    img.sizes = '(max-width: 600px) 480px, 800px';
+    testing.expectEqual('(max-width: 600px) 480px, 800px', img.getAttribute('sizes'));
+
+    img.setAttribute('sizes', 'auto');
+    testing.expectEqual('auto', img.sizes);
+}
+</script>
+
+<script id="width_height_setters">
+{
+    const img = document.createElement('img');
+
+    img.width = 100;
+    testing.expectEqual(100, img.width);
+    testing.expectEqual('100', img.getAttribute('width'));
+
+    img.height = 200;
+    testing.expectEqual(200, img.height);
+    testing.expectEqual('200', img.getAttribute('height'));
+
+    img.setAttribute('width', '50');
+    testing.expectEqual(50, img.width);
+
+    img.setAttribute('height', 'invalid');
+    testing.expectEqual(0, img.height);
+}
+</script>
+
+<script id="crossOrigin">
+{
+    const img = document.createElement('img');
+
+    testing.expectEqual(null, img.crossOrigin);
+
+    img.crossOrigin = 'anonymous';
+    testing.expectEqual('anonymous', img.crossOrigin);
+    testing.expectEqual('anonymous', img.getAttribute('crossorigin'));
+
+    img.crossOrigin = null;
+    testing.expectEqual(null, img.crossOrigin);
+    testing.expectEqual(null, img.getAttribute('crossorigin'));
+}
+</script>
+
+<script id="loading">
+{
+    const img = document.createElement('img');
+
+    testing.diverges('Chrome: a missing loading attribute reads "auto", not the Eager default', () => {
+      testing.expectEqual('eager', img.loading);
+    });
+
+    img.loading = 'lazy';
+    testing.expectEqual('lazy', img.loading);
+    testing.expectEqual('lazy', img.getAttribute('loading'));
+}
+</script>
+
+<script id="complete" type=module>
+  // An image without a source is complete. One with a source is not until its
+  // load or error fires, even when it isn't fetched.
+  const state = await testing.async();
+  const img = document.createElement('img');
+  const initial = img.complete;
+  img.src = 'test.png';
+  const during = img.complete;
+  await new Promise(resolve => {
+    img.onload = resolve;
+    img.onerror = resolve;
+  });
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual(true, initial);
+    testing.expectEqual(false, during);
+    testing.expectEqual(true, img.complete);
+    testing.expectEqual(true, new Image().complete);
+  });
+</script>
+
+<body></body>
+
+<script id="img-load-event" type=module>
+  // An img fires a load event when src is set.
+  const state = await testing.async();
+  const img = document.createElement("img");
+
+  img.addEventListener("load", (e) => {
+    state.resolve(e);
+  });
+  img.src = "/images/ok.png";
+
+  await state.done((e) => {
+    testing.expectEqual(false, e.bubbles);
+    testing.expectEqual(false, e.cancelBubble);
+    testing.expectEqual(false, e.cancelable);
+    testing.expectEqual(false, e.composed);
+    testing.expectEqual(true, e.isTrusted);
+    testing.expectEqual(img, e.target);
+    testing.diverges('Lightpanda does not fetch images by default', () => {
+      testing.expectEqual(0, img.naturalWidth);
+    });
+  });
+</script>
+
+<script id="img-no-load-without-src">
+{
+  // An img without src should not fire a load event.
+  let fired = false;
+  const img = document.createElement("img");
+  img.addEventListener("load", () => { fired = true; });
+  document.body.appendChild(img);
+  testing.onload(() => testing.expectEqual(false, fired));
+}
+</script>
+
+<script id="lazy-src-set">
+{
+  // Append to DOM first, then set src — load should still fire.
+  const img = document.createElement("img");
+  let result = false;
+  img.onload = () => result = true;
+  document.body.appendChild(img);
+  img.src = "/images/ok.png";
+
+  testing.onload(() => testing.expectEqual(true, result));
+}
+</script>
+
+<script id="superseded-src-fires-one-load">
+{
+  // Only the source the img ends up with fires load, as when a newer src
+  // aborts the fetch of an older one.
+  const img = document.createElement("img");
+  const events = [];
+  // these URLs are 404s in a browser that fetches
+  img.addEventListener("load", () => events.push(img.getAttribute("src")));
+  img.addEventListener("error", () => events.push(img.getAttribute("src")));
+  document.body.appendChild(img);
+  img.src = "a.png";
+  img.removeAttribute("src");
+  img.src = "b.png";
+  img.src = "c.png";
+
+  testing.onload(() => testing.expectEqual("c.png", events.join(",")));
+}
+</script>
+
+<script id=url_encode>
+  {
+    let img = document.createElement('img');
+    img.src = 'over 9000!?hello=world !';
+    testing.expectEqual('over 9000!?hello=world !', img.getAttribute('src'));
+    testing.expectEqual(testing.BASE_URL + 'element/html/over%209000!?hello=world%20!', img.src);
+  }
+</script>
+
+<script id="decode" type=module>
+  const state = await testing.async();
+  const decoded = (img) => img.decode().then(() => 'resolved', (e) => e.name);
+
+  // no source: rejects
+  const img = new Image();
+  const p = img.decode();
+  p.catch(() => {});
+  testing.expectEqual(true, p instanceof Promise);
+  const no_src = await decoded(img);
+
+  // waits for the load
+  img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  const loading = await decoded(img);
+  const loaded = await decoded(img);
+
+  // a new source while waiting rejects the pending decode
+  img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+  const pending = decoded(img);
+  img.removeAttribute('src');
+  const superseded = await pending;
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual('EncodingError', no_src);
+    testing.expectEqual('resolved', loading);
+    testing.expectEqual('resolved', loaded);
+    testing.expectEqual('EncodingError', superseded);
+  });
+</script>
+
+<script id="empty_src_fires_error" type=module>
+  // An empty src selects nothing: that's an error. No src at all is not.
+  const state = await testing.async();
+  const events = [];
+  const empty = document.createElement('img');
+  empty.onload = () => events.push('empty:load');
+  empty.onerror = () => events.push('empty:error');
+  empty.src = '';
+  const none = document.createElement('img');
+  none.onload = () => events.push('none:load');
+  none.onerror = () => events.push('none:error');
+  document.body.append(empty, none);
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual('empty:error', events.join(','));
+    testing.expectEqual(true, empty.complete);
+  });
+</script>
+
+<script id="legacy_factory_function">
+  // https://webidl.spec.whatwg.org/#legacy-factory-functions
+  testing.expectEqual(true, Image !== HTMLImageElement)
+  testing.expectEqual('Image', Image.name)
+  testing.expectEqual(0, Image.length)
+  testing.expectEqual(HTMLImageElement.prototype, Image.prototype)
+  testing.expectEqual(HTMLImageElement, new Image().constructor)
+  testing.expectEqual('img', new Image().localName)
+  testing.expectError('TypeError', () => new HTMLImageElement())
+  testing.expectError('TypeError', () => Image())
+
+  const desc = Object.getOwnPropertyDescriptor(Image, 'prototype')
+  testing.expectEqual(false, desc.writable)
+  testing.expectEqual(false, desc.enumerable)
+  testing.expectEqual(false, desc.configurable)
+
+  testing.expectEqual(false, Object.keys(window).includes('Image'))
+  testing.expectEqual(false, Object.keys(window).includes('HTMLImageElement'))
+</script>
