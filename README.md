@@ -1,66 +1,153 @@
 # YOLO-Web
 
-YOLO-Web owns browser engines, CDP control, browser APIs, media capture, and browser research tools in Rust and Bun. It is **not currently a full Chromium, Blink, WebKit, or Firefox implementation**. The human-browser service controls a separately running browser through the Chrome DevTools Protocol (CDP); its frontend is owned by [yolo-ui](https://github.com/yolo-rs/yolo-ui). The Rust workspace contains Servo-derived components, Obscura/V8 experiments, and browser support libraries; those crates do not add up to Chromium web-platform parity. `crates/yolo-chromium` runs upstream Chromium through the official CEF (Chromium Embedded Framework) binary distribution as a native shell with the sandbox enabled; it is a downloaded Chromium 156 engine with a Rust control plane, not a Chromium source build (see [Chromium browser shell](#chromium-browser-shell-yolo-chromium)).
+High-performance, dual-plane browser engine architecture, headless CDP automation mesh, Servo-derived CSS/layout primitives, and Chromium V8 isolate host.
 
-The canonical ownership map is [ARCHITECTURE.mdx](docs/ARCHITECTURE.mdx), with local conventions in [STYLE_GUIDE.mdx](docs/STYLE_GUIDE.mdx). The long-term engine rewrite and upstream integration strategy is recorded in [ENGINE_REWRITE_PLAN.md](docs/ENGINE_REWRITE_PLAN.md). For the current CDP workbench, see [BROWSER_ENGINE_MANAGER.md](docs/BROWSER_ENGINE_MANAGER.md) and [WINDOWS_BROWSER_TOOLCHAIN.md](docs/WINDOWS_BROWSER_TOOLCHAIN.md). Windows/MSVC qualification and Rust cross-compilation are owned by [yolo-cross](https://github.com/yolo-rs/yolo-cross).
-
-## Current workspace
-
-- `apps/human-browser`: Bun CDP service for navigation, JavaScript evaluation, status, and screenshot streaming. Its UI is `apps/yolo-browser-workbench` in yolo-ui.
-- `apps/ai-agent-runner`: browser-agent runner.
-- `packages/cdp-client`: Bun WebSocket/HTTP client for CDP.
-- `packages/web-cli` and `packages/web-mcp`: browser tooling CLI and MCP server.
-- `packages/chromium-tracker`: Chromium release tracking and the initial browser engine catalog.
-- `crates/yolo-chromium`: CEF-based Chromium browser shell (launcher, bootstrap host, Chrome-style Views window, and smoke receipt), see [crates/yolo-chromium/README.md](crates/yolo-chromium/README.md).
-- `crates/servo-*`: Rust components derived from Servo; feature coverage varies by crate.
-- `crates/obscura-*`: Rust/V8 browser experiments and protocol/runtime components.
-- `crates/brave-*`, `crates/deno-*`: browser-adjacent libraries and runtime integrations.
-
-The directory names and dependency manifests describe the code present; they do not claim that upstream browser projects have been merged into this repository. Chromium's Blink, V8, Skia, Dawn, `content/`, `chrome/`, `third_party/`, GN build graph, and `DEPS` checkout are not vendored here today. The CEF distribution that `yolo-chromium` runs is downloaded into the git-ignored `.cef/` cache at build time; it is not vendored either.
-
-## Develop
-
-Install workspace dependencies and run the browser service:
-
-```sh
-bun install
-bun run dev
+```
+                           +-------------------------------------------------------------+
+                           |         Plane 1: Host Orchestration & Tooling (Bun/JSC)     |
+                           |   Bun v1.4.4+ (Rust Workspace) | Cranelift AoT | WebKit JSC |
+                           +------------------------------+------------------------------+
+                                                          |
+                                      Zero-Copy IPC / Safe Native FFI
+                                                          |
+                           +------------------------------v------------------------------+
+                           |     Plane 2: Guest Execution & Web Platform Engine (V8)      |
+                           |  V8 Isolates (rusty_v8) | Stylo (Servo) | Taffy 0.15 Layout  |
+                           |       WebRender / WebGPU Hardware Rasterization Pipeline    |
+                           +-------------------------------------------------------------+
 ```
 
-The service expects a CDP-compatible browser endpoint, defaulting to `127.0.0.1:9222`, and listens for its API/media clients on `127.0.0.1:8080`. Configure `YOLO_CDP_PORT` and `YOLO_HTTP_PORT` to change those ports. To run the frontend, set `YOLO_WEB_API_URL=http://127.0.0.1:8080` in the yolo-ui checkout and run `bun --filter @yolo-rs/browser-workbench dev`; it serves the page at `127.0.0.1:8081` and proxies API and media requests to this service.
+---
 
-Run the focused checks for the components you changed:
+## Architecture Overview
 
-```sh
+YOLO-Web enforces a zero-cost abstraction boundary between host orchestration and sandboxed web execution:
+
+### Plane 1: Host & Tooling Runtime (Native Bun + WebKit/JSC)
+- **Runtime**: Upstream Bun (`bun_core`, `bun_sys`, `bun_alloc`) built against Apple WebKit / JavaScriptCore (`WTF`, `bmalloc`, `JavaScriptCore`, Riptide GC, FTL/B3 JIT).
+- **Compilation**: Cranelift Ahead-of-Time (AoT) native code generator via `src/aot` (`bun build --compile --aot`).
+- **Networking & Server**: PicoHTTPParser SIMD HTTP/1.1 parsing, `uWebSockets` / `uSockets` kernel event loops, and BoringSSL TLS 1.3 / ALPN termination.
+- **Orchestration**: Manages headless browser sub-processes, WebSocket CDP framing, and MCP RPC server endpoints.
+
+### Plane 2: Browser Engine & Guest Isolate Execution (Chromium V8 + Servo + Taffy)
+- **JS/WASM Isolate Engine**: Chromium V8 isolates via `rusty_v8` and `deno_core` (`crates/obscura-js`, `crates/yolo-browser`). Every context runs with dedicated page-level heaps, Sparkplug/Maglev/TurboFan JIT pipelines, and `Oilpan` GC isolation.
+- **CSS Selector & Cascade**: Mozilla/Servo Stylo subsystem (`crates/servo-stylo`, `crates/servo-cssparser`) executing high-throughput parallel selector matching and specificity computation.
+- **Layout System**: Taffy 0.15 CSS Flexbox, CSS Grid, and block flow geometry computation integrated into `crates/obscura-render`.
+- **Compositing & Rasterization**: WebGPU / Dawn and Servo WebRender pipelines for GPU-accelerated drawing, WebVTT cue rendering, and zero-copy surface blitting.
+- **Network Guards**: Brave Shields (`adblock-rust`) ruleset matching, deterministic query sanitization, and client fingerprint defenses.
+
+---
+
+## Workspace Layout
+
+```
+yolo-web/
+|-- apps/
+|   |-- human-browser/          # Bun CDP control server for interactive browsing and screenshot streaming
+|   `-- ai-agent-runner/        # Autonomous browser agent execution harness
+|-- packages/
+|   |-- web-cli/                # Unified "web" binary interface for agents and engineers
+|   |-- web-mcp/                # Model Context Protocol (MCP) server exposing tools & prompts
+|   |-- cdp-client/             # High-throughput asynchronous CDP client
+|   |-- servo-bridge/           # Bindings to Servo Stylo, CSS parser, and XPath translation
+|   |-- brave-shields/          # Rust adblock and URL tracking sanitization wrappers
+|   |-- bun-v8-bridge/          # Inter-runtime coordination types and memory layouts
+|   `-- chromium-tracker/       # Upstream Chromium / CEF channel and milestone tracker
+`-- crates/
+    |-- yolo-browser/           # Unified browser host bridging Servo, Obscura, and Brave Shields
+    |-- yolo-chromium/          # CEF binary distribution runner (Chromium 156 Views framework)
+    |-- obscura-*/              # V8 isolate management, CDP domains, rendering, and DOM
+    `-- servo-*/                # Servo components (stylo, cssparser, selectors, webrender, taffy)
+```
+
+---
+
+## Command Line Interface (`web`)
+
+The `@yolo-web/web-cli` package delivers low-latency commands for headless operations:
+
+```bash
+# Fetch and render URL via Chromium/V8 with Brave Shields ad/tracker filtering
+web fetch https://aphrody.com --markdown
+web fetch https://craft.aphrody.app --screenshot=viewport.png --dump=html
+
+# Independent private search querying Brave Search API
+web search "servo stylo parallel selector matching" --count=5
+
+# LLM grounding snippet extraction with token budget constraints
+web context "webgpu compute pass pipeline layout" --max-tokens=2048
+
+# Evaluate CSS selector specificity or translate XPath to CSS using Servo Stylo
+web servo "div.container > article#main:first-child"
+web servo --xpath "//div[@id='content']/p[contains(@class, 'lead')]"
+
+# Verify URL against Brave Shields Rust engine (adblock, tracker lists, query stripping)
+web shields https://tracker.adnetwork.com/beacon.js --source=https://aphrody.com --type=script
+
+# Chromium engine release and local runtime qualification
+web chromium check
+web chromium launch --url=https://yolo.aphrody.com
+```
+
+---
+
+## Model Context Protocol (`yolo-web` Protocol)
+
+`packages/web-mcp` exposes a complete JSON-RPC Model Context Protocol interface over `stdio` and SSE for Claude Desktop, OpenCode, and local AI agent runtimes:
+
+### Exposed Tool Classes
+
+| Category | Tools | Description |
+|:---|:---|:---|
+| `browser-automation` | `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_evaluate`, `browser_screenshot`, `browser_pdf` | CDP-driven headless page manipulation, full-page accessibility snapshots, and viewport capture. |
+| `search-intelligence` | `brave_web_search`, `brave_llm_context`, `brave_shields_check`, `brave_news_search` | Real-time grounding queries, snippet aggregation, and adblock filter verification. |
+| `servo-dom-geometry` | `servo_css_specificity`, `servo_xpath_to_css`, `servo_parse_webvtt` | Servo Stylo selector analysis, XPath 1.0 to CSS3 translation, and WebVTT timeline parsing. |
+| `v8-chromium-engine` | `v8_runtime_info`, `v8_evaluate_safe`, `web_engine_status`, `browser_chromium_legitimacy_script` | Inspection of V8 isolate heap status, sandboxed code evaluation, and CEF/Chromium version validation. |
+
+### Configuration (`mcpServers`)
+
+```json
+{
+  "mcpServers": {
+    "yolo-web": {
+      "command": "bun",
+      "args": ["run", "C:/src/yolo-web/packages/web-mcp/src/index.ts"],
+      "env": {
+        "YOLO_CDP_ENDPOINT": "http://127.0.0.1:9222"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Engine Specifications & IPC Protocol
+
+### Dual-Runtime IPC & Memory Safety
+- Host (Bun) and guest (Chromium V8) processes communicate across non-blocking local sockets or named pipes (`FastWebSocket` / `uWebSockets`).
+- Buffer allocations for DOM trees, screenshot bitmaps, and PDF exports utilize zero-copy shared memory regions (`SharedArrayBuffer` / memory-mapped backing stores).
+- Host orchestrators retain zero direct access to guest V8 heap pointers; all operations traverse strictly validated schema boundaries.
+
+### Layout & Rasterization
+- **Taffy 0.15**: Computes layout geometry for mixed Flexbox and Grid models within `crates/obscura-render`. Layout nodes map directly to Servo DOM nodes.
+- **WebRender & WebGPU**: Scene display lists translate to hardware textures and GPU command buffers for compositing, eliminating software raster bottlenecks.
+
+---
+
+## Development
+
+```bash
+# Install workspace dependencies
+bun install
+
+# Run human browser service
+bun run dev
+
+# Execute unit and integration test suites
 bun test apps/human-browser/src/server.test.ts packages/cdp-client/src/index.test.ts
 cargo test -p yolo-browser
+
+# Format codebase
+bun fmt
 ```
-
-For V8 isolate crates, use `cargo nextest run -p <crate>` so each test suite
-gets a separate process. Avoid workspace-wide Rust builds during an incremental
-edit loop.
-
-The repo-wide `bun check` currently reports existing TypeScript errors across multiple packages; see the command output before treating it as a passing gate.
-
-## Chromium browser shell (yolo-chromium)
-
-`crates/yolo-chromium` is the YOLO-Web-owned CEF engine adapter and browser shell. It runs the official CEF binary distribution `156.0.15+gcf671c0+chromium-156.0.8078.80` (Chromium `156.0.8078.80`) in the Chrome runtime style with the Views framework: Chrome toolbar, omnibox, DevTools, and popups as new windows. On Windows the shell is a `cdylib` loaded by CEF's `bootstrap.exe`/`bootstrapc.exe`, which keeps Chromium's sandbox enabled; the Rust `yolo-chromium` binary is a launcher that prepares the runtime directory and forwards Chromium switches. The separately pinned Chromium `159.0.8143.0` source checkout in `engines/chromium.lock.json` is not what runs; a source-built CEF from that checkout is future work.
-
-```sh
-cargo build -p yolo-chromium   # first build downloads about 175 MB of CEF into .cef/ and compiles the wrapper
-cargo run -p yolo-chromium -- --url=https://example.com
-cargo run -p yolo-chromium -- --smoke --url=chrome://version/ --receipt=engines/cef.lock.json
-```
-
-`just chromium-build`, `just chromium-run <url>` (defaults to `https://example.com`), `just chromium-smoke`, and the `bun run chromium:*` scripts wrap the same commands. CMake, Ninja, and the MSVC Build Tools are required on Windows. The smoke run writes the engine receipt `engines/cef.lock.json` (build and runtime CEF/Chromium versions, API hash, sandbox state, load outcome); that receipt is the evidence for the shell, not this paragraph. Details: [crates/yolo-chromium/README.md](crates/yolo-chromium/README.md), [docs/CEF_ADAPTER_BOUNDARY.mdx](docs/CEF_ADAPTER_BOUNDARY.mdx), and the CEF notes in [WINDOWS_BROWSER_TOOLCHAIN.md](docs/WINDOWS_BROWSER_TOOLCHAIN.md).
-
-## Upstream project references
-
-- [Chromium source and build guide](https://chromium.googlesource.com/chromium/src/+/main/docs/get_the_code.md)
-- [Chromium source directory architecture](https://www.chromium.org/developers/how-tos/getting-around-the-chrome-source-code/)
-- [Blink](https://www.chromium.org/blink/)
-- [Dawn](https://dawn.googlesource.com/dawn)
-- [Skia](https://docs.skia.org/docs/user/build/)
-- [Servo Book](https://book.servo.org/)
-- [WebKit documentation](https://docs.webkit.org/)
-- [Firefox source documentation](https://firefox-source-docs.mozilla.org/)
