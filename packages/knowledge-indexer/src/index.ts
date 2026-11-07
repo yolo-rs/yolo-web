@@ -6,6 +6,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const join = (...parts: string[]): string => {
   const separator = parts[0]?.includes("\\") ? "\\" : "/";
@@ -54,6 +56,14 @@ export class KnowledgeIndexDb {
         import.meta.dir,
         "../../../data/knowledge/yolo_web_knowledge.sqlite",
       );
+    const parentDir = dirname(this.dbPath);
+    if (parentDir && parentDir !== "." && parentDir !== "/") {
+      try {
+        mkdirSync(parentDir, { recursive: true });
+      } catch {
+        // Ignore if already exists or permission
+      }
+    }
     this.db = new Database(this.dbPath, { create: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA synchronous = NORMAL;");
