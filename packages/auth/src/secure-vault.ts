@@ -74,7 +74,7 @@ export interface CsvImportAuditReport {
 }
 
 async function deriveAes256Key(masterSecret: string): Promise<CryptoKey> {
-  const rawHash = new Bun.CryptoHasher("sha256").update(masterSecret).digest();
+  const rawHash = new Uint8Array(new Bun.CryptoHasher("sha256").update(masterSecret).digest());
   return crypto.subtle.importKey(
     "raw",
     rawHash,

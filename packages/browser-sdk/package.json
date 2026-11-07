@@ -15,6 +15,7 @@
     "@yolo-web/bun-v8-bridge": "workspace:*"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "check": "bun check"
   }
 }

@@ -14,5 +14,12 @@
   },
   "dependencies": {
     "@yolo-web/cdp-client": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./crawl": "./src/crawl.ts",
+    "./session": "./src/session.ts",
+    "./urls": "./src/urls.ts"
   }
 }

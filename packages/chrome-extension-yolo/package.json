@@ -21,5 +21,12 @@
     "tokens": "bun run scripts/tokens-json.ts",
     "check": "bun check --no-script",
     "test": "bun test"
+  },
+  "main": "./src/extension-api.ts",
+  "exports": {
+    ".": "./src/extension-api.ts",
+    "./tokens": "./src/tokens.ts",
+    "./styles": "./src/styles.ts",
+    "./dom": "./src/dom.ts"
   }
 }

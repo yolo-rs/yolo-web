@@ -12,6 +12,7 @@
   },
   "scripts": {
     "check": "bun check",
-    "update": "bun run scripts/update.ts"
+    "update": "bun run scripts/update.ts",
+    "test": "bun test"
   }
 }

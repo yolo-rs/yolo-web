@@ -52,6 +52,7 @@ import {
   crawl,
   inspectGitRemote,
   listGitHubRepositories,
+  queryMultiRegistryPackage,
   synthesizeMarkdown,
   YOLO_ECOSYSTEM_5_REGISTRY_CATALOG,
   YOLO_WEB_ENGINE_INVENTORY,
@@ -723,12 +724,20 @@ export function createWebCli(): Command {
       "Google account email",
       "yohanpierre15@gmail.com",
     )
+    .option("--db <path>", "SQLite WAL vault path", ":memory:")
+    .option("--qr-out <path>", "Optional path to write QR SVG file")
     .action(
       async (
         action: string,
-        opts: { csv?: string; secret?: string; account: string },
+        opts: {
+          csv?: string;
+          secret?: string;
+          account: string;
+          db: string;
+          qrOut?: string;
+        },
       ) => {
-        const vault = new YoloSecureVault();
+        const vault = new YoloSecureVault({ dbPath: opts.db });
         try {
           if (action === "postgres-schema") {
             console.log(getPostgresVaultSchemaSql());
@@ -747,12 +756,16 @@ export function createWebCli(): Command {
                 ? "JBSWY3DPEHPK3PXP"
                 : secretOrUri,
             });
-            const qrSvg = renderAuthenticatorQrSvg(otpUri, 180);
+            const qrSvg = renderAuthenticatorQrSvg(otpUri, 220);
+            if (opts.qrOut) {
+              await Bun.write(opts.qrOut, qrSvg);
+            }
             console.log(
               JSON.stringify(
                 {
                   enrolled,
                   qrSvgLength: qrSvg.length,
+                  ...(opts.qrOut ? { qrSavedTo: opts.qrOut } : {}),
                 },
                 null,
                 2,
@@ -807,8 +820,10 @@ export function createWebCli(): Command {
     .description(
       "Index google.com, AI endpoints, Web UI/Backend stacks, and 5 registries (GitHub, npm, crates.io, PyPI, Go) into KnowledgeIndexDb",
     )
-    .action(async () => {
-      const db = new KnowledgeIndexDb(":memory:");
+    .option("--db <path>", "SQLite KnowledgeIndexDb path", ":memory:")
+    .option("--live", "Probe live package registries over HTTPS")
+    .action(async (opts: { db: string; live?: boolean }) => {
+      const db = new KnowledgeIndexDb(opts.db);
       try {
         for (const entry of YOLO_WEB_GOOGLE_NETWORK_MAP) {
           db.recordTestKnowledge({
@@ -824,6 +839,23 @@ export function createWebCli(): Command {
             ragSnippet: `Endpoints: ${entry.endpoints.length} | Auth: ${entry.authAndCookies.join(", ")}`,
           });
         }
+        const liveSamples = opts.live
+          ? await Promise.all([
+              queryMultiRegistryPackage("npm", "@google/genai", 4000),
+              queryMultiRegistryPackage("pypi", "google-genai", 4000),
+              queryMultiRegistryPackage("crates.io", "totp-rs", 4000),
+              queryMultiRegistryPackage(
+                "go",
+                "github.com/chromedp/chromedp",
+                4000,
+              ),
+              queryMultiRegistryPackage(
+                "github",
+                "HanaokaYuzu/Gemini-API",
+                4000,
+              ),
+            ])
+          : [];
         console.log(
           JSON.stringify(
             {
@@ -833,6 +865,9 @@ export function createWebCli(): Command {
               fiveRegistryCatalogCount:
                 YOLO_ECOSYSTEM_5_REGISTRY_CATALOG.length,
               registries: ["github", "npm", "crates.io", "pypi", "go"],
+              ...(liveSamples.length > 0
+                ? { liveRegistryProbes: liveSamples }
+                : {}),
             },
             null,
             2,

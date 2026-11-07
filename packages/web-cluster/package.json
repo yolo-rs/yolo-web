@@ -7,6 +7,14 @@
   "scripts": {
     "coordinator": "bun src/coordinator.ts",
     "worker": "bun src/worker.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "check": "bun check"
+  },
+  "main": "./src/common.ts",
+  "exports": {
+    ".": "./src/common.ts",
+    "./coordinator": "./src/coordinator.ts",
+    "./worker": "./src/worker.ts",
+    "./cdp": "./src/cdp.ts"
   }
 }

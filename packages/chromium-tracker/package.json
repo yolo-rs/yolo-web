@@ -15,5 +15,12 @@
   "dependencies": {
     "@yolo-web/shared": "workspace:*",
     "@yolo-web/knowledge-indexer": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/cli.ts",
+    "./engine-manager": "./src/engine-manager.ts",
+    "./patch-queue": "./src/patch-queue.ts",
+    "./upstream-watch": "./src/upstream-watch.ts"
   }
 }

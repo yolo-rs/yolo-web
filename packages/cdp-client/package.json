@@ -12,6 +12,7 @@
     "@yolo-web/shared": "workspace:*"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "check": "bun check"
   }
 }
