@@ -31,8 +31,6 @@ import {
   renderAphrodySitemapXml,
   syncCatalogToSqlAndRedis,
 } from "./aphrody-apps-catalog.ts";
-import searchHtml from "./search-ui.html";
-
 const SEARCH_UI_HTML_TEXT = readFileSync(
   join(import.meta.dir, "search-ui.html"),
   "utf8",
@@ -86,9 +84,15 @@ const DEFAULT_SUGGESTIONS_EN = [
   "cosmic.aphrody.app rust desktop",
 ];
 
-function extractSubdomainParam(req: Request, prefix: string, suffix = ""): string {
+function extractSubdomainParam(
+  req: Request,
+  prefix: string,
+  suffix = "",
+): string {
   const pathname = new URL(req.url).pathname;
-  let value = pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname;
+  let value = pathname.startsWith(prefix)
+    ? pathname.slice(prefix.length)
+    : pathname;
   if (suffix && value.endsWith(suffix)) {
     value = value.slice(0, -suffix.length);
   }
@@ -103,7 +107,9 @@ export function createAphrodySearchRoutes(
 
   const handleRootOrSubdomain = (req?: Request) => {
     if (req) {
-      const hostSub = extractAphrodyAppSubdomainFromHost(req.headers.get("host"));
+      const hostSub = extractAphrodyAppSubdomainFromHost(
+        req.headers.get("host"),
+      );
       if (hostSub) {
         const app = findAphrodyTop1App(hostSub);
         if (app) {
@@ -124,7 +130,8 @@ export function createAphrodySearchRoutes(
   };
 
   const handleAppSubdomainHtml = (req: Request) => {
-    const params = (req as Request & { params?: Record<string, string> }).params;
+    const params = (req as Request & { params?: Record<string, string> })
+      .params;
     const sub = params?.subdomain || extractSubdomainParam(req, "/app/");
     const app = findAphrodyTop1App(sub);
     if (!app) {
@@ -132,7 +139,9 @@ export function createAphrodySearchRoutes(
         {
           error: "Unknown *.aphrody.app subdomain",
           requested: sub,
-          availableSubdomains: APHRODY_TOP1_RUST_BUN_CATALOG.map((a) => a.subdomain),
+          availableSubdomains: APHRODY_TOP1_RUST_BUN_CATALOG.map(
+            (a) => a.subdomain,
+          ),
         },
         { status: 404 },
       );
@@ -147,7 +156,8 @@ export function createAphrodySearchRoutes(
   };
 
   const handleAppSubdomainApi = (req: Request) => {
-    const params = (req as Request & { params?: Record<string, string> }).params;
+    const params = (req as Request & { params?: Record<string, string> })
+      .params;
     const sub = params?.subdomain || extractSubdomainParam(req, "/api/apps/");
     const app = findAphrodyTop1App(sub);
     if (!app) {
@@ -155,7 +165,9 @@ export function createAphrodySearchRoutes(
         {
           error: "Unknown *.aphrody.app application",
           requested: sub,
-          availableSubdomains: APHRODY_TOP1_RUST_BUN_CATALOG.map((a) => a.subdomain),
+          availableSubdomains: APHRODY_TOP1_RUST_BUN_CATALOG.map(
+            (a) => a.subdomain,
+          ),
         },
         { status: 404 },
       );
@@ -164,12 +176,16 @@ export function createAphrodySearchRoutes(
       brand: APHRODY_IDENTITY.brand,
       sharedMonorepo: SHARED_MONOREPO_SPEC,
       app,
-      bevyCpkBlueprint: app.id === "bevy" || app.id === "bevy-devtools" ? buildBevy60GbCpkBlueprint() : undefined,
+      bevyCpkBlueprint:
+        app.id === "bevy" || app.id === "bevy-devtools"
+          ? buildBevy60GbCpkBlueprint()
+          : undefined,
     });
   };
 
   const handleOgSvg = (req: Request) => {
-    const params = (req as Request & { params?: Record<string, string> }).params;
+    const params = (req as Request & { params?: Record<string, string> })
+      .params;
     const raw = params?.subdomain || extractSubdomainParam(req, "/og/", ".svg");
     const sub = raw.replace(/\.svg$/i, "");
     return new Response(renderAphrodyAppOgSvg(sub), {
@@ -182,8 +198,10 @@ export function createAphrodySearchRoutes(
   };
 
   const handleIconSvg = (req: Request) => {
-    const params = (req as Request & { params?: Record<string, string> }).params;
-    const raw = params?.subdomain || extractSubdomainParam(req, "/icon/", ".svg");
+    const params = (req as Request & { params?: Record<string, string> })
+      .params;
+    const raw =
+      params?.subdomain || extractSubdomainParam(req, "/icon/", ".svg");
     const sub = raw.replace(/\.svg$/i, "");
     return new Response(renderAphrodyAppIconSvg(sub), {
       status: 200,
@@ -232,28 +250,28 @@ export function createAphrodySearchRoutes(
 
   return {
     "/": handleRootOrSubdomain,
-    "/search": searchHtml,
-    "/ai": searchHtml,
-    "/files": searchHtml,
-    "/drive": searchHtml,
-    "/word": searchHtml,
-    "/docs": searchHtml,
-    "/grid": searchHtml,
-    "/sheets": searchHtml,
-    "/deck": searchHtml,
-    "/slides": searchHtml,
-    "/mail": searchHtml,
-    "/meet": searchHtml,
-    "/calendar": searchHtml,
-    "/photo": searchHtml,
-    "/photos": searchHtml,
-    "/translate": searchHtml,
-    "/maps": searchHtml,
-    "/play": searchHtml,
-    "/os": searchHtml,
-    "/console": searchHtml,
-    "/yolo": searchHtml,
-    "/workspace": searchHtml,
+    "/search": handleRootOrSubdomain,
+    "/ai": handleRootOrSubdomain,
+    "/files": handleRootOrSubdomain,
+    "/drive": handleRootOrSubdomain,
+    "/word": handleRootOrSubdomain,
+    "/docs": handleRootOrSubdomain,
+    "/grid": handleRootOrSubdomain,
+    "/sheets": handleRootOrSubdomain,
+    "/deck": handleRootOrSubdomain,
+    "/slides": handleRootOrSubdomain,
+    "/mail": handleRootOrSubdomain,
+    "/meet": handleRootOrSubdomain,
+    "/calendar": handleRootOrSubdomain,
+    "/photo": handleRootOrSubdomain,
+    "/photos": handleRootOrSubdomain,
+    "/translate": handleRootOrSubdomain,
+    "/maps": handleRootOrSubdomain,
+    "/play": handleRootOrSubdomain,
+    "/os": handleRootOrSubdomain,
+    "/console": handleRootOrSubdomain,
+    "/yolo": handleRootOrSubdomain,
+    "/workspace": handleRootOrSubdomain,
     "/health": () =>
       Response.json({
         status: "ok",
@@ -292,10 +310,19 @@ export function createAphrodySearchRoutes(
           background_color: "#0A0E17",
           theme_color: "#0A0E17",
           icons: [
-            { src: "/icon/showcase.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+            {
+              src: "/icon/showcase.svg",
+              sizes: "any",
+              type: "image/svg+xml",
+              purpose: "any",
+            },
           ],
         }),
-        { headers: { "content-type": "application/manifest+json; charset=utf-8" } },
+        {
+          headers: {
+            "content-type": "application/manifest+json; charset=utf-8",
+          },
+        },
       ),
     "/llms.txt": () =>
       new Response(
@@ -372,13 +399,19 @@ export function createAphrodySearchRoutes(
       const defaultSuggestions = isFr
         ? DEFAULT_SUGGESTIONS_FR
         : DEFAULT_SUGGESTIONS_EN;
-      const appSuggestions = APHRODY_APPS_ECOSYSTEM.map((a) =>
-        `${a.name.toLowerCase()} (${a.url.replace("https://", "")})`,
+      const appSuggestions = APHRODY_APPS_ECOSYSTEM.map(
+        (a) => `${a.name.toLowerCase()} (${a.url.replace("https://", "")})`,
       );
       const top1Suggestions = APHRODY_TOP1_RUST_BUN_CATALOG.map(
         (a) => `${a.subdomain}.aphrody.app — ${a.title.toLowerCase()}`,
       );
-      const combined = [...new Set([...defaultSuggestions, ...appSuggestions, ...top1Suggestions])];
+      const combined = [
+        ...new Set([
+          ...defaultSuggestions,
+          ...appSuggestions,
+          ...top1Suggestions,
+        ]),
+      ];
       const matches = combined.filter((s) => s.includes(q)).slice(0, 10);
       return Response.json([q, matches], {
         headers: {
@@ -396,13 +429,19 @@ export function createAphrodySearchRoutes(
       const defaultSuggestions = isFr
         ? DEFAULT_SUGGESTIONS_FR
         : DEFAULT_SUGGESTIONS_EN;
-      const appSuggestions = APHRODY_APPS_ECOSYSTEM.map((a) =>
-        `${a.name.toLowerCase()} (${a.url.replace("https://", "")})`,
+      const appSuggestions = APHRODY_APPS_ECOSYSTEM.map(
+        (a) => `${a.name.toLowerCase()} (${a.url.replace("https://", "")})`,
       );
       const top1Suggestions = APHRODY_TOP1_RUST_BUN_CATALOG.map(
         (a) => `${a.subdomain}.aphrody.app — ${a.title.toLowerCase()}`,
       );
-      const combined = [...new Set([...defaultSuggestions, ...appSuggestions, ...top1Suggestions])];
+      const combined = [
+        ...new Set([
+          ...defaultSuggestions,
+          ...appSuggestions,
+          ...top1Suggestions,
+        ]),
+      ];
       const matches = combined.filter((s) => s.includes(q)).slice(0, 10);
       return Response.json([q, matches], {
         headers: {
@@ -413,9 +452,13 @@ export function createAphrodySearchRoutes(
     },
     "/api/search": async (req: Request) => {
       const url = new URL(req.url);
-      const q = url.searchParams.get("q") || url.searchParams.get("query") || "";
-      const lang = url.searchParams.get("lang") || url.searchParams.get("hl") || "en";
-      const rawVertical = (url.searchParams.get("vertical") || "all").toLowerCase();
+      const q =
+        url.searchParams.get("q") || url.searchParams.get("query") || "";
+      const lang =
+        url.searchParams.get("lang") || url.searchParams.get("hl") || "en";
+      const rawVertical = (
+        url.searchParams.get("vertical") || "all"
+      ).toLowerCase();
       const validVerticals = new Set(APHRODY_SEARCH_VERTICALS.map((v) => v.id));
       const vertical: AphrodySearchVertical = validVerticals.has(
         rawVertical as AphrodySearchVertical,
@@ -468,7 +511,10 @@ export function createAphrodySearchRoutes(
       // Provider 2: Brave Search Independent Index (brave-shields MCP bridge)
       if (organicResults.length === 0) {
         try {
-          const braveItems = await braveBridge.webSearch({ query: q, count: 10 });
+          const braveItems = await braveBridge.webSearch({
+            query: q,
+            count: 10,
+          });
           if (braveItems && braveItems.length > 0) {
             organicResults = braveItems.map((item) => ({
               title: item.title,
@@ -593,16 +639,20 @@ export function createAphrodySearchRoutes(
   };
 }
 
-export function startAphrodySearchServer(options: AphrodySearchServerOptions = {}) {
+export function startAphrodySearchServer(
+  options: AphrodySearchServerOptions = {},
+) {
   const port = options.port ?? (Number(process.env.SEARCH_PORT) || 8793);
-  const routes = createAphrodySearchRoutes(options.publicSearch, options.braveBridge);
+  const routes = createAphrodySearchRoutes(
+    options.publicSearch,
+    options.braveBridge,
+  );
   return Bun.serve({
     port,
     routes,
     fetch(req) {
       return routes["/"](req);
     },
-    development: { hmr: true },
   });
 }
 
