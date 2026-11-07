@@ -53,6 +53,7 @@ export * from "./gws.ts";
 export * from "./docs-wordcraft.ts";
 export * from "./slides-deckcraft.ts";
 export * from "./aphrody-ecosystem.ts";
+export * from "./aphrody-apps-catalog.ts";
 export {
   createAphrodySearchRoutes,
   startAphrodySearchServer,

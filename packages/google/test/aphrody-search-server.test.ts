@@ -6,7 +6,19 @@ import {
   buildAiOverview,
   buildKnowledgeCard,
 } from "../src/aphrody-ecosystem.ts";
+import {
+  APHRODY_TOP1_RUST_BUN_CATALOG,
+  SHARED_MONOREPO_SPEC,
+  buildBevy60GbCpkBlueprint,
+  renderAphrodyAppIconSvg,
+  renderAphrodyAppOgSvg,
+  renderAphrodyAppSubdomainHtml,
+  renderAphrodySitemapXml,
+  syncCatalogToSqlAndRedis,
+} from "../src/aphrody-apps-catalog.ts";
 import { createAphrodySearchRoutes } from "../src/search-server.ts";
+
+const EMOJI_REGEX = /\p{Extended_Pictographic}/u;
 
 describe("Aphrody Flagship Ecosystem & Search Server", () => {
   test("APHRODY_IDENTITY defines Evolving Google 2026 4-stop gradient and Aphrody brand palette", () => {
@@ -71,6 +83,42 @@ describe("Aphrody Flagship Ecosystem & Search Server", () => {
     }
   });
 
+  test("APHRODY_TOP1_RUST_BUN_CATALOG includes all 21 *.aphrody.app subdomains with zero emojis", () => {
+    expect(APHRODY_TOP1_RUST_BUN_CATALOG.length).toBe(21);
+    const subdomains = APHRODY_TOP1_RUST_BUN_CATALOG.map((item) => item.subdomain);
+    expect(subdomains).toEqual([
+      "zed",
+      "rio",
+      "nushell",
+      "uncensored",
+      "spacedrive",
+      "cosmic",
+      "bevy",
+      "bevy-devtools",
+      "tiny-glade",
+      "veloren",
+      "tunnet",
+      "gpui",
+      "egui",
+      "iced",
+      "wgpu",
+      "leptos",
+      "taffy",
+      "awesome",
+      "showcase",
+      "templates",
+      "docs",
+    ]);
+
+    for (const item of APHRODY_TOP1_RUST_BUN_CATALOG) {
+      expect(item.fqdn).toBe(`${item.subdomain}.aphrody.app`);
+      expect(item.url).toBe(`https://${item.subdomain}.aphrody.app`);
+      expect(EMOJI_REGEX.test(item.title)).toBe(false);
+      expect(EMOJI_REGEX.test(item.summaryEn)).toBe(false);
+      expect(EMOJI_REGEX.test(item.summaryFr)).toBe(false);
+    }
+  });
+
   test("buildKnowledgeCard and buildAiOverview return structured bilingual payloads", () => {
     const cardEn = buildKnowledgeCard("GoogleBook 2026", "en");
     expect(cardEn.title).toContain("GoogleBook");
@@ -116,9 +164,11 @@ describe("Aphrody Flagship Ecosystem & Search Server", () => {
       total: number;
       apps: typeof APHRODY_APPS_ECOSYSTEM;
       verticals: typeof APHRODY_SEARCH_VERTICALS;
+      top1RustBunCatalogTotal: number;
     };
     expect(appsJson.total).toBe(16);
     expect(appsJson.verticals.length).toBe(10);
+    expect(appsJson.top1RustBunCatalogTotal).toBe(21);
 
     const workspaceRes = routes["/api/apps"](
       new Request("http://localhost/api/apps?category=workspace&q=wordcraft"),
@@ -155,6 +205,129 @@ describe("Aphrody Flagship Ecosystem & Search Server", () => {
     expect(searchJson.organic.length).toBe(2);
     expect(searchJson.aiOverview.summary).toContain("googlebook");
     expect(searchJson.knowledgeCard?.title).toContain("GoogleBook");
+  });
+
+  test("HTTP routes serve /api/catalog, /app/bevy, /app/zed, Host: bevy.aphrody.app, /api/bevy/cpk-builder, /api/crawler/sync, /og/bevy.svg, and /sitemap.xml", async () => {
+    const routes = createAphrodySearchRoutes();
+
+    // 1. GET /api/catalog
+    const catalogRes = routes["/api/catalog"](new Request("http://localhost/api/catalog"));
+    expect(catalogRes.status).toBe(200);
+    const catalogJson = (await catalogRes.json()) as {
+      total: number;
+      appDomainPattern: string;
+      sharedMonorepo: typeof SHARED_MONOREPO_SPEC;
+      catalog: typeof APHRODY_TOP1_RUST_BUN_CATALOG;
+    };
+    expect(catalogJson.total).toBe(21);
+    expect(catalogJson.appDomainPattern).toBe("*.aphrody.app");
+    expect(catalogJson.sharedMonorepo.sharedGpuBackend.crate).toBe("wgpu");
+
+    // 2. GET /app/bevy and GET /app/zed
+    const bevyPageRes = routes["/app/:subdomain"](new Request("http://localhost/app/bevy"));
+    expect(bevyPageRes.status).toBe(200);
+    expect(bevyPageRes.headers.get("x-aphrody-subdomain")).toBe("bevy.aphrody.app");
+    const bevyHtml = await bevyPageRes.text();
+    expect(bevyHtml).toContain("Bevy Fullstack Engine");
+    expect(bevyHtml).toContain("60 GB (64,424,509,440 bytes)");
+    expect(bevyHtml).toContain("#0A0E17");
+    expect(bevyHtml).toContain("#17335C");
+    expect(bevyHtml).toContain("#FFD700");
+    expect(EMOJI_REGEX.test(bevyHtml)).toBe(false);
+
+    const zedPageRes = routes["/app/:subdomain"](new Request("http://localhost/app/zed"));
+    expect(zedPageRes.status).toBe(200);
+    expect(zedPageRes.headers.get("x-aphrody-subdomain")).toBe("zed.aphrody.app");
+    const zedHtml = await zedPageRes.text();
+    expect(zedHtml).toContain("Zed Code Editor");
+    expect(zedHtml).toContain("gpui-wgpu-sdf");
+    expect(EMOJI_REGEX.test(zedHtml)).toBe(false);
+
+    // 3. Host: bevy.aphrody.app on root "/"
+    const hostSubRes = routes["/"](
+      new Request("http://bevy.aphrody.app/", {
+        headers: { host: "bevy.aphrody.app" },
+      }),
+    );
+    expect(hostSubRes.status).toBe(200);
+    expect(hostSubRes.headers.get("x-aphrody-subdomain")).toBe("bevy.aphrody.app");
+    const hostSubHtml = await hostSubRes.text();
+    expect(hostSubHtml).toContain("bevy.aphrody.app");
+    expect(hostSubHtml).toContain("Bevy 60 GB CRIWARE CPK");
+
+    // 4. GET /api/apps/bevy
+    const bevyApiRes = routes["/api/apps/:subdomain"](
+      new Request("http://localhost/api/apps/bevy"),
+    );
+    expect(bevyApiRes.status).toBe(200);
+    const bevyApiJson = (await bevyApiRes.json()) as {
+      app: { id: string; fqdn: string };
+      bevyCpkBlueprint: ReturnType<typeof buildBevy60GbCpkBlueprint>;
+    };
+    expect(bevyApiJson.app.id).toBe("bevy");
+    expect(bevyApiJson.app.fqdn).toBe("bevy.aphrody.app");
+    expect(bevyApiJson.bevyCpkBlueprint.maxArchiveBytes).toBe(64_424_509_440);
+
+    // 5. GET /api/bevy/cpk-builder & /api/shared-monorepo
+    const cpkRes = routes["/api/bevy/cpk-builder"]();
+    expect(cpkRes.status).toBe(200);
+    const cpkJson = (await cpkRes.json()) as ReturnType<typeof buildBevy60GbCpkBlueprint>;
+    expect(cpkJson.id).toBe("bevy-cpk-60gb-ai-builder");
+    expect(cpkJson.aiPipelineStages.length).toBe(4);
+    expect(cpkJson.vpsNodes.length).toBe(3);
+
+    const monoRes = routes["/api/shared-monorepo"]();
+    expect(monoRes.status).toBe(200);
+    const monoJson = (await monoRes.json()) as typeof SHARED_MONOREPO_SPEC;
+    expect(monoJson.workspaceDependencies.wgpu).toBe("24.0.1");
+
+    // 6. GET /api/crawler/sync (SQLite WAL + FTS5 + Redis graceful sync)
+    const syncRes = await routes["/api/crawler/sync"](
+      new Request("http://localhost/api/crawler/sync"),
+    );
+    expect(syncRes.status).toBe(200);
+    const syncJson = (await syncRes.json()) as Awaited<
+      ReturnType<typeof syncCatalogToSqlAndRedis>
+    >;
+    expect(syncJson.totalAppsSynced).toBe(21);
+    expect(syncJson.fts5IndexedCount).toBe(21);
+    expect(syncJson.bevyPipelinesSynced).toBe(1);
+    expect(syncJson.sqliteWalEnabled).toBe(true);
+
+    // 7. GET /og/bevy.svg and /icon/bevy.svg
+    const ogRes = routes["/og/:subdomain.svg"](new Request("http://localhost/og/bevy.svg"));
+    expect(ogRes.status).toBe(200);
+    expect(ogRes.headers.get("content-type")).toContain("image/svg+xml");
+    const ogSvg = await ogRes.text();
+    expect(ogSvg).toContain("BEVY.APHRODY.APP");
+    expect(EMOJI_REGEX.test(ogSvg)).toBe(false);
+
+    const iconRes = routes["/icon/:subdomain.svg"](
+      new Request("http://localhost/icon/bevy.svg"),
+    );
+    expect(iconRes.status).toBe(200);
+    const iconSvg = await iconRes.text();
+    expect(iconSvg).toContain("<svg");
+    expect(EMOJI_REGEX.test(iconSvg)).toBe(false);
+
+    // 8. GET /sitemap.xml and /robots.txt
+    const sitemapRes = routes["/sitemap.xml"]();
+    expect(sitemapRes.status).toBe(200);
+    const sitemapXml = await sitemapRes.text();
+    expect(sitemapXml).toContain("https://bevy.aphrody.app");
+    expect(sitemapXml).toContain("https://zed.aphrody.app");
+    expect(sitemapXml).toContain("https://cosmic.aphrody.app");
+
+    const robotsRes = routes["/robots.txt"]();
+    expect(robotsRes.status).toBe(200);
+    const robotsTxt = await robotsRes.text();
+    expect(robotsTxt).toContain("Sitemap: https://aphrody.com/sitemap.xml");
+
+    // Verify helper exports directly
+    expect(renderAphrodyAppOgSvg("zed")).toContain("ZED.APHRODY.APP");
+    expect(renderAphrodyAppIconSvg("cosmic")).toContain("COSMIC");
+    expect(renderAphrodyAppSubdomainHtml("uncensored")).toContain("8081");
+    expect(renderAphrodySitemapXml()).toContain("<urlset");
   });
 
   test("Brave Search and Sovereign Aphrody multi-provider fallbacks", async () => {
