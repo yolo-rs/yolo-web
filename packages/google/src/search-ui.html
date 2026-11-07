@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Recherche Souveraine — Bun OS</title>
+    <title>Aphrody — Search, Gemini AI & Workspace Hub (aphrody.com)</title>
     <!-- Google Fonts & Material Symbols -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Display:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
     <link
@@ -16,9 +16,41 @@
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200"
     />
     <style>
-      /* M3 Design Tokens */
+      /* ==========================================================================
+         Aphrody Identity (Evolving Google Identity 2026) & Material 3 Expressive
+         Inspiration: https://design.google/library/evolving-google-identity
+         ========================================================================== */
       :root {
-        /* Colors: Light Scheme (M3 Surface Containers) */
+        /* Evolving Google 2026 4-Stop Gradient + Aphrody Brand Tokens */
+        --evolving-google-blue: #4285f4;
+        --evolving-google-violet: #9b72cb;
+        --evolving-google-coral: #d96570;
+        --evolving-google-gold: #f4b400;
+
+        --aphrody-gold: #ffd700;
+        --aphrody-violet: #7c5cff;
+        --aphrody-cyan: #00d4ff;
+        --aphrody-navy: #17335c;
+        --aphrody-pet-mauve: #8c6c88;
+
+        --evolving-gradient-4stop: linear-gradient(
+          90deg,
+          #4285f4 0%,
+          #9b72cb 33%,
+          #d96570 66%,
+          #f4b400 100%
+        );
+        --aphrody-evolving-gradient: linear-gradient(
+          105deg,
+          #4285f4 0%,
+          #7c5cff 25%,
+          #9b72cb 45%,
+          #d96570 68%,
+          #f4b400 85%,
+          #ffd700 100%
+        );
+
+        /* M3 Expressive HCT/CAM16 Light Surface Containers */
         --bg: #ffffff;
         --surface: #ffffff;
         --surface-container-lowest: #ffffff;
@@ -32,10 +64,10 @@
         --outline-variant: #dadce0;
 
         --border: #dfe1e5;
-        --border-hover: rgba(223, 225, 229, 0);
-        --shadow-hover: 0 1px 6px rgba(32, 33, 36, 0.28);
+        --border-hover: rgba(155, 114, 203, 0.35);
+        --shadow-hover: 0 2px 12px rgba(23, 51, 92, 0.16), 0 1px 4px rgba(124, 92, 255, 0.12);
         --text: #202124;
-        --text-subtle: #70757a;
+        --text-subtle: #5f6368;
         --text-snippet: #4d5156;
         --link: #1a0dab;
         --link-visited: #681da8;
@@ -48,53 +80,49 @@
         --btn-active-bg: var(--surface-container-highest);
         --accent-blue: #1a73e8;
 
-        /* Typography */
+        /* Geometric Typography (Product Sans / Google Sans Metrics) */
         --font-family:
-          "Google Sans", "Google Sans Text", "Product Sans", -apple-system,
+          "Google Sans", "Product Sans", "Google Sans Text", -apple-system,
           BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
         --font-family-text:
           "Google Sans Text", "Google Sans", -apple-system, BlinkMacSystemFont,
           "Segoe UI", Roboto, Arial, sans-serif;
         --font-family-display:
-          "Product Sans", "Google Sans", "Google Sans Text", sans-serif;
+          "Product Sans", "Google Sans Display", "Google Sans", sans-serif;
 
-        /* M3 Shape Tokens */
+        /* M3 Expressive Shape Tokens */
         --m3-shape-corner-small: 8px;
         --m3-shape-corner-medium: 12px;
         --m3-shape-corner-large: 16px;
-        --m3-shape-corner-full: 20px;
+        --m3-shape-corner-xl: 24px;
+        --m3-shape-corner-full: 9999px;
+        --m3-capsule-radius: 28px;
       }
 
       @media (prefers-color-scheme: dark) {
         :root {
-          /* Colors: Dark Scheme (M3 Surface Containers) */
-          --bg: #202124;
-          --surface: #303134;
-          --surface-container-lowest: #1e1f20;
-          --surface-container-low: #282a2d;
-          --surface-container: #303134;
-          --surface-container-high: #3c4043;
-          --surface-container-highest: #474a4d;
+          --bg: #131420;
+          --surface: #1e2030;
+          --surface-container-lowest: #0f101a;
+          --surface-container-low: #181a28;
+          --surface-container: #222538;
+          --surface-container-high: #2b2f45;
+          --surface-container-highest: #363b54;
           --on-surface: #e8eaed;
           --on-surface-variant: #c4c7c5;
           --outline: #8e918f;
-          --outline-variant: #5f6368;
+          --outline-variant: #444963;
 
-          --border: #5f6368;
-          --border-hover: rgba(95, 99, 104, 0);
-          --shadow-hover: 0 1px 6px rgba(0, 0, 0, 0.5);
+          --border: #3c4059;
+          --border-hover: rgba(124, 92, 255, 0.55);
+          --shadow-hover: 0 4px 18px rgba(0, 0, 0, 0.55), 0 0 12px rgba(124, 92, 255, 0.22);
           --text: #e8eaed;
           --text-subtle: #9aa0a6;
           --text-snippet: #bdc1c6;
           --link: #8ab4f8;
           --link-visited: #c58af9;
           --url-breadcrumb: #dadce0;
-
-          --btn-bg: var(--surface-container);
-          --btn-border: transparent;
-          --btn-hover-border: var(--outline-variant);
-          --btn-hover-bg: var(--surface-container-high);
-          --btn-active-bg: var(--surface-container-highest);
+          --accent-blue: #8ab4f8;
         }
       }
 
@@ -124,7 +152,7 @@
         display: flex;
       }
 
-      /* S01: HOME VIEW */
+      /* ==================== S01: HOME VIEW ==================== */
       #view-home {
         min-height: 100vh;
         justify-content: space-between;
@@ -135,7 +163,7 @@
         display: flex;
         justify-content: flex-end;
         align-items: center;
-        padding: 16px 24px;
+        padding: 14px 24px;
         gap: 16px;
         font-size: 13px;
         font-family: var(--font-family-text);
@@ -145,9 +173,128 @@
         text-decoration: none;
         display: flex;
         align-items: center;
+        font-weight: 500;
       }
       .home-header a:hover {
         text-decoration: underline;
+      }
+
+      /* 9-Dot Waffle App Launcher Button & Menu */
+      .waffle-wrapper {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+      }
+      .waffle-btn {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
+        color: var(--text-subtle);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .waffle-btn:hover,
+      .waffle-btn[aria-expanded="true"] {
+        background: var(--surface-container-high);
+        color: var(--text);
+      }
+      .waffle-dropdown {
+        position: absolute;
+        top: 48px;
+        right: 0;
+        width: 368px;
+        max-height: 520px;
+        overflow-y: auto;
+        background: var(--surface-container-low);
+        border: 1px solid var(--border);
+        border-radius: var(--m3-shape-corner-xl);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.26);
+        z-index: 200;
+        padding: 16px;
+        display: none;
+      }
+      .waffle-dropdown.active {
+        display: block;
+      }
+      .waffle-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 4px 12px 4px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 12px;
+      }
+      .waffle-title {
+        font-family: var(--font-family-display);
+        font-size: 15px;
+        font-weight: 700;
+        background: var(--aphrody-evolving-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .waffle-subtitle {
+        font-size: 11px;
+        color: var(--text-subtle);
+        font-weight: 500;
+      }
+      .waffle-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        background: var(--surface);
+        padding: 12px;
+        border-radius: var(--m3-shape-corner-large);
+        border: 1px solid var(--border);
+      }
+      .waffle-app-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 10px 6px;
+        border-radius: var(--m3-shape-corner-medium);
+        text-decoration: none;
+        color: var(--text);
+        transition: background 0.15s ease, transform 0.15s ease;
+        gap: 6px;
+      }
+      .waffle-app-item:hover {
+        background: var(--surface-container);
+        transform: translateY(-1px);
+        text-decoration: none !important;
+      }
+      .waffle-app-icon {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 22px;
+        font-weight: 700;
+        color: #ffffff;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      }
+      .waffle-app-name {
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.2;
+        color: var(--text);
+        max-width: 92px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .waffle-app-eq {
+        font-size: 10px;
+        color: var(--text-subtle);
       }
 
       /* Better Auth Presence UI */
@@ -165,8 +312,8 @@
         font-family: var(--font-family);
         font-size: 12px;
         font-weight: 600;
-        height: 32px;
-        padding: 0 10px;
+        height: 34px;
+        padding: 0 12px;
         cursor: pointer;
         display: inline-flex;
         align-items: center;
@@ -204,9 +351,9 @@
         text-transform: uppercase;
       }
       .role-tag.owner {
-        background: rgba(245, 196, 81, 0.2);
-        color: #f5c451;
-        border: 1px solid rgba(245, 196, 81, 0.4);
+        background: rgba(255, 215, 0, 0.2);
+        color: #d4a000;
+        border: 1px solid rgba(255, 215, 0, 0.45);
       }
       .role-tag.developer {
         background: rgba(138, 180, 248, 0.2);
@@ -226,7 +373,7 @@
         color: #81c995;
       }
 
-      /* Dropdown */
+      /* Auth Dropdown */
       .auth-dropdown {
         position: absolute;
         top: 42px;
@@ -236,7 +383,7 @@
         border: 1px solid var(--border);
         border-radius: var(--m3-shape-corner-medium);
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-        z-index: 100;
+        z-index: 150;
         padding: 8px 0;
         text-align: left;
       }
@@ -319,13 +466,14 @@
         margin: 6px 0;
       }
 
+      /* Home Hero & Evolving Google/Aphrody Wordmark */
       .home-center {
         display: flex;
         flex-direction: column;
         align-items: center;
         width: 100%;
-        max-width: 584px;
-        margin-top: 10vh;
+        max-width: 640px;
+        margin-top: 7vh;
         padding: 0 16px;
       }
       .logo-container {
@@ -337,57 +485,42 @@
       }
       .logo-text {
         font-family: var(--font-family-display);
-        font-size: 64px;
-        font-weight: 500;
-        letter-spacing: -0.02em;
-        display: flex;
-        gap: 1px;
+        font-size: 74px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.05;
+        background: var(--aphrody-evolving-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
         user-select: none;
-      }
-      .logo-text span:nth-child(1) {
-        color: #4285f4;
-      }
-      .logo-text span:nth-child(2) {
-        color: #ea4335;
-      }
-      .logo-text span:nth-child(3) {
-        color: #fbbc05;
-      }
-      .logo-text span:nth-child(4) {
-        color: #4285f4;
-      }
-      .logo-text span:nth-child(5) {
-        color: #34a853;
-      }
-      .logo-text span:nth-child(6) {
-        color: #ea4335;
-      }
-      .logo-text span:nth-child(7) {
-        color: #4285f4;
-      }
-      .logo-text span:nth-child(8) {
-        color: #34a853;
-      }
-      .logo-text span:nth-child(9) {
-        color: #ea4335;
+        display: inline-flex;
+        align-items: baseline;
       }
       .logo-text .logo-dot {
-        color: #4285f4;
+        color: var(--aphrody-gold);
+        -webkit-text-fill-color: var(--aphrody-gold);
       }
-
       .logo-badge {
         font-family: var(--font-family-text);
-        font-size: 13px;
-        font-weight: 500;
-        background: rgba(26, 115, 232, 0.1);
-        color: var(--accent-blue);
-        padding: 4px 10px;
-        border-radius: var(--m3-shape-corner-medium);
-        margin-top: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        background: linear-gradient(
+          90deg,
+          rgba(66, 133, 244, 0.12),
+          rgba(155, 114, 203, 0.14),
+          rgba(217, 101, 112, 0.12),
+          rgba(244, 180, 0, 0.14)
+        );
+        border: 1px solid rgba(155, 114, 203, 0.3);
+        color: var(--text);
+        padding: 5px 14px;
+        border-radius: var(--m3-shape-corner-full);
+        margin-top: 10px;
         align-self: center;
       }
 
-      /* Search Box Capsule */
+      /* M3 Expressive Search Box Capsule */
       .search-box-wrapper {
         width: 100%;
         position: relative;
@@ -396,12 +529,12 @@
         display: flex;
         align-items: center;
         width: 100%;
-        height: 48px;
+        height: 52px;
         background: var(--surface);
         border: 1px solid var(--border);
-        border-radius: 24px;
-        padding: 0 14px 0 16px;
-        box-shadow: none;
+        border-radius: var(--m3-capsule-radius);
+        padding: 0 14px 0 18px;
+        box-shadow: 0 1px 4px rgba(23, 51, 92, 0.08);
         transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
       }
       .search-capsule:hover,
@@ -427,12 +560,12 @@
       .input-actions {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
       }
       .action-icon-btn {
         background: transparent;
         border: none;
-        padding: 4px;
+        padding: 6px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -440,23 +573,41 @@
         border-radius: 50%;
         color: var(--text-subtle);
         outline: none;
+        transition: background 0.15s ease;
       }
       .action-icon-btn:hover {
         background: var(--surface-container);
+      }
+      .ai-mode-pill-btn {
+        background: var(--aphrody-evolving-gradient);
+        color: #ffffff;
+        border: none;
+        border-radius: var(--m3-shape-corner-full);
+        font-family: var(--font-family);
+        font-size: 12px;
+        font-weight: 700;
+        height: 32px;
+        padding: 0 12px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin-left: 4px;
+        box-shadow: 0 2px 6px rgba(124, 92, 255, 0.3);
       }
 
       /* Autocomplete Dropdown */
       .autocomplete-dropdown {
         position: absolute;
-        top: 48px;
+        top: 52px;
         left: 0;
         right: 0;
         background: var(--surface);
         border: 1px solid var(--border);
         border-top: none;
-        border-bottom-left-radius: 24px;
-        border-bottom-right-radius: 24px;
-        box-shadow: 0 4px 6px rgba(32, 33, 36, 0.28);
+        border-bottom-left-radius: var(--m3-capsule-radius);
+        border-bottom-right-radius: var(--m3-capsule-radius);
+        box-shadow: 0 6px 14px rgba(23, 51, 92, 0.22);
         overflow: hidden;
         z-index: 100;
         display: none;
@@ -473,7 +624,7 @@
         display: flex;
         align-items: center;
         gap: 14px;
-        padding: 9px 16px;
+        padding: 10px 18px;
         font-size: 15px;
         font-family: var(--font-family-text);
         cursor: pointer;
@@ -484,8 +635,10 @@
 
       .home-buttons {
         display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
         gap: 12px;
-        margin-top: 28px;
+        margin-top: 26px;
       }
       .google-btn {
         background: var(--btn-bg);
@@ -511,6 +664,39 @@
         transform: translateY(-1px);
       }
 
+      /* Quick Ecosystem Pills on Home */
+      .home-ecosystem-strip {
+        margin-top: 28px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+      }
+      .eco-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: var(--m3-shape-corner-full);
+        background: var(--surface-container-low);
+        border: 1px solid var(--border);
+        color: var(--text-subtle);
+        font-size: 12px;
+        font-weight: 500;
+        text-decoration: none;
+        transition: all 0.15s ease;
+      }
+      .eco-chip:hover {
+        border-color: var(--aphrody-violet);
+        color: var(--text);
+        background: var(--surface-container);
+      }
+      .eco-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+
       /* Home Footer */
       .home-footer {
         width: 100%;
@@ -523,6 +709,9 @@
       .footer-location {
         padding: 12px 24px;
         border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
       }
       .footer-links {
         display: flex;
@@ -540,7 +729,7 @@
         text-decoration: underline;
       }
 
-      /* S03: SERP VIEW */
+      /* ==================== S03: SERP VIEW ==================== */
       #view-serp {
         min-height: 100vh;
       }
@@ -557,7 +746,7 @@
         align-items: center;
         justify-content: space-between;
         gap: 28px;
-        margin-bottom: 16px;
+        margin-bottom: 14px;
       }
       .serp-top-left {
         display: flex;
@@ -567,55 +756,31 @@
       }
       .serp-logo {
         font-family: var(--font-family-display);
-        font-size: 26px;
+        font-size: 28px;
         font-weight: 700;
         letter-spacing: -0.03em;
         text-decoration: none;
         flex-shrink: 0;
-        display: flex;
-        gap: 0.5px;
+        background: var(--aphrody-evolving-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
         user-select: none;
-      }
-      .serp-logo span:nth-child(1) {
-        color: #4285f4;
-      }
-      .serp-logo span:nth-child(2) {
-        color: #ea4335;
-      }
-      .serp-logo span:nth-child(3) {
-        color: #fbbc05;
-      }
-      .serp-logo span:nth-child(4) {
-        color: #4285f4;
-      }
-      .serp-logo span:nth-child(5) {
-        color: #34a853;
-      }
-      .serp-logo span:nth-child(6) {
-        color: #ea4335;
-      }
-      .serp-logo span:nth-child(7) {
-        color: #4285f4;
-      }
-      .serp-logo span:nth-child(8) {
-        color: #34a853;
-      }
-      .serp-logo span:nth-child(9) {
-        color: #ea4335;
       }
 
       .serp-search-wrapper {
-        max-width: 652px;
+        max-width: 680px;
         width: 100%;
         position: relative;
       }
       .serp-nav-tabs {
         display: flex;
-        gap: 20px;
+        gap: 18px;
         margin-left: 140px;
         font-size: 14px;
         font-family: var(--font-family-text);
         color: var(--text-subtle);
+        overflow-x: auto;
       }
       .nav-tab {
         display: flex;
@@ -625,6 +790,7 @@
         cursor: pointer;
         border-bottom: 3px solid transparent;
         user-select: none;
+        white-space: nowrap;
         transition: color 0.15s ease;
       }
       .nav-tab:hover {
@@ -633,7 +799,14 @@
       .nav-tab.active {
         color: var(--accent-blue);
         border-bottom-color: var(--accent-blue);
-        font-weight: 500;
+        font-weight: 600;
+      }
+      .nav-tab[data-tab="ai"].active {
+        background: var(--aphrody-evolving-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        border-bottom-color: var(--evolving-google-violet);
       }
       .tools-btn {
         margin-left: auto;
@@ -665,19 +838,76 @@
       /* SERP Content Area */
       .serp-main {
         display: flex;
-        padding: 16px 24px 24px 164px;
-        gap: 60px;
-        max-width: 1280px;
+        padding: 18px 24px 24px 164px;
+        gap: 56px;
+        max-width: 1320px;
       }
       .serp-results-column {
-        max-width: 652px;
+        max-width: 668px;
         flex: 1;
       }
       .results-stats {
         font-size: 14px;
         font-family: var(--font-family-text);
         color: var(--text-subtle);
-        margin-bottom: 20px;
+        margin-bottom: 16px;
+      }
+
+      /* Aphrody AI / Gemini Overview Card */
+      .ai-overview-card {
+        margin-bottom: 28px;
+        padding: 18px 20px;
+        border-radius: var(--m3-shape-corner-large);
+        background: linear-gradient(
+          135deg,
+          rgba(66, 133, 244, 0.07) 0%,
+          rgba(155, 114, 203, 0.09) 45%,
+          rgba(217, 101, 112, 0.07) 80%,
+          rgba(244, 180, 0, 0.08) 100%
+        );
+        border: 1px solid rgba(155, 114, 203, 0.35);
+      }
+      .ai-overview-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      .ai-overview-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--font-family-display);
+        font-size: 15px;
+        font-weight: 700;
+        background: var(--aphrody-evolving-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .ai-model-tag {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: var(--m3-shape-corner-full);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text-subtle);
+      }
+      .ai-overview-summary {
+        font-family: var(--font-family-text);
+        font-size: 14px;
+        line-height: 1.6;
+        color: var(--text);
+        margin-bottom: 10px;
+      }
+      .ai-overview-highlights {
+        padding-left: 18px;
+        font-family: var(--font-family-text);
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--text-snippet);
+        margin-bottom: 10px;
       }
 
       /* Organic Snippet Card */
@@ -694,14 +924,16 @@
         color: var(--url-breadcrumb);
       }
       .card-favicon {
-        width: 18px;
-        height: 18px;
+        width: 20px;
+        height: 20px;
         border-radius: 50%;
         background: var(--surface-container);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 12px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--accent-blue);
       }
       .card-site-name {
         font-weight: 500;
@@ -727,40 +959,53 @@
         color: var(--text-snippet);
       }
 
-      /* Knowledge Card Sidebar */
+      /* Knowledge Graph Card Sidebar */
       .knowledge-column {
-        width: 360px;
+        width: 372px;
         flex-shrink: 0;
       }
       .knowledge-card {
         border: 1px solid var(--border);
-        border-radius: var(--m3-shape-corner-small);
-        padding: 16px;
+        border-radius: var(--m3-shape-corner-large);
+        padding: 20px;
         background: var(--surface);
+        box-shadow: 0 2px 10px rgba(23, 51, 92, 0.06);
+      }
+      .knowledge-badge {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: var(--m3-shape-corner-full);
+        background: var(--aphrody-evolving-gradient);
+        color: #ffffff;
+        margin-bottom: 8px;
       }
       .knowledge-title {
         font-family: var(--font-family-display);
         font-size: 24px;
-        font-weight: 400;
+        font-weight: 700;
         margin-bottom: 4px;
       }
       .knowledge-subtitle {
         font-family: var(--font-family-text);
-        font-size: 14px;
+        font-size: 13px;
         color: var(--text-subtle);
         margin-bottom: 12px;
       }
       .knowledge-desc {
         font-family: var(--font-family-text);
         font-size: 14px;
-        line-height: 1.5;
+        line-height: 1.55;
         color: var(--text-snippet);
         margin-bottom: 16px;
       }
       .knowledge-attrs {
         font-family: var(--font-family-text);
         font-size: 13px;
-        line-height: 1.8;
+        line-height: 1.85;
+        border-top: 1px solid var(--border);
+        padding-top: 12px;
       }
       .knowledge-attr-name {
         font-weight: 600;
@@ -818,13 +1063,8 @@
         .serp-header-top {
           gap: 12px;
         }
-        .serp-nav-tabs {
-          overflow-x: auto;
-          white-space: nowrap;
-          -webkit-overflow-scrolling: touch;
-        }
         .logo-text {
-          font-size: 46px;
+          font-size: 52px;
         }
         .home-header {
           padding: 12px 16px;
@@ -833,12 +1073,47 @@
     </style>
   </head>
   <body>
-    <!-- ==================== S01: SEARCH HOME ==================== -->
+    <!-- ==================== S01: APHRODY.COM SEARCH & APPS HOME ==================== -->
     <div id="view-home" class="view active">
       <div class="home-header">
-        <a href="#mail" id="link-mail">Gmail</a>
+        <a href="https://mail.aphrody.com" id="link-mail">Aphrody Mail</a>
+        <a href="https://docs.aphrody.com" id="link-docs">Docs / WordCraft</a>
         <a href="#images" id="link-images">Images</a>
-        <a href="#settings" id="link-settings">Paramètres</a>
+        <a href="https://ai.aphrody.com" id="link-ai">Gemini AI</a>
+
+        <!-- 9-Dot Waffle App Launcher (Aphrody Apps) -->
+        <div class="waffle-wrapper">
+          <button
+            id="waffle-btn"
+            class="waffle-btn"
+            aria-label="Aphrody Apps"
+            aria-expanded="false"
+            title="Aphrody Apps (Google Ecosystem)"
+          >
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+              <path
+                d="M6,8c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM12,20c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM6,20c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM6,14c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM12,14c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM16,6c0,1.1 0.9,2 2,2s2,-0.9 2,-2 -0.9,-2 -2,-2 -2,0.9 -2,2zM12,8c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM18,14c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM18,20c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2z"
+              />
+            </svg>
+          </button>
+
+          <div
+            id="waffle-dropdown"
+            class="waffle-dropdown"
+            role="menu"
+            aria-label="Aphrody Ecosystem Apps"
+          >
+            <div class="waffle-header">
+              <span class="waffle-title" id="lbl-waffle-title"
+                >Aphrody Apps</span
+              >
+              <span class="waffle-subtitle" id="lbl-waffle-sub"
+                >16 Web & Android 17 Apps</span
+              >
+            </div>
+            <div id="waffle-grid" class="waffle-grid"></div>
+          </div>
+        </div>
 
         <!-- Bilingual Switcher & Better Auth Presence -->
         <div class="auth-presence-wrapper">
@@ -848,7 +1123,7 @@
             aria-label="Toggle language (EN / FR)"
             title="Switch language"
           >
-            🌐 <span id="lang-text">FR</span>
+            <span id="lang-text">FR</span>
           </button>
 
           <button
@@ -858,7 +1133,7 @@
             aria-expanded="false"
             aria-label="Account presence menu"
           >
-            <span id="passkey-status-icon" class="passkey-lock-icon">🔒</span>
+            <span id="passkey-status-icon" class="passkey-lock-icon">ID</span>
             <span id="auth-user-name">Owner</span>
             <span id="auth-role-tag" class="role-tag owner">Owner</span>
           </button>
@@ -881,16 +1156,13 @@
             <div id="accounts-container" class="dropdown-accounts"></div>
             <div class="dropdown-sep"></div>
             <button id="btn-auth-passkey" class="dropdown-action-item">
-              <span>🔑</span>
               <span id="lbl-btn-passkey">Connexion Clé d'accès (Passkey)</span>
             </button>
             <button id="btn-reg-passkey" class="dropdown-action-item">
-              <span>➕</span>
               <span id="lbl-btn-reg-passkey">Enregistrer une clé d'accès</span>
             </button>
             <div class="dropdown-sep"></div>
             <button id="btn-auth-logout" class="dropdown-action-item danger">
-              <span>🚪</span>
               <span id="lbl-btn-logout">Déconnexion</span>
             </button>
           </div>
@@ -899,14 +1171,11 @@
 
       <div class="home-center">
         <div class="logo-container">
-          <div class="logo-text">
-            <span>B</span><span>u</span><span>n</span><span>S</span
-            ><span>e</span><span>a</span><span>r</span><span>c</span
-            ><span>h</span>
-            <span class="logo-dot">.</span>
+          <div class="logo-text" aria-label="Aphrody">
+            Aphrody<span class="logo-dot">.</span>
           </div>
           <div class="logo-badge" id="lbl-logo-badge">
-            Souverain & Sans Publicité
+            Evolving Google Identity 2026 • Search, Gemini AI & GoogleBook OS
           </div>
         </div>
 
@@ -924,14 +1193,14 @@
               id="home-search-input"
               class="search-input"
               type="text"
-              placeholder="Effectuez une recherche ou saisissez une URL"
+              placeholder="Effectuez une recherche sur Aphrody.com ou demandez à Gemini IA"
               autocomplete="off"
               autofocus
             />
             <div class="input-actions">
               <button
                 class="action-icon-btn"
-                title="Recherche vocale"
+                title="Recherche vocale (Aphrody Voice)"
                 aria-label="Recherche vocale"
                 id="btn-voice"
               >
@@ -946,20 +1215,20 @@
                     fill="#4285f4"
                     d="m12 15c1.66 0 3-1.31 3-2.97v-7.02c0-1.66-1.34-3.01-3-3.01s-3 1.34-3 3.01v7.02c0 1.66 1.34 2.97 3 2.97z"
                   />
-                  <path fill="#34a853" d="m11 18.08h2v3.92h-2z" />
+                  <path fill="#9b72cb" d="m11 18.08h2v3.92h-2z" />
                   <path
-                    fill="#fbbc05"
+                    fill="#f4b400"
                     d="m7.05 10.87c0 2.82 2.29 5.11 5.11 5.11s5.11-2.29 5.11-5.11h-1.5c0 1.99-1.62 3.61-3.61 3.61s-3.61-1.62-3.61-3.61h-1.5z"
                   />
                   <path
-                    fill="#ea4335"
+                    fill="#d96570"
                     d="m12 16.98c-1.68 0-3.19-.68-4.28-1.78l-1.06 1.06c1.37 1.38 3.26 2.22 5.34 2.22s3.97-.84 5.34-2.22l-1.06-1.06c-1.09 1.1-2.6 1.78-4.28 1.78z"
                   />
                 </svg>
               </button>
               <button
                 class="action-icon-btn"
-                title="Recherche par image"
+                title="Recherche visuelle (Aphrody Lens)"
                 aria-label="Recherche par image"
                 id="btn-lens"
               >
@@ -972,7 +1241,7 @@
                 >
                   <rect fill="none" width="192" height="192" />
                   <path
-                    fill="#ea4335"
+                    fill="#d96570"
                     d="M68 40H52c-11 0-20 9-20 20v16h16V60c0-2.2 1.8-4 4-4h16V40z"
                   />
                   <path
@@ -980,18 +1249,25 @@
                     d="M156 76V60c0-11-9-20-20-20h-16v16h16c2.2 0 4 1.8 4 4v16h16z"
                   />
                   <path
-                    fill="#34a853"
+                    fill="#9b72cb"
                     d="M120 152h16c11 0 20-9 20-20v-16h-16v16c0 2.2-1.8 4-4 4h-16v16z"
                   />
                   <path
-                    fill="#fbbc05"
+                    fill="#f4b400"
                     d="M32 116v16c0 11 9 20 20 20h16v-16H52c-2.2 0-4-1.8-4-4v-16H32z"
                   />
                   <circle fill="#4285f4" cx="96" cy="96" r="32" />
                   <circle fill="#ffffff" cx="96" cy="96" r="22" />
-                  <circle fill="#ea4335" cx="96" cy="96" r="14" />
-                  <circle fill="#34a853" cx="120" cy="72" r="7" />
+                  <circle fill="#9b72cb" cx="96" cy="96" r="14" />
+                  <circle fill="#ffd700" cx="120" cy="72" r="7" />
                 </svg>
+              </button>
+              <button
+                id="btn-ai-mode"
+                class="ai-mode-pill-btn"
+                title="Mode IA Aphrody / Gemini"
+              >
+                <span id="lbl-ai-mode-btn">AI Mode</span>
               </button>
             </div>
           </div>
@@ -1001,26 +1277,68 @@
 
         <div class="home-buttons">
           <button id="btn-submit-home" class="google-btn">
-            Recherche Souveraine
+            Recherche Aphrody
           </button>
           <button id="btn-lucky" class="google-btn">J'ai de la chance</button>
+          <button id="btn-open-waffle-cta" class="google-btn">
+            Aphrody Workspace & OS
+          </button>
+        </div>
+
+        <div class="home-ecosystem-strip">
+          <a href="https://ai.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #9b72cb"></span>Gemini
+            AI</a
+          >
+          <a href="https://docs.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #4285f4"></span>Docs /
+            WordCraft</a
+          >
+          <a href="https://sheets.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #34a853"></span>Sheets /
+            GridCraft</a
+          >
+          <a href="https://slides.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #f4b400"></span>Slides /
+            DeckCraft</a
+          >
+          <a href="https://drive.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #00d4ff"></span>Drive /
+            Spacedrive</a
+          >
+          <a href="https://play.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #d96570"></span>Play Store
+            (Android 17)</a
+          >
+          <a href="https://os.aphrody.com" class="eco-chip"
+            ><span class="eco-dot" style="background: #ffd700"></span>2026
+            GoogleBook OS</a
+          >
         </div>
       </div>
 
       <div class="home-footer">
-        <div class="footer-location" id="lbl-footer-location">
-          France / Europe
+        <div class="footer-location">
+          <span id="lbl-footer-location"
+            >Aphrody (aphrody.com) — France / Europe & Global Edge</span
+          >
+          <span
+            >Core Library: YOLO (Rust + Upstream Bun v1.4.4+ + Material 3
+            HCT)</span
+          >
         </div>
         <div class="footer-links">
           <div>
-            <a href="#about" id="link-about">À propos</a>
+            <a href="#about" id="link-about">À propos d'Aphrody</a>
+            <a href="https://os.aphrody.com" id="link-os">GoogleBook OS 2026</a>
             <a href="#privacy" id="link-privacy">Confidentialité</a>
             <a href="#terms" id="link-terms">Conditions</a>
           </div>
           <div>
             <a href="#howitworks" id="link-how"
-              >Comment fonctionne la recherche</a
+              >Comment fonctionne la recherche Aphrody</a
             >
+            <a href="#settings" id="link-settings">Paramètres</a>
           </div>
         </div>
       </div>
@@ -1031,11 +1349,7 @@
       <div class="serp-header">
         <div class="serp-header-top">
           <div class="serp-top-left">
-            <a href="#home" id="serp-logo" class="serp-logo">
-              <span>B</span><span>u</span><span>n</span><span>S</span
-              ><span>e</span><span>a</span><span>r</span><span>c</span
-              ><span>h</span>
-            </a>
+            <a href="#home" id="serp-logo" class="serp-logo"> Aphrody. </a>
             <div class="serp-search-wrapper">
               <div class="search-capsule focused">
                 <input
@@ -1058,7 +1372,7 @@
                       height="22"
                     >
                       <path
-                        fill="#1a73e8"
+                        fill="#4285f4"
                         d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"
                       />
                     </svg>
@@ -1069,14 +1383,20 @@
           </div>
         </div>
 
-        <div class="serp-nav-tabs">
+        <!-- 10 Instant Vertical Tabs -->
+        <div class="serp-nav-tabs" id="serp-nav-tabs">
           <div class="nav-tab active" data-tab="all" id="tab-all">Tous</div>
+          <div class="nav-tab" data-tab="ai" id="tab-ai">Mode IA</div>
           <div class="nav-tab" data-tab="images" id="tab-images">Images</div>
           <div class="nav-tab" data-tab="videos" id="tab-videos">Vidéos</div>
           <div class="nav-tab" data-tab="news" id="tab-news">Actualités</div>
+          <div class="nav-tab" data-tab="maps" id="tab-maps">Maps</div>
           <div class="nav-tab" data-tab="shopping" id="tab-shopping">
             Shopping
           </div>
+          <div class="nav-tab" data-tab="books" id="tab-books">Livres</div>
+          <div class="nav-tab" data-tab="code" id="tab-code">Code</div>
+          <div class="nav-tab" data-tab="scholar" id="tab-scholar">Scholar</div>
           <div id="btn-tools" class="nav-tab tools-btn">Outils</div>
         </div>
 
@@ -1096,8 +1416,38 @@
       <div class="serp-main">
         <div class="serp-results-column">
           <div id="serp-stats" class="results-stats">
-            Environ 142 000 résultats (0,18 secondes)
+            Environ 284 000 résultats (0,14 secondes)
           </div>
+
+          <!-- Aphrody AI / Gemini Overview -->
+          <div id="ai-overview-container" class="ai-overview-card">
+            <div class="ai-overview-header">
+              <span class="ai-overview-title" id="lbl-ai-overview-title">
+                Aperçu IA — Aphrody AI / Gemini
+              </span>
+              <span class="ai-model-tag" id="lbl-ai-model">
+                aphrody-gemini-2.5-pro
+              </span>
+            </div>
+            <div class="ai-overview-summary" id="ai-overview-summary">
+              Aphrody.com unifie l'expérience complète de Google.com (Recherche,
+              Knowledge Graph, Workspace Docs/WordCraft, Sheets/GridCraft,
+              Slides/DeckCraft, Drive, Play Store) avec l'identité Evolving
+              Google 2026 et l'OS GoogleBook Laptop 2026.
+            </div>
+            <ul class="ai-overview-highlights" id="ai-overview-highlights">
+              <li>
+                Dégradé dynamique 4 couleurs (#4285F4 -> #9B72CB -> #D96570 ->
+                #F4B400) fusionné avec les teintes Aphrody (#FFD700, #7C5CFF,
+                #00D4FF, #17335C).
+              </li>
+              <li>
+                16 applications Web & Android 17 x64 propulsées par la
+                bibliothèque fondamentale YOLO (Rust + Upstream Bun v1.4.4+).
+              </li>
+            </ul>
+          </div>
+
           <div id="organic-results-container"></div>
 
           <div class="serp-pagination">
@@ -1115,43 +1465,48 @@
           </div>
         </div>
 
-        <!-- Knowledge Panel -->
+        <!-- Knowledge Graph Panel -->
         <div class="knowledge-column">
           <div class="knowledge-card">
-            <div class="knowledge-title" id="lbl-kp-title">Bun OS</div>
+            <span class="knowledge-badge" id="lbl-kp-badge"
+              >Evolving Identity 2026</span
+            >
+            <div class="knowledge-title" id="lbl-kp-title">Aphrody</div>
             <div class="knowledge-subtitle" id="lbl-kp-sub">
-              Système d'exploitation souverain
+              Plateforme Web Universelle, IA & Écosystème GoogleBook 2026
             </div>
             <div class="knowledge-desc" id="lbl-kp-desc">
-              Bun OS est une distribution Linux basée sur Arch et Upstream Bun,
-              intégrant l'environnement de bureau COSMIC, un sous-système
-              Android 17 et les studios créatifs WordCraft, DeckCraft,
-              GridCraft.
+              Aphrody (aphrody.com) est le produit public phare et
+              l'organisation principale construite sur le socle de bibliothèques
+              fondamentales YOLO (Rust + Upstream Bun v1.4.4+). Elle réunit la
+              recherche universelle, l'IA Gemini, les studios Workspace Craft et
+              l'OS GoogleBook 2026 (Android 17 x64 + Chromium OS + Aluminium
+              OS).
             </div>
-            <div class="knowledge-attrs">
+            <div class="knowledge-attrs" id="kp-attrs-container">
               <div>
                 <span class="knowledge-attr-name" id="lbl-kp-dev"
-                  >Développeur :</span
+                  >Organisation :</span
                 >
-                YOLO-Web
+                Aphrody (aphrody.com / aphrody-labs)
               </div>
               <div>
                 <span class="knowledge-attr-name" id="lbl-kp-kernel"
-                  >Noyau :</span
+                  >Socle Core :</span
                 >
-                Linux CachyOS / Zen
+                YOLO (yolo-ui, yolo-web, yolo-ai, yolo-os)
               </div>
               <div>
                 <span class="knowledge-attr-name" id="lbl-kp-runtime"
-                  >Moteur :</span
+                  >OS & Runtime :</span
                 >
-                Upstream Bun v1.4.4+
+                Android 17 x64 + CrOS + Aluminium + Bun v1.4.4+
               </div>
               <div>
                 <span class="knowledge-attr-name" id="lbl-kp-license"
-                  >Licence :</span
+                  >Design System :</span
                 >
-                Apache-2.0 / MIT
+                Material 3 Expressive HCT/CAM16
               </div>
             </div>
           </div>
@@ -1186,26 +1541,34 @@
       // ==================== Bilingual Dictionary ====================
       const I18N = {
         fr: {
-          searchPlaceholder: "Effectuez une recherche ou saisissez une URL",
-          badge: "Souverain & Sans Publicité",
-          btnSubmit: "Recherche Souveraine",
+          searchPlaceholder:
+            "Effectuez une recherche sur Aphrody.com ou demandez à Gemini IA",
+          badge:
+            "Evolving Google Identity 2026 • Recherche, Gemini IA & GoogleBook OS",
+          btnSubmit: "Recherche Aphrody",
           btnLucky: "J'ai de la chance",
-          mail: "Gmail",
+          mail: "Aphrody Mail",
           images: "Images",
           settings: "Paramètres",
-          about: "À propos",
+          about: "À propos d'Aphrody",
           privacy: "Confidentialité",
           terms: "Conditions",
-          howItWorks: "Comment fonctionne la recherche",
+          howItWorks: "Comment fonctionne la recherche Aphrody",
           tabAll: "Tous",
+          tabAi: "Mode IA",
           tabImages: "Images",
           tabVideos: "Vidéos",
           tabNews: "Actualités",
+          tabMaps: "Maps",
           tabShopping: "Shopping",
+          tabBooks: "Livres",
+          tabCode: "Code",
+          tabScholar: "Scholar",
           tools: "Outils",
           next: "Suivant ›",
+          aiOverviewTitle: "Aperçu IA — Aphrody AI / Gemini",
           ownerVerified: "Identité Propriétaire Vérifiée",
-          localSession: "Session Locale Souveraine",
+          localSession: "Session Locale Aphrody",
           switchAccount: "Changer de compte",
           passkeyAuth: "Connexion Clé d'accès (Passkey)",
           passkeyReg: "Enregistrer une clé d'accès",
@@ -1214,36 +1577,39 @@
           passkeyPrompt:
             "Touchez votre clé de sécurité ou utilisez la biométrie (Windows Hello / Touch ID)",
           passkeySuccess: "Authentification par clé d'accès réussie !",
-          kpTitle: "Bun OS",
-          kpSub: "Système d'exploitation souverain",
+          kpTitle: "Aphrody",
+          kpSub: "Plateforme Web Universelle, IA & Écosystème GoogleBook 2026",
           kpDesc:
-            "Bun OS est une distribution Linux basée sur Arch et Upstream Bun, intégrant l'environnement COSMIC, Android 17 et les studios souverains WordCraft, DeckCraft, GridCraft.",
-          kpDev: "Développeur :",
-          kpKernel: "Noyau :",
-          kpRuntime: "Moteur :",
-          kpLicense: "Licence :",
+            "Aphrody (aphrody.com) est le produit public phare et l'organisation principale construite sur le socle de bibliothèques fondamentales YOLO (Rust + Upstream Bun v1.4.4+). Elle réunit la recherche universelle, l'IA Gemini, les studios Workspace Craft et l'OS GoogleBook 2026.",
         },
         en: {
-          searchPlaceholder: "Search sovereign web or enter URL",
-          badge: "Sovereign & Ad-Free",
-          btnSubmit: "Sovereign Search",
+          searchPlaceholder: "Search Aphrody.com or ask Gemini AI",
+          badge:
+            "Evolving Google Identity 2026 • Search, Gemini AI & GoogleBook OS",
+          btnSubmit: "Aphrody Search",
           btnLucky: "I'm Feeling Lucky",
-          mail: "Gmail",
+          mail: "Aphrody Mail",
           images: "Images",
           settings: "Settings",
-          about: "About",
+          about: "About Aphrody",
           privacy: "Privacy",
           terms: "Terms",
-          howItWorks: "How Search works",
+          howItWorks: "How Aphrody Search works",
           tabAll: "All",
+          tabAi: "AI Mode",
           tabImages: "Images",
           tabVideos: "Videos",
           tabNews: "News",
+          tabMaps: "Maps",
           tabShopping: "Shopping",
+          tabBooks: "Books",
+          tabCode: "Code",
+          tabScholar: "Scholar",
           tools: "Tools",
           next: "Next ›",
+          aiOverviewTitle: "AI Overview — Aphrody AI / Gemini",
           ownerVerified: "Sovereign Owner Verified",
-          localSession: "Sovereign Local Session",
+          localSession: "Aphrody Local Session",
           switchAccount: "Switch Account",
           passkeyAuth: "Sign in with Passkey",
           passkeyReg: "Register New Passkey",
@@ -1252,16 +1618,143 @@
           passkeyPrompt:
             "Touch your security key or use biometric verification (Windows Hello / Touch ID)",
           passkeySuccess: "Passkey authenticated successfully!",
-          kpTitle: "Bun OS",
-          kpSub: "Sovereign Operating System",
+          kpTitle: "Aphrody",
+          kpSub: "Universal Web Platform, AI & 2026 GoogleBook Ecosystem",
           kpDesc:
-            "Bun OS is an Arch-based Linux distribution built on Upstream Bun, featuring COSMIC desktop, Android 17 container, and WordCraft, DeckCraft, GridCraft studios.",
-          kpDev: "Developer:",
-          kpKernel: "Kernel:",
-          kpRuntime: "Runtime:",
-          kpLicense: "License:",
+            "Aphrody (aphrody.com) is the flagship public product and main organization powered by the YOLO core library ecosystem (Rust + Upstream Bun v1.4.4+). It unifies universal web search, Gemini AI, Workspace Craft studios, and the 2026 GoogleBook OS.",
         },
       };
+
+      const FALLBACK_APPS = [
+        {
+          id: "search",
+          name: "Aphrody Search",
+          googleEquivalent: "Google Search",
+          url: "https://aphrody.com/search",
+          accentHex: "#4285F4",
+          short: "S",
+        },
+        {
+          id: "ai",
+          name: "Aphrody AI",
+          googleEquivalent: "Gemini",
+          url: "https://ai.aphrody.com",
+          accentHex: "#9B72CB",
+          short: "AI",
+        },
+        {
+          id: "drive",
+          name: "Aphrody Drive",
+          googleEquivalent: "Drive + Spacedrive",
+          url: "https://drive.aphrody.com",
+          accentHex: "#34A853",
+          short: "Dr",
+        },
+        {
+          id: "docs",
+          name: "WordCraft",
+          googleEquivalent: "Google Docs",
+          url: "https://docs.aphrody.com",
+          accentHex: "#4285F4",
+          short: "Do",
+        },
+        {
+          id: "sheets",
+          name: "GridCraft",
+          googleEquivalent: "Google Sheets",
+          url: "https://sheets.aphrody.com",
+          accentHex: "#34A853",
+          short: "Sh",
+        },
+        {
+          id: "slides",
+          name: "DeckCraft",
+          googleEquivalent: "Google Slides",
+          url: "https://slides.aphrody.com",
+          accentHex: "#F4B400",
+          short: "Sl",
+        },
+        {
+          id: "mail",
+          name: "Aphrody Mail",
+          googleEquivalent: "Gmail",
+          url: "https://mail.aphrody.com",
+          accentHex: "#EA4335",
+          short: "M",
+        },
+        {
+          id: "meet",
+          name: "Aphrody Meet",
+          googleEquivalent: "Google Meet",
+          url: "https://meet.aphrody.com",
+          accentHex: "#00D4FF",
+          short: "Me",
+        },
+        {
+          id: "calendar",
+          name: "Calendar",
+          googleEquivalent: "Google Calendar",
+          url: "https://calendar.aphrody.com",
+          accentHex: "#4285F4",
+          short: "Ca",
+        },
+        {
+          id: "photos",
+          name: "PhotoCraft",
+          googleEquivalent: "Google Photos",
+          url: "https://photos.aphrody.com",
+          accentHex: "#D96570",
+          short: "Ph",
+        },
+        {
+          id: "translate",
+          name: "Translate",
+          googleEquivalent: "Google Translate",
+          url: "https://translate.aphrody.com",
+          accentHex: "#4285F4",
+          short: "Tr",
+        },
+        {
+          id: "maps",
+          name: "Aphrody Maps",
+          googleEquivalent: "Google Maps",
+          url: "https://maps.aphrody.com",
+          accentHex: "#34A853",
+          short: "Ma",
+        },
+        {
+          id: "video",
+          name: "FilmCraft",
+          googleEquivalent: "YouTube",
+          url: "https://video.aphrody.com",
+          accentHex: "#EA4335",
+          short: "Vi",
+        },
+        {
+          id: "play",
+          name: "Play Store",
+          googleEquivalent: "Android 17 + WASM",
+          url: "https://play.aphrody.com",
+          accentHex: "#00D4FF",
+          short: "Pl",
+        },
+        {
+          id: "console",
+          name: "Cloud Console",
+          googleEquivalent: "Google Cloud",
+          url: "https://console.aphrody.com",
+          accentHex: "#FFD700",
+          short: "Cl",
+        },
+        {
+          id: "os",
+          name: "GoogleBook OS",
+          googleEquivalent: "CrOS + Aluminium",
+          url: "https://os.aphrody.com",
+          accentHex: "#7C5CFF",
+          short: "OS",
+        },
+      ];
 
       // State
       let currentLang = localStorage.getItem("search.lang") || "fr";
@@ -1269,22 +1762,25 @@
 
       const state = {
         query: "",
+        vertical: "all",
         view: "home",
+        apps: FALLBACK_APPS,
         results: [
           {
-            title: "Bun OS — Le Système d'Exploitation Unifié et Souverain",
-            url: "https://github.com/yolo-rs/yolo-web",
-            displayUrl: "https://github.com/yolo-rs/yolo-web",
+            title:
+              "Aphrody.com — Plateforme Publique Phare (Recherche, Gemini IA & Workspace)",
+            url: "https://aphrody.com/search",
+            displayUrl: "https://aphrody.com > search",
             snippet:
-              "Distribution Linux optimisée pour le runtime Bun upstream avec intégration complète d'Android 17, COSMIC desktop et des modèles d'IA souverains.",
+              "Réplique complète de Google.com avec l'identité Evolving Google 2026, Material 3 Expressive HCT/CAM16 et les 16 applications Web & Android 17 propulsées par YOLO.",
           },
           {
             title:
-              "Documentation Officielle Bun — Runtime JavaScript Ultra-Rapide",
-            url: "https://bun.sh/docs",
-            displayUrl: "https://bun.sh > docs",
+              "Aphrody OS — 2026 GoogleBook Laptop (Android 17 x64 + Chromium OS + Aluminium OS)",
+            url: "https://os.aphrody.com",
+            displayUrl: "https://os.aphrody.com > googlebook-2026",
             snippet:
-              "Découvrez Bun : un runtime JavaScript tout-en-un doté d'un gestionnaire de paquets, d'un exécuteur de tests et d'un bundler natif.",
+              "Système d'exploitation convergent unifiant l'image Google Play Android 17 x86_64, les services système Chromium OS (crosh, vmc, sommelier), Aluminium OS Wayland et Upstream Bun v1.4.4+.",
           },
         ],
       };
@@ -1300,6 +1796,10 @@
         "organic-results-container",
       );
 
+      const waffleBtn = document.getElementById("waffle-btn");
+      const waffleDropdown = document.getElementById("waffle-dropdown");
+      const waffleGrid = document.getElementById("waffle-grid");
+
       const langBtn = document.getElementById("lang-btn");
       const langText = document.getElementById("lang-text");
       const authBtn = document.getElementById("auth-presence-btn");
@@ -1310,6 +1810,34 @@
       const userEmailText = document.getElementById("user-email-text");
       const userStatusText = document.getElementById("user-status-text");
       const accountsContainer = document.getElementById("accounts-container");
+
+      function renderWaffleApps() {
+        waffleGrid.innerHTML = state.apps
+          .map((app) => {
+            const label = app.short || app.name.slice(0, 2).toUpperCase();
+            return `
+              <a href="${app.url}" class="waffle-app-item" role="menuitem">
+                <div class="waffle-app-icon" style="background: ${app.accentHex || "#4285f4"}">${label}</div>
+                <span class="waffle-app-name">${app.name}</span>
+                <span class="waffle-app-eq">${app.googleEquivalent}</span>
+              </a>
+            `;
+          })
+          .join("");
+      }
+
+      async function loadEcosystemApps() {
+        try {
+          const data = await queryClient.fetchQuery(["apps"], async () => {
+            const r = await fetch("/api/apps");
+            return r.json();
+          });
+          if (data && Array.isArray(data.apps) && data.apps.length > 0) {
+            state.apps = data.apps;
+            renderWaffleApps();
+          }
+        } catch {}
+      }
 
       function applyLanguage() {
         const d = I18N[currentLang];
@@ -1327,12 +1855,19 @@
         document.getElementById("link-how").textContent = d.howItWorks;
 
         document.getElementById("tab-all").textContent = d.tabAll;
+        document.getElementById("tab-ai").textContent = d.tabAi;
         document.getElementById("tab-images").textContent = d.tabImages;
         document.getElementById("tab-videos").textContent = d.tabVideos;
         document.getElementById("tab-news").textContent = d.tabNews;
+        document.getElementById("tab-maps").textContent = d.tabMaps;
         document.getElementById("tab-shopping").textContent = d.tabShopping;
+        document.getElementById("tab-books").textContent = d.tabBooks;
+        document.getElementById("tab-code").textContent = d.tabCode;
+        document.getElementById("tab-scholar").textContent = d.tabScholar;
         document.getElementById("btn-tools").textContent = d.tools;
         document.getElementById("lbl-next-page").textContent = d.next;
+        document.getElementById("lbl-ai-overview-title").textContent =
+          d.aiOverviewTitle;
 
         document.getElementById("lbl-switch-acc").textContent = d.switchAccount;
         document.getElementById("lbl-btn-passkey").textContent = d.passkeyAuth;
@@ -1343,10 +1878,6 @@
         document.getElementById("lbl-kp-title").textContent = d.kpTitle;
         document.getElementById("lbl-kp-sub").textContent = d.kpSub;
         document.getElementById("lbl-kp-desc").textContent = d.kpDesc;
-        document.getElementById("lbl-kp-dev").textContent = d.kpDev;
-        document.getElementById("lbl-kp-kernel").textContent = d.kpKernel;
-        document.getElementById("lbl-kp-runtime").textContent = d.kpRuntime;
-        document.getElementById("lbl-kp-license").textContent = d.kpLicense;
 
         if (presence) {
           userStatusText.textContent = presence.isOwner
@@ -1384,10 +1915,10 @@
           : I18N[currentLang].localSession;
 
         if (hasPasskey) {
-          passkeyIcon.textContent = "🔓";
+          passkeyIcon.textContent = "OK";
           passkeyIcon.classList.add("verified");
         } else {
-          passkeyIcon.textContent = "🔒";
+          passkeyIcon.textContent = "ID";
           passkeyIcon.classList.remove("verified");
         }
 
@@ -1406,7 +1937,7 @@
         accountsContainer
           .querySelectorAll(".dropdown-account-btn")
           .forEach((btn) => {
-            btn.addEventListener("click", async (e) => {
+            btn.addEventListener("click", async () => {
               const accId = btn.dataset.id;
               if (accId) {
                 const res = await fetch("/api/auth/accounts/switch", {
@@ -1424,6 +1955,22 @@
             });
           });
       }
+
+      // Waffle Menu toggle
+      waffleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const isOpen = waffleDropdown.classList.toggle("active");
+        waffleBtn.setAttribute("aria-expanded", String(isOpen));
+        authDropdown.style.display = "none";
+      });
+
+      document
+        .getElementById("btn-open-waffle-cta")
+        .addEventListener("click", (e) => {
+          e.stopPropagation();
+          waffleDropdown.classList.add("active");
+          waffleBtn.setAttribute("aria-expanded", "true");
+        });
 
       // Passkey ceremonies
       document
@@ -1493,12 +2040,18 @@
         const open = authDropdown.style.display !== "none";
         authDropdown.style.display = open ? "none" : "block";
         authBtn.setAttribute("aria-expanded", String(!open));
+        waffleDropdown.classList.remove("active");
+        waffleBtn.setAttribute("aria-expanded", "false");
       });
 
       document.addEventListener("click", (e) => {
         if (!authDropdown.contains(e.target) && e.target !== authBtn) {
           authDropdown.style.display = "none";
           authBtn.setAttribute("aria-expanded", "false");
+        }
+        if (!waffleDropdown.contains(e.target) && e.target !== waffleBtn) {
+          waffleDropdown.classList.remove("active");
+          waffleBtn.setAttribute("aria-expanded", "false");
         }
       });
 
@@ -1550,7 +2103,7 @@
             (m) => `
           <div class="suggestion-item">
             <svg class="suggestion-icon" focusable="false" viewBox="0 0 24 24" width="18" height="18">
-              <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 14z"/>
+              <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
             </svg>
             <div class="suggestion-text">${m}</div>
           </div>
@@ -1574,7 +2127,7 @@
             (r) => `
           <div class="organic-card">
             <div class="card-url-row">
-              <div class="card-favicon">🌐</div>
+              <div class="card-favicon">A</div>
               <span class="card-site-name">${r.displayUrl}</span>
             </div>
             <div class="card-title">
@@ -1587,23 +2140,42 @@
           .join("");
       }
 
-      async function submitQuery(q) {
+      async function submitQuery(q, vertical = state.vertical) {
         if (!q.trim()) return;
         state.query = q;
+        state.vertical = vertical;
         homeSuggest.classList.remove("active");
         homeCapsule.classList.remove("has-suggestions");
         showView("serp");
 
         try {
           const data = await queryClient.fetchQuery(
-            ["search", q, currentLang],
+            ["search", q, currentLang, vertical],
             async () => {
               const res = await fetch(
-                `/api/search?q=${encodeURIComponent(q)}&lang=${currentLang}`,
+                `/api/search?q=${encodeURIComponent(q)}&lang=${currentLang}&vertical=${encodeURIComponent(vertical)}`,
               );
               return res.json();
             },
           );
+          if (data.aiOverview) {
+            document.getElementById("ai-overview-summary").textContent =
+              data.aiOverview.summary;
+            if (Array.isArray(data.aiOverview.highlights)) {
+              document.getElementById("ai-overview-highlights").innerHTML =
+                data.aiOverview.highlights
+                  .map((h) => `<li>${h}</li>`)
+                  .join("");
+            }
+          }
+          if (data.knowledgeCard) {
+            document.getElementById("lbl-kp-title").textContent =
+              data.knowledgeCard.title;
+            document.getElementById("lbl-kp-sub").textContent =
+              data.knowledgeCard.subtitle;
+            document.getElementById("lbl-kp-desc").textContent =
+              data.knowledgeCard.description;
+          }
           if (data.organic && data.organic.length > 0) {
             state.results = data.organic;
             if (data.totalResults) {
@@ -1614,8 +2186,8 @@
                 );
                 statsEl.textContent =
                   currentLang === "fr"
-                    ? `Environ ${countStr} résultats (${data.searchTimeSec || "0,18"} secondes)`
-                    : `About ${countStr} results (${data.searchTimeSec || "0.18"} seconds)`;
+                    ? `Environ ${countStr} résultats (${data.searchTimeSec || "0,14"} secondes)`
+                    : `About ${countStr} results (${data.searchTimeSec || "0.14"} seconds)`;
               }
             }
             renderResults();
@@ -1637,6 +2209,9 @@
       document
         .getElementById("btn-submit-home")
         .addEventListener("click", () => submitQuery(homeInput.value));
+      document.getElementById("btn-ai-mode").addEventListener("click", () => {
+        submitQuery(homeInput.value || "Aphrody AI Gemini", "ai");
+      });
       document.getElementById("btn-lucky").addEventListener("click", () => {
         if (state.results[0]) window.open(state.results[0].url, "_blank");
       });
@@ -1651,7 +2226,20 @@
         document.getElementById("tools-bar").classList.toggle("active");
       });
 
+      document.querySelectorAll("#serp-nav-tabs .nav-tab[data-tab]").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          document
+            .querySelectorAll("#serp-nav-tabs .nav-tab[data-tab]")
+            .forEach((t) => t.classList.remove("active"));
+          tab.classList.add("active");
+          const v = tab.getAttribute("data-tab") || "all";
+          submitQuery(serpInput.value || state.query || "Aphrody", v);
+        });
+      });
+
       // Init on load
+      renderWaffleApps();
+      loadEcosystemApps();
       applyLanguage();
       initBetterAuth();
     </script>

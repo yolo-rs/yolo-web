@@ -28,7 +28,9 @@
     "./fonts-proxy": "./src/fonts-proxy.ts",
     "./bun-plugin": "./src/bun-plugin.ts",
     "./gws": "./src/gws.ts",
-    "./password-store": "./src/password-store.ts"
+    "./password-store": "./src/password-store.ts",
+    "./aphrody-ecosystem": "./src/aphrody-ecosystem.ts",
+    "./search-server": "./src/search-server.ts"
   },
   "scripts": {
     "check": "bun check --no-script",
