@@ -275,11 +275,7 @@ export const YOLO_WEB_GOOGLE_NETWORK_MAP: DomainStackMapEntry[] = [
 ];
 
 export type EcosystemRegistryType =
-  | "github"
-  | "npm"
-  | "crates.io"
-  | "pypi"
-  | "go";
+  "github" | "npm" | "crates.io" | "pypi" | "go";
 
 export interface MultiRegistryPackageEntry {
   registry: EcosystemRegistryType;
@@ -424,8 +420,7 @@ export const YOLO_ECOSYSTEM_5_REGISTRY_CATALOG: MultiRegistryPackageEntry[] = [
     repositoryUrl: "https://github.com/googleapis/python-genai",
     registryApiUrl: "https://pypi.org/pypi/google-genai/json",
     domainUseCase: "gemini_vertex_ai_gateway",
-    description:
-      "Official Google GenAI Python SDK for Gemini 4 and Vertex AI",
+    description: "Official Google GenAI Python SDK for Gemini 4 and Vertex AI",
   },
   {
     registry: "pypi",
@@ -465,8 +460,7 @@ export const YOLO_ECOSYSTEM_5_REGISTRY_CATALOG: MultiRegistryPackageEntry[] = [
     packageName: "github.com/pquerna/otp",
     version: "v1.4.0",
     repositoryUrl: "https://github.com/pquerna/otp",
-    registryApiUrl:
-      "https://proxy.golang.org/github.com/pquerna/otp/@latest",
+    registryApiUrl: "https://proxy.golang.org/github.com/pquerna/otp/@latest",
     domainUseCase: "auth_passkey_totp_2fa",
     description:
       "Go TOTP / HOTP Google Authenticator library supporting otpauth:// URLs",
@@ -476,8 +470,7 @@ export const YOLO_ECOSYSTEM_5_REGISTRY_CATALOG: MultiRegistryPackageEntry[] = [
     packageName: "google.golang.org/genai",
     version: "v1.2.0",
     repositoryUrl: "https://github.com/googleapis/go-genai",
-    registryApiUrl:
-      "https://proxy.golang.org/google.golang.org/genai/@latest",
+    registryApiUrl: "https://proxy.golang.org/google.golang.org/genai/@latest",
     domainUseCase: "gemini_vertex_ai_gateway",
     description: "Official Google GenAI Go SDK for Gemini and Vertex AI",
   },
@@ -520,7 +513,7 @@ export async function queryMultiRegistryPackage(
     (e) => e.registry === registry && e.packageName === packageName,
   );
 
-  let url = "";
+  let url: string;
   if (registry === "npm") {
     url = `https://registry.npmjs.org/${packageName}/latest`;
   } else if (registry === "pypi") {

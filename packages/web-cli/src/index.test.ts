@@ -87,4 +87,36 @@ describe("@yolo-web/web-cli - Unified 'web' Command", () => {
       console.log = origLog;
     }
   });
+
+  it("handles vault sync-profile and index-ecosystem subcommands", async () => {
+    const cli = createWebCli();
+    cli.exitOverride();
+
+    let output = "";
+    const origLog = console.log;
+    console.log = (msg: string) => {
+      output += msg;
+    };
+
+    try {
+      await cli.parseAsync(["node", "web", "vault", "sync-profile"]);
+      const syncParsed = JSON.parse(output);
+      expect(syncParsed.sourceGoogleAccount).toBe("yohanpierre15@gmail.com");
+      expect(syncParsed.targetYoloProfile).toBe("aphrody-yolo");
+
+      output = "";
+      await cli.parseAsync(["node", "web", "index-ecosystem"]);
+      const indexParsed = JSON.parse(output);
+      expect(indexParsed.indexedDomainRecords).toBeGreaterThanOrEqual(5);
+      expect(indexParsed.registries).toEqual([
+        "github",
+        "npm",
+        "crates.io",
+        "pypi",
+        "go",
+      ]);
+    } finally {
+      console.log = origLog;
+    }
+  });
 });

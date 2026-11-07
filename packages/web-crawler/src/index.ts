@@ -675,4 +675,3 @@ export function synthesizeMarkdown(
 }
 
 export * from "./registry-indexer.ts";
-

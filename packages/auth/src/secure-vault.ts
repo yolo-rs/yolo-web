@@ -456,7 +456,9 @@ export class YoloSecureVault {
   public async enrollTotpAuthenticator(
     inputUriOrSecret: string,
     defaults?: { issuer?: string; accountName?: string },
-  ): Promise<VaultTotpRecord & { currentCode: string; remainingSeconds: number }> {
+  ): Promise<
+    VaultTotpRecord & { currentCode: string; remainingSeconds: number }
+  > {
     const config = inputUriOrSecret.startsWith("otpauth://")
       ? parseOtpAuthUri(inputUriOrSecret)
       : {

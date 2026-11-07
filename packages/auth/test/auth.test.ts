@@ -17,6 +17,13 @@ import {
   verifyPasskeyRegistrationResponse,
   verifySessionToken,
   resolveSessionSecret,
+  buildOtpAuthUri,
+  generateTotpCode,
+  parseOtpAuthUri,
+  renderAuthenticatorQrSvg,
+  verifyTotpCode,
+  YoloSecureVault,
+  getPostgresVaultSchemaSql,
 } from "../src/index.ts";
 
 describe("@yolo-web/auth - session and identity API", () => {
@@ -265,5 +272,81 @@ describe("@yolo-web/auth - session and identity API", () => {
     expect(switchRes.status).toBe(200);
     const switchData = await switchRes.json();
     expect(switchData.activeAccount.id).toBe(dev.id);
+  });
+
+  test("Google Authenticator TOTP (RFC 6238), otpauth:// URI & QR SVG generation", () => {
+    const secret = "JBSWY3DPEHPK3PXP";
+    const uri = buildOtpAuthUri({
+      issuer: "Google",
+      accountName: "yohanpierre15@gmail.com",
+      secretBase32: secret,
+    });
+    expect(uri).toContain("otpauth://totp/");
+    expect(uri).toContain("secret=JBSWY3DPEHPK3PXP");
+
+    const parsed = parseOtpAuthUri(uri);
+    expect(parsed.issuer).toBe("Google");
+    expect(parsed.accountName).toBe("yohanpierre15@gmail.com");
+    expect(parsed.secretBase32).toBe(secret);
+
+    const fixedTime = 1762473600_000;
+    const totp = generateTotpCode(secret, { timestampMs: fixedTime });
+    expect(totp.code).toHaveLength(6);
+
+    const verified = verifyTotpCode(secret, totp.code, {
+      timestampMs: fixedTime,
+    });
+    expect(verified.valid).toBe(true);
+    expect(verified.matchedStepDelta).toBe(0);
+
+    const svg = renderAuthenticatorQrSvg(uri, 200);
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("Google Authenticator OTP QR Matrix");
+  });
+
+  test("YoloSecureVault encrypts Chrome Password CSV, enrolls TOTP, and syncs yohanpierre15 to aphrody-yolo", async () => {
+    const vault = new YoloSecureVault({
+      dbPath: ":memory:",
+      masterSecret: secret,
+    });
+    try {
+      const csv = [
+        "name,url,username,password,note",
+        "Google Account,https://accounts.google.com/signin,yohanpierre15@gmail.com,SovereignPass#2026,Primary Owner",
+        "Aphrody Hub,https://aphrody.com/login,yohanpierre15@gmail.com,AphrodyYoloKey!99,Sovereign",
+      ].join("\n");
+
+      const report = await vault.importChromePasswordCsv(csv, "aphrody-yolo");
+      expect(report.importedCredentials).toBe(2);
+      expect(report.encryptedWith).toBe("AES-256-GCM");
+      expect(report.uniqueWebOrigins).toContain("https://accounts.google.com");
+
+      const decrypted = await vault.getDecryptedCredential(
+        "https://accounts.google.com",
+        "yohanpierre15@gmail.com",
+      );
+      expect(decrypted?.password).toBe("SovereignPass#2026");
+
+      const enrolled = await vault.enrollTotpAuthenticator("JBSWY3DPEHPK3PXP", {
+        issuer: "Google",
+        accountName: "yohanpierre15@gmail.com",
+      });
+      expect(enrolled.currentCode).toHaveLength(6);
+
+      const syncReceipt = await vault.syncChromeAccountToAphrodyYolo({
+        sourceGoogleAccount: "yohanpierre15@gmail.com",
+        targetYoloProfile: "aphrody-yolo",
+      });
+      expect(syncReceipt.sourceGoogleAccount).toBe("yohanpierre15@gmail.com");
+      expect(syncReceipt.targetYoloProfile).toBe("aphrody-yolo");
+      expect(syncReceipt.storageBackends.sqliteWal).toBe(true);
+
+      const pgSql = getPostgresVaultSchemaSql();
+      expect(pgSql).toContain(
+        "CREATE TABLE IF NOT EXISTS yolo_vault_credentials",
+      );
+    } finally {
+      vault.close();
+    }
   });
 });

@@ -718,7 +718,11 @@ export function createWebCli(): Command {
     )
     .option("--csv <path>", "Path to Chrome Passwords CSV file")
     .option("--secret <uriOrBase32>", "otpauth:// URI or Base32 secret")
-    .option("--account <email>", "Google account email", "yohanpierre15@gmail.com")
+    .option(
+      "--account <email>",
+      "Google account email",
+      "yohanpierre15@gmail.com",
+    )
     .action(
       async (
         action: string,
@@ -826,7 +830,8 @@ export function createWebCli(): Command {
               indexedDomainRecords: db.getCount(),
               engineInventory: YOLO_WEB_ENGINE_INVENTORY,
               networkMap: YOLO_WEB_GOOGLE_NETWORK_MAP,
-              fiveRegistryCatalogCount: YOLO_ECOSYSTEM_5_REGISTRY_CATALOG.length,
+              fiveRegistryCatalogCount:
+                YOLO_ECOSYSTEM_5_REGISTRY_CATALOG.length,
               registries: ["github", "npm", "crates.io", "pypi", "go"],
             },
             null,

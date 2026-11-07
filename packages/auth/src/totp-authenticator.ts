@@ -216,9 +216,7 @@ export function parseOtpAuthUri(uri: string): OtpAuthConfig {
   }
 
   const issuer =
-    parsed.searchParams.get("issuer")?.trim() ||
-    issuerFromLabel ||
-    "Google";
+    parsed.searchParams.get("issuer")?.trim() || issuerFromLabel || "Google";
 
   const algParam = (
     parsed.searchParams.get("algorithm") || "SHA1"
@@ -282,9 +280,7 @@ export function renderAuthenticatorQrSvg(
   const rects: string[] = [];
 
   const isFinder = (r: number, c: number) =>
-    (r < 7 && c < 7) ||
-    (r < 7 && c >= grid - 7) ||
-    (r >= grid - 7 && c < 7);
+    (r < 7 && c < 7) || (r < 7 && c >= grid - 7) || (r >= grid - 7 && c < 7);
 
   const drawFinder = (r0: number, c0: number) => {
     for (let r = 0; r < 7; r++) {
