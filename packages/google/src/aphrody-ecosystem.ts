@@ -79,10 +79,10 @@ export const APHRODY_IDENTITY: AphrodyIdentitySpec = {
   },
   typography: {
     display:
-      '"Product Sans", "Google Sans Display", "Google Sans Flex", "Aphrody Display", system-ui, sans-serif',
-    sans: '"Google Sans", "Google Sans Flex", "Aphrody Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    text: '"Google Sans Text", "Google Sans", "Google Sans Flex", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    mono: '"Google Sans Mono", "JetBrains Mono", monospace',
+      '"Cinzel", "Product Sans", "Google Sans Display", "Google Sans Flex", "Plus Jakarta Sans", "Aphrody Display", system-ui, sans-serif',
+    sans: '"Plus Jakarta Sans", "Google Sans", "Google Sans Flex", "Aphrody Sans", system-ui, sans-serif',
+    text: '"Plus Jakarta Sans", "Google Sans Text", "Google Sans", "Google Sans Flex", system-ui, sans-serif',
+    mono: '"JetBrains Mono", "Google Sans Mono", monospace',
   },
   m3Expressive: {
     colorSpace: "HCT/CAM16",

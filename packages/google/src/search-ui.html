@@ -80,15 +80,16 @@
         --btn-active-bg: var(--surface-container-highest);
         --accent-blue: #1a73e8;
 
-        /* Geometric Typography (Product Sans / Google Sans Metrics) */
+        /* Geometric Typography (Cinzel / Plus Jakarta Sans / Product Sans / Google Sans Metrics) */
         --font-family:
-          "Google Sans", "Product Sans", "Google Sans Text", -apple-system,
-          BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+          "Plus Jakarta Sans", "Google Sans", "Product Sans", "Google Sans Text",
+          system-ui, sans-serif;
         --font-family-text:
-          "Google Sans Text", "Google Sans", -apple-system, BlinkMacSystemFont,
-          "Segoe UI", Roboto, Arial, sans-serif;
+          "Plus Jakarta Sans", "Google Sans Text", "Google Sans", system-ui,
+          sans-serif;
         --font-family-display:
-          "Product Sans", "Google Sans Display", "Google Sans", sans-serif;
+          "Cinzel", "Product Sans", "Google Sans Display", "Plus Jakarta Sans",
+          sans-serif;
 
         /* M3 Expressive Shape Tokens */
         --m3-shape-corner-small: 8px;
@@ -97,6 +98,29 @@
         --m3-shape-corner-xl: 24px;
         --m3-shape-corner-full: 9999px;
         --m3-capsule-radius: 28px;
+      }
+
+      /* Modern Web & UI/UX Pro Max Accessibility Guards */
+      :focus-visible {
+        outline: 2px solid var(--aphrody-violet, #7c5cff);
+        outline-offset: 2px;
+      }
+
+      @media (forced-colors: active) {
+        :focus-visible {
+          outline-color: CanvasText !important;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
       }
 
       @media (prefers-color-scheme: dark) {
