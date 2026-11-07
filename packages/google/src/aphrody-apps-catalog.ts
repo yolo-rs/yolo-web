@@ -1303,6 +1303,8 @@ export function renderAphrodyAppSubdomainHtml(subdomain: string): string {
 <html lang="en" data-yolo-theme="aphrody" data-mode="dark">
 <head>
   <meta charset="utf-8" />
+<meta name="theme-color" content="#0A0E17" />
+<link rel="manifest" href="/manifest.webmanifest" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeXml(app.title)} | ${escapeXml(app.fqdn)}</title>
   <meta name="description" content="${escapeXml(app.summaryEn)}" />
@@ -1555,9 +1557,11 @@ export function renderAphrodyAppSubdomainHtml(subdomain: string): string {
       font-size: 1.25rem;
       color: var(--aphrody-gold);
     }
+  .skip-link{position:absolute;left:-9999px;top:0;background:#FFD700;color:#0A0E17;padding:8px 16px;z-index:100}.skip-link:focus{left:8px;top:8px}a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid #FFD700;outline-offset:2px}@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="topbar">
     <a class="brand" href="/">
       <svg viewBox="0 0 256 256" fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1574,7 +1578,7 @@ export function renderAphrodyAppSubdomainHtml(subdomain: string): string {
     </nav>
   </header>
 
-  <main class="container">
+  <main id="main-content" class="container">
     <nav class="pill-strip" aria-label="All *.aphrody.app Subdomains">
       ${navPills}
     </nav>

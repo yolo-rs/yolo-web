@@ -387,3 +387,56 @@ describe("Aphrody Flagship Ecosystem & Search Server", () => {
     expect(sovereignJson.organic.some((item) => item.title.includes("WordCraft"))).toBe(true);
   });
 });
+
+describe("Aphrody audit endpoints", () => {
+  const routes = createAphrodySearchRoutes() as unknown as Record<
+    string,
+    (req: Request) => Response | Promise<Response>
+  >;
+  const call = async (path: string) =>
+    await routes[path]!(new Request(`http://aphrody.test${path}`));
+
+  test("manifest is valid JSON with theme color and icon", async () => {
+    const res = await call("/manifest.webmanifest");
+    const body = (await res.json()) as { theme_color: string; icons: unknown[] };
+    expect(res.status).toBe(200);
+    expect(body.theme_color).toBe("#0A0E17");
+    expect(body.icons.length).toBeGreaterThan(0);
+  });
+
+  test("llms.txt and security.txt are plain text without emojis", async () => {
+    for (const path of ["/llms.txt", "/.well-known/security.txt"]) {
+      const res = await call(path);
+      const text = await res.text();
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/plain");
+      expect(EMOJI_REGEX.test(text)).toBe(false);
+    }
+    expect(await (await call("/.well-known/security.txt")).text()).toContain("Contact:");
+  });
+
+  test("stack integrations lists auth and runtime", async () => {
+    const body = (await (await call("/api/stack-integrations")).json()) as Record<string, string[]>;
+    expect(body.auth?.[0]).toContain("better-auth");
+    expect(body.runtime).toContain("Bun 1.4.4+");
+  });
+});
+
+describe("Aphrody HTML accessibility markers", () => {
+  const page = renderAphrodyAppSubdomainHtml(APHRODY_TOP1_RUST_BUN_CATALOG[0]!.subdomain);
+  test("generated portal has skip link, main landmark, theme color and manifest", () => {
+    expect(page).toContain('class="skip-link"');
+    expect(page).toContain('<main id="main-content"');
+    expect(page).toContain('name="theme-color"');
+    expect(page).toContain('rel="manifest"');
+    expect(page).toContain("prefers-reduced-motion");
+  });
+
+  test("search-ui has the same landmarks and no banned fonts", async () => {
+    const html = await Bun.file(new URL("../src/search-ui.html", import.meta.url)).text();
+    expect(html).toContain('class="skip-link"');
+    expect(html).toContain('<main id="main-content">');
+    expect(html).toContain('rel="manifest"');
+    expect(/font-family:[^;]*\b(Roboto|Inter)\b/.test(html)).toBe(false);
+  });
+});

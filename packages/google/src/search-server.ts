@@ -252,6 +252,61 @@ export function createAphrodySearchRoutes(
         status: 200,
         headers: { "content-type": "text/plain; charset=utf-8" },
       }),
+    "/manifest.webmanifest": () =>
+      new Response(
+        JSON.stringify({
+          name: "Aphrody",
+          short_name: "Aphrody",
+          description:
+            "Aphrody search, Gemini AI and the *.aphrody.app Rust and Bun application catalog.",
+          start_url: "/",
+          scope: "/",
+          display: "standalone",
+          background_color: "#0A0E17",
+          theme_color: "#0A0E17",
+          icons: [
+            { src: "/icon/showcase.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+          ],
+        }),
+        { headers: { "content-type": "application/manifest+json; charset=utf-8" } },
+      ),
+    "/llms.txt": () =>
+      new Response(
+        [
+          "# Aphrody",
+          "",
+          "> Search portal (aphrody.com) and a catalog of self-hosted Rust and Bun applications on *.aphrody.app, built on the YOLO libraries.",
+          "",
+          "## Endpoints",
+          "- [Catalog](/api/catalog): all *.aphrody.app applications as JSON",
+          "- [Apps](/api/apps): Aphrody application registry",
+          "- [Search](/api/search?q=): search API",
+          "- [Stack integrations](/api/stack-integrations): verified framework and service matrix",
+          "- [Sitemap](/sitemap.xml)",
+          "",
+        ].join("\n"),
+        { headers: { "content-type": "text/plain; charset=utf-8" } },
+      ),
+    "/.well-known/security.txt": () =>
+      new Response(
+        [
+          "Contact: mailto:security@aphrody.com",
+          "Expires: 2027-11-07T00:00:00.000Z",
+          "Preferred-Languages: en, fr",
+          "Canonical: https://aphrody.com/.well-known/security.txt",
+          "",
+        ].join("\n"),
+        { headers: { "content-type": "text/plain; charset=utf-8" } },
+      ),
+    "/api/stack-integrations": () =>
+      Response.json({
+        ui: ["@base-ui/react 1.8", "shadcn 4.21", "Tailwind 4"],
+        auth: ["better-auth 1.7.14 (passkey, TOTP, OAuth provider)"],
+        data: ["Postgres", "SQLite WAL + FTS5", "Redis", "rqlite"],
+        edge: ["Cloudflare Workers (workerd)", "Garage S3", "nginx gateway"],
+        ai: ["Vercel AI SDK 7", "llama.cpp local endpoints", "Gemini"],
+        runtime: ["Bun 1.4.4+", "Rust 2024"],
+      }),
     "/api/identity": () => {
       return Response.json(APHRODY_IDENTITY);
     },
