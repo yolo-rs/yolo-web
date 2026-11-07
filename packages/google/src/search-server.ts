@@ -233,6 +233,33 @@ export function createAphrodySearchRoutes(
   return {
     "/": handleRootOrSubdomain,
     "/search": searchHtml,
+    "/ai": searchHtml,
+    "/files": searchHtml,
+    "/drive": searchHtml,
+    "/word": searchHtml,
+    "/docs": searchHtml,
+    "/grid": searchHtml,
+    "/sheets": searchHtml,
+    "/deck": searchHtml,
+    "/slides": searchHtml,
+    "/mail": searchHtml,
+    "/meet": searchHtml,
+    "/calendar": searchHtml,
+    "/photo": searchHtml,
+    "/photos": searchHtml,
+    "/translate": searchHtml,
+    "/maps": searchHtml,
+    "/play": searchHtml,
+    "/os": searchHtml,
+    "/console": searchHtml,
+    "/yolo": searchHtml,
+    "/workspace": searchHtml,
+    "/health": () =>
+      Response.json({
+        status: "ok",
+        service: "aphrody-flagship-hub",
+        domain: APHRODY_IDENTITY.domain,
+      }),
     ...authServer.routes,
     "/app/:subdomain": handleAppSubdomainHtml,
     "/api/apps/:subdomain": handleAppSubdomainApi,
@@ -543,6 +570,9 @@ export function startAphrodySearchServer(options: AphrodySearchServerOptions = {
   return Bun.serve({
     port,
     routes,
+    fetch(req) {
+      return routes["/"](req);
+    },
     development: { hmr: true },
   });
 }
