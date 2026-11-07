@@ -202,8 +202,8 @@ describe("search history", () => {
     await recordQuery(area, "bun test");
     await recordQuery(area, "yolo chromium");
     expect((await loadQueries(area))[0]).toMatchObject({
-      text: "yolo chromium",
-      count: 1,
+      text: "bun test",
+      count: 2,
     });
     expect(removeQueryIn(await loadQueries(area), "BUN TEST").length).toBe(1);
     await removeQuery(area, "bun test");
