@@ -901,14 +901,20 @@ export async function syncCatalogToSqlAndRedis(options?: {
   query?: string;
 }): Promise<CrawlerSyncReceipt> {
   let sqlitePath = options?.sqlitePath || resolveDefaultCatalogSqlitePath();
+  let db: Database;
   try {
     mkdirSync(dirname(sqlitePath), { recursive: true });
+    db = new Database(sqlitePath, { create: true });
   } catch {
-    sqlitePath = resolve(process.cwd(), ".cache", "aphrody-catalog.sqlite");
-    mkdirSync(dirname(sqlitePath), { recursive: true });
+    try {
+      sqlitePath = resolve(process.cwd(), ".cache", "aphrody-catalog.sqlite");
+      mkdirSync(dirname(sqlitePath), { recursive: true });
+      db = new Database(sqlitePath, { create: true });
+    } catch {
+      sqlitePath = ":memory:";
+      db = new Database(":memory:");
+    }
   }
-
-  const db = new Database(sqlitePath, { create: true });
   let walEnabled = false;
   try {
     db.exec("PRAGMA journal_mode = WAL;");
