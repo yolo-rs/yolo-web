@@ -96,7 +96,11 @@ bun install --no-save --silent 2>/dev/null || bun install
 mkdir -p dist
 bun run aot:all
 if command -v cargo >/dev/null 2>&1; then
-  CARGO_BUILD_JOBS=6 cargo build --release -p agent-browser --bin yolo-web 2>&1 | tail -n 5 || cargo check -p agent-browser --bin yolo-web 2>&1 | tail -n 5
+  if [ -f target/release/yolo-web ]; then
+    echo "rust_binary=target/release/yolo-web (cached)"
+  else
+    CARGO_BUILD_JOBS=8 cargo check -p agent-browser --bin yolo-web 2>&1 | tail -n 5
+  fi
 fi
 if [ -d /srv/yolo_build_cache ] && [ -w /srv/yolo_build_cache ]; then
   mkdir -p /srv/yolo_build_cache/yolo-web
