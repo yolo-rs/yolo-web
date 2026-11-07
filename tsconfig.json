@@ -22,6 +22,9 @@
     "**/*.test.ts",
     "**/*.spec.ts",
     "**/test/**",
-    "**/tests/**"
+    "**/tests/**",
+    "packages/chrome-extension-yolo/**",
+    "packages/yolo-agent/extension/**",
+    "tools/site-audit/probes/**"
   ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "yolo-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Cross-platform browser research and orchestration monorepo with Rust crates, Bun tools, and upstream engine workflows",
@@ -34,6 +34,7 @@
     "aot:agent-runner": "bun build --compile --bytecode --minify apps/ai-agent-runner/src/index.ts --outfile dist/yolo-agent-runner",
     "aot:report": "bun scripts/aot-report.ts",
     "aot:all": "bun run aot:web && bun run aot:web-mcp && bun run aot:human-browser && bun run aot:agent-runner",
+    "fleet:deploy": "bun scripts/fleet-release-deploy.ts",
     "docs:generate": "bun run scripts/generate-docs.ts",
     "docs:manifest": "bun run scripts/generate-docs.ts",
     "crawl:chromium-ui": "bun scripts/crawl-chromium-ui.ts",
