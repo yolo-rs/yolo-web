@@ -21,8 +21,8 @@ memchr = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
-typed-arena = { workspace = true }
+criterion = "0.5"
+typed-arena = "2.0"
 
 [[bench]]
 name = "html5ever"

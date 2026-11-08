@@ -1,0 +1,13 @@
+{
+  "name": "@google-bun/google-indexer",
+  "version": "2026.11.0",
+  "description": "Real-time Google search indexer, robots.txt & llms.txt publisher, AST code indexer, and semantic knowledge graph updater.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "bin": {
+    "google-index": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}

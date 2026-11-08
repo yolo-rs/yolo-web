@@ -1,0 +1,13 @@
+{
+  "name": "@google-bun/google-crawler",
+  "version": "2026.11.0",
+  "description": "24/7 Automated Web, DNS, API Endpoint & UI/UX Crawler for Google, Chromium, Gemini, DeepMind & Google Cloud platforms.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "bin": {
+    "google-crawl": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}

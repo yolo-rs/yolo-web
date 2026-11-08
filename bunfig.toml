@@ -1,12 +1,3 @@
-[install]
-exact = false
-peer = true
-linker = "hoisted"
-
 [test]
-coverage = false
-timeout = 15000
-pathIgnorePatterns = ["crates/**", "src/yolo-vendor/**", "vendor/**", "third_party/**", "engines/**"]
-
-[run]
-bun = true
+# Restrict test runner to first-party packages directory
+root = "packages"

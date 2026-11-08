@@ -15,7 +15,26 @@
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "paths": {
+      "@yolo-web/shared": ["./packages/shared/src/index.ts"],
+      "@yolo-web/shared/*": ["./packages/shared/src/*"],
+      "@yolo-web/cdp-client": ["./packages/cdp-client/src/index.ts"],
+      "@yolo-web/cdp-client/*": ["./packages/cdp-client/src/*"],
+      "@yolo-web/mcp-client": ["./packages/mcp-client/src/index.ts"],
+      "@yolo-web/mcp-client/*": ["./packages/mcp-client/src/*"],
+      "@yolo-web/bun-v8-bridge": ["./packages/bun-v8-bridge/src/index.ts"],
+      "@yolo-web/bun-v8-bridge/*": ["./packages/bun-v8-bridge/src/*"],
+      "@yolo-web/browser-sdk": ["./packages/browser-sdk/src/index.ts"],
+      "@yolo-web/browser-sdk/*": ["./packages/browser-sdk/src/*"],
+      "@yolo-web/brave-shields": ["./packages/brave-shields/src/index.ts"],
+      "@yolo-web/brave-shields/*": ["./packages/brave-shields/src/*"],
+      "@yolo-web/auth": ["./packages/auth/src/index.ts"],
+      "@yolo-web/auth/*": ["./packages/auth/src/*"],
+      "@yolo-web/google": ["./packages/google/src/index.ts"],
+      "@yolo-web/google/*": ["./packages/google/src/*"],
+      "@google-bun/free-context7": ["../yolo-bun/packages/free-context7/src/index.ts"]
+    }
   },
   "include": ["apps/**/*", "packages/**/*", "tools/**/*"],
   "exclude": [

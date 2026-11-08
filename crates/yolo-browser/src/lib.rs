@@ -19,6 +19,10 @@ pub use obscura_mcp as mcp;
 pub use obscura_net as net;
 pub use obscura_render as render;
 pub use obscura_ssrf as ssrf;
+/// Native GUI and windowing state for interactive browser desktop execution.
+pub mod gui;
+/// GPU Compositor and Bare-Metal frame generation pipeline.
+pub mod compositor;
 /// Typed browser and web-platform standards registry bundled with YOLO-Web.
 pub use yolo_web_standards as standards;
 

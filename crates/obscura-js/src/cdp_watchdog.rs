@@ -59,10 +59,10 @@ fn watchdog_loop(s: Arc<Shared>) {
             .0
             .iter()
             .filter(|(_, slot)| slot.deadline <= now)
-            .map(|(gen, _)| *gen)
+            .map(|(slot_gen, _)| *slot_gen)
             .collect();
-        for gen in expired {
-            if let Some(slot) = guard.0.remove(&gen) {
+        for slot_gen in expired {
+            if let Some(slot) = guard.0.remove(&slot_gen) {
                 slot.fired.store(true, Ordering::SeqCst);
                 slot.handle.terminate_execution();
             }
@@ -84,7 +84,7 @@ fn watchdog_loop(s: Arc<Shared>) {
 
 /// Handle to an armed command; pass to [`disarm`].
 pub struct Armed {
-    gen: u64,
+    slot_gen: u64,
     fired: Arc<AtomicBool>,
 }
 
@@ -95,10 +95,10 @@ pub fn arm(handle: IsolateHandle, budget: Duration) -> Armed {
     let s = shared();
     let mut guard = s.state.lock().unwrap();
     guard.1 += 1;
-    let gen = guard.1;
+    let slot_gen = guard.1;
     let fired = Arc::new(AtomicBool::new(false));
     guard.0.insert(
-        gen,
+        slot_gen,
         Slot {
             deadline: Instant::now() + budget,
             handle,
@@ -106,7 +106,7 @@ pub fn arm(handle: IsolateHandle, budget: Duration) -> Armed {
         },
     );
     s.cv.notify_one();
-    Armed { gen, fired }
+    Armed { slot_gen, fired }
 }
 
 /// Disarm the command's watchdog. Returns true if it had already fired
@@ -115,7 +115,7 @@ pub fn arm(handle: IsolateHandle, budget: Duration) -> Armed {
 pub fn disarm(armed: Armed) -> bool {
     let s = shared();
     let mut guard = s.state.lock().unwrap();
-    guard.0.remove(&armed.gen);
+    guard.0.remove(&armed.slot_gen);
     // Wake the worker so it recomputes its sleep if we removed the nearest slot.
     s.cv.notify_one();
     armed.fired.load(Ordering::SeqCst)

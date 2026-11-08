@@ -38,7 +38,7 @@ describe("@yolo-web/chromium-tracker - 2026 Chromium & Google Upstream Monitorin
     expect(cef.chromiumVersion).toBeDefined();
     expect(cef.channel).toBe("stable");
     expect(cef.downloadUrl).toContain("cef_binary");
-  });
+  }, 15000);
 
   it("inspects Google depot_tools repository latest commit", async () => {
     const status = await tracker.fetchDepotToolsStatus();

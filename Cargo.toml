@@ -78,7 +78,7 @@ members = [
     "crates/deno-media-type",
     "crates/deno-core/unsync",
     "crates/deno-core/unsafecell",
-    "crates/deno-core/parking_lot",
+    "crates/deno-core/parking_lot", "crates/yolo-search-rs",
 ]
 default-members = [
     "crates/agent-browser",

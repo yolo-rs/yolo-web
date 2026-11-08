@@ -6,8 +6,8 @@
 
 use std::io;
 
-use image::ImageEncoder as _;
 use obscura_js::CaptureRegion;
+use image::ImageEncoder as _;
 
 use crate::Page;
 
@@ -411,7 +411,8 @@ fn encode_pdf_pages(
         let content_id = page_id + 1;
         let image_id = page_id + 2;
         let page_dictionary = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width:.3} {page_height:.3}] /Resources << /XObject << /Im0 {image_id} 0 R >> >> /Contents {content_id} 0 R >>"
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width:.3} {page_height:.3}] \
+             /Resources << /XObject << /Im0 {image_id} 0 R >> >> /Contents {content_id} 0 R >>"
         );
         writer.write_object(page_id, page_dictionary.as_bytes())?;
 
@@ -476,10 +477,15 @@ impl PdfWriter {
 
     fn write_rgb_image(&mut self, id: usize, rgb: &image::RgbImage) -> Result<(), RasterPdfError> {
         self.offsets[id] = self.output.len();
-        self.append(format!(
-            "{id} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ",
-            rgb.width(), rgb.height(),
-        ).as_bytes())?;
+        self.append(
+            format!(
+                "{id} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace \
+                 /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ",
+                rgb.width(),
+                rgb.height(),
+            )
+            .as_bytes(),
+        )?;
         // Encode into the final PDF rather than building a second JPEG Vec.
         // A fixed-width decimal token lets us patch /Length after encoding.
         const LENGTH_DIGITS: usize = 20;
@@ -614,7 +620,7 @@ mod tests {
 
     #[test]
     fn pagination_preflight_bounds_pages_and_raster_work() {
-        let (_, _, printable_width, printable_height, _, _) =
+        let (_, _, printable_width, printable_height, ..) =
             RasterPdfOptions::default().page_geometry().unwrap();
         let ordinary = pagination_plan(1280.0, 10_000.0, printable_width, printable_height, 1.0)
             .expect("an ordinary multi-page document stays inside the budget");
@@ -664,7 +670,7 @@ mod tests {
 
     #[test]
     fn selected_ranges_alone_determine_output_and_raster_budgets() {
-        let (_, _, printable_width, printable_height, _, _) =
+        let (_, _, printable_width, printable_height, ..) =
             RasterPdfOptions::default().page_geometry().unwrap();
         let long =
             pagination_plan(1_000.0, 400_000.0, printable_width, printable_height, 1.0).unwrap();
@@ -685,7 +691,7 @@ mod tests {
                 long.page_count,
                 &[RasterPdfPageRange {
                     start: Some(1),
-                    end: Some(MAX_PDF_PAGES + 1),
+                    end: Some(MAX_PDF_PAGES + 1)
                 }],
             ),
             Err(RasterPdfError::TooManyPages(MAX_PDF_PAGES))
@@ -709,7 +715,7 @@ mod tests {
 
     #[test]
     fn scale_changes_css_page_span_and_rejects_invalid_values() {
-        let (_, _, printable_width, printable_height, _, _) =
+        let (_, _, printable_width, printable_height, ..) =
             RasterPdfOptions::default().page_geometry().unwrap();
         let normal =
             pagination_plan(800.0, 2_000.0, printable_width, printable_height, 1.0).unwrap();
@@ -736,15 +742,15 @@ mod tests {
                 &[
                     RasterPdfPageRange {
                         start: Some(3),
-                        end: Some(5),
+                        end: Some(5)
                     },
                     RasterPdfPageRange {
                         start: Some(1),
-                        end: Some(3),
+                        end: Some(3)
                     },
                     RasterPdfPageRange {
                         start: Some(5),
-                        end: None,
+                        end: None
                     },
                 ],
             )
@@ -756,7 +762,7 @@ mod tests {
                 6,
                 &[RasterPdfPageRange {
                     start: None,
-                    end: Some(2),
+                    end: Some(2)
                 }],
             )
             .unwrap(),
@@ -767,7 +773,7 @@ mod tests {
                 3,
                 &[RasterPdfPageRange {
                     start: Some(9),
-                    end: Some(12),
+                    end: Some(12)
                 }],
             ),
             Err(RasterPdfError::EmptyPageRange)

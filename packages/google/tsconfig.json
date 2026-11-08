@@ -8,7 +8,13 @@
     "strict": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@yolo-web/auth": ["../auth/src/index.ts"],
+      "@yolo-web/auth/*": ["../auth/src/*"],
+      "@yolo-web/brave-shields": ["../brave-shields/src/index.ts"],
+      "@yolo-web/brave-shields/*": ["../brave-shields/src/*"]
+    }
   },
   "include": ["src/**/*.ts", "types/**/*.d.ts", "../chromium/types/*.d.ts"]
 }

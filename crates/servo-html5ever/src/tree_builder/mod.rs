@@ -652,7 +652,7 @@ where
             .iter()
             .position(|n| match n {
                 FormatEntry::Marker => false,
-                FormatEntry::Element(ref handle, _) => self.sink.same_node(handle, element),
+                FormatEntry::Element(handle, _) => self.sink.same_node(handle, element),
             })
     }
 

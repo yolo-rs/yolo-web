@@ -268,8 +268,8 @@ pub async fn handle(
                             if dom.shadow_root(id).is_some()
                                 || dom.get_node(id).is_some_and(|node| {
                                     node.as_element().is_some_and(|name| {
-                                        name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                                            && matches!(name.local.as_ref(), "iframe" | "frame")
+                                        AsRef::<str>::as_ref(&name.ns) == "http://www.w3.org/1999/xhtml"
+                                            && matches!(AsRef::<str>::as_ref(&name.local), "iframe" | "frame")
                                     })
                                 })
                             {
@@ -738,8 +738,8 @@ fn node_value(dom: &DomTree, node_id: NodeId) -> Option<(Value, Vec<NodeId>)> {
         }
         NodeData::Element { name, attrs, .. } => {
             result["nodeType"] = json!(1);
-            result["nodeName"] = json!(name.local.as_ref().to_ascii_uppercase());
-            result["localName"] = json!(name.local.as_ref());
+            result["nodeName"] = json!(AsRef::<str>::as_ref(&name.local).to_ascii_uppercase());
+            result["localName"] = json!(AsRef::<str>::as_ref(&name.local));
             result["nodeValue"] = json!("");
             let cdp_attrs: Vec<String> = attrs
                 .iter()

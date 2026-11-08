@@ -1,8 +1,7 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use obscura_js::ops::OriginStorage;
-use obscura_net::{CookieJar, ObscuraHttpClient, RobotsCache};
+use obscura_net::{ObscuraHttpClient, CookieJar, RobotsCache};
 
 pub struct BrowserContext {
     pub id: String,
@@ -14,10 +13,6 @@ pub struct BrowserContext {
     pub indexed_db: Arc<obscura_js::indexed_db::IndexedDbStorage>,
     pub http_client: Arc<ObscuraHttpClient>,
     pub user_agent: String,
-    /// The UA the caller set explicitly (`--user-agent`), or `None` when the
-    /// profile default was resolved. Stealth mode uses it for the wire UA and
-    /// navigator.userAgent; `None` keeps the stealth defaults.
-    pub user_agent_override: Option<String>,
     pub platform: String,
     pub ua_platform: String,
     pub ua_platform_version: String,
@@ -27,10 +22,10 @@ pub struct BrowserContext {
     pub stealth: bool,
     /// When true, CDP-driven navigation to file:// URLs is permitted.
     /// Default is false: a remote CDP client cannot point the browser
-    /// at /etc/shadow even if Obscura is running as a privileged user.
-    /// Flip on via `obscura serve --allow-file-access` for legitimate
+    /// at /etc/shadow even if BunBrowser is running as a privileged user.
+    /// Flip on via `bun_browser serve --allow-file-access` for legitimate
     /// local-HTML testing workflows. Enforced by `Page` navigation itself,
-    /// so every CDP and MCP route is covered; the CLI's own `obscura fetch
+    /// so every CDP and MCP route is covered; the CLI's own `bun_browser fetch
     /// file://...` opts its local context in. A page can never drive
     /// itself from a web origin into file:// regardless of this flag.
     /// Use `set_allow_file_access` to keep the transport permission in sync.
@@ -207,7 +202,6 @@ impl BrowserContext {
             client.block_trackers = true;
         }
         let profile = crate::profiles::select_profile();
-        let user_agent_override = user_agent.clone();
         let resolved_ua = user_agent.unwrap_or_else(|| profile.user_agent.to_string());
         let platform = profile.platform.to_string();
         let ua_platform = profile.ua_platform.to_string();
@@ -231,7 +225,6 @@ impl BrowserContext {
             indexed_db: Arc::new(obscura_js::indexed_db::IndexedDbStorage::default()),
             http_client,
             user_agent: resolved_ua,
-            user_agent_override,
             platform,
             ua_platform,
             ua_platform_version,
@@ -311,7 +304,6 @@ impl BrowserContext {
             },
             http_client: Arc::new(client),
             user_agent: self.user_agent.clone(),
-            user_agent_override: self.user_agent_override.clone(),
             platform: self.platform.clone(),
             ua_platform: self.ua_platform.clone(),
             ua_platform_version: self.ua_platform_version.clone(),
@@ -423,7 +415,7 @@ mod tests {
 
     fn temp_storage_dir(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("obscura-storage-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("bun_browser-storage-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

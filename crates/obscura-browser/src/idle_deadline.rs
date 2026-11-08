@@ -1,6 +1,7 @@
 //! Preserve runtime polling while avoiding a coalesced final idle-deadline wake.
 
 use std::future::Future;
+
 use tokio::time::Instant;
 
 pub(crate) async fn wait_for_activity(deadline: Instant, final_check: bool, activity: impl Future) {
@@ -36,13 +37,16 @@ pub(crate) async fn wait_for_activity(deadline: Instant, final_check: bool, acti
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::ffi::c_void;
-    use std::future::Future;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::pin::Pin;
-    use std::ptr::NonNull;
-    use std::task::{Context, Poll};
-    use std::time::Instant;
+    use std::{
+        ffi::c_void,
+        future::Future,
+        panic::{catch_unwind, AssertUnwindSafe},
+        pin::Pin,
+        ptr::NonNull,
+        task::{Context, Poll},
+        time::Instant,
+    };
+
     use tokio::sync::oneshot;
 
     // C function APIs avoid Objective-C blocks and any extra runtime crate.
@@ -217,13 +221,16 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            task::{Wake, Waker},
+            time::Duration,
         };
-        use std::task::{Wake, Waker};
-        use std::time::Duration;
+
+        use super::*;
 
         async fn drained() {
             tokio::time::timeout(Duration::from_secs(2), async {
@@ -354,8 +361,9 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_intermediate_check_keeps_the_existing_timeout() {

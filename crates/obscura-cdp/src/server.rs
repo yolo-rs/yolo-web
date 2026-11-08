@@ -2025,7 +2025,7 @@ async fn process_with_interception(
     ctx: &mut CdpContext,
     reply_tx: &mpsc::UnboundedSender<String>,
     rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
-    intercept_rx: &mut Option<mpsc::UnboundedReceiver<obscura_js::ops::InterceptedRequest>>,
+    mut intercept_rx: &mut Option<mpsc::UnboundedReceiver<obscura_js::ops::InterceptedRequest>>,
     intercepted_paused: &mut HashMap<String, PausedIntercept>,
     deferred: &mut std::collections::VecDeque<ServerMessage>,
     send_command_response: bool,
@@ -2191,7 +2191,7 @@ async fn process_with_interception(
                 break;
             }
             Some(intercepted) = async {
-                if let Some(ref mut irx) = intercept_rx {
+                if let Some(irx) = &mut intercept_rx {
                     irx.recv().await
                 } else {
                     std::future::pending().await

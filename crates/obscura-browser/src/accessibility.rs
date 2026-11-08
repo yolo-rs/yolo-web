@@ -132,10 +132,10 @@ fn map_role(data: &NodeData) -> &'static str {
     match data {
         NodeData::Document => "RootWebArea",
         NodeData::Element { name, attrs, .. } => {
-            let tag = name.local.as_ref();
+            let tag = (&*name.local);
 
             // Check explicit role attribute first
-            if let Some(role_attr) = attrs.iter().find(|a| a.name.local.as_ref() == "role") {
+            if let Some(role_attr) = attrs.iter().find(|a| (&*a.name.local) == "role") {
                 return match role_attr.value.as_str() {
                     "button" => "button",
                     "link" => "link",
@@ -176,7 +176,7 @@ fn map_role(data: &NodeData) -> &'static str {
 
             match tag {
                 "a" => {
-                    if attrs.iter().any(|a| a.name.local.as_ref() == "href") {
+                    if attrs.iter().any(|a| (&*a.name.local) == "href") {
                         "link"
                     } else {
                         "generic"
@@ -186,7 +186,7 @@ fn map_role(data: &NodeData) -> &'static str {
                 "input" => {
                     let type_attr = attrs
                         .iter()
-                        .find(|a| a.name.local.as_ref() == "type")
+                        .find(|a| (&*a.name.local) == "type")
                         .map(|a| a.value.as_str())
                         .unwrap_or("text");
                     match type_attr {
@@ -202,7 +202,7 @@ fn map_role(data: &NodeData) -> &'static str {
                 "textarea" => "textbox",
                 "select" => {
                     if attrs.iter().any(|a| {
-                        a.name.local.as_ref() == "multiple" || a.name.local.as_ref() == "size"
+                        (&*a.name.local) == "multiple" || (&*a.name.local) == "size"
                     }) {
                         "listbox"
                     } else {
@@ -359,7 +359,7 @@ impl AccessibilityContext {
 
 fn tag(node: &obscura_dom::Node) -> &str {
     node.as_element()
-        .map(|name| name.local.as_ref())
+        .map(|name| (&*name.local))
         .unwrap_or("")
 }
 
@@ -576,7 +576,7 @@ fn compute_name(
 /// Compute the accessible value for a node (e.g., current input value).
 fn compute_value(dom: &DomTree, node: &obscura_dom::Node) -> Option<String> {
     if let NodeData::Element { name, attrs, .. } = &node.data {
-        let tag = name.local.as_ref();
+        let tag = (&*name.local);
         if tag == "input" || tag == "textarea" || tag == "select" {
             if tag == "input" && input_type(node) == "password" {
                 return None;
@@ -589,7 +589,7 @@ fn compute_value(dom: &DomTree, node: &obscura_dom::Node) -> Option<String> {
             }
             return attrs
                 .iter()
-                .find(|a| a.name.local.as_ref() == "value")
+                .find(|a| (&*a.name.local) == "value")
                 .map(|a| a.value.clone());
         }
 
@@ -606,7 +606,7 @@ fn contenteditable_keyword(node: &obscura_dom::Node) -> Option<bool> {
     };
     let value = &attrs
         .iter()
-        .find(|attr| attr.name.local.as_ref() == "contenteditable")?
+        .find(|attr| (&*attr.name.local) == "contenteditable")?
         .value;
 
     if value.is_empty()
@@ -645,7 +645,7 @@ fn is_content_editing_host(dom: &DomTree, node: &obscura_dom::Node) -> bool {
 /// Compute accessibility properties for a node.
 fn compute_properties(dom: &DomTree, node: &obscura_dom::Node) -> Vec<Value> {
     if let NodeData::Element { name, attrs, .. } = &node.data {
-        let tag = name.local.as_ref();
+        let tag = (&*name.local);
         let mut props = Vec::new();
 
         // focusable
@@ -653,7 +653,7 @@ fn compute_properties(dom: &DomTree, node: &obscura_dom::Node) -> Vec<Value> {
             tag,
             "a" | "button" | "input" | "select" | "textarea" | "details" | "summary"
         ) || attrs.iter().any(|a| {
-            let an = a.name.local.as_ref();
+            let an = (&*a.name.local);
             an == "tabindex" || an == "contenteditable"
         });
         if focusable {
@@ -665,7 +665,7 @@ fn compute_properties(dom: &DomTree, node: &obscura_dom::Node) -> Vec<Value> {
             || tag == "textarea"
             || attrs
                 .iter()
-                .any(|a| a.name.local.as_ref() == "contenteditable" && a.value != "false")
+                .any(|a| (&*a.name.local) == "contenteditable" && a.value != "false")
         {
             props.push(json!({"name": "editable", "value": ax_value_boolean(true)}));
         }

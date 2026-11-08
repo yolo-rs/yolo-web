@@ -881,7 +881,7 @@ pub enum RuntimeEvent {
 pub(crate) fn node_is_script(dom: &DomTree, node_id: NodeId) -> bool {
     dom.with_node(node_id, |node| {
         node.as_element()
-            .map(|name| name.local.as_ref().eq_ignore_ascii_case("script"))
+            .map(|name| AsRef::<str>::as_ref(&name.local).eq_ignore_ascii_case("script"))
             .unwrap_or(false)
     })
     .unwrap_or(false)
@@ -2320,9 +2320,9 @@ fn window_named_attributes(node: &obscura_dom::tree::Node) -> [Option<&str>; 2] 
     let Some(tag) = node.as_element() else {
         return [None, None];
     };
-    let name = (tag.ns.as_ref() == "http://www.w3.org/1999/xhtml"
+    let name = (AsRef::<str>::as_ref(&tag.ns) == "http://www.w3.org/1999/xhtml"
         && matches!(
-            tag.local.as_ref(),
+            AsRef::<str>::as_ref(&tag.local),
             "embed" | "form" | "iframe" | "img" | "object"
         ))
     .then(|| node.get_attribute_ns("", "name"))
@@ -2679,7 +2679,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                         let named_frame = names[1] == Some(arg1.as_str())
                             && node
                                 .as_element()
-                                .is_some_and(|tag| tag.local.as_ref() == "iframe");
+                                .is_some_and(|tag| AsRef::<str>::as_ref(&tag.local) == "iframe");
                         matches.push((node_id.index(), named_frame));
                     }
                 });
@@ -2743,7 +2743,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             for cid in dom.children(dom.document()) {
                 if let Some(n) = dom.get_node(cid) {
                     if n.as_element()
-                        .map(|name| name.local.as_ref() == "html")
+                        .map(|name| AsRef::<str>::as_ref(&name.local) == "html")
                         .unwrap_or(false)
                     {
                         return cid.index().to_string();
@@ -2851,7 +2851,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             let name: String = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Document => "#document".to_string(),
-                    NodeData::Element { name, .. } => name.local.as_ref().to_ascii_uppercase(),
+                    NodeData::Element { name, .. } => AsRef::<str>::as_ref(&name.local).to_ascii_uppercase(),
                     NodeData::Text { .. } => "#text".to_string(),
                     NodeData::Comment { .. } => "#comment".to_string(),
                     NodeData::Doctype { name, .. } => name.clone(),
@@ -2938,7 +2938,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                                     qualified.make_ascii_uppercase();
                                     qualified
                                 }
-                                None => name.local.as_ref().to_ascii_uppercase(),
+                                None => AsRef::<str>::as_ref(&name.local).to_ascii_uppercase(),
                             }
                         } else {
                             match &name.prefix {
@@ -2979,7 +2979,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let ns = dom
                 .with_node(NodeId::new(nid), |n| {
-                    n.as_element().map(|name| name.ns.as_ref().to_string())
+                    n.as_element().map(|name| AsRef::<str>::as_ref(&name.ns).to_string())
                 })
                 .flatten()
                 .unwrap_or_default();
@@ -3025,8 +3025,8 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 let attr = node.attrs()?.iter().find(|attr| attr.qualified_name_eq(&arg2))?;
                 Some(serde_json::json!({
                     "name": attr.qualified_name(), "value": attr.value,
-                    "namespaceURI": if attr.name.ns.is_empty() { None } else { Some(attr.name.ns.as_ref()) },
-                    "prefix": attr.name.prefix.as_ref().map(|prefix| prefix.as_ref()),
+                    "namespaceURI": if attr.name.ns.is_empty() { None } else { Some(AsRef::<str>::as_ref(&attr.name.ns)) },
+                    "prefix": attr.name.prefix.as_ref().map(|prefix| AsRef::<str>::as_ref(prefix)),
                 }))
             }).flatten();
             serde_json::to_string(&info).unwrap_or("null".into())

@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "bun_browser_engine"
+publish = false
+repository.workspace = true
+description = "Bun browser engine commands: CDP server, fetch, scrape, crawl and worker (the `bun web` subcommands)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+
+[[bin]]
+name = "bun-obscura"
+path = "src/bin/bun-obscura.rs"
+
+[[bin]]
+name = "bun-obscura-worker"
+path = "src/bin/bun-obscura-worker.rs"
+
+[features]
+default = ["render"]
+render = ["bun_browser_service/render", "bun_browser_browser/render", "bun_browser_cdp/render"]
+stealth = ["render", "bun_browser_service/stealth", "bun_browser_browser/stealth", "bun_browser_net/stealth"]
+
+[dependencies]
+bun_browser_process = { workspace = true }
+bun_browser_browser = { workspace = true }
+bun_browser_crawl = { workspace = true }
+bun_browser_extract = { workspace = true }
+bun_browser_service = { workspace = true }
+bun_browser_dom = { workspace = true }
+bun_browser_cdp = { workspace = true }
+bun_browser_net = { workspace = true }
+bun_browser_js = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+
+[lints]
+workspace = true

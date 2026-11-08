@@ -1,0 +1,14 @@
+{
+  "name": "@yolo-web/search-core",
+  "version": "1.0.0",
+  "description": "Unified Multi-Provider Sovereign Search Engine Core (FreeContext7, Exa, SearXNG, Obscura/Google)",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "exa-js": "C:/src/yolo-web/vendor/exa-js"
+  }
+}

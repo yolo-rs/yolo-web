@@ -100,8 +100,9 @@ fn named_entities_to_phf(to: &Path) {
     entities.insert("", (0, 0));
 
     let mut phf_map = phf_codegen::Map::new();
-    for (key, value) in entities {
-        phf_map.entry(key, format!("{value:?}"));
+    for (key, value) in &entities {
+        let val_str = format!("{value:?}");
+        phf_map.entry(*key, &val_str);
     }
 
     let mut file = File::create(to).unwrap();

@@ -5,6 +5,10 @@
   "sideEffects": false,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "bin": {
+    "yolo-web": "./src/cli.ts",
+    "obscura-web": "./src/cli.ts"
+  },
   "exports": {
     ".": "./src/index.ts"
   },

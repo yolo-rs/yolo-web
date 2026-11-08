@@ -1,0 +1,29 @@
+[package]
+name = "aphrody-web"
+version = "1.4.7"
+edition = "2024"
+rust-version = "1.97"
+authors = ["aphrody-dev <contact@aphrody.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/aphrody-labs/bun-os"
+description = "Reusable Rust crawl and browser-rendering API for Aphrody Web."
+readme = "README.md"
+
+[dependencies]
+obscura-crawl = { workspace = true }
+obscura-net = { workspace = true }
+aphrody-rag = { path = "../../../yolo-ai/crates/aphrody-rag", version = "1.4.7", optional = true }
+reqwest = { workspace = true, features = ["rustls-no-provider", "json", "http2"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+
+[features]
+default = ["searxng"]
+http-search = []
+searxng = []
+rag-search = ["dep:aphrody-rag"]
+
+[package.metadata.docs.rs]
+all-features = true
+

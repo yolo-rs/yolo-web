@@ -19,12 +19,14 @@ mod browser;
 mod config;
 mod cookie;
 mod error;
+pub mod locator;
 mod page;
 
 pub use browser::Browser;
 pub use config::BrowserConfig;
 pub use cookie::{Cookie, CookieStore};
 pub use error::Error;
+pub use locator::{Locator, SelectorStrategy};
 pub use page::Page;
 
 // Request/response interception types (issue #306).

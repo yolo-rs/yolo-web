@@ -1635,7 +1635,7 @@ fn interactive_lines(
                 let reference = refs.get(&id.raw())?;
                 let ax = context.describe_node(dom, id)?;
                 let node = dom.get_node(id)?;
-                let tag = node.as_element()?.local.as_ref();
+                let tag: &str = AsRef::<str>::as_ref(&node.as_element()?.local);
                 let preview = |value: &str| value.chars().take(80).collect::<String>();
                 let label = ax["name"]["value"]
                     .as_str()
