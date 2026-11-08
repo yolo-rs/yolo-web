@@ -71,6 +71,7 @@ yolo-web-standards = { workspace = true }
 yolo-zig-ffi = { version = "0.1.0", optional = true, features = ["link-yolo-zig"] }
 
 # Async & serialization
+tiny-skia = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

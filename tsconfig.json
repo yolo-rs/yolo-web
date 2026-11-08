@@ -27,13 +27,21 @@
       "@yolo-web/bun-v8-bridge/*": ["./packages/bun-v8-bridge/src/*"],
       "@yolo-web/browser-sdk": ["./packages/browser-sdk/src/index.ts"],
       "@yolo-web/browser-sdk/*": ["./packages/browser-sdk/src/*"],
+      "@yolo-web/bun-mirror": ["./packages/bun-mirror/src/index.ts"],
+      "@yolo-web/bun-mirror/*": ["./packages/bun-mirror/src/*"],
       "@yolo-web/brave-shields": ["./packages/brave-shields/src/index.ts"],
       "@yolo-web/brave-shields/*": ["./packages/brave-shields/src/*"],
       "@yolo-web/auth": ["./packages/auth/src/index.ts"],
       "@yolo-web/auth/*": ["./packages/auth/src/*"],
       "@yolo-web/google": ["./packages/google/src/index.ts"],
       "@yolo-web/google/*": ["./packages/google/src/*"],
-      "@google-bun/free-context7": ["../yolo-plugins/packages/free-context7/src/index.ts"]
+      "@yolo-web/search-core": ["./packages/search-core/src/index.ts"],
+      "@yolo-web/search-core/*": ["./packages/search-core/src/*"],
+      "@yolo-web/standards": ["./packages/web-standards/src/index.ts"],
+      "@yolo-web/standards/*": ["./packages/web-standards/src/*"],
+      "@google-bun/free-context7": ["../yolo-plugins/packages/free-context7/src/index.ts"],
+      "@google-bun/google-crawler": ["./packages/google-crawler/src/index.ts"],
+      "@google-bun/google-indexer": ["./packages/google-indexer/src/index.ts"]
     }
   },
   "include": ["apps/**/*", "packages/**/*", "tools/**/*"],

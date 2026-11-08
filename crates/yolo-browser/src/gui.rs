@@ -6,10 +6,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use euclid::{Point2D, Rect, Size2D};
 use url::Url;
 
-use crate::{CssPixel, DevicePixel, EngineMode, YoloViewport};
+use crate::YoloViewport;
 
 /// Represents a single browser tab in the GUI session.
 #[derive(Debug, Clone)]

@@ -1,16 +1,8 @@
 {
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "lib": ["ESNext", "DOM"],
-    "types": ["bun"],
-    "strict": true,
-    "skipLibCheck": true,
-    "allowImportingTsExtensions": true,
-    "noEmit": true,
     "paths": {
-      "@google-bun/free-context7": ["../../../yolo-bun/packages/free-context7/src/index.ts"],
+      "@google-bun/free-context7": ["../../../yolo-plugins/packages/free-context7/src/index.ts"],
       "@yolo-standards/*": ["../../../yolo-standards/src/*"]
     }
   },

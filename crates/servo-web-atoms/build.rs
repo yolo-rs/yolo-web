@@ -102,7 +102,7 @@ fn named_entities_to_phf(to: &Path) {
     let mut phf_map = phf_codegen::Map::new();
     for (key, value) in &entities {
         let val_str = format!("{value:?}");
-        phf_map.entry(*key, &val_str);
+        phf_map.entry(*key, val_str);
     }
 
     let mut file = File::create(to).unwrap();

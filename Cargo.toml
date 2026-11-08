@@ -58,7 +58,6 @@ members = [
     "crates/servo-pathfinder/color",
     "crates/servo-font-kit",
     "crates/servo-surfman",
-    "crates/servo-gaol",
 
     # Consolidated Brave Crates (Adblock Shields, Kuchikiki DOM, Brave Search CLI, STAR Privacy, Bravebot Security)
     "crates/brave-adblock",
@@ -78,7 +77,8 @@ members = [
     "crates/deno-media-type",
     "crates/deno-core/unsync",
     "crates/deno-core/unsafecell",
-    "crates/deno-core/parking_lot", "crates/yolo-search-rs",
+    "crates/deno-core/parking_lot",
+    "crates/yolo-search-rs",
 ]
 default-members = [
     "crates/agent-browser",
@@ -105,17 +105,39 @@ exclude = [
     "crates/servo-string-cache/integration-tests",
     "crates/servo-font-kit/c",
     "crates/servo-surfman/android-example/rust",
+    "crates/servo-gaol",
     "crates/brave-star/star",
     "crates/brave-star/star-wasm",
     "crates/brave-bot/crates",
     "crates/deno-core/core",
     "crates/deno-core/ops",
     "crates/deno-core/serde_v8",
+    # Retained sovereign Obscura, Aphrody & Cloudflare web crates (bun_browser_* / wreq ecosystem)
+    "crates/obscura-api",
+    "crates/obscura-crawl",
+    "crates/obscura-detect",
+    "crates/obscura-engine",
+    "crates/obscura-extract",
+    "crates/obscura-frames",
+    "crates/obscura-index",
+    "crates/obscura-layout",
+    "crates/obscura-process",
+    "crates/obscura-service",
+    "crates/aphrody-adblock",
+    "crates/aphrody-boq",
+    "crates/aphrody-chromium-ffi",
+    "crates/aphrody-web",
+    "crates/bun-os-google",
+    "crates/browser_emulation",
+    "crates/capture_harness",
+    "crates/cloudflare_errors",
+    "crates/cloudflare_mitigation",
+    "crates/cookie_store_wrapper",
 ]
 
 [workspace.package]
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
 authors = ["The YOLO-RS, Servo, Obscura & Brave Project Developers"]
 license = "Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/yolo-rs/yolo-web"

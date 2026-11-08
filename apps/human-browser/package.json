@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
-    "aot": "bun build --compile --bytecode --minify src/server.ts --outfile ../../dist/yolo-human-browser",
+    "aot": "bun build --compile --aot --bytecode --minify src/server.ts --outfile ../../dist/yolo-human-browser",
     "test": "bun test",
     "check": "bun check"
   },

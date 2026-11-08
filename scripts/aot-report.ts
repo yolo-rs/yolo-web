@@ -37,7 +37,7 @@ export const TARGETS: AotTarget[] = [
 ];
 
 /** Flags shipped by the root `aot:*` scripts. Keep in sync with package.json. */
-export const AOT_FLAGS = ["--compile", "--bytecode", "--minify"];
+export const AOT_FLAGS = ["--compile", "--aot", "--bytecode", "--minify"];
 
 export const VARIANTS: Record<string, string[]> = {
   "compile-only": ["--compile"],

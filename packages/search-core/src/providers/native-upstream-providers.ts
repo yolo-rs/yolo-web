@@ -5,7 +5,7 @@
 
 import type { SearchProvider, SearchHit, SearchOptions } from '../types.ts';
 // @ts-ignore
-import Exa from 'C:/src/yolo-web/vendor/exa-js/dist/index.js';
+import Exa from '../../../../vendor/exa-js/dist/index.js';
 
 /**
  * Native Upstream Exa Provider backed directly by official exa-js SDK

@@ -3,9 +3,8 @@
 //! Bridges Servo Webrender / Surfman / WGPU / Tiny-Skia rendering pipelines for 120 FPS
 //! window presentation and headless off-screen bitmap/PNG/PDF generation.
 
-use euclid::{Rect, Size2D};
 use std::sync::Arc;
-use crate::{CssPixel, DevicePixel, YoloViewport};
+use crate::YoloViewport;
 
 /// Composited surface frame buffer.
 #[derive(Clone)]

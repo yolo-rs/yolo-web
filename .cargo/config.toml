@@ -4,6 +4,7 @@ RUST_TEST_THREADS = "1"
 # crates/yolo-chromium. cef-dll-sys downloads the pinned version here on first
 # build; the directory is git-ignored.
 CEF_PATH = { value = ".cef", relative = true }
+CMAKE_MAKE_PROGRAM = "C:/Users/aphro/.local/bin/ninja.exe"
 
 [alias]
 # Local runtime iteration only. Benchmark with the normal non-incremental build.

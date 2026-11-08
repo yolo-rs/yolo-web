@@ -58,6 +58,7 @@ import {
   YOLO_WEB_ENGINE_INVENTORY,
   YOLO_WEB_GOOGLE_NETWORK_MAP,
 } from "@yolo-web/web-crawler";
+import { runBunMirrorCli } from "../../bun-mirror/src/cli";
 
 function describeSpawnError(error: unknown): string {
   const value = error as { code?: unknown; message?: unknown };
@@ -877,6 +878,37 @@ export function createWebCli(): Command {
         db.close();
       }
     });
+
+  // 12. web mirror (Full bun.com Sovereign Mirror, Stack/DNS/TCP/TLS Scanner & FTS5 Server)
+  program
+    .command("mirror")
+    .description(
+      "Run the sovereign https://bun.com/ mirror, indexer, crawler, scraper, stack/DNS/TCP/TLS scanner, and HTTP server",
+    )
+    .argument(
+      "[action]",
+      "Action: audit, scan, scrape, serve, commands",
+      "audit",
+    )
+    .option("--db <path>", "SQLite WAL database path", ":memory:")
+    .option("--port <number>", "HTTP server port for serve action", "3145")
+    .option("--max-pages <number>", "Maximum pages to crawl", "5")
+    .action(
+      async (
+        action: string,
+        opts: { db: string; port: string; maxPages: string },
+      ) => {
+        await runBunMirrorCli([
+          action,
+          "--db",
+          opts.db,
+          "--port",
+          opts.port,
+          "--max-pages",
+          opts.maxPages,
+        ]);
+      },
+    );
 
   return program;
 }

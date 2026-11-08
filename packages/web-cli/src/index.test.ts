@@ -14,6 +14,7 @@ describe("@yolo-web/web-cli - Unified 'web' Command", () => {
     expect(cmdNames).toContain("mcp");
     expect(cmdNames).toContain("serve");
     expect(cmdNames).toContain("info");
+    expect(cmdNames).toContain("mirror");
   });
 
   it("handles servo selector specificity subcommand", async () => {
@@ -115,6 +116,26 @@ describe("@yolo-web/web-cli - Unified 'web' Command", () => {
         "pypi",
         "go",
       ]);
+    } finally {
+      console.log = origLog;
+    }
+  });
+
+  it("handles mirror commands subcommand for https://bun.com/", async () => {
+    const cli = createWebCli();
+    cli.exitOverride();
+
+    let output = "";
+    const origLog = console.log;
+    console.log = (msg: string) => {
+      output += msg;
+    };
+
+    try {
+      await cli.parseAsync(["node", "web", "mirror", "commands"]);
+      const parsed = JSON.parse(output);
+      expect(parsed.curl).toContain("https://bun.com/");
+      expect(parsed.wget2).toContain("https://bun.com/");
     } finally {
       console.log = origLog;
     }

@@ -7,7 +7,7 @@
   "description": "Bun-based browser-agent orchestration runner with CDP, selector, and Shields integrations",
   "scripts": {
     "start": "bun src/index.ts",
-    "aot": "bun build --compile --bytecode --minify src/index.ts --outfile ../../dist/yolo-agent-runner",
+    "aot": "bun build --compile --aot --bytecode --minify src/index.ts --outfile ../../dist/yolo-agent-runner",
     "test": "bun test",
     "check": "bun check"
   },

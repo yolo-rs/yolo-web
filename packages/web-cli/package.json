@@ -35,6 +35,7 @@
     "@yolo-web/brave-search-mcp": "workspace:*",
     "@yolo-web/brave-shields": "workspace:*",
     "@yolo-web/browser-sdk": "workspace:*",
+    "@yolo-web/bun-mirror": "workspace:*",
     "@yolo-web/bun-v8-bridge": "workspace:*",
     "@yolo-web/cdp-client": "workspace:*",
     "@yolo-web/challenge-solver": "workspace:*",

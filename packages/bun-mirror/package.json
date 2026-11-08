@@ -1,0 +1,24 @@
+{
+  "name": "@yolo-web/bun-mirror",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Sovereign indexing, mirroring, crawling, scraping, stack scanner, DNS/TCP/TLS scanner, and multi-engine (Brave + Obscura + Servo + curl + wget2) mirror service for https://bun.com",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "yolo-bun-mirror": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test",
+    "check": "bun check src/index.ts src/cli.ts"
+  },
+  "dependencies": {
+    "@yolo-web/brave-shields": "workspace:*",
+    "@yolo-web/servo-bridge": "workspace:*",
+    "@yolo-web/web-crawler": "workspace:*",
+    "@yolo-web/knowledge-indexer": "workspace:*"
+  }
+}

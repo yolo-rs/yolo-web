@@ -18,6 +18,7 @@ const join = (...parts: string[]): string => {
 };
 
 export type TargetDomain =
+  | "bun.com"
   | "google.com"
   | "cloudflare.com"
   | "chromium.org"
@@ -265,6 +266,7 @@ export class KnowledgeIndexDb {
     if (records.length === 0) return;
 
     const domains: TargetDomain[] = [
+      "bun.com",
       "google.com",
       "cloudflare.com",
       "chromium.org",
@@ -289,7 +291,7 @@ export class KnowledgeIndexDb {
         const cleanSnippet = item.ragSnippet
           .replace(/[\r\n]+/g, " ")
           .slice(0, 100);
-        md += `| \`${item.testSuite}\` | ${item.depth} | \`${item.targetUrl}\` | ${item.statusCode} | **${item.status}** | ${item.shieldsBlocked ? "🛡️ Blocked" : "✅ Allowed"} | ${titleOrSnippet}${cleanSnippet}... |\n`;
+        md += `| \`${item.testSuite}\` | ${item.depth} | \`${item.targetUrl}\` | ${item.statusCode} | **${item.status}** | ${item.shieldsBlocked ? "Blocked" : "Allowed"} | ${titleOrSnippet}${cleanSnippet}... |\n`;
       }
       md += `\n`;
     }
