@@ -33,7 +33,7 @@
       "@yolo-web/auth/*": ["./packages/auth/src/*"],
       "@yolo-web/google": ["./packages/google/src/index.ts"],
       "@yolo-web/google/*": ["./packages/google/src/*"],
-      "@google-bun/free-context7": ["../yolo-bun/packages/free-context7/src/index.ts"]
+      "@google-bun/free-context7": ["../yolo-plugins/packages/free-context7/src/index.ts"]
     }
   },
   "include": ["apps/**/*", "packages/**/*", "tools/**/*"],
