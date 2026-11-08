@@ -575,7 +575,7 @@ A server that has prompts offers them in the list a slash opens, among the skill
 
 ```
 > /mcp__
-  ❯ /mcp__github__review_pr  Review a pull request (MCP github)
+   /mcp__github__review_pr  Review a pull request (MCP github)
 ```
 
 Once the name is typed in full, the box shows what the prompt takes: `number=<value> [focus=<value>]`,

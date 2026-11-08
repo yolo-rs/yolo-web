@@ -333,7 +333,7 @@ export class GoogleCrawlerEngine {
           const node: RecursiveCrawlNode = {
             url: item.url,
             depth: item.depth,
-            driver: (driver || "fetch") as CrawlerDriverType,
+            driver,
             workerId,
             statusCode: 200,
             trackersBlockedByBrave: enableBrave ? 3 + item.depth * 2 : 0,
@@ -394,5 +394,3 @@ export class GoogleCrawlerEngine {
 
 export const crawler = new GoogleCrawlerEngine();
 export default crawler;
-
-

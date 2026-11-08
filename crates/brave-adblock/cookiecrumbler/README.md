@@ -93,15 +93,15 @@ The `screenshot` parameter can be set to `true`, `false`, `always`, `fullPage`, 
 
 | value     | element detected | no element detected |
 |-----------|------------------|---------------------|
-| true      | 🎯               | ❌                  |
-| false     | ❌               | ❌                  |
-| always    | 🎯               | 📄                  |
-| fullPage  | 📄               | 📄                  |
+| true      |                |                   |
+| false     |                |                   |
+| always    |                |                   |
+| fullPage  |                |                   |
 
 **Legend**:  
-🎯 - Screenshot of detected element  
-📄 - Screenshot of full page  
-❌ - No screenshot  
+ - Screenshot of detected element  
+ - Screenshot of full page  
+ - No screenshot  
 
 ## Testing
 

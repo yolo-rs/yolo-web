@@ -113,8 +113,8 @@ List of channels with unread messages:
 
 | Message                 | Emoji | Count | Channel      |
 | ----------------------- | ----- | ----- | ------------ |
-| "Shipped to production" | 🎉    | 8     | #engineering |
-| "FYI the site is down"  | 🚨    | 12    | #incidents   |
+| "Shipped to production" |     | 8     | #engineering |
+| "FYI the site is down"  |     | 12    | #incidents   |
 
 ---
 

@@ -457,7 +457,7 @@ as the file it may read, with its links followed.
             digest: 4f1c9a2e
 
   Use this MCP server?
-❯ 1. Yes
+ 1. Yes
   2. Yes, and use all future MCP servers in this project
   3. No, continue without this server
 ```

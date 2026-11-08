@@ -475,7 +475,7 @@ was declined, with how its tools stand ([SERVERS-14](mcp-servers.md#SERVERS-14),
 
 A marker stands in front of the title, so a tab bar that cuts the title still shows it, and counts
 toward the 60 columns of [PANEL-2](#PANEL-2). While a turn or a command is running the marker is
-`✦`. While an approval, a question or a confirmation is open and the run is waiting for the person
+``. While an approval, a question or a confirmation is open and the run is waiting for the person
 it is `[!]`. With neither, as at the box, there is no marker and the title is as PANEL-1 gives it.
 The marker is written before the session has a name, since the first turn is when a tab most needs
 to say it is waiting. It is written on a change of state and not again while the state stays the
